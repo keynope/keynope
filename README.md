@@ -2,6 +2,8 @@
 
 Keynope is a terminal-native presentation tool. This repository is the source distribution: it builds the Go CLI and the native macOS presenter helper from source.
 
+![Keynope main presentation screen](https://raw.githubusercontent.com/keynope/keynope/main/screenshots/kn1-keynope-main-screen.jpg)
+
 ## Install with Homebrew
 
 ```sh
@@ -41,6 +43,14 @@ By default Keynope starts presentation mode: the terminal UI renders at the deck
 
 The presenter menu bar's **Share** submenu can place another application, individual window, or entire screen over the live deck. Shared content is aspect-fitted with a margin on every edge so the current slide remains visible around it. **Share → Nothing** stops capture. Screen sharing is video-only and macOS asks for Screen Recording permission the first time it is used; if permission is denied, the same menu links to the relevant System Settings page. Full-screen sharing excludes Keynope Presenter itself to avoid recursive capture.
 
+Press `2` to open speaker notes while presenting. Animated GIFs and WebP images play directly inside the terminal-rendered slide.
+
+![Speaker notes and an animated GIF in a Keynope slide](https://raw.githubusercontent.com/keynope/keynope/main/screenshots/kn6-speaker-notes-and-animated-gifs.jpg)
+
+Press `0` to start the test-card countdown timer before a presentation.
+
+![Keynope test-card countdown timer](https://raw.githubusercontent.com/keynope/keynope/main/screenshots/kn8-testcard-countdown-timer.jpg)
+
 Create a new starter deck in the current directory:
 
 ```sh
@@ -61,6 +71,20 @@ Export HTML:
 bin/keynope --export deck.md
 ```
 
+Press `?` at any time to open the shortcut reference.
+
+![Keynope main keyboard shortcuts](https://raw.githubusercontent.com/keynope/keynope/main/screenshots/kn5-shortcuts.jpg)
+
+## Visuals and Effects
+
+Slides can combine terminal-art images with configurable backgrounds and animations.
+
+![A Keynope presentation using an animated data-storm background](https://raw.githubusercontent.com/keynope/keynope/main/screenshots/kn7-backgrounds-and-animations.jpg)
+
+Effects adapt to the slide palette so they remain part of the composition on light or dark backgrounds.
+
+![A Keynope effect adapting to a light slide background](https://raw.githubusercontent.com/keynope/keynope/main/screenshots/kn3-effects-adapt-to-background.jpg)
+
 ## Master Decks
 
 Press `M` while the editor chrome is visible to open **Master View**. Every deck can contain a Base Master and multiple named layouts:
@@ -75,9 +99,13 @@ Press `M` while the editor chrome is visible to open **Master View**. Every deck
 
 Press `n` to create a slide. Keynope opens a visual layout chooser and preselects the current slide's layout. Press `L` to apply another layout to an existing slide. Matching placeholder content is rebound by slot and role; content that has no matching placeholder is preserved as an ordinary local element.
 
+![Choosing a master-deck layout for a new Keynope slide](https://raw.githubusercontent.com/keynope/keynope/main/screenshots/kn2-build-master-decks.jpg)
+
 Press `#` in the normal slide view to cycle that slide's page-number policy through inherit, show, and hide. Page numbers resolve from the actual slide index in the terminal, presenter, thumbnails, and HTML export; no literal number is stored in slide content.
 
 Press `v` in the normal slide view to edit the same five visual properties for that slide. Mastered slides can inherit each property independently, choose an explicit value, or choose None. Changes remain local to that slide. Selecting **Close menu** commits immediately; pressing `Esc` after making changes asks `Save visual changes? [Y/n]`, with Yes as the default.
+
+![Customising the visual properties of an individual Keynope slide](https://raw.githubusercontent.com/keynope/keynope/main/screenshots/kn4-customise-every-slide.jpg)
 
 Master definitions are embedded as versioned metadata in the deck's `.md` file. They do not count as slides and are not included directly in presentation or HTML export. Decks created by older Keynope versions remain valid and unmastered until a master or layout is used.
 
