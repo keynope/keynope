@@ -1,0 +1,21 @@
+.DS_Store
+.localized
+
+# Build outputs.
+/bin/
+/build/
+
+# Runtime caches.
+/.keynope/
+
+# Local Apple build/signing/package artifacts.
+**/_CodeSignature/
+**/CodeResources
+**/embedded.provisionprofile
+*.dSYM/
+*.xcarchive/
+*.dmg
+*.pkg
+*.zip
+xcuserdata/
+DerivedData/
