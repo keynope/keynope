@@ -1,0 +1,150 @@
+name: Test And Build Artifacts
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-and-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    name: Test And Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            arch: arm64
+            goarch: arm64
+          - os: macos-15-intel
+            arch: x86_64
+            goarch: amd64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Test
+        run: make test
+
+      - name: Build
+        run: make build
+
+      - name: Verify Architecture
+        shell: bash
+        run: |
+          test "$(lipo -archs bin/keynope)" = "${{ matrix.arch }}"
+          test "$(lipo -archs bin/KeynopePresenter.app/Contents/MacOS/KeynopePresenter)" = "${{ matrix.arch }}"
+
+      - name: Package
+        shell: bash
+        run: |
+          package="keynope-mac-${{ matrix.goarch }}"
+          mkdir -p "dist/$package"
+          cp bin/keynope "dist/$package/"
+          cp -R bin/KeynopePresenter.app "dist/$package/"
+          tar -C dist -czf "dist/$package.tar.gz" "$package"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: keynope-mac-${{ matrix.goarch }}
+          path: dist/keynope-mac-${{ matrix.goarch }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish Release
+    needs: test-and-build
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    runs-on: macos-14
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download Built Artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: keynope-mac-*
+          path: dist
+          merge-multiple: true
+
+      - name: Resolve Version From Changelog
+        shell: bash
+        run: |
+          if [[ ! -f CHANGELOG.md ]]; then
+            echo "Missing CHANGELOG.md" >&2
+            exit 1
+          fi
+
+          heading_pattern='^[[:space:]]*##[[:space:]]+v?([0-9]+\.[0-9]+\.[0-9]+)([[:space:]]|$)'
+          start=0
+          version=""
+
+          while IFS= read -r line; do
+            start=$((start + 1))
+            if [[ "$line" =~ $heading_pattern ]]; then
+              version="${BASH_REMATCH[1]}"
+              break
+            fi
+          done < CHANGELOG.md
+
+          if [[ -z "$version" ]]; then
+            echo "Could not find semantic version heading in CHANGELOG.md" >&2
+            exit 1
+          fi
+
+          tail -n "+$((start + 1))" CHANGELOG.md | awk '
+            /^[[:space:]]*##[[:space:]]+v?[0-9]+\.[0-9]+\.[0-9]+([[:space:]]|$)/ { exit }
+            { print }
+          ' > release-notes.md
+
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "CHANGELOG.md section for $version has no release notes" >&2
+            exit 1
+          fi
+
+          echo "RELEASE_TAG=$version" >> "$GITHUB_ENV"
+          echo "RELEASE_NAME=$version" >> "$GITHUB_ENV"
+
+      - name: Publish Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --repo "${{ github.repository }}" \
+              --target "${{ github.ref_name }}" \
+              --title "$RELEASE_NAME" \
+              --notes-file release-notes.md
+          fi
+
+          gh release edit "$RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            --title "$RELEASE_NAME" \
+            --notes-file release-notes.md
+
+          gh release upload "$RELEASE_TAG" dist/*.tar.gz \
+            --repo "${{ github.repository }}" \
+            --clobber
