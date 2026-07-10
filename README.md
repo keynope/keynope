@@ -2,7 +2,14 @@
 
 Keynope is a terminal-native presentation tool. This repository is the source distribution: it builds the Go CLI and the native macOS presenter helper from source.
 
-## Requirements
+## Install with Homebrew
+
+```sh
+brew tap keynope/keynope
+brew install keynope
+```
+
+## Build requirements
 
 - Go
 - macOS 14 or later with `swiftc` available through Xcode Command Line Tools
