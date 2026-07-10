@@ -516,14 +516,16 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
         alert.runModal()
     }
 
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.name == "keynopePresenter",
-              let body = message.body as? [String: Any],
-              let action = body["action"] as? String else {
-            return
-        }
-        if action == "stop" {
-            noPresentation()
+    nonisolated func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        MainActor.assumeIsolated {
+            guard message.name == "keynopePresenter",
+                  let body = message.body as? [String: Any],
+                  let action = body["action"] as? String else {
+                return
+            }
+            if action == "stop" {
+                noPresentation()
+            }
         }
     }
 
@@ -539,7 +541,7 @@ struct KeynopePresenterMain {
     private static var parentMonitor: Timer?
 
     static func main() {
-        let args = CommandLine.arguments
+        let args = ProcessInfo.processInfo.arguments
         guard args.count >= 2, let url = URL(string: args[1]) else {
             fputs("usage: KeynopePresenter <url> [--parent-pid pid]\n", stderr)
             exit(2)

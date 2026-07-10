@@ -4,7 +4,25 @@ on:
   push:
     branches:
       - "**"
+    paths:
+      - "*.go"
+      - "presenter/**"
+      - "assets/**"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
+      - "CHANGELOG.md"
+      - ".github/workflows/test-and-build-artifacts.yml"
   pull_request:
+    paths:
+      - "*.go"
+      - "presenter/**"
+      - "assets/**"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
+      - "CHANGELOG.md"
+      - ".github/workflows/test-and-build-artifacts.yml"
   workflow_dispatch:
 
 permissions:
