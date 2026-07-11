@@ -11,6 +11,12 @@ brew tap keynope/keynope
 brew install keynope
 ```
 
+## Community
+
+Have an idea, suggestion, feedback, or a memorable Keynope anecdote? [Join the conversation in Keynope Discussions](https://github.com/keynope/keynope/discussions). Early experiments, presentation stories, feature concepts, and constructive criticism are all welcome.
+
+Want to contribute code or report a bug? Read the [contribution guide](CONTRIBUTION.md).
+
 ## Build requirements
 
 - Go
@@ -31,7 +37,7 @@ bin/KeynopePresenter.app
 
 The Go CLI launches `KeynopePresenter.app` automatically when the app bundle is next to the CLI. If the helper is absent or unavailable, Keynope still runs in presentation mode locally and simply skips second-screen broadcast.
 
-The helper is an `LSUIElement` app: it has a stable `sh.keynope.presenter` identity and a menu bar icon, but no Dock icon or ordinary application window. `make build` ad-hoc signs the complete bundle. Screen Recording permission therefore belongs to Keynope Presenter instead of the terminal that launched it. An ad-hoc identity changes when the helper is rebuilt, so macOS may ask for permission again after an upgrade.
+The helper is an `LSUIElement` app: it has a stable `sh.keynope.presenter` identity and a menu bar icon, but no Dock icon or ordinary application window. Screen Recording permission therefore belongs to Keynope Presenter instead of the terminal that launched it. Local `make build` builds are ad-hoc signed and may require permission again after a rebuild. Official release artifacts are Developer ID signed and notarized so their identity remains stable across upgrades.
 
 ## Run
 
