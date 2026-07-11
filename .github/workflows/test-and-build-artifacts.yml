@@ -72,6 +72,7 @@ jobs:
           test "$(lipo -archs bin/KeynopePresenter.app/Contents/MacOS/KeynopePresenter)" = "${{ matrix.arch }}"
 
       - name: Package
+        if: github.ref != 'refs/heads/main'
         shell: bash
         run: |
           package="keynope-mac-${{ matrix.goarch }}"
@@ -81,15 +82,228 @@ jobs:
           tar -C dist -czf "dist/$package.tar.gz" "$package"
 
       - name: Upload Artifact
+        if: github.ref != 'refs/heads/main'
         uses: actions/upload-artifact@v7
         with:
           name: keynope-mac-${{ matrix.goarch }}
           path: dist/keynope-mac-${{ matrix.goarch }}.tar.gz
           if-no-files-found: error
 
+  release-build:
+    name: Sign And Notarize (${{ matrix.arch }})
+    needs: test-and-build
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    environment: release
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            arch: arm64
+            goarch: arm64
+          - os: macos-15-intel
+            arch: x86_64
+            goarch: amd64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Resolve Application Version
+        shell: bash
+        run: |
+          heading_pattern='^[[:space:]]*##[[:space:]]+v?([0-9]+\.[0-9]+\.[0-9]+)([[:space:]]|$)'
+          version=""
+
+          while IFS= read -r line; do
+            if [[ "$line" =~ $heading_pattern ]]; then
+              version="${BASH_REMATCH[1]}"
+              break
+            fi
+          done < CHANGELOG.md
+
+          if [[ -z "$version" ]]; then
+            echo "Could not find semantic version heading in CHANGELOG.md" >&2
+            exit 1
+          fi
+
+          plutil -replace CFBundleShortVersionString -string "$version" presenter/Info.plist
+          plutil -replace CFBundleVersion -string "${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}" presenter/Info.plist
+          echo "APP_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Import Developer ID Certificate
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: |
+          certificate_path="$RUNNER_TEMP/keynope-developer-id.p12"
+          notary_key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          keychain_path="$RUNNER_TEMP/keynope-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+
+          printf '%s' "$MACOS_CERTIFICATE_P12" | /usr/bin/base64 -D > "$certificate_path"
+          printf '%s' "$APPLE_API_KEY_P8" | /usr/bin/base64 -D > "$notary_key_path"
+          chmod 600 "$certificate_path" "$notary_key_path"
+
+          grep -q '^-----BEGIN PRIVATE KEY-----' "$notary_key_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+
+          identity="$(security find-identity -v -p codesigning "$keychain_path" | awk -F '"' '/Developer ID Application/ { print $2; exit }')"
+          if [[ -z "$identity" || "$identity" != *"(DX2HD28CUR)"* ]]; then
+            echo "Expected Developer ID Application identity for team DX2HD28CUR" >&2
+            security find-identity -v -p codesigning "$keychain_path"
+            exit 1
+          fi
+
+          echo "CODESIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "NOTARY_KEY_PATH=$notary_key_path" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: make build
+
+      - name: Verify Architecture
+        shell: bash
+        run: |
+          test "$(lipo -archs bin/keynope)" = "${{ matrix.arch }}"
+          test "$(lipo -archs bin/KeynopePresenter.app/Contents/MacOS/KeynopePresenter)" = "${{ matrix.arch }}"
+
+      - name: Sign Distribution
+        shell: bash
+        run: |
+          codesign \
+            --force \
+            --options runtime \
+            --timestamp \
+            --sign "$CODESIGN_IDENTITY" \
+            bin/keynope
+
+          codesign \
+            --force \
+            --options runtime \
+            --timestamp \
+            --sign "$CODESIGN_IDENTITY" \
+            bin/KeynopePresenter.app
+
+      - name: Verify Developer ID Signatures
+        shell: bash
+        run: |
+          codesign --verify --strict --verbose=4 bin/keynope
+          codesign --verify --deep --strict --verbose=4 bin/KeynopePresenter.app
+
+          team_id="$(codesign -d --verbose=4 bin/KeynopePresenter.app 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+          test "$team_id" = "DX2HD28CUR"
+
+          requirement="$(codesign -d -r- bin/KeynopePresenter.app 2>&1)"
+          echo "$requirement"
+          grep -q 'anchor apple generic' <<< "$requirement"
+          grep -q 'DX2HD28CUR' <<< "$requirement"
+
+      - name: Prepare Notarization Upload
+        shell: bash
+        run: |
+          package="keynope-mac-${{ matrix.goarch }}"
+          mkdir -p "dist/$package"
+          cp bin/keynope "dist/$package/"
+          ditto bin/KeynopePresenter.app "dist/$package/KeynopePresenter.app"
+          ditto -c -k --keepParent "dist/$package" "$RUNNER_TEMP/$package.zip"
+          echo "PACKAGE_NAME=$package" >> "$GITHUB_ENV"
+          echo "NOTARIZATION_UPLOAD=$RUNNER_TEMP/$package.zip" >> "$GITHUB_ENV"
+
+      - name: Notarize Distribution
+        shell: bash
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          result="$RUNNER_TEMP/notary-result.plist"
+
+          xcrun notarytool submit "$NOTARIZATION_UPLOAD" \
+            --key "$NOTARY_KEY_PATH" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --wait \
+            --output-format plist > "$result"
+
+          status="$(plutil -extract status raw -o - "$result")"
+          submission_id="$(plutil -extract id raw -o - "$result")"
+          echo "Notarization $submission_id finished with status: $status"
+
+          if [[ "$status" != "Accepted" ]]; then
+            xcrun notarytool log "$submission_id" \
+              --key "$NOTARY_KEY_PATH" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER_ID"
+            exit 1
+          fi
+
+      - name: Staple And Assess Distribution
+        shell: bash
+        run: |
+          helper="dist/$PACKAGE_NAME/KeynopePresenter.app"
+          xcrun stapler staple "$helper"
+          xcrun stapler validate "$helper"
+          codesign --verify --deep --strict --verbose=4 "$helper"
+          spctl --assess --type execute --verbose=4 "$helper"
+
+      - name: Package Release
+        shell: bash
+        run: |
+          tar -C dist -czf "dist/$PACKAGE_NAME.tar.gz" "$PACKAGE_NAME"
+
+          verification_dir="$RUNNER_TEMP/package-verification"
+          mkdir -p "$verification_dir"
+          tar -xzf "dist/$PACKAGE_NAME.tar.gz" -C "$verification_dir"
+          codesign --verify --strict --verbose=4 "$verification_dir/$PACKAGE_NAME/keynope"
+          codesign --verify --deep --strict --verbose=4 "$verification_dir/$PACKAGE_NAME/KeynopePresenter.app"
+          xcrun stapler validate "$verification_dir/$PACKAGE_NAME/KeynopePresenter.app"
+
+      - name: Upload Signed Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: keynope-mac-${{ matrix.goarch }}
+          path: dist/keynope-mac-${{ matrix.goarch }}.tar.gz
+          if-no-files-found: error
+
+      - name: Remove Signing Material
+        if: always()
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/keynope-signing.keychain-db" 2>/dev/null || true
+          rm -f \
+            "$RUNNER_TEMP/keynope-developer-id.p12" \
+            "$RUNNER_TEMP"/AuthKey_*.p8
+
   publish:
     name: Publish Release
-    needs: test-and-build
+    needs: release-build
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: macos-14
     timeout-minutes: 15
