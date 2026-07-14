@@ -289,11 +289,7 @@ func main() {
 	presenterMode := !args.ExportOnly && !args.Classic
 	presenterModeActive = presenterMode
 	if args.ExportOnly {
-		if terminalWidth, terminalHeight, ok := terminalSizeOK(); ok {
-			width, height = terminalWidth, terminalHeight
-		} else {
-			width, height = inferExportSize(resolvedSlides)
-		}
+		width, height = exportRenderSize(resolvedSlides)
 	} else if presenterMode {
 		width, height = authoredRenderSize(width, height)
 	}
