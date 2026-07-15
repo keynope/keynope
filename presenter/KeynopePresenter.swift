@@ -1,6 +1,7 @@
 import Cocoa
 import Darwin
 @preconcurrency import ScreenCaptureKit
+import UniformTypeIdentifiers
 import WebKit
 
 final class PresenterWindow: NSWindow {
@@ -9,9 +10,14 @@ final class PresenterWindow: NSWindow {
 }
 
 @MainActor
-final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler, NSMenuDelegate {
-    private let presenterURL: URL
+final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler, NSMenuDelegate, WKUIDelegate {
+    private var presenterURL: URL
+    private let appMode: Bool
+    private let openDeckHandler: ((String) -> URL?)?
+    private let inputHandler: ((Data) -> Void)?
     private var statusItem: NSStatusItem?
+    private var editorWindow: NSWindow?
+    private var editorWebView: WKWebView?
     private var window: NSWindow?
     private var webView: WKWebView?
     private var compositeView: PresenterCompositeView?
@@ -26,13 +32,21 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
     private var presentationMode: String = "none"
     private let presentationModeKey = "keynope.presenter.mode"
 
-    init(url: URL) {
+    init(
+        url: URL,
+        appMode: Bool = false,
+        openDeckHandler: ((String) -> URL?)? = nil,
+        inputHandler: ((Data) -> Void)? = nil
+    ) {
         self.presenterURL = url
+        self.appMode = appMode
+        self.openDeckHandler = openDeckHandler
+        self.inputHandler = inputHandler
         super.init()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        NSApp.setActivationPolicy(appMode ? .regular : .accessory)
         createStatusItem()
         NotificationCenter.default.addObserver(
             self,
@@ -45,6 +59,10 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
         screenShareController.onStopped = { [weak self] error in
             self?.refreshShareMenu()
             self?.showCaptureError(error)
+        }
+        if appMode {
+            createMainMenu()
+            showEditorWindow()
         }
     }
 
@@ -77,6 +95,10 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
         item.button?.toolTip = "Keynope Presenter"
 
         let menu = NSMenu()
+        if appMode {
+            menu.addItem(NSMenuItem(title: "Show Keynope", action: #selector(showEditor), keyEquivalent: "k"))
+            menu.addItem(NSMenuItem.separator())
+        }
         let noneItem = NSMenuItem(title: "No Presentation", action: #selector(noPresentationSelected), keyEquivalent: "n")
         menu.addItem(noneItem)
         noPresentationItem = noneItem
@@ -98,12 +120,149 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Reload", action: #selector(reload), keyEquivalent: "r"))
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit Keynope Presenter", action: #selector(quit), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: appMode ? "Quit Keynope" : "Quit Keynope Presenter", action: #selector(quit), keyEquivalent: "q"))
         for item in menu.items {
             item.target = self
         }
         item.menu = menu
         statusItem = item
+    }
+
+    private func createMainMenu() {
+        let mainMenu = NSMenu()
+        let applicationItem = NSMenuItem()
+        let applicationMenu = NSMenu()
+        applicationMenu.addItem(withTitle: "About Keynope", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        applicationMenu.addItem(NSMenuItem.separator())
+        applicationMenu.addItem(withTitle: "Quit Keynope", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        applicationItem.submenu = applicationMenu
+        mainMenu.addItem(applicationItem)
+
+        let fileItem = NSMenuItem()
+        let fileMenu = NSMenu(title: "File")
+        let openItem = fileMenu.addItem(withTitle: "Open…", action: #selector(openDeck), keyEquivalent: "o")
+        openItem.target = self
+        fileMenu.addItem(NSMenuItem.separator())
+        fileMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        fileItem.submenu = fileMenu
+        mainMenu.addItem(fileItem)
+
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redoItem = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        let showItem = windowMenu.addItem(withTitle: "Show Keynope", action: #selector(showEditor), keyEquivalent: "0")
+        showItem.target = self
+        windowItem.submenu = windowMenu
+        mainMenu.addItem(windowItem)
+        NSApp.mainMenu = mainMenu
+        NSApp.windowsMenu = windowMenu
+    }
+
+    private func editorURL() -> URL {
+        presenterURLForSurface("app")
+    }
+
+    private func showEditorWindow() {
+        if let editorWindow {
+            editorWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let config = WKWebViewConfiguration()
+        config.userContentController.add(self, name: "keynopeInput")
+        config.userContentController.add(self, name: "keynopePresenter")
+        let visibleFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let windowSize = NSSize(
+            width: min(1440, max(1100, visibleFrame.width * 0.92)),
+            height: min(960, max(720, visibleFrame.height * 0.92))
+        )
+        let initialFrame = NSRect(origin: .zero, size: windowSize)
+        let view = WKWebView(frame: initialFrame, configuration: config)
+        view.uiDelegate = self
+        view.autoresizingMask = [.width, .height]
+        view.load(URLRequest(url: editorURL()))
+        let newWindow = PresenterWindow(
+            contentRect: initialFrame,
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        newWindow.title = "Keynope"
+        newWindow.contentView = view
+        newWindow.isReleasedWhenClosed = false
+        newWindow.minSize = NSSize(width: 960, height: 640)
+        newWindow.setFrameAutosaveName("KeynopeEditorWindow")
+        newWindow.center()
+        newWindow.makeKeyAndOrderFront(nil)
+        editorWindow = newWindow
+        editorWebView = view
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runOpenPanelWith parameters: WKOpenPanelParameters,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping @MainActor @Sendable ([URL]?) -> Void
+    ) {
+        let panel = NSOpenPanel()
+        panel.title = "Import an Image"
+        panel.prompt = "Import"
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.canChooseDirectories = parameters.allowsDirectories
+        panel.canChooseFiles = true
+        if let hostWindow = editorWindow ?? webView.window {
+            panel.beginSheetModal(for: hostWindow) { response in
+                completionHandler(response == .OK ? panel.urls : nil)
+            }
+        } else {
+            completionHandler(panel.runModal() == .OK ? panel.urls : nil)
+        }
+    }
+
+    @objc private func showEditor() {
+        showEditorWindow()
+    }
+
+    @objc private func openDeck() {
+        let panel = NSOpenPanel()
+        panel.title = "Open a Keynope Deck"
+        panel.prompt = "Open"
+        panel.allowedContentTypes = ["md", "markdown"].compactMap { UTType(filenameExtension: $0) }
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let path = panel.url?.path else {
+            return
+        }
+        replaceDeck(path: path)
+    }
+
+    private func replaceDeck(path: String) {
+        guard let newURL = openDeckHandler?(path) else {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Could Not Open Deck"
+            alert.informativeText = path
+            alert.runModal()
+            return
+        }
+        noPresentation()
+        presenterURL = newURL
+        editorWebView?.load(URLRequest(url: editorURL()))
+        editorWindow?.title = "Keynope — \(URL(fileURLWithPath: path).lastPathComponent)"
+        showEditorWindow()
     }
 
     private var hasExternalDisplay: Bool {
@@ -518,6 +677,10 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
 
     nonisolated func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         MainActor.assumeIsolated {
+            if message.name == "keynopeInput", let input = message.body as? String, let data = input.data(using: .utf8) {
+                inputHandler?(data)
+                return
+            }
             guard message.name == "keynopePresenter",
                   let body = message.body as? [String: Any],
                   let action = body["action"] as? String else {
@@ -525,12 +688,32 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
             }
             if action == "stop" {
                 noPresentation()
+            } else if action == "show-main" {
+                showPresentation(preferExternal: false)
+            } else if action == "show-external" {
+                showPresentation(preferExternal: true)
             }
         }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if appMode {
+            showEditorWindow()
+        }
+        return true
+    }
+
+    func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        guard appMode, let path = filenames.first else {
+            sender.reply(toOpenOrPrint: .failure)
+            return
+        }
+        replaceDeck(path: path)
+        sender.reply(toOpenOrPrint: .success)
     }
 }
 
@@ -539,12 +722,24 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
 struct KeynopePresenterMain {
     private static var delegate: PresenterDelegate?
     private static var parentMonitor: Timer?
+    private static var engineProcess: Process?
+    private static var engineInput: Pipe?
 
     static func main() {
         let args = ProcessInfo.processInfo.arguments
-        guard args.count >= 2, let url = URL(string: args[1]) else {
-            fputs("usage: KeynopePresenter <url> [--parent-pid pid]\n", stderr)
-            exit(2)
+        let appMode = args.contains("--app") || Bundle.main.bundleIdentifier == "sh.keynope.app"
+        let url: URL
+        if appMode {
+            guard let deckPath = deckPathForApp(arguments: args), let engineURL = startEngine(deckPath: deckPath) else {
+                exit(1)
+            }
+            url = engineURL
+        } else {
+            guard args.count >= 2, let presenterURL = URL(string: args[1]) else {
+                fputs("usage: KeynopePresenter <url> [--parent-pid pid]\n", stderr)
+                exit(2)
+            }
+            url = presenterURL
         }
         let parentPID: pid_t? = {
             guard let index = args.firstIndex(of: "--parent-pid"), index+1 < args.count else {
@@ -554,7 +749,14 @@ struct KeynopePresenterMain {
         }()
 
         let app = NSApplication.shared
-        delegate = PresenterDelegate(url: url)
+        delegate = PresenterDelegate(
+            url: url,
+            appMode: appMode,
+            openDeckHandler: appMode ? { path in startEngine(deckPath: path) } : nil,
+            inputHandler: appMode ? { data in
+                try? engineInput?.fileHandleForWriting.write(contentsOf: data)
+            } : nil
+        )
         app.delegate = delegate
         if let parentPID {
             parentMonitor = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
@@ -566,5 +768,73 @@ struct KeynopePresenterMain {
             }
         }
         app.run()
+        if let engineProcess, engineProcess.isRunning {
+            try? engineInput?.fileHandleForWriting.close()
+            engineProcess.terminate()
+            engineProcess.waitUntilExit()
+        }
+        engineInput = nil
+    }
+
+    private static func deckPathForApp(arguments: [String]) -> String? {
+        if let index = arguments.firstIndex(of: "--app"), index + 1 < arguments.count {
+            return arguments[index + 1]
+        }
+        let panel = NSOpenPanel()
+        panel.title = "Open a Keynope Deck"
+        panel.prompt = "Open"
+        panel.allowedContentTypes = ["md", "markdown"].compactMap { UTType(filenameExtension: $0) }
+        panel.allowsMultipleSelection = false
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
+    private static func startEngine(deckPath: String) -> URL? {
+        if let engineProcess, engineProcess.isRunning {
+            try? engineInput?.fileHandleForWriting.close()
+            engineProcess.terminate()
+            engineProcess.waitUntilExit()
+        }
+        engineProcess = nil
+        engineInput = nil
+        let engineURL = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Helpers/keynope-engine")
+        let process = Process()
+        process.executableURL = engineURL
+        process.arguments = ["--app", deckPath]
+        var environment = ProcessInfo.processInfo.environment
+        environment["COLUMNS"] = "100"
+        environment["LINES"] = "32"
+        process.environment = environment
+        let output = Pipe()
+        let input = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.standardError
+        process.standardInput = input
+        do {
+            try process.run()
+        } catch {
+            fputs("could not start Keynope engine: \(error)\n", stderr)
+            return nil
+        }
+        engineProcess = process
+        engineInput = input
+        var pending = Data()
+        while process.isRunning {
+            let data = output.fileHandleForReading.availableData
+            if data.isEmpty { break }
+            pending.append(data)
+            while let newline = pending.firstIndex(of: 10) {
+                let lineData = pending[..<newline]
+                pending.removeSubrange(...newline)
+                guard let line = String(data: lineData, encoding: .utf8) else { continue }
+                if line.hasPrefix("KEYNOPE_URL="), let url = URL(string: String(line.dropFirst(12))) {
+                    return url
+                }
+            }
+        }
+        process.terminate()
+        engineProcess = nil
+        fputs("Keynope engine did not provide an application URL\n", stderr)
+        return nil
     }
 }

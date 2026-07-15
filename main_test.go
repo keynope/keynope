@@ -67,6 +67,52 @@ func TestMacPresenterLaunchUsesLaunchServicesAndTracksParent(t *testing.T) {
 	}
 }
 
+func TestParseAppMode(t *testing.T) {
+	args, ok := parseArgs([]string{"--app", "deck.md"})
+	if !ok || !args.AppMode || args.DeckPath != "deck.md" {
+		t.Fatalf("args = %#v, ok = %v", args, ok)
+	}
+	if _, ok := parseArgs([]string{"--app", "--classic", "deck.md"}); ok {
+		t.Fatal("app and classic modes must be mutually exclusive")
+	}
+}
+
+func TestCompanionAuthorizationEstablishesSession(t *testing.T) {
+	companion := &presenterCompanion{token: "test-token"}
+	handler := companion.authorized(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d", unauthorized.Code)
+	}
+
+	authorized := httptest.NewRecorder()
+	handler.ServeHTTP(authorized, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/?token=test-token", nil))
+	if authorized.Code != http.StatusNoContent {
+		t.Fatalf("authorized status = %d", authorized.Code)
+	}
+	if len(authorized.Result().Cookies()) != 1 || authorized.Result().Cookies()[0].Value != "test-token" {
+		t.Fatalf("session cookies = %#v", authorized.Result().Cookies())
+	}
+}
+
+func TestTerminalFrameSubscribersReceiveLatestFrame(t *testing.T) {
+	updates := make(chan presenterTerminalFrame, 1)
+	companion := &presenterCompanion{frames: map[chan presenterTerminalFrame]<-chan struct{}{updates: make(chan struct{})}}
+	companion.PublishTerminalFrame("\033[2J\033[Hhello", 80, 25)
+	select {
+	case frame := <-updates:
+		if frame.Version != 1 || frame.Cols != 80 || frame.Rows != 25 {
+			t.Fatalf("frame = %#v", frame)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for terminal frame")
+	}
+}
+
 func TestAxisScalingCapabilitiesExcludeText(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -211,6 +257,10 @@ func TestOverlayLoopCommit(t *testing.T) {
 }
 
 func TestPresenterStatusHandler(t *testing.T) {
+	previousNativeAppMode := nativeAppModeActive
+	nativeAppModeActive = true
+	defer func() { nativeAppModeActive = previousNativeAppMode }()
+
 	companion := &presenterCompanion{}
 	request := httptest.NewRequest(http.MethodPost, "/presenter-status", strings.NewReader(`{"mode":"external"}`))
 	recorder := httptest.NewRecorder()
@@ -218,9 +268,20 @@ func TestPresenterStatusHandler(t *testing.T) {
 	if recorder.Code != http.StatusNoContent {
 		t.Fatalf("status = %d", recorder.Code)
 	}
-	available, target, _ := companion.Status()
-	if !available || target != "external" {
-		t.Fatalf("available=%v target=%q", available, target)
+	available, target, live := companion.Status()
+	if !available || target != "external" || !live {
+		t.Fatalf("available=%v target=%q live=%v", available, target, live)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/presenter-status", strings.NewReader(`{"mode":"none"}`))
+	recorder = httptest.NewRecorder()
+	companion.handlePresenterStatus(recorder, request)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("none status = %d", recorder.Code)
+	}
+	_, target, live = companion.Status()
+	if target != "none" || live {
+		t.Fatalf("stopped target=%q live=%v", target, live)
 	}
 
 	request = httptest.NewRequest(http.MethodPost, "/presenter-status", strings.NewReader(`{"mode":"projector"}`))
@@ -369,4 +430,100 @@ func TestStyledWrappingMeasuresBoldGlyphWidth(t *testing.T) {
 			t.Fatalf("line %d width = %d, want 5", i, width)
 		}
 	}
+}
+
+func TestBitmapTextImageRendersMarkdownStylesWithoutMarkerGlyphs(t *testing.T) {
+	query := "render=text-image&source=bitmap&scale=1.00&text-size=1"
+	normal := renderTextImageElement(Element{Kind: "text", Text: "A", Query: query}, 80)
+	bold := renderTextImageElement(Element{Kind: "text", Text: "**A**", Query: query}, 80)
+	highlight := renderTextImageElement(Element{Kind: "text", Text: "*A*", Query: query}, 80)
+	if normalWidth, boldWidth := maxLineDisplayWidth(normal), maxLineDisplayWidth(bold); boldWidth <= normalWidth || boldWidth >= normalWidth*2 {
+		t.Fatalf("bitmap Markdown widths normal=%d bold=%d", normalWidth, boldWidth)
+	}
+	if !strings.Contains(strings.Join(highlight, ""), "\033[1m") {
+		t.Fatal("bitmap highlight is missing the brighter foreground treatment")
+	}
+	for row := range normal {
+		if row >= len(highlight) || stripANSI(highlight[row]) != normal[row] {
+			t.Fatalf("bitmap highlight row %d changed glyph", row)
+		}
+	}
+}
+
+func TestRemovedImageGlyphStylesAreNotAcceptedOrOffered(t *testing.T) {
+	for _, glyph := range []string{"half", "vertical"} {
+		if got := parseImageASCIIOptions("glyph=" + glyph).glyph; got != "blocks" {
+			t.Fatalf("removed glyph %q parsed as %q, want blocks", glyph, got)
+		}
+		for _, field := range append(imageSettingFields, textSettingFields...) {
+			if field.Key == "glyph" && slicesContain(field.Values, glyph) {
+				t.Fatalf("CLI settings still offer removed glyph %q", glyph)
+			}
+		}
+	}
+}
+
+func TestTransparentTextExportsAsSelectableTransparencyMask(t *testing.T) {
+	slide := Slide{Elements: []Element{{Kind: "text", Text: "Hi", Query: "transparent=1"}}}
+	lines := []Line{{Text: "Hi", Role: "body", Row: 2, Col: 3, Element: 0, Query: "transparent=1"}}
+	exported := exportLines(lines, slide, 20, 10, 1)
+	if len(exported) != 1 || exported[0].Role != "transparent-text" {
+		t.Fatalf("transparent text export = %#v, want selectable transparent-text source", exported)
+	}
+	mask := transparentShapeExportLines(lines, 20, 10, slide)
+	if len(mask) != 1 || mask[0].Row != 2 || len(mask[0].Parts) == 0 {
+		t.Fatalf("transparent text mask = %#v, want row 2 mask", mask)
+	}
+}
+
+func TestTransparentTextMaskUsesResolvedTextColour(t *testing.T) {
+	redBG, _ := ansiBG("red")
+	if got := transparentElementBG(Slide{}, Element{Kind: "text", Query: "fg=red"}, "body"); got != redBG {
+		t.Fatalf("transparent body background = %q, want %q", got, redBG)
+	}
+	blueBG, _ := ansiBG("blue")
+	if got := transparentElementBG(Slide{}, Element{Kind: "heading", Query: "header=blue"}, "heading"); got != blueBG {
+		t.Fatalf("transparent heading background = %q, want %q", got, blueBG)
+	}
+	slide := Slide{FG: "32", HeaderFG: "35"}
+	if got := transparentElementBG(slide, Element{Kind: "heading"}, "heading"); got != "45" {
+		t.Fatalf("transparent inherited heading background = %q, want 45", got)
+	}
+}
+
+func TestTransparentImageExportsAsSelectableTransparencyMask(t *testing.T) {
+	slide := Slide{Elements: []Element{{Kind: "image", Query: "transparent=1"}}}
+	lines := []Line{{Text: "██", Role: "image", Row: 2, Col: 3, Element: 0, Query: "transparent=1"}}
+	exported := exportLines(lines, slide, 20, 10, 1)
+	if len(exported) != 1 || exported[0].Role != "transparent-image" {
+		t.Fatalf("transparent image export = %#v, want selectable transparent-image source", exported)
+	}
+	mask := transparentShapeExportLines(lines, 20, 10, slide)
+	if len(mask) != 1 || mask[0].Row != 2 || len(mask[0].Parts) == 0 {
+		t.Fatalf("transparent image mask = %#v, want row 2 mask", mask)
+	}
+}
+
+func TestBulletElementSavesWithMarkdownDash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bullet.md")
+	deck := Deck{Slides: []Slide{{Elements: []Element{{Kind: "bullet", Text: "Converted text"}}}}}
+	if err := saveDeck(path, deck); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "- Converted text\n") {
+		t.Fatalf("saved bullet does not use Markdown dash: %q", data)
+	}
+}
+
+func slicesContain(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }

@@ -1,0 +1,155 @@
+package main
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestWebExportUsesPresentationCanvasRenderer(t *testing.T) {
+	javascript := exportHTMLSuffix()
+	for _, marker := range []string{
+		"const keynopeCanvasRenderer = true;",
+		"function fitCanvasFontToGrid()",
+		"canvasCharWidth * 0.98",
+		"function sizeCanvasToAspect(availableWidth, availableHeight, targetAspect)",
+		"function sizeEditorCanvas(stageRect)",
+		"sizeEditorCanvas(stageRect);",
+		"const notesHeight = editorSpeakerNotesVisible ? 132 : 0;",
+		"--editor-notes-top",
+		"sizeCanvasToAspect(innerWidth, innerHeight, 16 / 9);",
+		"if (keynopeCanvasRenderer) {\n    drawPresenterPage(page, frame, contentLines);",
+		"renderCanvasLinkHitAreas(contentLines)",
+		"if (keynopeCanvasRenderer && presenterTransitionUntil",
+		"startPageTransition(previousPageIndex, pageIndex);",
+		"function publishPresenterPage(index)",
+		"action: 'navigate-presentation'",
+		"action: 'start-timer'",
+		"notesToggleButton.textContent = 'Notes'",
+		"e.key.toLowerCase() === 'z' || e.key.toLowerCase() === 'y'",
+		"function drawEditorCanvasCaret(lines)",
+		"fetch('/api/editor/preview'",
+		"editor.className = 'keynope-inline-capture'",
+		"function editorElementIndexMaps()",
+		"const rawElement = resolvedToRaw.get(line.element);",
+		"slideContextMenu.className = 'keynope-slide-context'",
+		"button.addEventListener('contextmenu'",
+		"Use master appearance",
+		"(performance.now() - editorCanvasCaret.started) % 900",
+		"stage.addEventListener('contextmenu'",
+		"masterModeButton.addEventListener('click', () => editorAction({action: 'toggle-master-mode'}",
+		"slidesHeader.className = 'keynope-slides-header'",
+		"action: 'toggle-master-mode'",
+		"fetch('/api/editor/workspace?cols='",
+		"speakerNotesSaveTimer = setTimeout(flushSpeakerNotes, 2000);",
+		"action: 'update-slide-notes'",
+		"await navigator.clipboard.writeText(speakerNotesInput.value.slice(start, end));",
+		"const pasted = await navigator.clipboard.readText();",
+		"function changeCanvasTextSize(index, delta)",
+		"function setCanvasTextKind(index, kind, level)",
+		"function appendCanvasTextKindTools(container, index, element)",
+		"['⏺', 'bullet', 0, element.kind === 'bullet']",
+		"function cycleCanvasOutline(index)",
+		"function canvasOutlineTool(index, element, query)",
+		"if (shape === 'circle') label = '⃣⃣⃣⃣⃣';",
+		"else if (shape === 'square') label = '𓉘𓉝';",
+		"symbol.className = 'keynope-shape-outline-symbol keynope-shape-outline-' + shapeIcon",
+		"function canvasDuplicateTool(index)",
+		"function rotateCanvasText(index)",
+		"'keynope-icon-button keynope-rotate-button'",
+		"<span class=\"keynope-rotate-label\">ROTATE</span>",
+		"function canvasStyleSelect(index, element)",
+		"function canvasColourTool(index, element, renderedColour)",
+		"const colourKey = element.kind === 'heading' ? 'header' : 'fg';",
+		"function setCanvasAlignment(index, alignment)",
+		"function applyCanvasLink(index, input, value)",
+		"function openCanvasLinkDialog(index)",
+		"for (const [value, label] of [['url','URL'],['slide','Slide']])",
+		"urlLabel.hidden = mode.value !== 'url';",
+		"slideLabel.hidden = mode.value !== 'slide';",
+		"function canvasLinkTool(index, query)",
+		"canvasTool('🔗'",
+		"function drawCanvasLinkUnderlines(lines)",
+		"presenterContext.strokeStyle = group.color || '#f3efe0';",
+		"editorButton('⟲', {action: 'undo'}",
+		"editorButton('⟳', {action: 'redo'}",
+		"undoButton.classList.add('keynope-icon-button', 'keynope-history-button')",
+		"<span class=\"keynope-history-label\">UNDO</span>",
+		"<span class=\"keynope-history-label\">REDO</span>",
+		"exportButton.addEventListener('click', () => editorAction({action: 'export'}).then(showEditorExportConfirmation)",
+		"<span class=\"keynope-monochrome-glyph\" aria-hidden=\"true\">🌐︎</span>",
+		"function showEditorExportConfirmation()",
+		"function drawEditorExportConfirmation()",
+		"const text = 'EXPORTED';",
+		"function renderEditorTopbar()",
+		"function svgToolbarButton(title, drawing, action)",
+		"editorButton('⿻', {action: 'clone-slide'}",
+		"editorButton('🗑️', {action: 'delete-slide'}",
+		"svgToolbarButton('Appearance'",
+		"function addElementIconButton(title, kind, drawing, level, activate)",
+		"addElementIconButton('Add title', 'heading'",
+		"addElementIconButton('Add subtitle', 'heading'",
+		"addElementIconButton('Add bullet point', 'bullet'",
+		"addShapeMenu.className = 'keynope-add-shape-menu'",
+		"editorAction({action: 'add-element', kind:'shape', name:shape})",
+		"<svg viewBox=\"-13 80 1050 1040\" aria-hidden=\"true\"><path",
+		"function toggleCanvasMarkdownStyle(index, marker)",
+		"function canvasVisualMenu(index, element)",
+		"function canvasTransparencyTool(index, query)",
+		"function appendCanvasShapeKindTools(container, index, query)",
+		"function canvasDeleteTool(index)",
+		"canvasTool('Adjust Image'",
+		"function appendCanvasVisualControls(panel, index, element)",
+		"visualControls.className = 'keynope-context-visual'",
+		"document.body.appendChild(panel)",
+		"function closeCanvasVisualMenu()",
+		"activeCanvasVisualMenu.index !== index",
+		"function showElementContextMenu(index, clientX, clientY)",
+		"function canvasShapeSelectionBounds(element, pageNumber)",
+		"const bounds = canvasShapeSelectionBounds(element, page.page)",
+		"function cycleCanvasSelection(reverse)",
+		"cycleCanvasSelection(e.shiftKey)",
+		"setCanvasAlignment(editorState.selected, e.key === '<' ? 'left' : e.key === '>' ? 'right' : 'center')",
+		"cycleCanvasOutline(editorState.selected)",
+		"presenterTimerMode === 'config' && !e.metaKey",
+		"presenterTimerMode === 'running' && !e.metaKey",
+		"data-keynope-timer-active",
+		"canvasOverlay.hidden = active;",
+		"timerButton.textContent = active ? 'Stop Timer' : 'Timer'",
+		"setSpeakerNotesVisible(false, false);",
+		"editorAction({action: 'select-element', element: -1}).catch(() => {});",
+		"line.role === 'transparent-text'",
+		"line.role === 'transparent-image'",
+		"function previewCanvasMutation(index, element, refreshOverlay = true)",
+		"previewCanvasMutation(index, resizedElementForBounds(bounds), false)",
+		"function fitCanvasTextElement(index, element, boxWidth, boxHeight)",
+		"fetch('/api/editor/fit-text'",
+		"if (fittingText) queueTextFit(next);",
+		"else if (resizingVisual) queueVisualPreview(next);",
+		"const fitted = await finishTextFit(resizedBounds(dx, dy));",
+		"if (!presenterMainSurface) {\n      presenterTimerMode = state.timerMode || '';",
+		"setInterval(syncPresenterState, 120);",
+	} {
+		if !strings.Contains(javascript, marker) {
+			t.Fatalf("web export is missing shared canvas renderer marker %q", marker)
+		}
+	}
+	if strings.Contains(javascript, "document.body.appendChild(inspector)") {
+		t.Fatal("windowed editor still mounts the inspector sidebar")
+	}
+	if strings.Contains(javascript, "tools.className = 'keynope-selection-tools'") {
+		t.Fatal("windowed editor still mounts element controls over the canvas")
+	}
+	for _, removedStyle := range []string{"Style: Half", "Style: Vertical", "['half','Half']", "['vertical','Vertical']"} {
+		if strings.Contains(javascript, removedStyle) {
+			t.Fatalf("windowed editor still offers removed image style %q", removedStyle)
+		}
+	}
+	if !strings.Contains(javascript, "if (!window.KEYNOPE_PRESENTER) return;") {
+		t.Fatal("presenter state synchronization is no longer gated to live presenter documents")
+	}
+	for _, staleSizing := range []string{"innerWidth - 490", "deck.cols - 2", "deck.rows - 5"} {
+		if strings.Contains(javascript, staleSizing) {
+			t.Fatalf("web export still contains divergent canvas sizing %q", staleSizing)
+		}
+	}
+}

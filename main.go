@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -190,6 +191,7 @@ type exportPart struct {
 type appArgs struct {
 	ExportOnly bool
 	Classic    bool
+	AppMode    bool
 	DeckPath   string
 	Startup    bool
 }
@@ -211,6 +213,7 @@ type presenterTerminalFrame struct {
 	Cols    int          `json:"cols"`
 	Rows    int          `json:"rows"`
 	Lines   []exportLine `json:"lines"`
+	ANSI    string       `json:"ansi,omitempty"`
 }
 
 type presenterCompanion struct {
@@ -226,10 +229,41 @@ type presenterCompanion struct {
 	helper  bool
 	seq     int64
 	fullSeq int64
+	frames  map[chan presenterTerminalFrame]<-chan struct{}
+	token   string
 }
 
 var activePresenter *presenterCompanion
 var presenterModeActive bool
+var nativeAppModeActive bool
+var nativeInputMu sync.Mutex
+var nativeInputBuffer bytes.Buffer
+
+func inputRead(buffer []byte) (int, error) {
+	if nativeAppModeActive {
+		nativeInputMu.Lock()
+		defer nativeInputMu.Unlock()
+		return nativeInputBuffer.Read(buffer)
+	}
+	return os.Stdin.Read(buffer)
+}
+
+func startNativeInputReader() {
+	go func() {
+		buffer := make([]byte, 64*1024)
+		for {
+			n, err := os.Stdin.Read(buffer)
+			if n > 0 {
+				nativeInputMu.Lock()
+				_, _ = nativeInputBuffer.Write(buffer[:n])
+				nativeInputMu.Unlock()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+}
 
 var queuedEditEvent *KeyEvent
 var queuedMainMouseEvent *KeyEvent
@@ -259,7 +293,7 @@ func init() {
 func main() {
 	args, ok := parseArgs(os.Args[1:])
 	if !ok {
-		fmt.Fprintln(os.Stderr, "usage: keynope [--export] [--classic] [deck.md]")
+		fmt.Fprintln(os.Stderr, "usage: keynope [--export] [--classic] [--app] [deck.md]")
 		os.Exit(2)
 	}
 	if args.Startup {
@@ -288,6 +322,10 @@ func main() {
 	width, height := terminalSize()
 	presenterMode := !args.ExportOnly && !args.Classic
 	presenterModeActive = presenterMode
+	nativeAppModeActive = args.AppMode
+	if args.AppMode {
+		startNativeInputReader()
+	}
 	if args.ExportOnly {
 		width, height = exportRenderSize(resolvedSlides)
 	} else if presenterMode {
@@ -303,8 +341,14 @@ func main() {
 	}
 
 	var presenter *presenterCompanion
+	var nativeEditor *nativeEditorSession
+	if args.AppMode {
+		nativeEditor = newNativeEditorSession(args.DeckPath, deck)
+		activeNativeEditor = nativeEditor
+		defer func() { activeNativeEditor = nil }()
+	}
 	if presenterMode {
-		presenter, err = startPresenterCompanion(args.DeckPath, resolvedSlides, width, height)
+		presenter, err = startPresenterCompanion(args.DeckPath, resolvedSlides, width, height, !args.AppMode)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "presenter companion unavailable: %v\n", err)
 		} else {
@@ -313,15 +357,31 @@ func main() {
 			defer presenter.Close()
 		}
 	}
+	if nativeEditor != nil {
+		if presenter == nil {
+			fmt.Fprintln(os.Stderr, "native editor server unavailable")
+			os.Exit(1)
+		}
+		nativeEditor.mu.Lock()
+		nativeEditor.companion = presenter
+		nativeEditor.mu.Unlock()
+		presenter.Update(0, 0, false, nil)
+		select {}
+	}
 
-	restore, err := rawTerminal()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	restore := func() {}
+	if !args.AppMode {
+		restore, err = rawTerminal()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	}
 	defer restore()
-	termPrint("\033[?25l\033[?1049h\033[?1000h\033[?1002h\033[?1006h\033[?2004h")
-	defer termPrint("\033[0m\033[?2004l\033[?1006l\033[?1002l\033[?1000l\033[?25h\033[?1049l")
+	if !args.AppMode {
+		termPrint("\033[?25l\033[?1049h\033[?1000h\033[?1002h\033[?1006h\033[?2004h")
+		defer termPrint("\033[0m\033[?2004l\033[?1006l\033[?1002l\033[?1000l\033[?25h\033[?1049l")
+	}
 
 	current := 0
 	page := 0
@@ -426,6 +486,8 @@ func parseArgs(raw []string) (appArgs, bool) {
 			args.ExportOnly = true
 		case "--classic":
 			args.Classic = true
+		case "--app":
+			args.AppMode = true
 		default:
 			if strings.HasPrefix(value, "-") || args.DeckPath != "" {
 				return appArgs{}, false
@@ -433,7 +495,7 @@ func parseArgs(raw []string) (appArgs, bool) {
 			args.DeckPath = value
 		}
 	}
-	if args.DeckPath == "" || (args.ExportOnly && args.Classic) {
+	if args.DeckPath == "" || (args.ExportOnly && args.Classic) || (args.AppMode && (args.ExportOnly || args.Classic)) {
 		return appArgs{}, false
 	}
 	return args, true
@@ -725,7 +787,7 @@ func drawStartupBox(x, y, w, h int) {
 func readStartupKeyEvent() KeyEvent {
 	var buf [64]byte
 	for {
-		n, _ := os.Stdin.Read(buf[:])
+		n, _ := inputRead(buf[:])
 		if n == 0 {
 			time.Sleep(10 * time.Millisecond)
 			continue
@@ -1686,12 +1748,19 @@ func exportSlidePages(slide Slide, slideIndex, slideCount, cols, rows int) []exp
 	return pages
 }
 
-func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*presenterCompanion, error) {
+func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int, launchHelper bool) (*presenterCompanion, error) {
 	html, err := exportHTMLDocument(deckPath, slides, cols, rows, readPreservedExportHead(strings.TrimSuffix(deckPath, filepath.Ext(deckPath))+".html"), true)
 	if err != nil {
 		return nil, err
 	}
-	companion := &presenterCompanion{html: html, pages: map[int][]exportPage{}}
+	tokenBytes := make([]byte, 32)
+	if _, err := cryptorand.Read(tokenBytes); err != nil {
+		return nil, fmt.Errorf("create companion token: %w", err)
+	}
+	companion := &presenterCompanion{
+		html: html, pages: map[int][]exportPage{}, frames: map[chan presenterTerminalFrame]<-chan struct{}{},
+		token: hex.EncodeToString(tokenBytes),
+	}
 	for slideIndex, slide := range slides {
 		companion.pages[slideIndex] = exportSlidePages(slide, slideIndex, len(slides), cols, rows)
 	}
@@ -1742,6 +1811,7 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(frame)
 	})
+	mux.HandleFunc("/terminal-events", companion.handleTerminalEvents)
 	mux.HandleFunc("/key", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1764,17 +1834,33 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 		}
 	})
 	mux.HandleFunc("/presenter-status", companion.handlePresenterStatus)
+	if activeNativeEditor != nil {
+		mux.HandleFunc("/api/editor/state", activeNativeEditor.handleState)
+		mux.HandleFunc("/api/editor/action", activeNativeEditor.handleAction)
+		mux.HandleFunc("/api/editor/preview", activeNativeEditor.handlePreview)
+		mux.HandleFunc("/api/editor/fit-text", activeNativeEditor.handleFitText)
+		mux.HandleFunc("/api/editor/workspace", activeNativeEditor.handleWorkspace)
+		mux.HandleFunc("/api/editor/upload", activeNativeEditor.handleUpload)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
-	companion.url = "http://" + listener.Addr().String() + "/"
-	companion.server = &http.Server{Handler: mux}
+	companion.url = "http://" + listener.Addr().String() + "/?token=" + url.QueryEscape(companion.token)
+	companion.server = &http.Server{Handler: companion.authorized(mux)}
 	go func() {
 		if err := companion.server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			fmt.Fprintf(os.Stderr, "presenter companion stopped: %v\n", err)
 		}
 	}()
+	if !launchHelper {
+		companion.mu.Lock()
+		companion.helper = true
+		companion.target = "none"
+		companion.mu.Unlock()
+		fmt.Println("KEYNOPE_URL=" + companion.url)
+		return companion, nil
+	}
 	cmd, err := launchPresenterSurface(companion.url)
 	if err != nil {
 		_ = companion.server.Close()
@@ -1793,6 +1879,37 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 		companion.mu.Unlock()
 	}()
 	return companion, nil
+}
+
+func (p *presenterCompanion) authorized(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorized := false
+		if token := r.URL.Query().Get("token"); token != "" && token == p.token {
+			authorized = true
+			http.SetCookie(w, &http.Cookie{
+				Name: "keynope_session", Value: p.token, Path: "/", HttpOnly: true,
+				SameSite: http.SameSiteStrictMode,
+			})
+		}
+		if cookie, err := r.Cookie("keynope_session"); err == nil && cookie.Value == p.token {
+			authorized = true
+		}
+		if !authorized {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			origin := r.Header.Get("Origin")
+			if origin != "" {
+				parsed, err := url.Parse(origin)
+				if err != nil || parsed.Host != r.Host {
+					http.Error(w, "invalid origin", http.StatusForbidden)
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (p *presenterCompanion) Status() (available bool, target string, live bool) {
@@ -1823,8 +1940,60 @@ func (p *presenterCompanion) handlePresenterStatus(w http.ResponseWriter, r *htt
 	p.mu.Lock()
 	p.target = status.Mode
 	p.helper = true
+	if nativeAppModeActive {
+		presenting := status.Mode != "none"
+		if p.state.Presenting != presenting {
+			p.state.Presenting = presenting
+			p.state.Version++
+		}
+	}
 	p.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (p *presenterCompanion) handleTerminalEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unavailable", http.StatusInternalServerError)
+		return
+	}
+	updates := make(chan presenterTerminalFrame, 64)
+	p.mu.Lock()
+	p.frames[updates] = r.Context().Done()
+	initial := p.frame
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		delete(p.frames, updates)
+		p.mu.Unlock()
+	}()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Connection", "keep-alive")
+	writeFrame := func(frame presenterTerminalFrame) bool {
+		payload, err := json.Marshal(frame)
+		if err != nil {
+			return false
+		}
+		if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", frame.Version, payload); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	if !writeFrame(initial) {
+		return
+	}
+	for {
+		select {
+		case frame := <-updates:
+			if !writeFrame(frame) {
+				return
+			}
+		case <-r.Context().Done():
+			return
+		}
+	}
 }
 
 func (p *presenterCompanion) Refresh(deckPath string, slides []Slide, cols, rows int) error {
@@ -1926,7 +2095,7 @@ func (p *presenterCompanion) Update(slide, page int, presenting bool, deckState 
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	timerMode, timerInput, timerEndMS := "", "", int64(0)
+	timerMode, timerInput, timerEndMS := p.state.TimerMode, p.state.TimerInput, p.state.TimerEndMS
 	if deckState != nil {
 		timerMode = deckState.TimerMode
 		timerInput = deckState.TimerInput
@@ -1946,17 +2115,52 @@ func (p *presenterCompanion) Update(slide, page int, presenting bool, deckState 
 	p.state.Version++
 }
 
+func (p *presenterCompanion) StartTimer(duration time.Duration) {
+	if p == nil || duration <= 0 {
+		return
+	}
+	p.mu.Lock()
+	p.state.TimerMode = "running"
+	p.state.TimerInput = ""
+	p.state.TimerEndMS = time.Now().Add(duration).UnixMilli()
+	p.state.Version++
+	p.mu.Unlock()
+}
+
+func (p *presenterCompanion) StopTimer() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.state.TimerMode = ""
+	p.state.TimerInput = ""
+	p.state.TimerEndMS = 0
+	p.state.Version++
+	p.mu.Unlock()
+}
+
 func (p *presenterCompanion) PublishTerminalFrame(frame string, cols, rows int) {
 	if p == nil || cols <= 0 || rows <= 0 || frame == "" {
 		return
 	}
-	lines := ansiFrameToExportLines(frame, cols, rows, ansiCSSColour("37"))
 	p.mu.Lock()
 	p.frame.Version++
 	p.frame.Cols = cols
 	p.frame.Rows = rows
-	p.frame.Lines = lines
+	p.frame.Lines = nil
+	p.frame.ANSI = frame
+	update := p.frame
+	subscribers := make(map[chan presenterTerminalFrame]<-chan struct{}, len(p.frames))
+	for subscriber, done := range p.frames {
+		subscribers[subscriber] = done
+	}
 	p.mu.Unlock()
+	for subscriber, done := range subscribers {
+		select {
+		case subscriber <- update:
+		case <-done:
+		}
+	}
 }
 
 func (p *presenterCompanion) Close() {
@@ -2543,8 +2747,17 @@ func exportLines(lines []Line, slide Slide, width, height, slideCount int) []exp
 		if line.Row < 0 || line.Row >= height || line.Col >= width || line.Text == "" {
 			continue
 		}
-		if line.Role == "shape" && line.Element >= 0 && line.Element < len(slide.Elements) && elementTransparent(slide.Elements[line.Element]) {
+		transparentMask := transparencyMaskLine(line, slide)
+		if transparentMask && line.Role == "shape" {
 			continue
+		}
+		exportRole := line.Role
+		if transparentMask {
+			if line.Role == "image" {
+				exportRole = "transparent-image"
+			} else {
+				exportRole = "transparent-text"
+			}
 		}
 		color := ansiCSSColour(slideFG(slide))
 		if line.Role == "heading" {
@@ -2577,7 +2790,7 @@ func exportLines(lines []Line, slide Slide, width, height, slideCount int) []exp
 				link = target.Value
 			}
 		}
-		out = append(out, exportLine{Row: line.Row, Col: line.Col, Element: line.Element, Role: line.Role, Link: link, Parts: parts})
+		out = append(out, exportLine{Row: line.Row, Col: line.Col, Element: line.Element, Role: exportRole, Link: link, Parts: parts})
 	}
 	return out
 }
@@ -2909,6 +3122,113 @@ body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Libe
 #stage { position: fixed; inset: 0; background: #000; overflow: hidden; }
 .terminal-layer { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: calc(var(--cols) * 1ch); height: calc(var(--rows) * 1em); font-size: var(--cell); line-height: 1; color: #f3efe0; }
 #presenter-canvas { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 2; display: none; image-rendering: auto; }
+#link-layer { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 4; display: none; pointer-events: none; }
+.canvas-link-hit { position: absolute; pointer-events: auto; cursor: pointer; background: transparent; }
+.keynope-app-toolbar { position: fixed; left: 210px; right: 0; bottom: 0; height: 52px; z-index: 20; display: none; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 12px; box-sizing: border-box; color: #e8e8e8; background: rgba(18, 18, 18, 0.96); border-top: 1px solid #444; font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-app-toolbar button { color: inherit; background: #292929; border: 1px solid #555; border-radius: 6px; padding: 6px 12px; font: inherit; cursor: default; }
+.keynope-app-toolbar button:active { background: #444; }
+.keynope-app-toolbar button.active { border-color: #70b7ff; background: #244766; }
+.keynope-timer-input { width: 72px; box-sizing: border-box; color: #eee; background: #111; border: 1px solid #70b7ff; border-radius: 5px; padding: 6px; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.keynope-editor-status { margin-right: auto; color: #aeb4bb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+html[data-keynope-app="true"] .keynope-app-toolbar { display: flex; }
+html[data-keynope-app="true"] #stage { left: 210px; right: 0; }
+.keynope-editor-topbar { position: fixed; left: 210px; right: 0; top: 0; height: 52px; z-index: 21; display: none; align-items: center; gap: 6px; padding: 0 10px; box-sizing: border-box; overflow-x: auto; background: #181818; border-bottom: 1px solid #444; font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-topbar-mode { display: flex; min-width: max-content; align-items: center; gap: 6px; }
+.keynope-topbar-mode[hidden] { display: none; }
+.keynope-topbar-mode button { padding: 4px 7px; }
+.keynope-topbar-label { max-width: 180px; overflow: hidden; color: #bfc7cf; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.keynope-topbar-link { width: 180px; min-width: 120px !important; box-sizing: border-box; color: #eee; background: #111; border: 1px solid #555; border-radius: 5px; padding: 5px 7px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.keynope-visual-panel { position: fixed; z-index: 90; display: grid; grid-template-columns: max-content 150px; gap: 7px 9px; width: 270px; padding: 10px; box-sizing: border-box; border: 1px solid #5b6168; border-radius: 8px; color: #ddd; background: #202124; box-shadow: 0 12px 32px rgba(0,0,0,.55); }
+.keynope-visual-panel[hidden] { display: none; }
+.keynope-visual-panel label { align-self: center; color: #aeb4bb; font-size: 11px; }
+.keynope-visual-panel select, .keynope-visual-panel input { width: 100%; min-width: 0; box-sizing: border-box; }
+.keynope-link-dialog { position: fixed; z-index: 100; width: 360px; padding: 12px; box-sizing: border-box; border: 1px solid #67717b; border-radius: 8px; color: #ddd; background: #202124; box-shadow: 0 14px 38px rgba(0,0,0,.6); font: 12px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-link-dialog h3 { margin: 0 0 10px; color: #fff; font-size: 13px; }
+.keynope-link-dialog label { display: block; margin: 0 0 8px; color: #aeb4bb; }
+.keynope-link-dialog [hidden] { display: none; }
+.keynope-link-dialog input, .keynope-link-dialog select { display: block; width: 100%; margin-top: 4px; box-sizing: border-box; padding: 6px; color: #eee; background: #111; border: 1px solid #555; border-radius: 4px; }
+.keynope-link-dialog .keynope-editor-actions { margin: 10px 0 0; }
+.keynope-input-blocker { position: fixed; inset: 0 0 52px 0; z-index: 55; background: transparent; }
+html[data-keynope-timer-active="true"] .keynope-editor-topbar,
+html[data-keynope-timer-active="true"] .keynope-editor-slides,
+html[data-keynope-timer-active="true"] .keynope-speaker-notes { opacity: .42; filter: grayscale(1); }
+html[data-keynope-timer-active="true"] .keynope-canvas-overlay { display: none; }
+.keynope-editor-topbar button, .keynope-editor-panel button { color: #eee; background: #292929; border: 1px solid #555; border-radius: 5px; padding: 5px 9px; font: inherit; }
+.keynope-editor-topbar button.keynope-icon-button { width: 30px; min-width: 30px; height: 30px; padding: 3px; font-size: 18px; line-height: 1.1; }
+.keynope-editor-topbar button.keynope-rotate-button { position: relative; display: inline-grid; place-items: center; padding: 0; overflow: visible; line-height: 1; }
+.keynope-rotate-icon { font-size: 27px; line-height: 27px; }
+.keynope-rotate-label { position: absolute; left: 50%; bottom: -2px; transform: translateX(-50%); padding: 0 2px; border: 1px solid #59616a; border-radius: 3px; color: #d8dee5; background: #151719; font: 700 5px/8px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .03em; box-shadow: 0 1px 2px rgba(0,0,0,.7); }
+.keynope-editor-topbar button.keynope-monochrome-icon { display: inline-grid; place-items: center; padding: 0; color: #fff; font-family: "Apple Symbols", "SF Pro", -apple-system, sans-serif; font-variant-emoji: text; line-height: 1; }
+.keynope-monochrome-glyph { display: block; line-height: 1; transform: translateY(1px); }
+.keynope-monochrome-icon svg { display: block; width: 20px; height: 20px; fill: currentColor; }
+.keynope-editor-topbar button.keynope-history-button { position: relative; display: inline-grid; width: 30px; min-width: 30px; height: 30px; place-items: center; padding: 0; overflow: visible; line-height: 1; }
+.keynope-history-icon { font-size: 27px; line-height: 27px; }
+.keynope-history-label { position: absolute; left: 50%; bottom: -2px; transform: translateX(-50%); padding: 0 3px; border: 1px solid #59616a; border-radius: 3px; color: #d8dee5; background: #151719; font: 700 6px/8px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .06em; box-shadow: 0 1px 2px rgba(0,0,0,.7); }
+.keynope-editor-topbar button.keynope-svg-button { display: inline-grid; width: 30px; height: 30px; place-items: center; padding: 4px; }
+.keynope-svg-button svg { display: block; width: 19px; height: 19px; }
+.keynope-canvas-shape-kind svg { display: block; width: 18px; height: 18px; }
+.keynope-add-shape-menu { position: fixed; z-index: 95; display: grid; grid-template-columns: repeat(2, 54px); gap: 7px; padding: 8px; color: #eee; background: #202124; border: 1px solid #5b6168; border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.55); }
+.keynope-add-shape-menu[hidden] { display: none; }
+.keynope-add-shape-menu button { display: grid; width: 54px; height: 48px; place-items: center; padding: 5px; color: inherit; background: #292929; border: 1px solid #555; border-radius: 6px; }
+.keynope-add-shape-menu button:hover { border-color: #70b7ff; background: #244766; }
+.keynope-add-shape-menu svg { width: 36px; height: 32px; }
+.keynope-editor-topbar button.active { border-color: #70b7ff; background: #244766; }
+.keynope-editor-topbar select { min-width: 132px; color: #eee; background: #292929; border: 1px solid #555; border-radius: 5px; padding: 5px 9px; font: inherit; }
+.keynope-editor-separator { width: 1px; height: 24px; flex: 0 0 auto; margin: 0 3px; background: #444; }
+.keynope-editor-panel { position: fixed; top: 0; bottom: 0; z-index: 21; display: none; overflow: auto; box-sizing: border-box; color: #ddd; background: #1d1d1d; font: 12px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-editor-slides { left: 0; width: 210px; border-right: 1px solid #444; padding: 8px; }
+.keynope-slides-header { display: flex; min-height: 30px; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 8px; }
+.keynope-slides-header h3 { margin: 0; }
+.keynope-slides-header button { min-width: 30px; padding: 3px 7px; font-size: 18px; line-height: 1.1; }
+.keynope-speaker-notes { position: fixed; left: 210px; right: 0; top: var(--editor-notes-top, 100%); bottom: 52px; z-index: 19; display: none; flex-direction: column; gap: 5px; padding: 7px 10px; box-sizing: border-box; color: #ddd; background: #171717; border-top: 1px solid #444; font: 12px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-slide-context { position: fixed; z-index: 60; display: none; width: 270px; max-height: calc(100vh - 20px); overflow: auto; box-sizing: border-box; padding: 10px; color: #ddd; background: #202124; border: 1px solid #5b6168; border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.55); font: 12px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-slide-context.open { display: block; }
+.keynope-slide-context h3 { margin: 0 0 9px; color: #fff; font-size: 13px; }
+.keynope-slide-context button { color: #eee; background: #292929; border: 1px solid #555; border-radius: 5px; padding: 5px 9px; font: inherit; }
+.keynope-slide-context select { color: #eee; background: #292929; border: 1px solid #555; border-radius: 5px; padding: 5px 7px; font: inherit; }
+.keynope-context-visual { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 7px 9px; margin: 2px 0 10px; padding: 9px 0; border-top: 1px solid #41464b; border-bottom: 1px solid #41464b; }
+.keynope-context-visual h4 { grid-column: 1 / -1; margin: 0 0 2px; color: #fff; font-size: 12px; }
+.keynope-context-visual label { align-self: center; color: #aeb4bb; font-size: 11px; }
+.keynope-context-visual select, .keynope-context-visual input { width: 100%; min-width: 0; box-sizing: border-box; }
+.keynope-slide-context .keynope-editor-field input, .keynope-slide-context .keynope-editor-field select { width: 100%; box-sizing: border-box; color: #eee; background: #111; border: 1px solid #555; border-radius: 4px; padding: 5px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.keynope-speaker-notes label { color: #aeb4bb; font-weight: 600; }
+.keynope-speaker-notes textarea { min-height: 0; flex: 1; resize: none; box-sizing: border-box; padding: 7px; color: #eee; background: #0e0e0e; border: 1px solid #555; border-radius: 5px; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+html[data-keynope-app="true"][data-keynope-notes="true"] .keynope-speaker-notes { display: flex; }
+.keynope-slide-item { display: block; width: 100%; margin: 0 0 6px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.keynope-slide-item.active { border-color: #70b7ff; background: #244766; }
+.keynope-editor-section { margin: 0 0 14px; padding: 0 0 12px; border-bottom: 1px solid #3c3c3c; }
+.keynope-editor-section h3 { margin: 0 0 7px; color: #fff; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.keynope-editor-actions { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 10px; }
+.keynope-editor-actions button.danger { color: #ffb0aa; border-color: #8d4741; }
+button.keynope-outline-large { min-width: 34px; padding-top: 1px; padding-bottom: 1px; font-size: 26px; line-height: 1; }
+button.keynope-shape-outline-button { display: inline-flex; align-items: center; justify-content: center; text-indent: 0; }
+.keynope-shape-outline-symbol { display: inline-block; transform: translateX(0); }
+.keynope-shape-outline-circle { transform: translateX(-4px); }
+.keynope-shape-outline-diamond { transform: translateX(4px); }
+.keynope-editor-help { margin: 0 0 10px; color: #949ba3; line-height: 1.45; }
+.keynope-editor-subheading { margin: 10px 0 6px; color: #aeb4bb; font-weight: 600; }
+.keynope-editor-field { display: block; margin: 0 0 7px; }
+.keynope-editor-field span { display: block; margin-bottom: 3px; color: #aaa; }
+.keynope-editor-field input, .keynope-editor-field textarea, .keynope-editor-field select { width: 100%; box-sizing: border-box; color: #eee; background: #111; border: 1px solid #555; border-radius: 4px; padding: 5px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.keynope-editor-field textarea { min-height: 70px; resize: vertical; }
+.keynope-element-item { display: flex; width: 100%; justify-content: space-between; margin-bottom: 4px; }
+.keynope-element-item.active { border-color: #70b7ff; background: #244766; }
+.keynope-canvas-overlay { position: absolute; left: 50%; top: 50%; z-index: 12; transform: translate(-50%, -50%); pointer-events: none; }
+.keynope-canvas-element { position: absolute; min-width: 22px; min-height: 22px; box-sizing: border-box; border: 1px solid transparent; background: transparent; pointer-events: auto; cursor: move; }
+.keynope-canvas-element:hover { border-color: rgba(112,183,255,.65); }
+.keynope-canvas-element.active { border: 2px solid #70b7ff; box-shadow: 0 0 0 1px #111; }
+.keynope-resize-handle { position: absolute; z-index: 2; width: 9px; height: 9px; border: 1px solid #111; background: #70b7ff; }
+.keynope-resize-handle.nw { left: -6px; top: -6px; cursor: nwse-resize; }
+.keynope-resize-handle.ne { right: -6px; top: -6px; cursor: nesw-resize; }
+.keynope-resize-handle.sw { left: -6px; bottom: -6px; cursor: nesw-resize; }
+.keynope-resize-handle.se { right: -6px; bottom: -6px; cursor: nwse-resize; }
+.keynope-colour-tool { position: relative; overflow: hidden; display: grid; width: 28px; min-width: 28px; place-items: center; padding: 4px 0; box-sizing: border-box; border-radius: 4px; color: #e9edf1; background: #343940; font: 11px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-colour-tool::after { content: ''; position: absolute; left: 7px; right: 7px; bottom: 4px; height: 3px; border-radius: 2px; background: var(--keynope-tool-colour, #fff); pointer-events: none; }
+.keynope-colour-tool input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.keynope-inline-capture { position: absolute; left: 0; top: 0; z-index: 30; width: 1px; height: 1px; margin: 0; padding: 0; opacity: 0; border: 0; resize: none; pointer-events: none; }
+html[data-keynope-app="true"] .keynope-editor-topbar, html[data-keynope-app="true"] .keynope-editor-panel { display: flex; }
+html[data-keynope-app="true"] .keynope-editor-panel { display: block; }
+html[data-keynope-app="true"] #presenter-canvas, html[data-keynope-app="true"] #link-layer, html[data-keynope-app="true"] .keynope-canvas-overlay { top: var(--editor-canvas-top, 50%); transform: translateX(-50%); }
 html[data-keynope-presenter="true"] .terminal-layer { visibility: hidden; pointer-events: none; }
 html[data-keynope-presenter="true"] #presenter-canvas { display: block; }
 #effect-layer { z-index: 1; pointer-events: none; }
@@ -2921,7 +3241,7 @@ html[data-keynope-presenter="true"] #presenter-canvas { display: block; }
 </style>
 </head>
 <body>
-<div id="stage"><canvas id="presenter-canvas"></canvas><div id="effect-layer" class="terminal-layer"></div><div id="content-layer" class="terminal-layer"></div><div id="chrome-layer" class="terminal-layer"></div></div>
+<div id="stage"><canvas id="presenter-canvas"></canvas><div id="link-layer"></div><div id="effect-layer" class="terminal-layer"></div><div id="content-layer" class="terminal-layer"></div><div id="chrome-layer" class="terminal-layer"></div></div>
 `
 	if presenter {
 		html = strings.Replace(html, `<html lang="en">`, `<html lang="en" data-keynope-presenter="true">`, 1)
@@ -2951,44 +3271,91 @@ let pageIndex = 0;
 const stage = document.getElementById('stage');
 const presenterCanvas = document.getElementById('presenter-canvas');
 const presenterContext = presenterCanvas.getContext('2d');
+const linkLayer = document.getElementById('link-layer');
 const presenterTestCardBuffer = document.createElement('canvas');
 const presenterTestCardBufferContext = presenterTestCardBuffer.getContext('2d');
 const effectLayer = document.getElementById('effect-layer');
-const contentLayer = document.getElementById('content-layer');
+let contentLayer = document.getElementById('content-layer');
 const chromeLayer = document.getElementById('chrome-layer');
 const presenterSurface = new URLSearchParams(location.search).get('keynopeSurface') || 'external';
 const presenterMainSurface = presenterSurface === 'main';
+const keynopeAppSurface = presenterSurface === 'app';
+// Standalone HTML and live presentation share this renderer. Presenter state
+// synchronization remains separately gated by KEYNOPE_PRESENTER.
+const keynopeCanvasRenderer = true;
+let renderEditorCanvasOverlay = () => {};
+let editorSpeakerNotesVisible = false;
+let refreshEditorPresenterControls = () => {};
+let editorCanvasCaret = null;
+let editorExportConfirmation = null;
+let keynopeEditorMasterMode = false;
+if (keynopeAppSurface) {
+  document.documentElement.setAttribute('data-keynope-app', 'true');
+  document.documentElement.setAttribute('data-keynope-notes', 'true');
+  document.title = 'Keynope';
+}
 let frame = 0;
 let contentAnimationCache = new Map();
 let canvasCell = 1;
 let canvasCharWidth = 1;
 let canvasFont = '';
+const canvasFontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
+function fitCanvasFontToGrid() {
+  let fontSize = canvasCell;
+  canvasFont = fontSize + 'px ' + canvasFontFamily;
+  presenterContext.font = canvasFont;
+  const measuredWidth = Math.max(1, presenterContext.measureText('M').width);
+  const safeCellWidth = Math.max(1, canvasCharWidth * 0.98);
+  if (measuredWidth > safeCellWidth) {
+    fontSize *= safeCellWidth / measuredWidth;
+    canvasFont = fontSize + 'px ' + canvasFontFamily;
+    presenterContext.font = canvasFont;
+  }
+}
+function sizeCanvasToAspect(availableWidth, availableHeight, targetAspect) {
+  let cssWidth = Math.max(1, availableWidth);
+  let cssHeight = cssWidth / targetAspect;
+  if (cssHeight > availableHeight) {
+    cssHeight = Math.max(1, availableHeight);
+    cssWidth = cssHeight * targetAspect;
+  }
+  cssWidth = Math.max(1, Math.floor(cssWidth));
+  cssHeight = Math.max(1, Math.floor(cssHeight));
+  const ratio = Math.max(1, window.devicePixelRatio || 1);
+  presenterCanvas.width = Math.max(1, Math.round(cssWidth * ratio));
+  presenterCanvas.height = Math.max(1, Math.round(cssHeight * ratio));
+  presenterCanvas.style.width = cssWidth + 'px';
+  presenterCanvas.style.height = cssHeight + 'px';
+  linkLayer.style.width = presenterCanvas.style.width;
+  linkLayer.style.height = presenterCanvas.style.height;
+  canvasCell = presenterCanvas.height / Math.max(1, deck.rows);
+  canvasCharWidth = presenterCanvas.width / Math.max(1, deck.cols);
+  fitCanvasFontToGrid();
+  document.documentElement.style.setProperty('--cell', canvasCell + 'px');
+  return {width: cssWidth, height: cssHeight};
+}
+function sizeEditorCanvas(stageRect) {
+  const targetAspect = 16 / 9;
+  const topChromeHeight = 52;
+  const bottomChromeHeight = 52;
+  const notesHeight = editorSpeakerNotesVisible ? 132 : 0;
+  const notesGap = editorSpeakerNotesVisible ? 8 : 0;
+  const availableHeight = Math.max(1, stageRect.height - topChromeHeight - bottomChromeHeight - notesHeight - notesGap);
+  const canvasSize = sizeCanvasToAspect(stageRect.width, availableHeight, targetAspect);
+  const canvasTop = topChromeHeight + Math.max(0, (availableHeight - canvasSize.height) / 2);
+  document.documentElement.style.setProperty('--editor-canvas-top', canvasTop + 'px');
+  document.documentElement.style.setProperty('--editor-notes-top', (canvasTop + canvasSize.height + notesGap) + 'px');
+}
 function resize() {
   document.documentElement.style.setProperty('--cols', deck.cols);
   document.documentElement.style.setProperty('--rows', deck.rows);
-  if (window.KEYNOPE_PRESENTER) {
-    const probeCell = 100;
-    presenterContext.font = probeCell + 'px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
-    const charRatio = Math.max(0.1, presenterContext.measureText('M').width / probeCell);
-    const opticalAspect = (Math.max(1, deck.cols) * charRatio) / Math.max(1, deck.rows);
-    let cssW = innerWidth;
-    let cssH = cssW / opticalAspect;
-    if (cssH > innerHeight) {
-      cssH = innerHeight;
-      cssW = cssH * opticalAspect;
-    }
-    cssW = Math.max(1, Math.floor(cssW));
-    cssH = Math.max(1, Math.floor(cssH));
-    const ratio = Math.max(1, window.devicePixelRatio || 1);
-    presenterCanvas.width = Math.max(1, Math.round(cssW * ratio));
-    presenterCanvas.height = Math.max(1, Math.round(cssH * ratio));
-    presenterCanvas.style.width = 'calc(100vw * ' + Math.max(1, deck.cols - 2) + ' / ' + Math.max(1, deck.cols) + ')';
-    presenterCanvas.style.height = 'calc(100vh * ' + Math.max(1, deck.rows - 5) + ' / ' + Math.max(1, deck.rows) + ')';
-    canvasCell = presenterCanvas.height / Math.max(1, deck.rows);
-    canvasCharWidth = presenterCanvas.width / Math.max(1, deck.cols);
-    canvasFont = canvasCell + 'px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
-    presenterContext.font = canvasFont;
-    document.documentElement.style.setProperty('--cell', canvasCell + 'px');
+  if (keynopeAppSurface) {
+    const stageRect = stage.getBoundingClientRect();
+    sizeEditorCanvas(stageRect);
+    return;
+  }
+  if (keynopeCanvasRenderer) {
+    sizeCanvasToAspect(innerWidth, innerHeight, 16 / 9);
     return;
   }
   let low = 1, high = Math.max(8, innerHeight);
@@ -3008,7 +3375,9 @@ function resize() {
     if (width <= innerWidth && height <= innerHeight) low = mid;
     else high = mid;
   }
-  const cell = Math.max(1, Math.floor(low));
+  // Keep the fractional fit found above. Rounding down to a whole CSS pixel
+  // leaves as much as one row-height of unused space in embedded web views.
+  const cell = Math.max(1, low);
   document.documentElement.style.setProperty('--cell', cell + 'px');
   canvasCell = cell;
   canvasFont = cell + 'px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
@@ -3030,6 +3399,7 @@ function label(page) {
 function renderLines(lines) {
   let html = '';
   for (const line of lines || []) {
+    if (line.role === 'transparent-text' || line.role === 'transparent-image') continue;
     for (const part of line.parts) {
       const bg = part.background ? ';background-color:' + part.background : '';
       html += '<span class="line" style="--x:' + part.col + ';--y:' + line.row + ';color:' + part.color + bg + '">' + esc(part.text) + '</span>';
@@ -3044,6 +3414,7 @@ function drawCanvasLines(lines) {
   const textOutlineMasks = canvasTextPixelOutlineMasks(lines, textOutlineElements);
   const drawnTextOutlines = new Set();
   for (const line of lines || []) {
+    if (line.role === 'transparent-text' || line.role === 'transparent-image') continue;
     if (line.role === 'outline') {
       if (textOutlineElements.has(line.element)) continue;
       drawCanvasOutlineLine(line);
@@ -3068,6 +3439,39 @@ function drawCanvasLines(lines) {
       }
     }
   }
+  drawEditorCanvasCaret(lines);
+}
+function drawEditorCanvasCaret(lines) {
+  if (!keynopeAppSurface || !editorCanvasCaret || (performance.now() - editorCanvasCaret.started) % 900 >= 650) return;
+  const matching = (lines || []).filter(line => line.element === editorCanvasCaret.element);
+  if (!matching.length) return;
+  let minX = deck.cols, minY = deck.rows, maxX = 0, maxY = 0;
+  for (const line of matching) {
+    for (const part of line.parts || []) {
+      const width = [...(part.text || '')].length;
+      minX = Math.min(minX, part.col || 0);
+      maxX = Math.max(maxX, (part.col || 0) + width);
+      minY = Math.min(minY, line.row || 0);
+      maxY = Math.max(maxY, (line.row || 0) + 1);
+    }
+  }
+  if (minX >= deck.cols || minY >= deck.rows) return;
+  const text = editorCanvasCaret.text || '';
+  const cursor = Math.max(0, Math.min(text.length, editorCanvasCaret.cursor || 0));
+  const before = text.slice(0, cursor).split('\n');
+  const rawLines = text.split('\n');
+  const lineIndex = Math.max(0, before.length - 1);
+  const column = [...(before[before.length - 1] || '')].length;
+  const rawLineLength = Math.max(1, [...(rawLines[lineIndex] || '')].length);
+  const renderedWidth = Math.max(1, maxX - minX);
+  const renderedHeight = Math.max(1, maxY - minY);
+  const caretCol = Math.min(deck.cols - 1, maxX, minX + column / rawLineLength * renderedWidth);
+  const caretRow = Math.min(maxY - 1, minY + Math.ceil((lineIndex + 1) / Math.max(1, rawLines.length) * renderedHeight) - 1);
+  const caretCells = Math.max(1, renderedWidth / rawLineLength);
+  const x = Math.floor(caretCol * canvasCharWidth);
+  const y = Math.max(0, Math.ceil((caretRow + 1) * canvasCell) - Math.max(2, Math.round(window.devicePixelRatio || 1)));
+  presenterContext.fillStyle = '#70b7ff';
+  presenterContext.fillRect(x, y, Math.max(2, Math.ceil(caretCells * canvasCharWidth)), Math.max(2, Math.round(window.devicePixelRatio || 1)));
 }
 function textOutlineElementMap(lines) {
   const outlines = new Map();
@@ -3407,6 +3811,66 @@ function drawPresenterTimerBlock(ch, x, y, cell) {
     presenterContext.fillRect(x1, y1, Math.max(1, x2 - x1), Math.max(1, y2 - y1));
   }
 }
+const editorExportGlyphs = {
+  E:['11111','10000','10000','11110','10000','10000','11111'],
+  X:['10001','10001','01010','00100','01010','10001','10001'],
+  P:['11110','10001','10001','11110','10000','10000','10000'],
+  O:['01110','10001','10001','10001','10001','10001','01110'],
+  R:['11110','10001','10001','11110','10100','10010','10001'],
+  T:['11111','00100','00100','00100','00100','00100','00100'],
+  D:['11110','10001','10001','10001','10001','10001','11110']
+};
+function showEditorExportConfirmation() {
+  if (!keynopeAppSurface) return;
+  editorExportConfirmation = {started: performance.now(), duration: 1500};
+  const animate = () => {
+    if (!editorExportConfirmation) return;
+    if (performance.now() - editorExportConfirmation.started >= editorExportConfirmation.duration) editorExportConfirmation = null;
+    drawFrame();
+    if (editorExportConfirmation) requestAnimationFrame(animate);
+  };
+  requestAnimationFrame(animate);
+}
+function drawEditorExportConfirmation() {
+  if (!keynopeAppSurface || !editorExportConfirmation) return;
+  const elapsed = performance.now() - editorExportConfirmation.started;
+  const progress = Math.max(0, Math.min(1, elapsed / editorExportConfirmation.duration));
+  const fade = progress < .48 ? 1 : Math.pow(1 - (progress - .48) / .52, 2);
+  const text = 'EXPORTED';
+  const block = Math.max(2, Math.floor(Math.min(presenterCanvas.width / 66, presenterCanvas.height / 24)));
+  const glyphWidth = 5 * block, glyphGap = 2 * block;
+  const textWidth = text.length * glyphWidth + (text.length - 1) * glyphGap;
+  const textHeight = 7 * block;
+  const padX = 3 * block, padY = 2 * block;
+  const scale = 1 + progress * .035;
+  const x = (presenterCanvas.width - textWidth) / 2;
+  const y = (presenterCanvas.height - textHeight) / 2 - progress * 12;
+  presenterContext.save();
+  presenterContext.globalAlpha = fade;
+  presenterContext.translate(presenterCanvas.width / 2, presenterCanvas.height / 2);
+  presenterContext.scale(scale, scale);
+  presenterContext.translate(-presenterCanvas.width / 2, -presenterCanvas.height / 2);
+  presenterContext.fillStyle = 'rgba(3,18,9,.92)';
+  presenterContext.strokeStyle = '#22cc66';
+  presenterContext.lineWidth = Math.max(2, block * .45);
+  presenterContext.fillRect(x - padX, y - padY, textWidth + padX * 2, textHeight + padY * 2);
+  presenterContext.strokeRect(x - padX, y - padY, textWidth + padX * 2, textHeight + padY * 2);
+  let cursor = x;
+  presenterContext.lineWidth = Math.max(1, block * .38);
+  for (const ch of text) {
+    const glyph = editorExportGlyphs[ch];
+    for (let row = 0; row < glyph.length; row++) for (let col = 0; col < glyph[row].length; col++) {
+      if (glyph[row][col] !== '1') continue;
+      const px = cursor + col * block, py = y + row * block;
+      presenterContext.fillStyle = '#00aa55';
+      presenterContext.strokeStyle = '#77ff99';
+      presenterContext.fillRect(px, py, block, block);
+      presenterContext.strokeRect(px, py, block, block);
+    }
+    cursor += glyphWidth + glyphGap;
+  }
+  presenterContext.restore();
+}
 function drawPresenterTestCard() {
   presenterCanvas.style.display = 'block';
   effectLayer.style.display = 'none';
@@ -3699,7 +4163,7 @@ function linkGroups(lines, includeImages) {
   const groups = new Map();
   for (const line of lines || []) {
     if (!line.link || !line.parts || !line.parts.length) continue;
-    if (!includeImages && line.role === 'image') continue;
+    if (!includeImages && (line.role === 'image' || line.role === 'transparent-image')) continue;
     const element = line.element == null ? 'row-' + line.row + '-' + line.link : line.element;
     const key = line.link + '|' + element;
     let group = groups.get(key);
@@ -3734,6 +4198,31 @@ function renderLinkHitAreas(lines) {
   }
   return html;
 }
+function renderCanvasLinkHitAreas(lines) {
+  let html = '';
+  for (const group of linkGroups(lines, true)) {
+    if (group.maxCol <= group.minCol) continue;
+    const left = group.minCol / Math.max(1, deck.cols) * 100;
+    const top = group.minRow / Math.max(1, deck.rows) * 100;
+    const width = (group.maxCol - group.minCol) / Math.max(1, deck.cols) * 100;
+    const height = (group.maxRow - group.minRow + 1) / Math.max(1, deck.rows) * 100;
+    html += '<span class="canvas-link-hit" data-link="' + esc(group.link) + '" style="left:' + left + '%;top:' + top + '%;width:' + width + '%;height:' + height + '%" aria-label="link"></span>';
+  }
+  return html;
+}
+function drawCanvasLinkUnderlines(lines) {
+  presenterContext.save();
+  presenterContext.lineWidth = Math.max(1, canvasCell * 0.055);
+  for (const group of linkGroups(lines, false)) {
+    const y = Math.min(presenterCanvas.height - 1, (group.maxRow + 1) * canvasCell + presenterContext.lineWidth);
+    presenterContext.strokeStyle = group.color || '#f3efe0';
+    presenterContext.beginPath();
+    presenterContext.moveTo(group.minCol * canvasCharWidth, y);
+    presenterContext.lineTo(group.maxCol * canvasCharWidth, y);
+    presenterContext.stroke();
+  }
+  presenterContext.restore();
+}
 function render() {
   const page = deck.pages[pageIndex];
   stage.style.background = page.bg;
@@ -3741,6 +4230,7 @@ function render() {
   contentLayer.style.color = page.fg;
   chromeLayer.innerHTML = page.hideChromePageNumber ? '' : '<span class="page-no">' + esc(label(page)) + '</span>';
   drawFrame();
+  if (keynopeAppSurface) requestAnimationFrame(renderEditorCanvasOverlay);
 }
 function lineKey(line) {
   const col = line.parts && line.parts.length ? line.parts[0].col : (line.col || 0);
@@ -4231,26 +4721,29 @@ function effectLines(page, frame) {
 function drawFrame() {
   const page = presenterPageAt(pageIndex);
   if (!page) return;
-  if (window.KEYNOPE_PRESENTER && !presenterPresenting && !presenterMainSurface) {
+  if (window.KEYNOPE_PRESENTER && !presenterPresenting && !presenterMainSurface && !keynopeAppSurface) {
     drawPresenterSnow();
     return;
   }
-  if (window.KEYNOPE_PRESENTER && presenterTransitionUntil && performance.now() < presenterTransitionUntil) {
+  if (keynopeCanvasRenderer && presenterTransitionUntil && performance.now() < presenterTransitionUntil) {
     drawChannelFlipTransition();
     if (presenterTimerMode === 'running') drawPresenterTestCard();
     drawPresenterTimer();
+    drawEditorExportConfirmation();
     return;
   }
   presenterTransitionUntil = 0;
   const contentLines = presenterContentLinesFor(pageIndex, page);
-  if (window.KEYNOPE_PRESENTER) {
+  if (keynopeCanvasRenderer) {
     drawPresenterPage(page, frame, contentLines);
     if (presenterTimerMode === 'running') drawPresenterTestCard();
     drawPresenterTimer();
+    drawEditorExportConfirmation();
     return;
   }
   const effectLinesWithBackground = (page.backgroundLines || []).concat(effectLines(page, frame));
   presenterCanvas.style.display = 'none';
+  linkLayer.style.display = 'none';
   effectLayer.style.display = 'block';
   contentLayer.style.display = 'block';
   chromeLayer.style.display = 'block';
@@ -4260,6 +4753,8 @@ function drawFrame() {
 function drawPresenterPage(page, frameValue, contentLines) {
   const effectLinesWithBackground = (page.backgroundLines || []).concat(effectLines(page, frameValue));
   presenterCanvas.style.display = 'block';
+  linkLayer.style.display = 'block';
+  linkLayer.innerHTML = renderCanvasLinkHitAreas(contentLines);
   effectLayer.style.display = 'none';
   contentLayer.style.display = 'none';
   chromeLayer.style.display = 'none';
@@ -4269,6 +4764,7 @@ function drawPresenterPage(page, frameValue, contentLines) {
   presenterContext.fillRect(0, 0, presenterCanvas.width, presenterCanvas.height);
   drawCanvasBackdropTransparency(effectLinesWithBackground, page.transparency || []);
   drawCanvasLines(contentLines);
+  drawCanvasLinkUnderlines(contentLines);
   drawCanvasPageLabel(page);
   drawPresenterPhosphor(presenterCanvas.width, presenterCanvas.height);
 }
@@ -4284,6 +4780,7 @@ function drawPresenterPageFallback() {
   presenterContext.fillStyle = page.bg || '#000';
   presenterContext.fillRect(0, 0, presenterCanvas.width, presenterCanvas.height);
   drawCanvasLines(page.lines || []);
+  drawCanvasLinkUnderlines(page.lines || []);
   drawCanvasPageLabel(page);
   drawPresenterPhosphor(presenterCanvas.width, presenterCanvas.height);
 }
@@ -4319,7 +4816,11 @@ function activateLink(target) {
   if (/^#?\d+$/.test(target)) {
     const slide = Math.max(1, parseInt(target.replace('#', ''), 10));
     const index = deck.pages.findIndex(page => page.slide === slide - 1 && page.page === 0);
-    if (index >= 0) pageIndex = index;
+    if (index >= 0) {
+      const previousPageIndex = pageIndex;
+      pageIndex = index;
+      startPageTransition(previousPageIndex, pageIndex);
+    }
     frame = 0;
     render();
     return true;
@@ -4339,6 +4840,24 @@ addEventListener('pointerdown', e => {
     e.stopPropagation();
   }
 }, true);
+function publishPresenterPage(index) {
+  if (!window.KEYNOPE_PRESENTER || !deck.pages || index < 0 || index >= deck.pages.length) return;
+  const page = deck.pages[index];
+  if (!page || !Number.isInteger(page.slide) || !Number.isInteger(page.page)) return;
+  fetch('/api/editor/action', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'navigate-presentation', slide: page.slide, page: page.page})
+  }).catch(() => {});
+}
+function publishPresenterTimer(seconds) {
+  if (!window.KEYNOPE_PRESENTER) return;
+  fetch('/api/editor/action', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(seconds > 0 ? {action: 'start-timer', value: seconds} : {action: 'stop-timer'})
+  }).catch(() => {});
+}
 addEventListener('keydown', e => {
   if (window.KEYNOPE_PRESENTER && presenterMainSurface) {
     if (presenterTimerMode === 'config') {
@@ -4353,6 +4872,7 @@ addEventListener('keydown', e => {
         const total = Math.max(0, minutes * 60 + seconds);
         presenterTimerMode = total > 0 ? 'running' : '';
         presenterTimerEndMS = total > 0 ? Date.now() + total * 1000 : 0;
+        publishPresenterTimer(total);
       } else if (e.key === 'Escape') {
         presenterTimerMode = '';
         presenterTimerInput = '';
@@ -4379,6 +4899,7 @@ addEventListener('keydown', e => {
       presenterTimerMode = '';
       presenterTimerInput = '';
       presenterTimerEndMS = 0;
+      publishPresenterTimer(0);
     }
     else if (e.key === 'q') {
       e.preventDefault();
@@ -4390,16 +4911,13 @@ addEventListener('keydown', e => {
     } else return;
     e.preventDefault();
     e.stopPropagation();
-    if (pageIndex !== previousPageIndex) {
-      presenterTransitionStarted = performance.now();
-      presenterTransitionUntil = presenterTransitionStarted + 180;
-      presenterTransitionFromIndex = previousPageIndex;
-      presenterTransitionToIndex = pageIndex;
-    }
+    startPageTransition(previousPageIndex, pageIndex);
     frame = 0;
     render();
+    publishPresenterPage(pageIndex);
     return;
   }
+  const previousPageIndex = pageIndex;
   if (['ArrowRight', ' ', 'n', 'PageDown'].includes(e.key)) pageIndex = Math.min(deck.pages.length - 1, pageIndex + 1);
   else if (['ArrowLeft', 'PageUp'].includes(e.key)) pageIndex = Math.max(0, pageIndex - 1);
   else if (e.key === 'Home') pageIndex = 0;
@@ -4408,7 +4926,9 @@ addEventListener('keydown', e => {
   e.preventDefault();
   e.stopPropagation();
   frame = 0;
+  startPageTransition(previousPageIndex, pageIndex);
   render();
+  publishPresenterPage(pageIndex);
 });
 let presenterVersion = -1;
 let presenterDeckVersion = -1;
@@ -4420,6 +4940,13 @@ let presenterTransitionStarted = 0;
 let presenterTransitionUntil = 0;
 let presenterTransitionFromIndex = 0;
 let presenterTransitionToIndex = 0;
+function startPageTransition(fromIndex, toIndex) {
+  if (fromIndex === toIndex) return;
+  presenterTransitionStarted = performance.now();
+  presenterTransitionUntil = presenterTransitionStarted + 180;
+  presenterTransitionFromIndex = fromIndex;
+  presenterTransitionToIndex = toIndex;
+}
 async function refreshPresenterSlide(slideIndex) {
   if (!Number.isInteger(slideIndex) || slideIndex < 0) {
     location.reload();
@@ -4452,6 +4979,7 @@ async function syncPresenterState() {
     const response = await fetch('/state', {cache: 'no-store'});
     if (!response.ok) return;
     const state = await response.json();
+    if (keynopeAppSurface && keynopeEditorMasterMode) return;
     const initialSync = presenterVersion < 0;
     let slideRefreshed = false;
     if (initialSync) {
@@ -4465,17 +4993,14 @@ async function syncPresenterState() {
     presenterVersion = state.version;
     const wasPresenting = presenterPresenting;
     presenterPresenting = !!state.presenting;
-    presenterTimerMode = state.timerMode || '';
-    presenterTimerInput = state.timerInput || '';
-    presenterTimerEndMS = Number(state.timerEndMs || 0);
+    if (!presenterMainSurface) {
+      presenterTimerMode = state.timerMode || '';
+      presenterTimerInput = state.timerInput || '';
+      presenterTimerEndMS = Number(state.timerEndMs || 0);
+    }
     const index = deck.pages.findIndex(page => page.slide === state.slide && page.page === state.page);
     if (index >= 0 && index !== pageIndex) {
-      if (presenterPresenting && wasPresenting) {
-        presenterTransitionStarted = performance.now();
-        presenterTransitionUntil = presenterTransitionStarted + 180;
-        presenterTransitionFromIndex = pageIndex;
-        presenterTransitionToIndex = index;
-      }
+      if (presenterPresenting && wasPresenting) startPageTransition(pageIndex, index);
       pageIndex = index;
       frame = 0;
       render();
@@ -4483,14 +5008,2107 @@ async function syncPresenterState() {
       frame = 0;
       render();
     }
+    refreshEditorPresenterControls();
   } catch (_err) {
   }
 }
-if (window.KEYNOPE_PRESENTER) {
-  if (!presenterMainSurface) {
-    setInterval(syncPresenterState, 120);
-    syncPresenterState();
+let keynopeAppFrameVersion = -1;
+let keynopeTerminalCols = 0;
+let keynopeTerminalRows = 0;
+let keynopeTerminalChars = [];
+let keynopeTerminalColors = [];
+let keynopeTerminalRow = 0;
+let keynopeTerminalCol = 0;
+let keynopeTerminalColor = '#f3efe0';
+let keynopeTerminalDrawPending = false;
+const keynopeANSIColors = ['#000000', '#aa0000', '#00aa00', '#aa5500', '#0000aa', '#aa00aa', '#00aaaa', '#aaaaaa'];
+const keynopeANSIBrightColors = ['#555555', '#ff5555', '#55ff55', '#ffff55', '#5555ff', '#ff55ff', '#55ffff', '#ffffff'];
+function resetKeynopeTerminal(cols, rows) {
+  keynopeTerminalCols = cols;
+  keynopeTerminalRows = rows;
+  keynopeTerminalChars = new Array(cols * rows).fill(' ');
+  keynopeTerminalColors = new Array(cols * rows).fill('#f3efe0');
+  keynopeTerminalRow = 0;
+  keynopeTerminalCol = 0;
+  keynopeTerminalColor = '#f3efe0';
+}
+function applyKeynopeSGR(raw) {
+  const values = (raw === '' ? [0] : raw.split(';').map(value => Number(value || 0)));
+  for (let i = 0; i < values.length; i++) {
+    const value = values[i];
+    if (value === 0 || value === 39) keynopeTerminalColor = '#f3efe0';
+    else if (value >= 30 && value <= 37) keynopeTerminalColor = keynopeANSIColors[value - 30];
+    else if (value >= 90 && value <= 97) keynopeTerminalColor = keynopeANSIBrightColors[value - 90];
+    else if (value === 38 && values[i + 1] === 2 && i + 4 < values.length) {
+      const component = index => Math.max(0, Math.min(255, values[index] || 0)).toString(16).padStart(2, '0');
+      keynopeTerminalColor = '#' + component(i + 2) + component(i + 3) + component(i + 4);
+      i += 4;
+    } else if (value === 38 && values[i + 1] === 5 && i + 2 < values.length) {
+      const index = Math.max(0, Math.min(255, values[i + 2] || 0));
+      if (index < 8) keynopeTerminalColor = keynopeANSIColors[index];
+      else if (index < 16) keynopeTerminalColor = keynopeANSIBrightColors[index - 8];
+      i += 2;
+    }
   }
+}
+function applyKeynopeANSI(value) {
+  for (let i = 0; i < value.length;) {
+    if (value.charCodeAt(i) === 27 && value[i + 1] === '[') {
+      let end = i + 2;
+      while (end < value.length && !/[A-Za-z]/.test(value[end])) end++;
+      if (end >= value.length) break;
+      const params = value.slice(i + 2, end);
+      const command = value[end];
+      if (command === 'H' || command === 'f') {
+        const fields = params.split(';');
+        keynopeTerminalRow = Math.max(0, Math.min(keynopeTerminalRows - 1, Number(fields[0] || 1) - 1));
+        keynopeTerminalCol = Math.max(0, Math.min(keynopeTerminalCols - 1, Number(fields[1] || 1) - 1));
+      } else if (command === 'J' && (params === '' || params === '2')) {
+        keynopeTerminalChars.fill(' ');
+        keynopeTerminalColors.fill('#f3efe0');
+        keynopeTerminalRow = 0;
+        keynopeTerminalCol = 0;
+      } else if (command === 'm') {
+        applyKeynopeSGR(params);
+      }
+      i = end + 1;
+      continue;
+    }
+    const codePoint = value.codePointAt(i);
+    const character = String.fromCodePoint(codePoint);
+    i += character.length;
+    if (character === '\n') {
+      keynopeTerminalRow++;
+      keynopeTerminalCol = 0;
+      continue;
+    }
+    if (character === '\r') {
+      keynopeTerminalCol = 0;
+      continue;
+    }
+    if (keynopeTerminalRow >= 0 && keynopeTerminalRow < keynopeTerminalRows && keynopeTerminalCol >= 0 && keynopeTerminalCol < keynopeTerminalCols) {
+      const index = keynopeTerminalRow * keynopeTerminalCols + keynopeTerminalCol;
+      keynopeTerminalChars[index] = character;
+      keynopeTerminalColors[index] = keynopeTerminalColor;
+    }
+    keynopeTerminalCol++;
+    if (keynopeTerminalCol >= keynopeTerminalCols) {
+      keynopeTerminalCol = 0;
+      keynopeTerminalRow++;
+    }
+  }
+}
+function drawKeynopeTerminal() {
+  keynopeTerminalDrawPending = false;
+  presenterCanvas.style.display = 'block';
+  effectLayer.style.display = 'none';
+  contentLayer.style.display = 'none';
+  chromeLayer.style.display = 'none';
+  presenterContext.clearRect(0, 0, presenterCanvas.width, presenterCanvas.height);
+  presenterContext.fillStyle = '#000000';
+  presenterContext.fillRect(0, 0, presenterCanvas.width, presenterCanvas.height);
+  presenterContext.font = canvasFont;
+  presenterContext.textBaseline = 'top';
+  for (let row = 0; row < keynopeTerminalRows; row++) {
+    let col = 0;
+    while (col < keynopeTerminalCols) {
+      const start = row * keynopeTerminalCols + col;
+      const color = keynopeTerminalColors[start];
+      let text = keynopeTerminalChars[start];
+      let end = col + 1;
+      while (end < keynopeTerminalCols && keynopeTerminalColors[row * keynopeTerminalCols + end] === color) {
+        text += keynopeTerminalChars[row * keynopeTerminalCols + end];
+        end++;
+      }
+      if (text.trim() !== '') {
+        presenterContext.fillStyle = color;
+        presenterContext.fillText(text, col * canvasCharWidth, row * canvasCell);
+      }
+      col = end;
+    }
+  }
+}
+function renderKeynopeAppFrame(next) {
+  if (!next || !Number.isInteger(next.version) || next.version <= keynopeAppFrameVersion) return;
+  keynopeAppFrameVersion = next.version;
+  if (next.cols > 0 && next.rows > 0 && (deck.cols !== next.cols || deck.rows !== next.rows)) {
+    deck.cols = next.cols;
+    deck.rows = next.rows;
+    resize();
+  }
+  if (keynopeTerminalCols !== next.cols || keynopeTerminalRows !== next.rows) {
+    resetKeynopeTerminal(next.cols, next.rows);
+  }
+  applyKeynopeANSI(next.ansi || '');
+  if (!keynopeTerminalDrawPending) {
+    keynopeTerminalDrawPending = true;
+    requestAnimationFrame(drawKeynopeTerminal);
+  }
+}
+function startKeynopeAppFrames() {
+  const events = new EventSource('/terminal-events');
+  events.onmessage = event => {
+    try { renderKeynopeAppFrame(JSON.parse(event.data)); } catch (_err) {}
+  };
+}
+function sendKeynopeAppInput(value) {
+  let input = value;
+  if (value instanceof Uint8Array) input = Array.from(value, byte => String.fromCharCode(byte)).join('');
+  if (!input || typeof input !== 'string') return;
+  const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopeInput;
+  if (handler) handler.postMessage(input);
+}
+function keynopeTerminalSequence(e) {
+  if (e.metaKey) {
+    const key = e.key.toLowerCase();
+    if (key === 'c') return new Uint8Array([3]);
+    if (key === 'x') return new Uint8Array([24]);
+    if (key === 'v') return new Uint8Array([22]);
+    if (key === 'z') return new Uint8Array([e.shiftKey ? 25 : 26]);
+    return null;
+  }
+  if (e.ctrlKey && e.key.length === 1) {
+    const code = e.key.toUpperCase().charCodeAt(0);
+    if (code >= 64 && code <= 95) return new Uint8Array([code - 64]);
+  }
+  const special = {
+    ArrowUp: e.shiftKey ? '\x1b[1;2A' : '\x1b[A',
+    ArrowDown: e.shiftKey ? '\x1b[1;2B' : '\x1b[B',
+    ArrowRight: e.shiftKey ? '\x1b[1;2C' : '\x1b[C',
+    ArrowLeft: e.shiftKey ? '\x1b[1;2D' : '\x1b[D',
+    Enter: e.shiftKey ? '\x1b[13;2u' : '\r',
+    Backspace: '\x7f', Escape: '\x1b', Tab: e.shiftKey ? '\x1b[Z' : '\t',
+    PageUp: '\x1b[5~', PageDown: '\x1b[6~', Home: '\x1b[H', End: '\x1b[F', Delete: '\x1b[3~'
+  };
+  if (special[e.key]) return special[e.key];
+  if (e.key.length === 1 && !e.altKey) return e.key;
+  return null;
+}
+if (keynopeAppSurface) {
+  let editorState = null;
+  let editorStateVersion = -1;
+  let activeInlineEditor = null;
+  let suppressSelectionTopbar = false;
+  let pendingCanvasSelection = null;
+  let editorStatus = null;
+  let editorNormalPages = null;
+  let editorWorkspaceSequence = 0;
+  let editorMutationPreviewSequence = 0;
+  let activeCanvasVisualMenu = null;
+  let activeCanvasLinkDialog = null;
+  async function editorAction(action) {
+    const enteringMasters = action.action === 'toggle-master-mode' && editorState && !editorState.masterMode;
+    if (enteringMasters) editorNormalPages = (deck.pages || []).slice();
+    const response = await fetch('/api/editor/action', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(action)
+    });
+    if (!response.ok) {
+      const message = (await response.text()).trim() || 'Editor action failed';
+      if (editorStatus) editorStatus.textContent = message;
+      throw new Error(message);
+    }
+    editorState = await response.json();
+    keynopeEditorMasterMode = !!editorState.masterMode;
+    editorStateVersion = editorState.version;
+    renderEditorPanels();
+    await syncEditorWorkspace();
+  }
+  function editorButton(label, action, parent) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.addEventListener('click', () => editorAction(action).catch(() => {}));
+    parent.appendChild(button);
+    return button;
+  }
+  function editorField(parent, label, value, multiline, changed) {
+    const wrapper = document.createElement('label');
+    wrapper.className = 'keynope-editor-field';
+    const caption = document.createElement('span');
+    caption.textContent = label;
+    const input = multiline ? document.createElement('textarea') : document.createElement('input');
+    input.value = value == null ? '' : String(value);
+    input.addEventListener('change', () => changed(input.value));
+    wrapper.append(caption, input);
+    parent.appendChild(wrapper);
+    return input;
+  }
+  function editorNumber(parent, label, value, options, changed) {
+    const input = editorField(parent, label, value, false, changed);
+    input.type = 'number';
+    if (options && options.min != null) input.min = String(options.min);
+    if (options && options.max != null) input.max = String(options.max);
+    if (options && options.step != null) input.step = String(options.step);
+    return input;
+  }
+  function editorSelect(parent, label, value, options, changed) {
+    const wrapper = document.createElement('label');
+    wrapper.className = 'keynope-editor-field';
+    const caption = document.createElement('span');
+    caption.textContent = label;
+    const select = document.createElement('select');
+    for (const optionValue of options) {
+      const option = document.createElement('option');
+      option.value = optionValue === 'none' ? '' : optionValue;
+      option.textContent = optionValue;
+      option.selected = option.value === (value || '');
+      select.appendChild(option);
+    }
+    select.addEventListener('change', () => changed(select.value));
+    wrapper.append(caption, select);
+    parent.appendChild(wrapper);
+  }
+  function editorColor(parent, label, value, fallback, changed) {
+    const wrapper = document.createElement('label');
+    wrapper.className = 'keynope-editor-field';
+    const caption = document.createElement('span');
+    caption.textContent = label;
+    const input = document.createElement('input');
+    input.type = 'color';
+    const rgb = /^(?:38|48);2;(\d+);(\d+);(\d+)$/.exec(value || '');
+    input.value = /^#[0-9a-f]{6}$/i.test(value || '') ? value : rgb
+      ? '#' + rgb.slice(1).map(part => Math.max(0, Math.min(255, Number(part))).toString(16).padStart(2, '0')).join('')
+      : fallback;
+    input.addEventListener('input', () => changed(input.value));
+    wrapper.append(caption, input);
+    parent.appendChild(wrapper);
+  }
+  const topbar = document.createElement('div');
+  topbar.className = 'keynope-editor-topbar';
+  const mainTopbar = document.createElement('div');
+  mainTopbar.className = 'keynope-topbar-mode';
+  const selectionTopbar = document.createElement('div');
+  selectionTopbar.className = 'keynope-topbar-mode';
+  selectionTopbar.hidden = true;
+  topbar.append(mainTopbar, selectionTopbar);
+  function svgToolbarButton(title, drawing, action) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'keynope-svg-button';
+    button.title = title;
+    button.setAttribute('aria-label', title);
+    button.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' + drawing + '</svg>';
+    button.addEventListener('click', action);
+    mainTopbar.appendChild(button);
+    return button;
+  }
+  const addSlideButton = svgToolbarButton('Add slide', '<path d="M5 2.5h7l3 3V17.5H5z"/><path d="M12 2.5v3h3M2 11h6M5 8v6"/>', () => editorAction({action: 'add-slide'}).catch(() => {}));
+  const cloneSlideButton = editorButton('⿻', {action: 'clone-slide'}, mainTopbar);
+  cloneSlideButton.classList.add('keynope-icon-button');
+  cloneSlideButton.title = 'Clone slide';
+  cloneSlideButton.setAttribute('aria-label', 'Clone slide');
+  const deleteSlideButton = editorButton('🗑️', {action: 'delete-slide'}, mainTopbar);
+  deleteSlideButton.classList.add('keynope-icon-button');
+  deleteSlideButton.title = 'Delete slide';
+  deleteSlideButton.setAttribute('aria-label', 'Delete slide');
+  const appearanceButton = svgToolbarButton('Appearance', '<path d="M4 4h12M4 10h12M4 16h12"/><circle cx="8" cy="4" r="2" fill="currentColor"/><circle cx="13" cy="10" r="2" fill="currentColor"/><circle cx="7" cy="16" r="2" fill="currentColor"/>', () => {
+    const rect = appearanceButton.getBoundingClientRect();
+    showSlideContextMenu(editorState ? editorState.current : -1, rect.left, rect.bottom + 5);
+  });
+  const slideSeparator = document.createElement('span');
+  slideSeparator.className = 'keynope-editor-separator';
+  mainTopbar.appendChild(slideSeparator);
+  function addElementIconButton(title, kind, drawing, level, activate) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'keynope-svg-button';
+    button.title = title;
+    button.setAttribute('aria-label', title);
+    button.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' + drawing + '</svg>';
+    button.addEventListener('click', () => {
+      if (activate) activate(button);
+      else editorAction({action: 'add-element', kind, level:level || 0}).catch(() => {});
+    });
+    mainTopbar.appendChild(button);
+    return button;
+  }
+  addElementIconButton('Add title', 'heading', '<path d="M3 4v12M11 4v12M3 10h8"/><path d="M14 7h3v9M14 16h5"/>', 1);
+  addElementIconButton('Add subtitle', 'heading', '<path d="M3 4v12M11 4v12M3 10h8"/><text x="13" y="17" fill="currentColor" stroke="none" font-size="11" font-family="-apple-system, sans-serif" font-weight="700">2</text>', 2);
+  addElementIconButton('Add text', 'text', '<path d="M3 4h14M10 4v12M7 16h6"/>');
+  addElementIconButton('Add bullet point', 'bullet', '<circle cx="4" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="4" cy="14" r="1" fill="currentColor" stroke="none"/><path d="M8 6h9M8 14h9"/>');
+  addElementIconButton('Add code', 'code', '<path d="M7 5 3 10l4 5M13 5l4 5-4 5M11 3 9 17"/>');
+  const addShapeMenu = document.createElement('div');
+  addShapeMenu.className = 'keynope-add-shape-menu';
+  addShapeMenu.hidden = true;
+  document.body.appendChild(addShapeMenu);
+  function closeAddShapeMenu() {
+    addShapeMenu.hidden = true;
+  }
+  function toggleAddShapeMenu(anchor) {
+    if (!addShapeMenu.hidden) { closeAddShapeMenu(); return; }
+    addShapeMenu.hidden = false;
+    const rect = anchor.getBoundingClientRect();
+    const menuRect = addShapeMenu.getBoundingClientRect();
+    addShapeMenu.style.left = Math.max(8, Math.min(innerWidth - menuRect.width - 8, rect.left)) + 'px';
+    addShapeMenu.style.top = Math.max(8, Math.min(innerHeight - menuRect.height - 8, rect.bottom + 6)) + 'px';
+  }
+  const addShapeButton = addElementIconButton('Add shape', 'shape', '<circle cx="7" cy="8" r="4"/><path d="m13 7 4 8H9z"/>', 0, toggleAddShapeMenu);
+  for (const [shape, label, drawing] of [
+    ['circle','Circle','<circle cx="20" cy="18" r="13"/>'],
+    ['square','Square','<rect x="7" y="5" width="26" height="26" rx="1"/>'],
+    ['triangle','Triangle','<path d="M20 4 35 31H5z"/>'],
+    ['diamond','Diamond','<path d="m20 3 16 15-16 15L4 18z"/>']
+  ]) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.title = 'Add ' + label.toLowerCase();
+    button.setAttribute('aria-label', button.title);
+    button.innerHTML = '<svg viewBox="0 0 40 36" aria-hidden="true" fill="currentColor" stroke="currentColor" stroke-width="1.5">' + drawing + '</svg>';
+    button.addEventListener('click', () => {
+      closeAddShapeMenu();
+      editorAction({action: 'add-element', kind:'shape', name:shape}).catch(() => {});
+    });
+    addShapeMenu.appendChild(button);
+  }
+  document.addEventListener('pointerdown', event => {
+    if (!addShapeMenu.contains(event.target) && event.target !== addShapeButton) closeAddShapeMenu();
+  }, true);
+  const imageInput = document.createElement('input');
+  imageInput.type = 'file';
+  imageInput.accept = 'image/*';
+  imageInput.hidden = true;
+  imageInput.addEventListener('change', async () => {
+    if (!imageInput.files || !imageInput.files[0]) return;
+    const body = new FormData();
+    body.append('image', imageInput.files[0]);
+    const response = await fetch('/api/editor/upload', {method: 'POST', body});
+    if (response.ok) {
+      editorState = await response.json();
+      editorStateVersion = editorState.version;
+      renderEditorPanels();
+    }
+    imageInput.value = '';
+  });
+  const importButton = document.createElement('button');
+  importButton.innerHTML = '<svg viewBox="-13 80 1050 1040" aria-hidden="true"><path d="M-13 1120V80h1050v1040Zm292-428q-18 0-27.5-17t-9.5-35.5 8-28q-4-10-4-23 0-12 4-23.75t13.5-15.25q-4.5-9-4.5-22 0-20.5 6-38.5t12.5-18 12.5 17.75 6 38.75q0 13-4.5 22 10 3.5 13.75 15t3.75 23q0 7.5-1.25 13.75T305 611.5q8.5 10 8.5 30.5 0 17.5-8.5 33.75T279 692m130.5 32.5q-15 0-33.5-4.75t-32-14.25-13.5-24q0-13.5 6.5-22.75T353 648q-3.5-6.5-3.5-13.5 0-10.5 7.5-18.25t18.5-9.75q-1-3-1-6 0-11 5.75-18.5t13.75-7.5q7.5 0 12.5 7t5 17q0 4.5-1.5 10 13 12 13 28 0 9-5 15.5 11 9 16.75 20t5.75 22.5q0 16-7 23t-24 7m266 97.5q-81.5 0-151.25-23T378.5 742q-54-24.5-99-38.25T191 684l6-40q46 6.5 93.75 21.5T394.5 706q74.5 34 139.75 55t140.25 21q34 0 70.75-5t79.25-15.5l10 39q-44.5 11-84 16.25t-75 5.25M27 1080h970V120H27Zm147-145.5v-669h676v669Zm40-40h596v-589H214ZM404.5 750v-40q40 0 73.5-2t64-7q24.5-4 47.75-11.25A1586 1586 0 0 0 637.5 674q40-14.5 86-26.5T829 633l2 40q-56 2-98.75 13.5t-82.25 25q-24.5 8.5-49.25 16T549 740q-32 6-67.25 8t-77.25 2m84-193q-29.5 0-46-24-17.5 1.5-30-9.25T400 497q0-15.5 10.5-26.25t26-12.25Q434 447 434 437q0-28 20.5-48t48.5-20q23.5 0 43 14.5t24.5 36.5q27.5-1.5 41.75 9.75T625 464.5q17.5-1.5 30.25 9.5T668 499t-13.75 24.25T621 533.5q-11.5 0-23.5-4-13 17-39 17-16 0-28.5-8-17.5 18.5-41.5 18.5m129 130q0-17 10.5-30.5t25-20 26.5-3q2.5-16 17-24.5t28.5-8.5q17.5 0 22.5 10.5 5-16.5 24.75-30t44.25-13.5V642q-50.5 0-104.75 14.75T617.5 687"/></svg>';
+  importButton.className = 'keynope-icon-button keynope-monochrome-icon';
+  importButton.title = 'Import image';
+  importButton.setAttribute('aria-label', 'Import image');
+  importButton.addEventListener('click', () => imageInput.click());
+  mainTopbar.append(importButton, imageInput);
+  const editSeparator = document.createElement('span');
+  editSeparator.className = 'keynope-editor-separator';
+  mainTopbar.appendChild(editSeparator);
+  const undoButton = editorButton('⟲', {action: 'undo'}, mainTopbar);
+  undoButton.classList.add('keynope-icon-button', 'keynope-history-button');
+  undoButton.innerHTML = '<span class="keynope-history-icon" aria-hidden="true">⟲</span><span class="keynope-history-label">UNDO</span>';
+  undoButton.title = 'Undo';
+  undoButton.setAttribute('aria-label', 'Undo');
+  const redoButton = editorButton('⟳', {action: 'redo'}, mainTopbar);
+  redoButton.classList.add('keynope-icon-button', 'keynope-history-button');
+  redoButton.innerHTML = '<span class="keynope-history-icon" aria-hidden="true">⟳</span><span class="keynope-history-label">REDO</span>';
+  redoButton.title = 'Redo';
+  redoButton.setAttribute('aria-label', 'Redo');
+  const exportButton = document.createElement('button');
+  exportButton.type = 'button';
+  exportButton.innerHTML = '<span class="keynope-monochrome-glyph" aria-hidden="true">🌐︎</span>';
+  exportButton.addEventListener('click', () => editorAction({action: 'export'}).then(showEditorExportConfirmation).catch(() => {}));
+  mainTopbar.appendChild(exportButton);
+  exportButton.classList.add('keynope-icon-button', 'keynope-monochrome-icon');
+  exportButton.title = 'Export to HTML';
+  exportButton.setAttribute('aria-label', 'Export to HTML');
+  document.body.appendChild(topbar);
+
+  const slidesPanel = document.createElement('aside');
+  slidesPanel.className = 'keynope-editor-panel keynope-editor-slides';
+  document.body.appendChild(slidesPanel);
+  const masterModeButton = document.createElement('button');
+  masterModeButton.type = 'button';
+  masterModeButton.textContent = 'M';
+  masterModeButton.title = 'Master slides';
+  masterModeButton.setAttribute('aria-label', 'Master slides');
+  masterModeButton.addEventListener('click', () => editorAction({action: 'toggle-master-mode'}).catch(() => {}));
+  const inspector = document.createElement('div');
+  const slideContextMenu = document.createElement('div');
+  slideContextMenu.className = 'keynope-slide-context';
+  document.body.appendChild(slideContextMenu);
+  const canvasOverlay = document.createElement('div');
+  canvasOverlay.className = 'keynope-canvas-overlay';
+  stage.appendChild(canvasOverlay);
+  const speakerNotesPanel = document.createElement('section');
+  speakerNotesPanel.className = 'keynope-speaker-notes';
+  const speakerNotesLabel = document.createElement('label');
+  speakerNotesLabel.textContent = 'Speaker notes';
+  const speakerNotesInput = document.createElement('textarea');
+  speakerNotesInput.setAttribute('aria-label', 'Speaker notes');
+  speakerNotesInput.placeholder = 'Add notes for this slide…';
+  speakerNotesPanel.append(speakerNotesLabel, speakerNotesInput);
+  document.body.appendChild(speakerNotesPanel);
+  let speakerNotesSlide = -1;
+  let speakerNotesSaveTimer = null;
+  let speakerNotesDirty = false;
+  let speakerNotesDirtySlide = -1;
+  let speakerNotesDirtyValue = '';
+  let speakerNotesSavingSlide = -1;
+  let notesToggleButton = null;
+  function setSpeakerNotesVisible(visible, focusNotes) {
+    editorSpeakerNotesVisible = !!visible;
+    document.documentElement.setAttribute('data-keynope-notes', editorSpeakerNotesVisible ? 'true' : 'false');
+    if (notesToggleButton) {
+      notesToggleButton.classList.toggle('active', editorSpeakerNotesVisible);
+      notesToggleButton.setAttribute('aria-pressed', editorSpeakerNotesVisible ? 'true' : 'false');
+    }
+    resize();
+    requestAnimationFrame(renderEditorCanvasOverlay);
+    if (editorSpeakerNotesVisible && focusNotes) requestAnimationFrame(() => speakerNotesInput.focus());
+  }
+  function renderSpeakerNotes(slide) {
+    if (!slide) return;
+    const changedSlide = speakerNotesSlide !== editorState.current;
+    if (changedSlide || (document.activeElement !== speakerNotesInput && speakerNotesSavingSlide !== editorState.current && !speakerNotesDirty)) {
+      speakerNotesInput.value = slide.notes || '';
+      speakerNotesSlide = editorState.current;
+    }
+  }
+  function flushSpeakerNotes() {
+    if (!speakerNotesDirty || speakerNotesDirtySlide < 0) return;
+    if (speakerNotesSaveTimer) {
+      clearTimeout(speakerNotesSaveTimer);
+      speakerNotesSaveTimer = null;
+    }
+    const slide = speakerNotesDirtySlide;
+    const notes = speakerNotesDirtyValue;
+    speakerNotesDirty = false;
+    speakerNotesSavingSlide = slide;
+    editorAction({action: 'update-slide-notes', slide, notes}).then(() => {
+      if (speakerNotesSavingSlide === slide) speakerNotesSavingSlide = -1;
+    }).catch(() => {
+      speakerNotesSavingSlide = -1;
+      speakerNotesDirty = true;
+      speakerNotesDirtySlide = slide;
+      speakerNotesDirtyValue = notes;
+    });
+  }
+  speakerNotesInput.addEventListener('input', () => {
+    speakerNotesDirty = true;
+    speakerNotesDirtySlide = editorState ? editorState.current : -1;
+    speakerNotesDirtyValue = speakerNotesInput.value;
+    if (speakerNotesSaveTimer) clearTimeout(speakerNotesSaveTimer);
+    speakerNotesSaveTimer = setTimeout(flushSpeakerNotes, 2000);
+  });
+  speakerNotesInput.addEventListener('keydown', async event => {
+    event.stopPropagation();
+    if (!(event.ctrlKey || event.metaKey) || !['c','x','v'].includes(event.key.toLowerCase())) return;
+    event.preventDefault();
+    const command = event.key.toLowerCase();
+    const start = speakerNotesInput.selectionStart || 0;
+    const end = speakerNotesInput.selectionEnd || 0;
+    try {
+      if (command === 'c' || command === 'x') {
+        if (start === end) return;
+        await navigator.clipboard.writeText(speakerNotesInput.value.slice(start, end));
+        if (command === 'x') {
+          speakerNotesInput.setRangeText('', start, end, 'start');
+          speakerNotesInput.dispatchEvent(new Event('input', {bubbles:true}));
+        }
+      } else {
+        const pasted = await navigator.clipboard.readText();
+        speakerNotesInput.setRangeText(pasted, start, end, 'end');
+        speakerNotesInput.dispatchEvent(new Event('input', {bubbles:true}));
+      }
+    } catch (_err) {
+      document.execCommand(command === 'c' ? 'copy' : command === 'x' ? 'cut' : 'paste');
+    }
+  });
+  speakerNotesInput.addEventListener('keyup', event => event.stopPropagation());
+  speakerNotesInput.addEventListener('blur', flushSpeakerNotes);
+  document.addEventListener('pointerdown', event => {
+    if (!speakerNotesPanel.contains(event.target)) flushSpeakerNotes();
+  }, true);
+
+  let editorPreviewOriginal = null;
+  let editorPreviewSequence = 0;
+  function replaceEditorPreviewPages(slide, pages) {
+    const first = deck.pages.findIndex(page => page.slide === slide);
+    if (first < 0 || !Array.isArray(pages) || !pages.length) return;
+    let end = first;
+    while (end < deck.pages.length && deck.pages[end].slide === slide) end++;
+    const currentPage = deck.pages[pageIndex] && deck.pages[pageIndex].slide === slide ? deck.pages[pageIndex].page : 0;
+    deck.pages.splice(first, end - first, ...pages);
+    const next = deck.pages.findIndex(page => page.slide === slide && page.page === currentPage);
+    pageIndex = next >= 0 ? next : first;
+  }
+  function restoreEditorPreview() {
+    if (!editorPreviewOriginal) return;
+    replaceEditorPreviewPages(editorPreviewOriginal.slide, editorPreviewOriginal.pages);
+    editorPreviewOriginal = null;
+  }
+  async function previewEditorText(index, element, sequence) {
+    try {
+      const response = await fetch('/api/editor/preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({element: index, elementData: element, cols: deck.cols, rows: deck.rows})
+      });
+      if (!response.ok) return;
+      const pages = await response.json();
+      if (!activeInlineEditor || activeInlineEditor.element !== index || sequence !== editorPreviewSequence) return;
+      replaceEditorPreviewPages(editorState.current, pages);
+      drawFrame();
+    } catch (_err) {}
+  }
+  function editorElementSignature(element) {
+    if (!element) return '';
+    return [element.kind || '', element.level || 0, element.text || '', element.path || '', element.query || '', element.id || '', element.slotId || ''].join('\u001f');
+  }
+  function editorElementIndexMaps() {
+    const raw = editorState && editorState.slides && editorState.slides[editorState.current] ? (editorState.slides[editorState.current].elements || []) : [];
+    const resolved = editorState && editorState.resolved && editorState.resolved[editorState.current] ? (editorState.resolved[editorState.current].elements || []) : raw;
+    const rawToResolved = new Map();
+    const resolvedToRaw = new Map();
+    const used = new Set();
+    raw.forEach((element, rawIndex) => {
+      const signature = editorElementSignature(element);
+      let resolvedIndex = resolved.findIndex((candidate, index) => !used.has(index) && editorElementSignature(candidate) === signature);
+      if (resolvedIndex < 0 && rawIndex < resolved.length && !used.has(rawIndex)) resolvedIndex = rawIndex;
+      if (resolvedIndex < 0) return;
+      used.add(resolvedIndex);
+      rawToResolved.set(rawIndex, resolvedIndex);
+      resolvedToRaw.set(resolvedIndex, rawIndex);
+    });
+    return {rawToResolved, resolvedToRaw};
+  }
+  function beginInlineEdit(index, hit) {
+    if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return;
+    const original = editorState.slides[editorState.current].elements[index];
+    if (!original || !['heading','text','bullet','code'].includes(original.kind)) {
+      if (editorStatus) editorStatus.textContent = 'Select a text element to edit its content';
+      return;
+    }
+    if (!hit) hit = canvasOverlay.querySelector('[data-element="' + index + '"]');
+    if (!hit) return;
+    if (activeInlineEditor) activeInlineEditor.finish(true);
+    if (pendingCanvasSelection) {
+      clearTimeout(pendingCanvasSelection);
+      pendingCanvasSelection = null;
+    }
+    const element = {...original};
+    const originalText = element.text || '';
+    const resolvedElement = editorElementIndexMaps().rawToResolved.get(index);
+    const editor = document.createElement('textarea');
+    editor.className = 'keynope-inline-capture';
+    editor.setAttribute('aria-label', 'Edit element text');
+    editor.spellcheck = false;
+    editor.value = element.text || '';
+    const slide = editorState.current;
+    const first = deck.pages.findIndex(page => page.slide === slide);
+    let end = first;
+    while (end >= 0 && end < deck.pages.length && deck.pages[end].slide === slide) end++;
+    editorPreviewOriginal = first >= 0 ? {slide, pages: deck.pages.slice(first, end)} : null;
+    let finished = false;
+    const finish = save => {
+      if (finished) return;
+      finished = true;
+      activeInlineEditor = null;
+      suppressSelectionTopbar = true;
+      const text = editor.value;
+      editor.remove();
+      editorCanvasCaret = null;
+      mainTopbar.hidden = false;
+      selectionTopbar.hidden = true;
+      selectionTopbar.replaceChildren();
+      let completion = Promise.resolve();
+      if (save && text !== originalText) {
+        const originalPreview = editorPreviewOriginal;
+        editorPreviewOriginal = null;
+        element.text = text;
+        completion = editorAction({action: 'update-element', element: index, elementData: element}).catch(() => {
+          editorPreviewOriginal = originalPreview;
+          restoreEditorPreview();
+          drawFrame();
+        });
+      } else {
+        restoreEditorPreview();
+        drawFrame();
+      }
+      completion.finally(() => {
+        editorAction({action: 'select-element', element: -1}).catch(() => {}).finally(() => {
+          suppressSelectionTopbar = false;
+          renderEditorTopbar();
+        });
+      });
+      if (editorStatus) editorStatus.textContent = save ? 'Text saved' : 'Editing cancelled';
+    };
+    const updateCaret = () => {
+      editorCanvasCaret = {element: resolvedElement == null ? index : resolvedElement, text: editor.value, cursor: editor.selectionStart, started: performance.now()};
+      drawFrame();
+    };
+    activeInlineEditor = {element: index, finish, editor};
+    renderEditorTopbar();
+    editor.addEventListener('input', () => {
+      element.text = editor.value;
+      updateCaret();
+      const sequence = ++editorPreviewSequence;
+      previewEditorText(index, {...element}, sequence);
+    });
+    editor.addEventListener('select', updateCaret);
+    editor.addEventListener('click', updateCaret);
+    editor.addEventListener('keyup', updateCaret);
+    editor.addEventListener('keydown', keyEvent => {
+      if (keyEvent.key === 'Enter' && !keyEvent.shiftKey) {
+        keyEvent.preventDefault();
+        finish(true);
+      } else if (keyEvent.key === 'Escape') {
+        keyEvent.preventDefault();
+        finish(false);
+      }
+      keyEvent.stopPropagation();
+    });
+    editor.addEventListener('blur', () => finish(true), {once: true});
+    canvasOverlay.appendChild(editor);
+    editor.focus();
+    editor.setSelectionRange(editor.value.length, editor.value.length);
+    updateCaret();
+    if (editorStatus) editorStatus.textContent = 'Editing text · Enter save · Shift+Enter newline · Esc cancel';
+  }
+
+  function canvasTool(label, className, action) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    if (className) button.className = className;
+    button.addEventListener('pointerdown', event => { event.preventDefault(); event.stopPropagation(); });
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      action();
+    });
+    return button;
+  }
+
+  function canvasElementAt(index) {
+    if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return null;
+    const element = editorState.slides[editorState.current].elements[index];
+    return element ? {...element} : null;
+  }
+  function updateCanvasElement(index, mutate) {
+    const element = canvasElementAt(index);
+    if (!element) return;
+    mutate(element);
+    previewCanvasMutation(index, element);
+    editorAction({action: 'update-element', element: index, elementData: element}).catch(() => {});
+  }
+  function setCanvasTextKind(index, kind, level) {
+    updateCanvasElement(index, element => {
+      element.kind = kind;
+      element.level = kind === 'heading' ? level : 0;
+    });
+  }
+  function appendCanvasTextKindTools(container, index, element) {
+    const choices = [
+      ['H1', 'heading', 1, element.kind === 'heading' && element.level !== 2],
+      ['H2', 'heading', 2, element.kind === 'heading' && element.level === 2],
+      ['T', 'text', 0, element.kind === 'text' || element.kind === 'text-image'],
+      ['⏺', 'bullet', 0, element.kind === 'bullet']
+    ];
+    for (const [label, kind, level, active] of choices) {
+      const button = canvasTool(label, active ? 'active' : '', () => setCanvasTextKind(index, kind, level));
+      button.title = kind === 'heading' ? 'Convert to heading ' + level : kind === 'bullet' ? 'Convert to bullet point' : 'Convert to plain text';
+      button.setAttribute('aria-label', button.title);
+      container.appendChild(button);
+    }
+  }
+  async function previewCanvasMutation(index, element, refreshOverlay = true) {
+    const sequence = ++editorMutationPreviewSequence;
+    const slide = editorState ? editorState.current : -1;
+    try {
+      const response = await fetch('/api/editor/preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({element: index, elementData: element, cols: deck.cols, rows: deck.rows})
+      });
+      if (!response.ok) return;
+      const pages = await response.json();
+      if (sequence !== editorMutationPreviewSequence || !editorState || editorState.current !== slide) return;
+      replaceEditorPreviewPages(slide, pages);
+      drawFrame();
+      if (refreshOverlay) requestAnimationFrame(renderEditorCanvasOverlay);
+    } catch (_err) {}
+  }
+  async function fitCanvasTextElement(index, element, boxWidth, boxHeight) {
+    const response = await fetch('/api/editor/fit-text', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({element: index, elementData: element, boxWidth, boxHeight, cols: deck.cols, rows: deck.rows})
+    });
+    if (!response.ok) throw new Error('Could not fit text');
+    return response.json();
+  }
+  function canvasTextNativeSize(element) {
+    if (element.kind === 'heading') return Number(element.level || 1) === 1 ? 20 : 10;
+    return 0;
+  }
+  function canvasTextSize(element) {
+    const query = new URLSearchParams(element.query || '');
+    const explicit = Number.parseInt(query.get('text-size'), 10);
+    if (Number.isInteger(explicit)) return Math.max(-1, Math.min(25, explicit));
+    const scale = Number.parseFloat(query.get('scale') || '1');
+    if (query.get('render') === 'text-image' && Number.isFinite(scale)) {
+      const source = query.get('source') || '';
+      if (source === 'bitmap') {
+        if (scale < 1) return Math.max(-1, Math.min(-1, Math.round((scale - 1) / .1)));
+        if (scale < 2) return Math.max(1, Math.min(9, Math.round((scale - 1) * 10)));
+        if (scale < 4) return Math.max(11, Math.min(19, 10 + Math.round((scale - 2) / .2)));
+        return Math.max(21, Math.min(25, 20 + Math.round((scale - 4) / .2)));
+      }
+    }
+    return canvasTextNativeSize(element);
+  }
+  function applyCanvasTextSize(element, size) {
+    size = Math.max(-1, Math.min(25, size));
+    const query = new URLSearchParams(element.query || '');
+    if (size === canvasTextNativeSize(element)) {
+      for (const key of ['render','source','scale','text-size']) query.delete(key);
+    } else {
+      let scale = 1;
+      if (size < 0) scale = 1 + size * .1;
+      else if (size < 10) scale = 1 + size / 10;
+      else if (size < 20) scale = 2 + (size - 10) * .2;
+      else scale = 4 + (size - 20) * .2;
+      query.set('render', 'text-image');
+      query.set('source', 'bitmap');
+      query.set('scale', scale.toFixed(2));
+      query.set('text-size', String(size));
+    }
+    element.query = query.toString();
+  }
+  function changeCanvasTextSize(index, delta) {
+    updateCanvasElement(index, element => applyCanvasTextSize(element, canvasTextSize(element) + delta));
+  }
+  function cycleCanvasOutline(index) {
+    updateCanvasElement(index, element => {
+      const query = new URLSearchParams(element.query || '');
+      const outline = query.get('outline') || '';
+      if (!outline) query.set('outline', '1');
+      else if (outline === '1') query.set('outline', 'dark');
+      else query.delete('outline');
+      element.query = query.toString();
+    });
+  }
+  function canvasOutlineTool(index, element, query) {
+    const selectedText = ['heading','text','text-image','bullet','code'].includes(element.kind);
+    let label = selectedText ? '『』' : 'Outline';
+    let large = false;
+    let shapeIcon = '';
+    if (element.kind === 'shape') {
+      const shape = query.get('shape') || 'circle';
+      shapeIcon = shape;
+      if (shape === 'circle') label = '⃣⃣⃣⃣⃣';
+      else if (shape === 'square') label = '𓉘𓉝';
+      else if (shape === 'triangle') { label = '△'; large = true; }
+      else if (shape === 'diamond') { label = '\u00a0⃟'; large = true; }
+    }
+    const outline = query.get('outline') || '';
+    const button = canvasTool(label, outline ? 'active' : '', () => cycleCanvasOutline(index));
+    if (large) button.classList.add('keynope-outline-large');
+    if (shapeIcon) {
+      const symbol = document.createElement('span');
+      symbol.className = 'keynope-shape-outline-symbol keynope-shape-outline-' + shapeIcon;
+      symbol.textContent = label;
+      button.replaceChildren(symbol);
+      button.classList.add('keynope-shape-outline-button');
+    }
+    button.title = outline === 'dark' ? 'Remove dark outline' : outline ? 'Switch to dark outline' : 'Add outline';
+    button.setAttribute('aria-label', button.title);
+    return button;
+  }
+  function canvasDuplicateTool(index) {
+    const button = canvasTool('⿻', 'keynope-icon-button', () => editorAction({action: 'duplicate-element', element: index}).catch(() => {}));
+    button.title = 'Clone element';
+    button.setAttribute('aria-label', 'Clone element');
+    return button;
+  }
+  function rotateCanvasText(index) {
+    updateCanvasElement(index, element => {
+      const query = new URLSearchParams(element.query || '');
+      const orientation = query.get('orientation') || '';
+      if (!orientation) query.set('orientation', 'cw');
+      else if (orientation === 'cw') query.set('orientation', 'down');
+      else if (orientation === 'down') query.set('orientation', 'ccw');
+      else query.delete('orientation');
+      element.query = query.toString();
+    });
+  }
+  function canvasStyleSelect(index, element) {
+    const query = new URLSearchParams(element.query || '');
+    const select = document.createElement('select');
+    select.title = 'Text rendering style';
+    select.setAttribute('aria-label', 'Text rendering style');
+    for (const [value, label] of [['','Style: Default'],['blocks','Style: Blocks'],['braille','Style: Braille'],['shade','Style: Shade'],['ascii','Style: ASCII'],['dense','Style: Dense']]) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      option.selected = query.get('glyph') === value;
+      select.appendChild(option);
+    }
+    select.addEventListener('pointerdown', event => event.stopPropagation());
+    select.addEventListener('change', event => {
+      event.stopPropagation();
+      updateCanvasElement(index, updated => {
+        const values = new URLSearchParams(updated.query || '');
+        if (select.value) {
+          values.set('glyph', select.value);
+          if (values.get('render') !== 'text-image') {
+            const size = canvasTextSize(updated);
+            let scale = size < 0 ? 1 + size * .1 : size < 10 ? 1 + size / 10 : size < 20 ? 2 + (size - 10) * .2 : 4 + (size - 20) * .2;
+            values.set('render', 'text-image');
+            values.set('source', 'bitmap');
+            values.set('scale', scale.toFixed(2));
+            values.set('text-size', String(size));
+          }
+        } else {
+          values.delete('glyph');
+        }
+        updated.query = values.toString();
+      });
+    });
+    return select;
+  }
+  function canvasColourTool(index, element, renderedColour) {
+    const query = new URLSearchParams(element.query || '');
+    const colourKey = element.kind === 'heading' ? 'header' : 'fg';
+    const colour = /^#[0-9a-f]{6}$/i.test(query.get(colourKey) || '') ? query.get(colourKey) : (/^#[0-9a-f]{6}$/i.test(renderedColour || '') ? renderedColour : '#ffffff');
+    const label = document.createElement('span');
+    label.className = 'keynope-colour-tool';
+    label.title = 'Text colour';
+    label.setAttribute('aria-label', 'Text colour');
+    label.textContent = 'A';
+    label.style.setProperty('--keynope-tool-colour', colour);
+    const input = document.createElement('input');
+    input.type = 'color';
+    input.value = colour;
+    input.setAttribute('aria-label', 'Choose text colour');
+    input.addEventListener('pointerdown', event => event.stopPropagation());
+    input.addEventListener('input', event => {
+      event.stopPropagation();
+      label.style.setProperty('--keynope-tool-colour', input.value);
+    });
+    input.addEventListener('change', event => {
+      event.stopPropagation();
+      updateCanvasElement(index, updated => {
+        const values = new URLSearchParams(updated.query || '');
+        values.set(colourKey, input.value);
+        if (colourKey === 'header') values.delete('fg');
+        updated.query = values.toString();
+      });
+    });
+    label.appendChild(input);
+    return label;
+  }
+  function setCanvasAlignment(index, alignment) {
+    updateCanvasElement(index, element => {
+      const query = new URLSearchParams(element.query || '');
+      query.set('align', alignment);
+      for (const key of ['left','right','left_pct','right_pct']) query.delete(key);
+      element.query = query.toString();
+    });
+  }
+  function toggleCanvasMarkdownStyle(index, marker) {
+    updateCanvasElement(index, element => {
+      const text = element.text || '';
+      if (!text) return;
+      element.text = text.startsWith(marker) && text.endsWith(marker) && text.length >= marker.length * 2
+        ? text.slice(marker.length, -marker.length)
+        : marker + text + marker;
+    });
+  }
+  function toggleCanvasTransparency(index) {
+    updateCanvasElement(index, element => {
+      const query = new URLSearchParams(element.query || '');
+      if (query.get('transparent') === '1') query.delete('transparent'); else query.set('transparent', '1');
+      element.query = query.toString();
+    });
+  }
+  function canvasTransparencyTool(index, query) {
+    const enabled = query.get('transparent') === '1';
+    const button = canvasTool('See through', enabled ? 'active' : '', () => toggleCanvasTransparency(index));
+    button.title = enabled ? 'Disable see through' : 'Enable see through';
+    button.setAttribute('aria-label', button.title);
+    return button;
+  }
+  function appendCanvasShapeKindTools(container, index, query) {
+    const current = query.get('shape') || 'circle';
+    for (const [shape, drawing] of [
+      ['circle','<circle cx="10" cy="10" r="7"/>'],
+      ['square','<rect x="3" y="3" width="14" height="14" rx="1"/>'],
+      ['triangle','<path d="M10 2 18 17H2z"/>'],
+      ['diamond','<path d="m10 2 8 8-8 8-8-8z"/>']
+    ]) {
+      const button = canvasTool('', current === shape ? 'active keynope-icon-button keynope-canvas-shape-kind' : 'keynope-icon-button keynope-canvas-shape-kind', () => {
+        updateCanvasElement(index, element => {
+          const values = new URLSearchParams(element.query || '');
+          values.set('shape', shape);
+          element.query = values.toString();
+        });
+      });
+      button.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" fill="currentColor" stroke="currentColor" stroke-width="1.5">' + drawing + '</svg>';
+      button.title = 'Change to ' + shape;
+      button.setAttribute('aria-label', button.title);
+      container.appendChild(button);
+    }
+  }
+  function canvasDeleteTool(index) {
+    const button = canvasTool('🗑️', 'danger keynope-icon-button', () => editorAction({action: 'delete-element', element: index}).catch(() => {}));
+    button.title = 'Delete element';
+    button.setAttribute('aria-label', 'Delete element');
+    return button;
+  }
+  function visualQueryControl(panel, index, labelText, key, value, options) {
+    const label = document.createElement('label');
+    label.textContent = labelText;
+    let input;
+    if (options.values) {
+      input = document.createElement('select');
+      for (const [optionValue, optionLabel] of options.values) {
+        const option = document.createElement('option');
+        option.value = optionValue;
+        option.textContent = optionLabel;
+        option.selected = optionValue === value;
+        input.appendChild(option);
+      }
+    } else {
+      input = document.createElement('input');
+      input.type = 'range';
+      input.min = String(options.min);
+      input.max = String(options.max);
+      input.step = String(options.step);
+      input.value = value || String(options.fallback);
+      input.title = labelText + ': ' + input.value;
+      input.addEventListener('input', () => { input.title = labelText + ': ' + input.value; });
+    }
+    input.setAttribute('aria-label', labelText);
+    input.addEventListener('pointerdown', event => event.stopPropagation());
+    input.addEventListener('change', () => {
+      updateCanvasElement(index, element => {
+        const query = new URLSearchParams(element.query || '');
+        if (input.value === '' || input.value === String(options.fallback)) query.delete(key); else query.set(key, input.value);
+        element.query = query.toString();
+      });
+    });
+    panel.append(label, input);
+  }
+  function canvasVisualMenu(index, element) {
+    const button = canvasTool('Adjust Image', '', () => {
+      if (activeCanvasVisualMenu && activeCanvasVisualMenu.button === button) {
+        closeCanvasVisualMenu();
+        return;
+      }
+      closeCanvasVisualMenu();
+      document.body.appendChild(panel);
+      panel.hidden = false;
+      const anchor = button.getBoundingClientRect();
+      const panelRect = panel.getBoundingClientRect();
+      panel.style.left = Math.max(8, Math.min(innerWidth - panelRect.width - 8, anchor.left)) + 'px';
+      panel.style.top = Math.max(8, Math.min(innerHeight - panelRect.height - 8, anchor.bottom + 7)) + 'px';
+      const dismiss = event => {
+        if (!panel.contains(event.target) && event.target !== button) closeCanvasVisualMenu();
+      };
+      activeCanvasVisualMenu = {index, button, panel, dismiss};
+      document.addEventListener('pointerdown', dismiss, true);
+    });
+    button.title = 'Adjust image';
+    button.setAttribute('aria-label', 'Adjust image');
+    const panel = document.createElement('div');
+    panel.className = 'keynope-visual-panel';
+    panel.hidden = true;
+    panel.addEventListener('pointerdown', event => event.stopPropagation());
+    appendCanvasVisualControls(panel, index, element);
+    return button;
+  }
+  function appendCanvasVisualControls(panel, index, element) {
+    const query = new URLSearchParams(element.query || '');
+    if (element.kind === 'image') {
+      visualQueryControl(panel, index, 'Glyph', 'glyph', query.get('glyph') || 'blocks', {values: [['blocks','Blocks'],['braille','Braille'],['shade','Shade'],['ascii','ASCII'],['dense','Dense']]});
+      visualQueryControl(panel, index, 'Sampling', 'shape', query.get('shape') || 'subject', {values: [['subject','Subject'],['contrast','Contrast'],['saturation','Saturation'],['luma','Luma'],['alpha','Alpha']]});
+      visualQueryControl(panel, index, 'Brightness', 'brightness', query.get('brightness'), {min:.2,max:2,step:.1,fallback:1});
+      visualQueryControl(panel, index, 'Contrast', 'contrast', query.get('contrast'), {min:.2,max:2,step:.1,fallback:1});
+      visualQueryControl(panel, index, 'Saturation', 'saturation', query.get('saturation'), {min:0,max:2,step:.1,fallback:1});
+      visualQueryControl(panel, index, 'Sharpness', 'sharpness', query.get('sharpness'), {min:.2,max:2,step:.1,fallback:1});
+      visualQueryControl(panel, index, 'Alpha', 'alpha', query.get('alpha'), {min:0,max:255,step:16,fallback:96});
+    }
+  }
+  function closeCanvasVisualMenu() {
+    if (!activeCanvasVisualMenu) return;
+    document.removeEventListener('pointerdown', activeCanvasVisualMenu.dismiss, true);
+    activeCanvasVisualMenu.panel.remove();
+    activeCanvasVisualMenu = null;
+  }
+  function canvasShapeSelectionBounds(element, pageNumber) {
+    const query = new URLSearchParams(element.query || '');
+    const width = Math.max(1, Number.parseInt(query.get('width') || '12', 10));
+    const height = Math.max(1, Number.parseInt(query.get('height') || '6', 10));
+    let left = 0;
+    if (query.has('left_pct')) left = Math.round(Number(query.get('left_pct')) * Math.max(0, deck.cols - 1));
+    else if (query.has('left')) left = Number.parseInt(query.get('left'), 10) || 0;
+    else if (query.get('align') === 'center') left = Math.floor((deck.cols - width) / 2);
+    else if (query.get('align') === 'right') left = deck.cols - width;
+    let top = Number.parseInt(query.get('top') || '0', 10) - Math.max(0, pageNumber || 0) * deck.rows;
+    if (query.has('bottom')) top = deck.rows - height - (Number.parseInt(query.get('bottom'), 10) || 0);
+    if (top >= deck.rows || top + height <= 0) return null;
+    left = Math.max(0, Math.min(deck.cols - 1, left));
+    top = Math.max(0, Math.min(deck.rows - 1, top));
+    return {minX:left, minY:top, maxX:Math.min(deck.cols, left + width), maxY:Math.min(deck.rows, top + height), color:query.get('fg') || ''};
+  }
+  function applyCanvasLink(index, input, value) {
+    value = value.trim();
+    const internal = /^#([1-9][0-9]*)$/.exec(value);
+    let external = false;
+    if (value && !internal) {
+      try { const parsed = new URL(value); external = parsed.protocol === 'http:' || parsed.protocol === 'https:'; } catch (_err) {}
+    }
+    if (value && !internal && !external) {
+      input.setCustomValidity('Use an https:// URL or #slide number');
+      input.reportValidity();
+      return false;
+    }
+    updateCanvasElement(index, element => {
+      const query = new URLSearchParams(element.query || '');
+      query.delete('link');
+      query.delete('slide');
+      if (internal) query.set('slide', internal[1]);
+      else if (external) query.set('link', value);
+      element.query = query.toString();
+    });
+    return true;
+  }
+  function closeCanvasLinkDialog() {
+    if (!activeCanvasLinkDialog) return;
+    activeCanvasLinkDialog.remove();
+    activeCanvasLinkDialog = null;
+  }
+  function openCanvasLinkDialog(index) {
+    closeCanvasLinkDialog();
+    const element = canvasElementAt(index);
+    if (!element) return;
+    const query = new URLSearchParams(element.query || '');
+    const dialog = document.createElement('form');
+    dialog.className = 'keynope-link-dialog';
+    const heading = document.createElement('h3');
+    heading.textContent = 'Link text';
+    const modeLabel = document.createElement('label');
+    modeLabel.textContent = 'Link to';
+    const mode = document.createElement('select');
+    for (const [value, label] of [['url','URL'],['slide','Slide']]) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      option.selected = query.has('slide') ? value === 'slide' : value === 'url';
+      mode.appendChild(option);
+    }
+    modeLabel.appendChild(mode);
+    const urlLabel = document.createElement('label');
+    urlLabel.textContent = 'URL';
+    const urlInput = document.createElement('input');
+    urlInput.type = 'url';
+    urlInput.placeholder = 'https://example.com';
+    urlInput.value = query.get('link') || '';
+    urlLabel.appendChild(urlInput);
+    const slideLabel = document.createElement('label');
+    slideLabel.textContent = 'Slide';
+    const slideSelect = document.createElement('select');
+    (editorState.slides || []).forEach((_slide, slideIndex) => {
+      const option = document.createElement('option');
+      option.value = String(slideIndex + 1);
+      option.textContent = slideTitle(editorState.slides[slideIndex], slideIndex);
+      option.selected = query.get('slide') === option.value;
+      slideSelect.appendChild(option);
+    });
+    slideLabel.appendChild(slideSelect);
+    const refreshMode = focus => {
+      urlLabel.hidden = mode.value !== 'url';
+      slideLabel.hidden = mode.value !== 'slide';
+      if (focus) requestAnimationFrame(() => (mode.value === 'url' ? urlInput : slideSelect).focus());
+    };
+    mode.addEventListener('change', () => refreshMode(true));
+    refreshMode(false);
+    const actions = document.createElement('div');
+    actions.className = 'keynope-editor-actions';
+    const apply = canvasTool('Apply', '', () => {
+      const value = mode.value === 'slide' ? '#' + slideSelect.value : urlInput.value;
+      if (applyCanvasLink(index, urlInput, value)) closeCanvasLinkDialog();
+    });
+    apply.type = 'button';
+    const clear = canvasTool('Clear', '', () => { applyCanvasLink(index, urlInput, ''); closeCanvasLinkDialog(); });
+    const cancel = canvasTool('Cancel', '', closeCanvasLinkDialog);
+    actions.append(apply, clear, cancel);
+    dialog.append(heading, modeLabel, urlLabel, slideLabel, actions);
+    dialog.addEventListener('submit', event => {
+      event.preventDefault();
+      const value = mode.value === 'slide' ? '#' + slideSelect.value : urlInput.value;
+      if (applyCanvasLink(index, urlInput, value)) closeCanvasLinkDialog();
+    });
+    dialog.addEventListener('keydown', event => { event.stopPropagation(); if (event.key === 'Escape') closeCanvasLinkDialog(); });
+    document.body.appendChild(dialog);
+    const rect = dialog.getBoundingClientRect();
+    dialog.style.left = Math.max(8, Math.floor((innerWidth - rect.width) / 2)) + 'px';
+    dialog.style.top = Math.max(60, Math.floor((innerHeight - rect.height) / 3)) + 'px';
+    activeCanvasLinkDialog = dialog;
+    requestAnimationFrame(() => (mode.value === 'url' ? urlInput : slideSelect).focus());
+  }
+  function canvasLinkTool(index, query) {
+    const linked = query.has('slide') || query.has('link');
+    const button = canvasTool('🔗', linked ? 'active keynope-icon-button' : 'keynope-icon-button', () => openCanvasLinkDialog(index));
+    button.title = linked ? 'Edit link' : 'Add link';
+    button.setAttribute('aria-label', button.title);
+    return button;
+  }
+  function renderEditorTopbar() {
+    const slide = editorState && editorState.slides && editorState.slides[editorState.current];
+    const index = editorState ? editorState.selected : -1;
+    const element = slide && index >= 0 ? slide.elements[index] : null;
+    if (activeCanvasVisualMenu && (!element || activeCanvasVisualMenu.index !== index)) closeCanvasVisualMenu();
+    const contextual = !suppressSelectionTopbar && (!!activeInlineEditor || !!element);
+    mainTopbar.hidden = contextual;
+    selectionTopbar.hidden = !contextual;
+    selectionTopbar.replaceChildren();
+    if (!contextual) return;
+    const label = document.createElement('span');
+    label.className = 'keynope-topbar-label';
+    label.textContent = activeInlineEditor ? 'Editing text' : ((element.kind || 'element') + ' selected');
+    selectionTopbar.appendChild(label);
+    if (activeInlineEditor) {
+      selectionTopbar.appendChild(canvasTool('Commit', '', () => activeInlineEditor && activeInlineEditor.finish(true)));
+      selectionTopbar.appendChild(canvasTool('Cancel', '', () => activeInlineEditor && activeInlineEditor.finish(false)));
+      return;
+    }
+    const done = canvasTool('✓', '', () => editorAction({action: 'select-element', element: -1}).catch(() => {}));
+    done.title = 'Done';
+    done.setAttribute('aria-label', 'Done');
+    selectionTopbar.appendChild(done);
+    const query = new URLSearchParams(element.query || '');
+    const selectedText = ['heading','text','text-image','bullet','code'].includes(element.kind);
+    const rotatableText = ['heading','text','text-image','bullet'].includes(element.kind);
+    const positionable = selectedText || element.kind === 'shape' || element.kind === 'image';
+    if (selectedText) {
+      const edit = canvasTool('✎', '', () => beginInlineEdit(index));
+      edit.title = 'Edit text';
+      edit.setAttribute('aria-label', 'Edit text');
+      selectionTopbar.appendChild(edit);
+      if (element.kind !== 'code') appendCanvasTextKindTools(selectionTopbar, index, element);
+      selectionTopbar.appendChild(canvasTool('−', '', () => changeCanvasTextSize(index, -1)));
+      selectionTopbar.appendChild(canvasTool('+', '', () => changeCanvasTextSize(index, 1)));
+      if (element.kind !== 'code') {
+        const bold = canvasTool('B', (element.text || '').startsWith('**') && (element.text || '').endsWith('**') ? 'active' : '', () => toggleCanvasMarkdownStyle(index, '**'));
+        bold.title = 'Bold';
+        bold.setAttribute('aria-label', 'Bold');
+        const highlight = canvasTool('H', (element.text || '').startsWith('*') && (element.text || '').endsWith('*') ? 'active' : '', () => toggleCanvasMarkdownStyle(index, '*'));
+        highlight.title = 'Highlight';
+        highlight.setAttribute('aria-label', 'Highlight');
+        selectionTopbar.append(bold, highlight);
+      }
+    }
+    if (positionable) {
+      for (const [alignment, symbol, title] of [['left','≡←','Align left'],['center','≡','Align centre'],['right','→≡','Align right']]) {
+        const button = canvasTool(symbol, query.get('align') === alignment ? 'active' : '', () => setCanvasAlignment(index, alignment));
+        button.title = title;
+        button.setAttribute('aria-label', title);
+        selectionTopbar.appendChild(button);
+      }
+    }
+    if (selectedText) {
+      if (rotatableText) {
+        const rotate = canvasTool('⟳', 'keynope-icon-button keynope-rotate-button', () => rotateCanvasText(index));
+        rotate.innerHTML = '<span class="keynope-rotate-icon" aria-hidden="true">⟳</span><span class="keynope-rotate-label">ROTATE</span>';
+        rotate.title = 'Rotate';
+        rotate.setAttribute('aria-label', 'Rotate');
+        selectionTopbar.appendChild(rotate);
+      }
+      if (element.kind !== 'code') selectionTopbar.appendChild(canvasStyleSelect(index, element));
+      selectionTopbar.appendChild(canvasColourTool(index, element, ''));
+      selectionTopbar.appendChild(canvasLinkTool(index, query));
+    }
+    if (element.kind === 'shape') selectionTopbar.appendChild(canvasColourTool(index, element, ''));
+    if (selectedText || element.kind === 'shape' || element.kind === 'image') selectionTopbar.appendChild(canvasTransparencyTool(index, query));
+    if (element.kind === 'shape') appendCanvasShapeKindTools(selectionTopbar, index, query);
+    if (element.kind === 'image') selectionTopbar.appendChild(canvasVisualMenu(index, element));
+    selectionTopbar.appendChild(canvasOutlineTool(index, element, query));
+    selectionTopbar.appendChild(canvasDuplicateTool(index));
+    selectionTopbar.appendChild(canvasTool('Back', '', () => editorAction({action: 'move-element', element: index, kind: 'backward'}).catch(() => {})));
+    selectionTopbar.appendChild(canvasTool('Front', '', () => editorAction({action: 'move-element', element: index, kind: 'forward'}).catch(() => {})));
+    selectionTopbar.appendChild(canvasDeleteTool(index));
+  }
+
+  renderEditorCanvasOverlay = () => {
+    if (!editorState || !deck.pages || !deck.pages.length) return;
+    const page = deck.pages[pageIndex];
+    if (!page || page.slide !== editorState.current) return;
+    canvasOverlay.style.width = presenterCanvas.style.width;
+    canvasOverlay.style.height = presenterCanvas.style.height;
+    canvasOverlay.replaceChildren();
+    const groups = new Map();
+    const resolvedToRaw = editorElementIndexMaps().resolvedToRaw;
+    for (const line of page.lines || []) {
+      if (!Number.isInteger(line.element) || line.element < 0) continue;
+      const rawElement = resolvedToRaw.get(line.element);
+      if (rawElement == null) continue;
+      let group = groups.get(rawElement);
+      if (!group) group = {minX: deck.cols, minY: deck.rows, maxX: 0, maxY: 0, color: ''};
+      for (const part of line.parts || []) {
+        const width = [...(part.text || '')].length;
+        group.minX = Math.min(group.minX, part.col || 0);
+        group.maxX = Math.max(group.maxX, (part.col || 0) + width);
+        group.minY = Math.min(group.minY, line.row || 0);
+        group.maxY = Math.max(group.maxY, (line.row || 0) + 1);
+        if (!group.color && part.color) group.color = part.color;
+      }
+      groups.set(rawElement, group);
+    }
+    const authoredElements = editorState.slides[editorState.current].elements || [];
+    authoredElements.forEach((element, index) => {
+      const query = new URLSearchParams(element.query || '');
+      if (element.kind === 'shape' && query.get('transparent') === '1') {
+        const bounds = canvasShapeSelectionBounds(element, page.page);
+        if (bounds) groups.set(index, bounds);
+      }
+    });
+    for (const [index, bounds] of groups) {
+      if (index >= (editorState.slides[editorState.current].elements || []).length) continue;
+      const hit = document.createElement('div');
+      hit.className = 'keynope-canvas-element' + ((index === editorState.selected || (editorState.selection || []).includes(index)) ? ' active' : '');
+      hit.dataset.element = String(index);
+      hit.dataset.color = bounds.color || '';
+      hit.style.left = (bounds.minX / deck.cols * 100) + '%';
+      hit.style.top = (bounds.minY / deck.rows * 100) + '%';
+      hit.style.width = (Math.max(1, bounds.maxX - bounds.minX) / deck.cols * 100) + '%';
+      hit.style.height = (Math.max(1, bounds.maxY - bounds.minY) / deck.rows * 100) + '%';
+      hit.title = 'Element ' + (index + 1);
+      hit.addEventListener('dblclick', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        beginInlineEdit(index, hit);
+      });
+      hit.addEventListener('contextmenu', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const open = () => showElementContextMenu(index, event.clientX, event.clientY);
+        if (editorState.selected === index) open();
+        else editorAction({action: 'select-element', element: index}).then(open).catch(() => {});
+      });
+      hit.addEventListener('pointerdown', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const originX = event.clientX;
+        const originY = event.clientY;
+        const start = {...bounds};
+        const resizeHandle = event.target.closest && event.target.closest('.keynope-resize-handle');
+        const resizeCorner = resizeHandle ? resizeHandle.dataset.corner : '';
+        const resizing = resizeCorner !== '';
+        const sourceElement = {...editorState.slides[editorState.current].elements[index]};
+        const fittingText = resizing && ['heading','text','text-image','bullet','code'].includes(sourceElement.kind);
+        const resizingVisual = resizing && (sourceElement.kind === 'shape' || sourceElement.kind === 'image');
+        let pendingFit = null;
+        let fitting = false;
+        let lastFit = null;
+        let fitWaiters = [];
+        let pendingVisualPreview = null;
+        let visualPreviewFrame = 0;
+        hit.setPointerCapture(event.pointerId);
+        const resizedBounds = (dx, dy) => {
+          let minX = start.minX, minY = start.minY, maxX = start.maxX, maxY = start.maxY;
+          if (resizeCorner.includes('w')) minX = Math.min(maxX - 1, minX + dx);
+          if (resizeCorner.includes('e')) maxX = Math.max(minX + 1, maxX + dx);
+          if (resizeCorner.includes('n')) minY = Math.min(maxY - 1, minY + dy);
+          if (resizeCorner.includes('s')) maxY = Math.max(minY + 1, maxY + dy);
+          minX = Math.max(0, minX); minY = Math.max(0, minY);
+          maxX = Math.min(deck.cols, maxX); maxY = Math.min(deck.rows, maxY);
+          return {minX, minY, maxX, maxY};
+        };
+        const fitElementForBounds = next => {
+          const element = {...sourceElement};
+          const query = new URLSearchParams(element.query || '');
+          for (const key of ['right','right_pct','bottom','row_delta','align','left','width','height']) query.delete(key);
+          query.set('left_pct', Math.max(0, Math.min(1, next.minX / deck.cols)).toFixed(6));
+          query.set('top', String(next.minY));
+          element.query = query.toString();
+          return element;
+        };
+        const resizedElementForBounds = next => {
+          const element = {...sourceElement};
+          const query = new URLSearchParams(element.query || '');
+          for (const key of ['right','right_pct','bottom','row_delta','align','left']) query.delete(key);
+          query.set('left_pct', Math.max(0, Math.min(1, next.minX / deck.cols)).toFixed(6));
+          query.set('top', String(next.minY));
+          query.set('width', String(Math.max(1, next.maxX - next.minX)));
+          query.set('height', String(Math.max(1, next.maxY - next.minY)));
+          element.query = query.toString();
+          return element;
+        };
+        const queueVisualPreview = next => {
+          pendingVisualPreview = next;
+          if (visualPreviewFrame) return;
+          visualPreviewFrame = requestAnimationFrame(() => {
+            visualPreviewFrame = 0;
+            const bounds = pendingVisualPreview;
+            pendingVisualPreview = null;
+            if (bounds) previewCanvasMutation(index, resizedElementForBounds(bounds), false);
+          });
+        };
+        const pumpTextFit = async () => {
+          if (fitting) return;
+          fitting = true;
+          while (pendingFit) {
+            const task = pendingFit;
+            pendingFit = null;
+            try {
+              const result = await fitCanvasTextElement(index, fitElementForBounds(task.bounds), task.bounds.maxX - task.bounds.minX, task.bounds.maxY - task.bounds.minY);
+              lastFit = {key: task.key, element: result.element};
+              replaceEditorPreviewPages(editorState.current, result.pages);
+              drawFrame();
+            } catch (_err) {}
+          }
+          fitting = false;
+          const waiters = fitWaiters;
+          fitWaiters = [];
+          waiters.forEach(resolve => resolve());
+        };
+        const queueTextFit = next => {
+          const key = [next.minX,next.minY,next.maxX,next.maxY].join(':');
+          if (pendingFit && pendingFit.key === key || lastFit && lastFit.key === key && !fitting) return key;
+          pendingFit = {key, bounds: next};
+          pumpTextFit();
+          return key;
+        };
+        const finishTextFit = async next => {
+          const key = queueTextFit(next);
+          while (fitting || pendingFit) await new Promise(resolve => fitWaiters.push(resolve));
+          return lastFit && lastFit.key === key ? lastFit.element : null;
+        };
+        const move = moveEvent => {
+          const rect = canvasOverlay.getBoundingClientRect();
+          const dx = Math.round((moveEvent.clientX - originX) * deck.cols / Math.max(1, rect.width));
+          const dy = Math.round((moveEvent.clientY - originY) * deck.rows / Math.max(1, rect.height));
+          if (resizing) {
+            const next = resizedBounds(dx, dy);
+            hit.style.left = (next.minX / deck.cols * 100) + '%';
+            hit.style.top = (next.minY / deck.rows * 100) + '%';
+            hit.style.width = ((next.maxX - next.minX) / deck.cols * 100) + '%';
+            hit.style.height = ((next.maxY - next.minY) / deck.rows * 100) + '%';
+            if (fittingText) queueTextFit(next);
+            else if (resizingVisual) queueVisualPreview(next);
+          } else {
+            hit.style.left = ((start.minX + dx) / deck.cols * 100) + '%';
+            hit.style.top = ((start.minY + dy) / deck.rows * 100) + '%';
+          }
+        };
+        const up = async upEvent => {
+          hit.removeEventListener('pointermove', move);
+          hit.removeEventListener('pointerup', up);
+          if (visualPreviewFrame) cancelAnimationFrame(visualPreviewFrame);
+          visualPreviewFrame = 0;
+          pendingVisualPreview = null;
+          const rect = canvasOverlay.getBoundingClientRect();
+          const dx = Math.round((upEvent.clientX - originX) * deck.cols / Math.max(1, rect.width));
+          const dy = Math.round((upEvent.clientY - originY) * deck.rows / Math.max(1, rect.height));
+          if (!dx && !dy) {
+            if (resizing) return;
+            if (pendingCanvasSelection) clearTimeout(pendingCanvasSelection);
+            pendingCanvasSelection = setTimeout(() => {
+              pendingCanvasSelection = null;
+              editorAction({action: 'select-element', element: index, name: event.shiftKey ? 'toggle' : ''}).catch(() => {});
+            }, 240);
+            return;
+          }
+          if (fittingText) {
+            const fitted = await finishTextFit(resizedBounds(dx, dy));
+            if (fitted) editorAction({action: 'update-element', element: index, elementData: fitted}).catch(() => {});
+            return;
+          }
+          const element = {...editorState.slides[editorState.current].elements[index]};
+          const query = new URLSearchParams(element.query || '');
+          if (resizing) {
+            const next = resizedBounds(dx, dy);
+            query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('align'); query.delete('left');
+            query.set('left_pct', Math.max(0, Math.min(1, next.minX / deck.cols)).toFixed(6));
+            query.set('top', String(next.minY));
+            query.set('width', String(Math.max(1, next.maxX - next.minX)));
+            query.set('height', String(Math.max(1, next.maxY - next.minY)));
+          } else {
+            query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('align'); query.delete('left');
+            query.set('left_pct', Math.max(0, Math.min(1, (start.minX + dx) / deck.cols)).toFixed(6));
+            query.set('top', String(Math.max(0, start.minY + dy)));
+          }
+          element.query = query.toString();
+          previewCanvasMutation(index, element);
+          editorAction({action: 'update-element', element: index, elementData: element}).catch(() => {});
+        };
+        hit.addEventListener('pointermove', move);
+        hit.addEventListener('pointerup', up);
+      });
+      if (index === editorState.selected) {
+        for (const corner of ['nw','ne','sw','se']) {
+          const handle = document.createElement('span');
+          handle.className = 'keynope-resize-handle ' + corner;
+          handle.dataset.corner = corner;
+          handle.setAttribute('aria-label', 'Resize from ' + corner);
+          hit.appendChild(handle);
+        }
+      }
+      canvasOverlay.appendChild(hit);
+    }
+  };
+
+  function slideTitle(slide, index) {
+    const element = (slide.elements || []).find(item => item.text && (item.kind === 'heading' || item.kind === 'text'));
+    return (index + 1) + '. ' + (element ? element.text.split('\n')[0] : 'Untitled slide');
+  }
+  function closeSlideContextMenu() {
+    slideContextMenu.classList.remove('open');
+    slideContextMenu.replaceChildren();
+  }
+  function showSlideContextMenu(index, clientX, clientY) {
+    if (!editorState || index < 0 || index >= editorState.slides.length) return;
+    const slide = editorState.slides[index];
+    slideContextMenu.replaceChildren();
+    const heading = document.createElement('h3');
+    heading.textContent = 'Slide ' + (index + 1) + ' settings';
+    slideContextMenu.appendChild(heading);
+    const updateSlide = () => editorAction({action: 'update-slide', slideData: slide}).catch(() => {});
+    if (editorState.masterMode) {
+      const currentName = index === 0 ? (editorState.masters.base.name || 'Base Master') : ((editorState.masters.layouts[index - 1] && editorState.masters.layouts[index - 1].name) || ('Master ' + index));
+      heading.textContent = currentName + ' settings';
+      editorField(slideContextMenu, 'Name', currentName, false, value => {
+        editorAction({action: 'rename-master', name: value}).catch(() => {});
+      });
+    }
+    if (!editorState.masterMode && editorState.masters && Array.isArray(editorState.masters.layouts)) {
+      const layoutField = document.createElement('label');
+      layoutField.className = 'keynope-editor-field';
+      const caption = document.createElement('span');
+      caption.textContent = 'Layout';
+      const select = document.createElement('select');
+      for (const layout of editorState.masters.layouts) {
+        const option = document.createElement('option');
+        option.value = layout.id;
+        option.textContent = layout.name || layout.id;
+        option.selected = layout.id === (slide.layoutId || '');
+        select.appendChild(option);
+      }
+      select.addEventListener('change', () => {
+        closeSlideContextMenu();
+        editorAction({action: 'set-layout', kind: select.value}).catch(() => {});
+      });
+      layoutField.append(caption, select);
+      slideContextMenu.appendChild(layoutField);
+    }
+    editorSelect(slideContextMenu, 'Effect', slide.effect || '', ['none','matrix','stars','plasma','glitch','digital-snow','radar','neural','circuit','data-storm','flame','warp','scanline','fireworks','explosion'], value => { slide.effect = value; slide.effectSet = true; updateSlide(); });
+    editorSelect(slideContextMenu, 'Background', slide.background || '', ['none','soft-plasma','aurora','topography','waves','mesh','constellation','ribbons','diagonal-flow','blueprint'], value => { slide.background = value; slide.backgroundSet = true; updateSlide(); });
+    editorColor(slideContextMenu, 'Foreground', slide.fg || '', '#f3efe0', value => { slide.fg = value; slide.fgSet = true; updateSlide(); });
+    editorColor(slideContextMenu, 'Background colour', slide.bg || '', '#000000', value => { slide.bg = value; slide.bgSet = true; updateSlide(); });
+    editorColor(slideContextMenu, 'Header colour', slide.headerFg || '', '#ffffff', value => { slide.headerFg = value; slide.headerFgSet = true; updateSlide(); });
+    const reset = document.createElement('button');
+    reset.type = 'button';
+    reset.textContent = 'Use master appearance';
+    reset.addEventListener('click', () => {
+      slide.effect = ''; slide.effectSet = false;
+      slide.background = ''; slide.backgroundSet = false;
+      slide.fg = ''; slide.fgSet = false;
+      slide.bg = ''; slide.bgSet = false;
+      slide.headerFg = ''; slide.headerFgSet = false;
+      closeSlideContextMenu();
+      updateSlide();
+    });
+    slideContextMenu.appendChild(reset);
+    slideContextMenu.classList.add('open');
+    const rect = slideContextMenu.getBoundingClientRect();
+    slideContextMenu.style.left = Math.max(8, Math.min(innerWidth - rect.width - 8, clientX)) + 'px';
+    slideContextMenu.style.top = Math.max(8, Math.min(innerHeight - rect.height - 8, clientY)) + 'px';
+  }
+  function showElementContextMenu(index, clientX, clientY) {
+    const slide = editorState && editorState.slides && editorState.slides[editorState.current];
+    const element = slide && slide.elements[index];
+    if (!element) return;
+    slideContextMenu.replaceChildren();
+    const heading = document.createElement('h3');
+    heading.textContent = (element.kind || 'Element') + ' actions';
+    slideContextMenu.appendChild(heading);
+    const actions = document.createElement('div');
+    actions.className = 'keynope-editor-actions';
+    const query = new URLSearchParams(element.query || '');
+    const selectedText = ['heading','text','text-image','bullet','code'].includes(element.kind);
+    const rotatableText = ['heading','text','text-image','bullet'].includes(element.kind);
+    const positionable = selectedText || element.kind === 'shape' || element.kind === 'image';
+    if (selectedText) {
+      actions.appendChild(canvasTool('✎', '', () => beginInlineEdit(index)));
+      if (element.kind !== 'code') appendCanvasTextKindTools(actions, index, element);
+      actions.appendChild(canvasTool('−', '', () => changeCanvasTextSize(index, -1)));
+      actions.appendChild(canvasTool('+', '', () => changeCanvasTextSize(index, 1)));
+      if (element.kind !== 'code') {
+        actions.appendChild(canvasTool('Bold', '', () => toggleCanvasMarkdownStyle(index, '**')));
+        actions.appendChild(canvasTool('Highlight', '', () => toggleCanvasMarkdownStyle(index, '*')));
+      }
+    }
+    if (positionable) {
+      actions.appendChild(canvasTool('Left', '', () => setCanvasAlignment(index, 'left')));
+      actions.appendChild(canvasTool('Centre', '', () => setCanvasAlignment(index, 'center')));
+      actions.appendChild(canvasTool('Right', '', () => setCanvasAlignment(index, 'right')));
+    }
+    if (rotatableText) actions.appendChild(canvasTool('⟳', '', () => rotateCanvasText(index)));
+    if (selectedText && element.kind !== 'code') actions.appendChild(canvasStyleSelect(index, element));
+    if (selectedText || element.kind === 'shape') actions.appendChild(canvasColourTool(index, element, ''));
+    if (selectedText) actions.appendChild(canvasLinkTool(index, query));
+    if (selectedText || element.kind === 'shape' || element.kind === 'image') actions.appendChild(canvasTransparencyTool(index, query));
+    if (element.kind === 'shape') appendCanvasShapeKindTools(actions, index, query);
+    actions.appendChild(canvasOutlineTool(index, element, query));
+    actions.appendChild(canvasDuplicateTool(index));
+    actions.appendChild(canvasTool('Back', '', () => editorAction({action: 'move-element', element: index, kind: 'backward'}).catch(() => {})));
+    actions.appendChild(canvasTool('Front', '', () => editorAction({action: 'move-element', element: index, kind: 'forward'}).catch(() => {})));
+    actions.appendChild(canvasDeleteTool(index));
+    slideContextMenu.appendChild(actions);
+    if (element.kind === 'image') {
+      const visualControls = document.createElement('div');
+      visualControls.className = 'keynope-context-visual';
+      const visualHeading = document.createElement('h4');
+      visualHeading.textContent = 'Adjust Image';
+      visualControls.appendChild(visualHeading);
+      appendCanvasVisualControls(visualControls, index, element);
+      slideContextMenu.appendChild(visualControls);
+    }
+    slideContextMenu.classList.add('open');
+    const rect = slideContextMenu.getBoundingClientRect();
+    slideContextMenu.style.left = Math.max(8, Math.min(innerWidth - rect.width - 8, clientX)) + 'px';
+    slideContextMenu.style.top = Math.max(8, Math.min(innerHeight - rect.height - 8, clientY)) + 'px';
+  }
+  document.addEventListener('pointerdown', event => {
+    if (!slideContextMenu.contains(event.target)) closeSlideContextMenu();
+  }, true);
+  stage.addEventListener('contextmenu', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (activeInlineEditor) activeInlineEditor.finish(true);
+    showSlideContextMenu(editorState ? editorState.current : -1, event.clientX, event.clientY);
+  });
+  function renderEditorPanels() {
+    if (!editorState || !editorState.slides || !editorState.slides.length) return;
+    slidesPanel.replaceChildren();
+    const slidesHeader = document.createElement('div');
+    slidesHeader.className = 'keynope-slides-header';
+    const slidesHeading = document.createElement('h3');
+    slidesHeading.textContent = editorState.masterMode ? 'Master Slides' : 'Slides';
+    slidesHeader.append(slidesHeading, masterModeButton);
+    slidesPanel.appendChild(slidesHeader);
+    addSlideButton.title = editorState.masterMode ? 'Add master' : 'Add slide';
+    addSlideButton.setAttribute('aria-label', addSlideButton.title);
+    cloneSlideButton.title = editorState.masterMode ? 'Clone master' : 'Clone slide';
+    cloneSlideButton.setAttribute('aria-label', cloneSlideButton.title);
+    deleteSlideButton.title = editorState.masterMode ? 'Delete master' : 'Delete slide';
+    deleteSlideButton.setAttribute('aria-label', deleteSlideButton.title);
+    deleteSlideButton.disabled = !!editorState.masterMode && editorState.current === 0;
+    masterModeButton.textContent = 'M';
+    masterModeButton.title = editorState.masterMode ? 'Exit master slides' : 'Master slides';
+    masterModeButton.setAttribute('aria-label', masterModeButton.title);
+    masterModeButton.classList.toggle('active', !!editorState.masterMode);
+    editorState.slides.forEach((slide, index) => {
+      const button = document.createElement('button');
+      button.className = 'keynope-slide-item' + (index === editorState.current ? ' active' : '');
+      button.textContent = editorState.masterMode
+        ? (index === 0 ? 'Base Master' : ((editorState.masters.layouts[index - 1] && editorState.masters.layouts[index - 1].name) || ('Master ' + index)))
+        : slideTitle(slide, index);
+      button.addEventListener('click', () => editorAction({action: 'select-slide', slide: index}).catch(() => {}));
+      button.addEventListener('contextmenu', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const open = () => showSlideContextMenu(index, event.clientX, event.clientY);
+        if (editorState.current === index) open();
+        else editorAction({action: 'select-slide', slide: index}).then(open).catch(() => {});
+      });
+      slidesPanel.appendChild(button);
+    });
+
+    inspector.replaceChildren();
+    const inspectorHeading = document.createElement('h2');
+    inspectorHeading.textContent = 'Inspector';
+    inspector.appendChild(inspectorHeading);
+    const slide = editorState.slides[editorState.current];
+    if (!slide) {
+      renderEditorTopbar();
+      return;
+    }
+    renderEditorTopbar();
+    renderSpeakerNotes(slide);
+    const slideSection = document.createElement('section');
+    slideSection.className = 'keynope-editor-section';
+    const slideHeading = document.createElement('h3');
+    slideHeading.textContent = 'Slide';
+    slideSection.appendChild(slideHeading);
+    const updateSlide = () => editorAction({action: 'update-slide', slideData: slide}).catch(() => {});
+    if (editorState.masters && Array.isArray(editorState.masters.layouts)) {
+      const layoutField = document.createElement('label');
+      layoutField.className = 'keynope-editor-field';
+      const layoutCaption = document.createElement('span');
+      layoutCaption.textContent = 'Layout';
+      const layoutSelect = document.createElement('select');
+      for (const layout of editorState.masters.layouts) {
+        const option = document.createElement('option');
+        option.value = layout.id;
+        option.textContent = layout.name;
+        option.selected = layout.id === (slide.layoutId || '');
+        layoutSelect.appendChild(option);
+      }
+      layoutSelect.addEventListener('change', () => editorAction({action: 'set-layout', kind: layoutSelect.value}).catch(() => {}));
+      layoutField.append(layoutCaption, layoutSelect);
+      slideSection.appendChild(layoutField);
+    }
+    editorSelect(slideSection, 'Effect', slide.effect || '', ['none','matrix','stars','plasma','glitch','digital-snow','radar','neural','circuit','data-storm','flame','warp','scanline','fireworks','explosion'], value => { slide.effect = value; slide.effectSet = true; updateSlide(); });
+    editorSelect(slideSection, 'Background', slide.background || '', ['none','soft-plasma','aurora','topography','waves','mesh','constellation','ribbons','diagonal-flow','blueprint'], value => { slide.background = value; slide.backgroundSet = true; updateSlide(); });
+    editorColor(slideSection, 'Foreground', slide.fg || '', '#f3efe0', value => { slide.fg = value; slide.fgSet = true; updateSlide(); });
+    editorColor(slideSection, 'Background colour', slide.bg || '', '#000000', value => { slide.bg = value; slide.bgSet = true; updateSlide(); });
+    editorColor(slideSection, 'Header colour', slide.headerFg || '', '#ffffff', value => { slide.headerFg = value; slide.headerFgSet = true; updateSlide(); });
+    const elementsSection = document.createElement('section');
+    elementsSection.className = 'keynope-editor-section';
+    const elementsHeading = document.createElement('h3');
+    elementsHeading.textContent = 'Elements';
+    elementsSection.appendChild(elementsHeading);
+    (slide.elements || []).forEach((element, index) => {
+      const button = document.createElement('button');
+      button.className = 'keynope-element-item' + ((index === editorState.selected || (editorState.selection || []).includes(index)) ? ' active' : '');
+      button.textContent = (index + 1) + '. ' + element.kind + (element.text ? ' — ' + element.text.split('\n')[0] : '');
+      button.addEventListener('click', event => editorAction({action: 'select-element', element: index, name: event.shiftKey ? 'toggle' : ''}).catch(() => {}));
+      elementsSection.appendChild(button);
+    });
+    if ((editorState.selection || []).length > 1) {
+      editorButton('Delete selected', {action: 'delete-selection'}, elementsSection);
+    }
+
+    const selected = editorState.selected;
+    if (selected >= 0 && selected < (slide.elements || []).length) {
+      const element = slide.elements[selected];
+      const elementSection = document.createElement('section');
+      elementSection.className = 'keynope-editor-section';
+      const heading = document.createElement('h3');
+      heading.textContent = 'Selected ' + element.kind;
+      elementSection.appendChild(heading);
+      const updateElement = () => editorAction({action: 'update-element', element: selected, elementData: element}).catch(() => {});
+      const help = document.createElement('p');
+      help.className = 'keynope-editor-help';
+      help.textContent = 'Drag on the canvas to move. Drag any blue corner to resize in that direction. Double-click or press Enter to edit text.';
+      elementSection.appendChild(help);
+      const actions = document.createElement('div');
+      actions.className = 'keynope-editor-actions';
+      if (['heading','text','bullet','code'].includes(element.kind)) {
+        actions.appendChild(canvasTool('Edit text', '', () => beginInlineEdit(selected)));
+      }
+      actions.appendChild(canvasTool('Duplicate', '', () => editorAction({action: 'duplicate-element', element: selected}).catch(() => {})));
+      const remove = canvasTool('Delete', 'danger', () => editorAction({action: 'delete-element', element: selected}).catch(() => {}));
+      actions.appendChild(remove);
+      elementSection.appendChild(actions);
+      if (['heading','text','bullet','code'].includes(element.kind)) {
+        editorField(elementSection, 'Text', element.text || '', true, value => { element.text = value; updateElement(); });
+      }
+      editorSelect(elementSection, 'Type', element.kind || 'text', ['heading','text','bullet','code','shape','image'], value => { element.kind = value; updateElement(); });
+      if (element.kind === 'heading') {
+        editorNumber(elementSection, 'Heading level', element.level || 1, {min: 1, max: 6, step: 1}, value => { element.level = Number(value || 1); updateElement(); });
+      }
+      if (element.kind === 'image') {
+        editorField(elementSection, 'Image path', element.path || '', false, value => { element.path = value; updateElement(); });
+      }
+      const query = new URLSearchParams(element.query || '');
+      const setQuery = (name, value) => {
+        if (value === '' || value == null) query.delete(name); else query.set(name, String(value));
+        element.query = query.toString();
+        updateElement();
+      };
+      const positionHeading = document.createElement('p');
+      positionHeading.className = 'keynope-editor-subheading';
+      positionHeading.textContent = 'Position & size';
+      elementSection.appendChild(positionHeading);
+      const leftValue = query.has('left_pct') ? (Number(query.get('left_pct')) * 100).toFixed(1) : '';
+      editorNumber(elementSection, 'Left (%)', leftValue, {min: 0, max: 100, step: .5}, value => setQuery('left_pct', value === '' ? '' : Math.max(0, Math.min(100, Number(value))) / 100));
+      editorNumber(elementSection, 'Top (rows)', query.get('top') || '', {min: 0, step: 1}, value => setQuery('top', value));
+      editorNumber(elementSection, 'Width (columns)', query.get('width') || '', {min: 1, step: 1}, value => setQuery('width', value));
+      editorNumber(elementSection, 'Height (rows)', query.get('height') || '', {min: 1, step: 1}, value => setQuery('height', value));
+      editorNumber(elementSection, 'Scale', query.get('scale') || '1', {min: .1, max: 10, step: .1}, value => setQuery('scale', value));
+      if (element.kind === 'shape') {
+        editorSelect(elementSection, 'Shape', query.get('shape') || 'rectangle', ['rectangle','square','circle','triangle','diamond'], value => setQuery('shape', value));
+      }
+      const appearanceHeading = document.createElement('p');
+      appearanceHeading.className = 'keynope-editor-subheading';
+      appearanceHeading.textContent = 'Appearance';
+      elementSection.appendChild(appearanceHeading);
+      editorColor(elementSection, 'Colour', query.get('fg') || '', '#f3efe0', value => setQuery('fg', value));
+      const advanced = document.createElement('details');
+      const advancedSummary = document.createElement('summary');
+      advancedSummary.textContent = 'Advanced properties';
+      advanced.appendChild(advancedSummary);
+      editorField(advanced, 'Query', element.query || '', true, value => { element.query = value; updateElement(); });
+      elementSection.appendChild(advanced);
+      const layersHeading = document.createElement('p');
+      layersHeading.className = 'keynope-editor-subheading';
+      layersHeading.textContent = 'Layer';
+      elementSection.appendChild(layersHeading);
+      const layers = document.createElement('div');
+      layers.className = 'keynope-editor-actions';
+      for (const [label, direction] of [['To back','back'],['Backward','backward'],['Forward','forward'],['To front','front']]) {
+        editorButton(label, {action: 'move-element', element: selected, kind: direction}, layers);
+      }
+      elementSection.appendChild(layers);
+      inspector.appendChild(elementSection);
+    }
+    inspector.appendChild(elementsSection);
+    inspector.appendChild(slideSection);
+    if (editorState.masters) {
+      const mastersSection = document.createElement('section');
+      mastersSection.className = 'keynope-editor-section';
+      const heading = document.createElement('h3');
+      heading.textContent = 'Masters & Layouts';
+      mastersSection.appendChild(heading);
+      editorButton('+ Layout', {action: 'add-layout', name: 'New Layout'}, mastersSection);
+      const layouts = [editorState.masters.base].concat(editorState.masters.layouts || []);
+      for (const layout of layouts) {
+        if (!layout) continue;
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = layout.name || layout.id;
+        details.appendChild(summary);
+        let name = layout.name || '';
+        const masterSlide = layout.slide || {elements: []};
+        if (!Array.isArray(masterSlide.elements)) masterSlide.elements = [];
+        editorField(details, 'Name', name, false, value => { name = value; });
+        editorSelect(details, 'Effect', masterSlide.effect || '', ['none','matrix','stars','plasma','glitch','digital-snow','radar','neural','circuit','data-storm','flame','warp','scanline','fireworks','explosion'], value => { masterSlide.effect = value; masterSlide.effectSet = true; });
+        editorSelect(details, 'Background', masterSlide.background || '', ['none','soft-plasma','aurora','topography','waves','mesh','constellation','ribbons','diagonal-flow','blueprint'], value => { masterSlide.background = value; masterSlide.backgroundSet = true; });
+        editorColor(details, 'Foreground', masterSlide.fg || '', '#f3efe0', value => { masterSlide.fg = value; masterSlide.fgSet = true; });
+        editorColor(details, 'Background colour', masterSlide.bg || '', '#000000', value => { masterSlide.bg = value; masterSlide.bgSet = true; });
+        editorColor(details, 'Header colour', masterSlide.headerFg || '', '#ffffff', value => { masterSlide.headerFg = value; masterSlide.headerFgSet = true; });
+        const masterElementsHeading = document.createElement('h3');
+        masterElementsHeading.textContent = 'Elements';
+        details.appendChild(masterElementsHeading);
+        masterSlide.elements.forEach((element, elementIndex) => {
+          const elementDetails = document.createElement('details');
+          const elementSummary = document.createElement('summary');
+          elementSummary.textContent = (elementIndex + 1) + '. ' + (element.kind || 'element') + (element.text ? ' — ' + element.text.split('\n')[0] : '');
+          elementDetails.appendChild(elementSummary);
+          editorField(elementDetails, 'Text', element.text || '', true, value => { element.text = value; });
+          editorField(elementDetails, 'Kind', element.kind || '', false, value => { element.kind = value; });
+          editorField(elementDetails, 'Level', element.level || 0, false, value => { element.level = Number(value || 0); });
+          editorField(elementDetails, 'Image path', element.path || '', false, value => { element.path = value; });
+          editorField(elementDetails, 'Properties', element.query || '', true, value => { element.query = value; });
+          const remove = document.createElement('button');
+          remove.textContent = 'Remove element';
+          remove.addEventListener('click', () => { masterSlide.elements.splice(elementIndex, 1); renderEditorPanels(); });
+          elementDetails.appendChild(remove);
+          details.appendChild(elementDetails);
+        });
+        const addMasterElement = document.createElement('button');
+        addMasterElement.textContent = '+ Element';
+        addMasterElement.addEventListener('click', () => {
+          masterSlide.elements.push({kind: 'text', text: 'Text', id: '', query: ''});
+          renderEditorPanels();
+        });
+        details.appendChild(addMasterElement);
+        const save = document.createElement('button');
+        save.textContent = 'Save layout';
+        save.addEventListener('click', () => {
+          editorAction({action: 'update-layout', kind: layout.id, name, slideData: masterSlide}).catch(() => {});
+        });
+        details.appendChild(save);
+        if (layout.id !== 'base') editorButton('Delete', {action: 'delete-layout', kind: layout.id}, details);
+        mastersSection.appendChild(details);
+      }
+      inspector.appendChild(mastersSection);
+    }
+    if (editorStatus) {
+      if (selected >= 0 && selected < (slide.elements || []).length) {
+        const selectedElement = slide.elements[selected];
+        editorStatus.textContent = selectedElement.kind + ' selected · Enter commit · Esc deselect · arrows move · ⌘D duplicate · Delete remove';
+      } else {
+        editorStatus.textContent = 'Select an element · double-click text to edit · drag to move';
+      }
+    }
+    requestAnimationFrame(renderEditorCanvasOverlay);
+  }
+  async function syncEditorState() {
+    try {
+      const response = await fetch('/api/editor/state', {cache: 'no-store'});
+      if (!response.ok) return;
+      const next = await response.json();
+      if (next.version === editorStateVersion) return;
+      editorState = next;
+      keynopeEditorMasterMode = !!editorState.masterMode;
+      editorStateVersion = next.version;
+      renderEditorPanels();
+      await syncEditorWorkspace();
+    } catch (_err) {}
+  }
+  async function syncEditorWorkspace() {
+    const sequence = ++editorWorkspaceSequence;
+    if (!editorState || !editorState.masterMode) {
+      if (editorNormalPages) {
+        deck.pages = editorNormalPages;
+        editorNormalPages = null;
+        const next = deck.pages.findIndex(page => page.slide === editorState.current && page.page === 0);
+        pageIndex = next >= 0 ? next : 0;
+        render();
+        requestAnimationFrame(renderEditorCanvasOverlay);
+      }
+      return;
+    }
+    if (!editorNormalPages) editorNormalPages = (deck.pages || []).slice();
+    try {
+      const response = await fetch('/api/editor/workspace?cols=' + encodeURIComponent(deck.cols) + '&rows=' + encodeURIComponent(deck.rows), {cache: 'no-store'});
+      if (!response.ok) return;
+      const pages = await response.json();
+      if (sequence !== editorWorkspaceSequence || !editorState.masterMode || !Array.isArray(pages) || !pages.length) return;
+      deck.pages = pages;
+      pageIndex = Math.max(0, deck.pages.findIndex(page => page.slide === editorState.current && page.page === 0));
+      render();
+      requestAnimationFrame(renderEditorCanvasOverlay);
+    } catch (_err) {}
+  }
+  const toolbar = document.createElement('div');
+  toolbar.className = 'keynope-app-toolbar';
+  const timerInputBlocker = document.createElement('div');
+  timerInputBlocker.className = 'keynope-input-blocker';
+  timerInputBlocker.hidden = true;
+  timerInputBlocker.addEventListener('pointerdown', event => { event.preventDefault(); event.stopPropagation(); });
+  timerInputBlocker.addEventListener('contextmenu', event => { event.preventDefault(); event.stopPropagation(); });
+  document.body.appendChild(timerInputBlocker);
+  notesToggleButton = document.createElement('button');
+  notesToggleButton.type = 'button';
+  notesToggleButton.textContent = 'Notes';
+  notesToggleButton.addEventListener('click', () => setSpeakerNotesVisible(!editorSpeakerNotesVisible, !editorSpeakerNotesVisible));
+  toolbar.appendChild(notesToggleButton);
+  setSpeakerNotesVisible(false, false);
+  const timerButton = document.createElement('button');
+  timerButton.type = 'button';
+  timerButton.textContent = 'Timer';
+  function openEditorTimer() {
+    presenterTimerMode = 'config';
+    presenterTimerInput = '';
+    presenterTimerEndMS = 0;
+    refreshEditorPresenterControls();
+    drawFrame();
+  }
+  function startEditorTimer() {
+    const digits = String(presenterTimerInput || '').replace(/\D/g, '').slice(-4).padStart(4, '0');
+    const seconds = Number(digits.slice(0, 2)) * 60 + Number(digits.slice(2));
+    if (seconds <= 0) return;
+    editorAction({action: 'start-timer', value: seconds}).catch(() => {});
+  }
+  function cancelEditorTimerInput() {
+    presenterTimerMode = '';
+    presenterTimerInput = '';
+    presenterTimerEndMS = 0;
+    refreshEditorPresenterControls();
+    drawFrame();
+  }
+  timerButton.addEventListener('click', () => {
+    if (presenterTimerMode === 'running') editorAction({action: 'stop-timer'}).catch(() => {});
+    else if (presenterTimerMode === 'config') cancelEditorTimerInput();
+    else openEditorTimer();
+  });
+  refreshEditorPresenterControls = () => {
+    const running = presenterTimerMode === 'running';
+    const active = presenterTimerMode === 'config' || running;
+    timerButton.textContent = active ? 'Stop Timer' : 'Timer';
+    timerButton.classList.toggle('active', active);
+    timerButton.setAttribute('aria-pressed', active ? 'true' : 'false');
+    timerInputBlocker.hidden = !active;
+    canvasOverlay.hidden = active;
+    document.documentElement.setAttribute('data-keynope-timer-active', active ? 'true' : 'false');
+    for (const button of toolbar.querySelectorAll('button')) button.disabled = active && button !== timerButton;
+    for (const button of slidesPanel.querySelectorAll('button')) button.disabled = active;
+    speakerNotesInput.disabled = active;
+  };
+  toolbar.append(timerButton);
+  editorStatus = document.createElement('span');
+  editorStatus.className = 'keynope-editor-status';
+  editorStatus.textContent = 'Select an element · double-click text to edit · drag to move';
+  toolbar.appendChild(editorStatus);
+  const controls = [
+    ['← Previous', {action: 'previous-slide'}],
+    ['Next →', {action: 'next-slide'}]
+  ];
+  for (const [label, action] of controls) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      editorAction(action).catch(() => {});
+    });
+    toolbar.appendChild(button);
+  }
+  const presentButton = document.createElement('button');
+  presentButton.textContent = 'Present';
+  presentButton.addEventListener('click', () => {
+    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+    if (handler) handler.postMessage({action: 'show-main'});
+  });
+  toolbar.appendChild(presentButton);
+  const externalButton = document.createElement('button');
+  externalButton.textContent = 'Present External';
+  externalButton.addEventListener('click', () => {
+    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+    if (handler) handler.postMessage({action: 'show-external'});
+  });
+  toolbar.appendChild(externalButton);
+  document.body.appendChild(toolbar);
+  function nudgeSelected(dx, dy) {
+    if (!editorState || editorState.selected < 0) return false;
+    const index = editorState.selected;
+    const slide = editorState.slides[editorState.current];
+    const element = slide && slide.elements[index];
+    const hit = canvasOverlay.querySelector('[data-element="' + index + '"]');
+    if (!element || !hit) return false;
+    const updated = {...element};
+    const query = new URLSearchParams(updated.query || '');
+    const renderedLeft = parseFloat(hit.style.left || '0') / 100;
+    const renderedTop = Math.round(parseFloat(hit.style.top || '0') * deck.rows / 100);
+    query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('align'); query.delete('left');
+    query.set('left_pct', Math.max(0, Math.min(1, Number(query.get('left_pct') || renderedLeft) + dx / deck.cols)).toFixed(6));
+    query.set('top', String(Math.max(0, Number(query.get('top') || renderedTop) + dy)));
+    updated.query = query.toString();
+    previewCanvasMutation(index, updated);
+    editorAction({action: 'update-element', element: index, elementData: updated}).catch(() => {});
+    return true;
+  }
+  function cycleCanvasSelection(reverse) {
+    if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return false;
+    const selectableKinds = new Set(['heading','text','text-image','bullet','code','shape','image','page-number']);
+    const indices = (editorState.slides[editorState.current].elements || [])
+      .map((element, index) => selectableKinds.has(element.kind) ? index : -1)
+      .filter(index => index >= 0);
+    if (!indices.length) return false;
+    const position = indices.indexOf(editorState.selected);
+    const next = position < 0
+      ? (reverse ? indices[indices.length - 1] : indices[0])
+      : indices[(position + (reverse ? -1 : 1) + indices.length) % indices.length];
+    editorAction({action: 'select-element', element: next}).catch(() => {});
+    return true;
+  }
+  addEventListener('keydown', e => {
+    if (presenterTimerMode === 'config' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (/^[0-9]$/.test(e.key) && presenterTimerInput.length < 4) {
+        presenterTimerInput += e.key;
+        drawFrame();
+      } else if (e.key === 'Backspace') {
+        presenterTimerInput = presenterTimerInput.slice(0, -1);
+        drawFrame();
+      } else if (e.key === 'Enter') {
+        startEditorTimer();
+      } else if (e.key === 'Escape' || e.key.toLowerCase() === 'q') {
+        cancelEditorTimerInput();
+      }
+      return;
+    }
+    if (presenterTimerMode === 'running' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (e.key === 'Escape' || e.key.toLowerCase() === 'q') editorAction({action: 'stop-timer'}).catch(() => {});
+      return;
+    }
+    if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+    if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'Tab') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      cycleCanvasSelection(e.shiftKey);
+      return;
+    }
+    if (e.key === 'Escape' && slideContextMenu.classList.contains('open')) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      closeSlideContextMenu();
+      return;
+    }
+    if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'm') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      editorAction({action: 'toggle-master-mode'}).catch(() => {});
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && (e.key.toLowerCase() === 'z' || e.key.toLowerCase() === 'y')) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const redo = e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey);
+      editorAction({action: redo ? 'redo' : 'undo'}).catch(() => {});
+      return;
+    }
+    if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === '2') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      setSpeakerNotesVisible(!editorSpeakerNotesVisible, false);
+      return;
+    }
+    if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === '0') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (presenterTimerMode === 'running') editorAction({action: 'stop-timer'}).catch(() => {});
+      else openEditorTimer();
+      return;
+    }
+    if (!e.metaKey && !e.ctrlKey && !e.altKey && editorState && editorState.selected >= 0) {
+      if (e.key === '<' || e.key === '=' || e.key === '>') {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setCanvasAlignment(editorState.selected, e.key === '<' ? 'left' : e.key === '>' ? 'right' : 'center');
+        return;
+      }
+      if (e.key.toLowerCase() === 'o') {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        cycleCanvasOutline(editorState.selected);
+        return;
+      }
+    }
+    if (e.key === 'Escape' && editorState && editorState.selected >= 0) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (pendingCanvasSelection) {
+        clearTimeout(pendingCanvasSelection);
+        pendingCanvasSelection = null;
+      }
+      editorAction({action: 'select-element', element: -1}).catch(() => {});
+      return;
+    }
+    if (e.key === 'Enter' && editorState && editorState.selected >= 0) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      editorAction({action: 'select-element', element: -1}).catch(() => {});
+      return;
+    }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && editorState && editorState.selected >= 0) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const action = (editorState.selection || []).length > 1 ? {action: 'delete-selection'} : {action: 'delete-element', element: editorState.selected};
+      editorAction(action).catch(() => {});
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'd' && editorState && editorState.selected >= 0) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      editorAction({action: 'duplicate-element', element: editorState.selected}).catch(() => {});
+      return;
+    }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (!nudgeSelected((e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 5 : 1), 0)) {
+        editorAction({action: e.key === 'ArrowLeft' ? 'previous-slide' : 'next-slide'}).catch(() => {});
+      }
+      return;
+    }
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      if (!editorState || editorState.selected < 0) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      nudgeSelected(0, (e.key === 'ArrowUp' ? -1 : 1) * (e.shiftKey ? 5 : 1));
+      return;
+    }
+    const sequence = keynopeTerminalSequence(e);
+    if (sequence == null) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    sendKeynopeAppInput(sequence);
+  }, true);
+  setInterval(syncPresenterState, 60);
+  syncPresenterState();
+  setInterval(syncEditorState, 150);
+  syncEditorState();
+} else if (window.KEYNOPE_PRESENTER) {
+  setInterval(syncPresenterState, 120);
+  syncPresenterState();
 }
 resize();
 render();
@@ -4908,7 +7526,7 @@ func addPlacementValue(values url.Values, key, value string) {
 		switch strings.ToLower(value) {
 		case "blocks", "block":
 			values.Set("glyph", "blocks")
-		case "braille", "half", "vertical", "shade", "ascii", "dense":
+		case "braille", "shade", "ascii", "dense":
 			values.Set("glyph", strings.ToLower(value))
 		}
 	case "shape":
@@ -5402,7 +8020,9 @@ func flushTerminalFrame(draw func()) {
 		width, height := terminalAuthoredSize()
 		activePresenter.PublishTerminalFrame(buffer.String(), width, height)
 	}
-	fmt.Print("\033[?2026h" + buffer.String() + "\033[?2026l")
+	if !nativeAppModeActive {
+		fmt.Print("\033[?2026h" + buffer.String() + "\033[?2026l")
+	}
 }
 
 func captureTerminalOutput(draw func()) string {
@@ -5497,7 +8117,7 @@ func drawOverlayLineSet(lines []Line, width, height int, slide Slide, rows map[i
 		if line.Text == "" {
 			continue
 		}
-		if line.Role == "shape" && line.Element >= 0 && line.Element < len(slide.Elements) && elementTransparent(slide.Elements[line.Element]) {
+		if transparencyMaskLine(line, slide) {
 			continue
 		}
 		transparency := transparentShapeCellsFrom(lines, index+1, width, height, slide)
@@ -5651,14 +8271,11 @@ func transparentShapeCellsFrom(lines []Line, start int, width, height int, slide
 		return cells
 	}
 	for _, line := range lines[start:] {
-		if line.Role != "shape" || line.Element < 0 || line.Element >= len(slide.Elements) || line.Row < 0 || line.Row >= height {
+		if !transparencyMaskLine(line, slide) || line.Row < 0 || line.Row >= height {
 			continue
 		}
 		element := slide.Elements[line.Element]
-		if !elementTransparent(element) {
-			continue
-		}
-		bg := transparentShapeBG(slide, element)
+		bg := transparentElementBG(slide, element, line.Role)
 		plain := []rune(stripANSI(line.Text))
 		for offset, r := range plain {
 			if r == ' ' {
@@ -5677,10 +8294,27 @@ func transparentShapeCellsFrom(lines []Line, start int, width, height int, slide
 	return cells
 }
 
-func transparentShapeBG(slide Slide, element Element) string {
-	fg := elementFG(element.Query, false)
+func transparencyMaskLine(line Line, slide Slide) bool {
+	if line.Element < 0 || line.Element >= len(slide.Elements) {
+		return false
+	}
+	switch line.Role {
+	case "shape", "heading", "body", "code", "image":
+		return elementTransparent(slide.Elements[line.Element])
+	default:
+		return false
+	}
+}
+
+func transparentElementBG(slide Slide, element Element, role string) string {
+	heading := role == "heading"
+	fg := elementFG(element.Query, heading)
 	if fg == "" {
-		fg = slideFG(slide)
+		if heading {
+			fg = slideHeaderFG(slide)
+		} else {
+			fg = slideFG(slide)
+		}
 	}
 	if bg, ok := fgCodeToBG(fg); ok {
 		return bg
@@ -9321,7 +11955,7 @@ func shapeAtPoint(x, y, width, height int) (int, bool) {
 
 func readEffectPickerKeyEvent() KeyEvent {
 	var buf [32]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -10042,7 +12676,7 @@ type imageSettingField struct {
 }
 
 var imageSettingFields = []imageSettingField{
-	{Key: "glyph", Label: "Glyph", Values: []string{"blocks", "braille", "half", "vertical", "shade", "ascii", "dense"}},
+	{Key: "glyph", Label: "Glyph", Values: []string{"blocks", "braille", "shade", "ascii", "dense"}},
 	{Key: "shape", Label: "Shape", Values: []string{"subject", "contrast", "saturation", "luma", "alpha"}},
 	{Key: "brightness", Label: "Brightness", Min: 0.2, Max: 2.0, Step: 0.1},
 	{Key: "contrast", Label: "Contrast", Min: 0.2, Max: 2.0, Step: 0.1},
@@ -10052,7 +12686,7 @@ var imageSettingFields = []imageSettingField{
 }
 
 var textSettingFields = []imageSettingField{
-	{Key: "glyph", Label: "Glyph", Values: []string{"blocks", "braille", "half", "vertical", "shade", "ascii", "dense"}},
+	{Key: "glyph", Label: "Glyph", Values: []string{"blocks", "braille", "shade", "ascii", "dense"}},
 }
 
 func playImageSettingsDialog(slide Slide, imageIndex, width, height, page int) (string, bool) {
@@ -10165,7 +12799,7 @@ func imageSettingsFieldAt(x, y, width, height int, fields []imageSettingField) (
 
 func readImageSettingsKeyEvent() KeyEvent {
 	var buf [32]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -13819,7 +16453,9 @@ func renderTextImageElement(element Element, width int) []string {
 		element.Text = "·  " + element.Text
 	}
 	var rows []string
-	if hasTextImageStyle(element.Query) {
+	if strings.Contains(element.Text, "*") {
+		rows = renderMarkdownBitmapTextImage(element, scale)
+	} else if hasTextImageStyle(element.Query) {
 		rows = renderStyledBitmapTextImage(element, scale)
 	}
 	if len(rows) == 0 {
@@ -13830,6 +16466,44 @@ func renderTextImageElement(element Element, width int) []string {
 			rows[i] = cropANSIVisible(row, width)
 		} else {
 			rows[i] = crop(row, width)
+		}
+	}
+	return trimBlank(rows)
+}
+
+func renderMarkdownBitmapTextImage(element Element, factor float64) []string {
+	spans := parseMarkdownStyledSpans(element.Text)
+	chunks := make([][]string, 0, len(spans))
+	maxRows := 0
+	for _, span := range spans {
+		font, glyphWidth := c64FullFont, 8
+		if span.Bold {
+			font, glyphWidth = c64BoldFont, 10
+		}
+		mask := scaledTextMaskWithFont(span.Text, factor, font, glyphWidth)
+		var rows []string
+		if hasTextImageStyle(element.Query) {
+			rows = renderStyledBitmapTextMask(element, mask)
+		} else {
+			rows = maskToQuadrantsPadded(mask)
+		}
+		if span.Highlight {
+			for index := range rows {
+				rows[index] = highlightVisibleText(rows[index])
+			}
+		}
+		chunks = append(chunks, rows)
+		maxRows = max(maxRows, len(rows))
+	}
+	rows := make([]string, maxRows)
+	for _, chunk := range chunks {
+		chunkWidth := maxLineDisplayWidth(chunk)
+		for row := 0; row < maxRows; row++ {
+			if row < len(chunk) {
+				rows[row] += chunk[row] + strings.Repeat(" ", max(0, chunkWidth-displayWidth(stripANSI(chunk[row]))))
+			} else {
+				rows[row] += strings.Repeat(" ", chunkWidth)
+			}
 		}
 	}
 	return trimBlank(rows)
@@ -13938,7 +16612,11 @@ func renderBitmapTextImage(text string, factor float64) []string {
 }
 
 func scaledC64TextMask(text string, factor float64) [][]bool {
-	mask := c64TextMask(text)
+	return scaledTextMaskWithFont(text, factor, c64FullFont, 8)
+}
+
+func scaledTextMaskWithFont(text string, factor float64, font map[rune][]string, glyphWidth int) [][]bool {
+	mask := textMaskWithFont(text, font, glyphWidth)
 	if len(mask) == 0 || len(mask[0]) == 0 || factor <= 0 {
 		return nil
 	}
@@ -14020,15 +16698,18 @@ func rotateMaskCounterClockwise(mask [][]bool) [][]bool {
 }
 
 func c64TextMask(text string) [][]bool {
-	const glyphW = 8
+	return textMaskWithFont(text, c64FullFont, 8)
+}
+
+func textMaskWithFont(text string, font map[rune][]string, glyphW int) [][]bool {
 	rows := make([][]bool, 8)
 	for i := range rows {
 		rows[i] = make([]bool, 0, len([]rune(text))*glyphW)
 	}
 	for _, r := range text {
-		glyph := c64FullFont[r]
+		glyph := font[r]
 		if glyph == nil {
-			glyph = c64FullFont['?']
+			glyph = font['?']
 		}
 		for y := 0; y < 8; y++ {
 			line := []rune(padRunes(glyph[y], glyphW))
@@ -14735,7 +17416,7 @@ func parseImageASCIIOptions(query string) imageASCIIOptions {
 		return opts
 	}
 	switch strings.ToLower(values.Get("glyph")) {
-	case "braille", "half", "vertical", "shade", "ascii", "dense":
+	case "braille", "shade", "ascii", "dense":
 		opts.glyph = strings.ToLower(values.Get("glyph"))
 	case "blocks", "block", "":
 		opts.glyph = "blocks"
@@ -14852,32 +17533,6 @@ func unicodeImageCellRune(block [8]rgba8, decisions [8]bool, opts imageASCIIOpti
 			}
 		}
 		return rune(0x2800 + mask)
-	case "half":
-		top := decisions[0] || decisions[1] || decisions[2] || decisions[3]
-		bottom := decisions[4] || decisions[5] || decisions[6] || decisions[7]
-		switch {
-		case top && bottom:
-			return '█'
-		case top:
-			return '▀'
-		case bottom:
-			return '▄'
-		default:
-			return ' '
-		}
-	case "vertical":
-		left := decisions[0] || decisions[2] || decisions[4] || decisions[6]
-		right := decisions[1] || decisions[3] || decisions[5] || decisions[7]
-		switch {
-		case left && right:
-			return '█'
-		case left:
-			return '▌'
-		case right:
-			return '▐'
-		default:
-			return ' '
-		}
 	case "shade":
 		if opts.binaryTone {
 			return binaryToneGlyph(decisions, []rune(" ░▒▓█"))
@@ -16404,7 +19059,7 @@ func readKeyEvent() KeyEvent {
 		return event
 	}
 	var buf [64]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -16558,7 +19213,7 @@ func readEditKeyEventMode(textMode bool) KeyEvent {
 		return event
 	}
 	var buf [32]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -16754,7 +19409,7 @@ func printableKeyEvent(b []byte) KeyEvent {
 
 func readSlideNavigatorKeyEvent() KeyEvent {
 	var buf [64]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -16782,7 +19437,7 @@ func readSlideNavigatorKeyEvent() KeyEvent {
 
 func readSpeakerNotesViewKeyEvent() KeyEvent {
 	var buf [64]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -16858,7 +19513,7 @@ func readSpeakerNotesViewKeyEvent() KeyEvent {
 
 func readSpeakerNotesKeyEvent() KeyEvent {
 	var buf [64]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -16907,7 +19562,7 @@ func readSpeakerNotesKeyEvent() KeyEvent {
 
 func readColorPickerKeyEvent() KeyEvent {
 	var buf [32]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -16945,7 +19600,7 @@ func readColorPickerKeyEvent() KeyEvent {
 
 func readLinkInputKeyEvent() KeyEvent {
 	var buf [256]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -16977,7 +19632,7 @@ func readLinkInputKeyEvent() KeyEvent {
 
 func readSearchKeyEvent() KeyEvent {
 	var buf [32]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -17018,7 +19673,7 @@ func readSearchKeyEvent() KeyEvent {
 
 func readJumpKeyEvent() KeyEvent {
 	var buf [32]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -17059,7 +19714,7 @@ func readJumpKeyEvent() KeyEvent {
 
 func readImagePlacementKeyEvent() KeyEvent {
 	var buf [32]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -17134,7 +19789,7 @@ func consumeBracketedPaste(initial []byte) bool {
 	var buf [512]byte
 	deadline := time.Now().Add(750 * time.Millisecond)
 	for !bytes.Contains(data, bracketedPasteEnd) && time.Now().Before(deadline) {
-		n, _ := os.Stdin.Read(buf[:])
+		n, _ := inputRead(buf[:])
 		if n == 0 {
 			time.Sleep(5 * time.Millisecond)
 			continue

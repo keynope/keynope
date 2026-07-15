@@ -364,6 +364,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          (cd dist && shasum -a 256 *.tar.gz > SHA256SUMS)
+
           if ! gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" \
               --repo "${{ github.repository }}" \
@@ -377,6 +379,6 @@ jobs:
             --title "$RELEASE_NAME" \
             --notes-file release-notes.md
 
-          gh release upload "$RELEASE_TAG" dist/*.tar.gz \
+          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS \
             --repo "${{ github.repository }}" \
             --clobber

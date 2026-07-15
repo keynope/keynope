@@ -15,6 +15,10 @@ BIN_DIR := bin
 KEYNOPE := $(BIN_DIR)/keynope
 PRESENTER_APP := $(BIN_DIR)/KeynopePresenter.app
 PRESENTER := $(PRESENTER_APP)/Contents/MacOS/KeynopePresenter
+KEYNOPE_APP := $(BIN_DIR)/Keynope.app
+KEYNOPE_APP_EXECUTABLE := $(KEYNOPE_APP)/Contents/MacOS/Keynope
+KEYNOPE_APP_ENGINE := $(KEYNOPE_APP)/Contents/Helpers/keynope-engine
+KEYNOPE_APP_INFO := app/Info.plist
 PRESENTER_INFO := presenter/Info.plist
 PRESENTER_ICON := assets/KeynopeMenuTemplate.png
 PRESENTER_SIGNATURE := $(PRESENTER_APP)/Contents/_CodeSignature/CodeResources
@@ -22,7 +26,7 @@ PRESENTER_SRC := presenter/KeynopePresenter.swift presenter/ScreenShare.swift pr
 PRESENTER_FRAMEWORKS := -framework Cocoa -framework WebKit -framework AVFoundation -framework ScreenCaptureKit
 GO_SRC := $(filter-out %_test.go,$(wildcard *.go))
 
-.PHONY: all build keynope presenter test install clean
+.PHONY: all build app keynope presenter test install clean
 
 all: build
 
@@ -31,6 +35,18 @@ build: keynope presenter
 keynope: $(KEYNOPE)
 
 presenter: $(PRESENTER_SIGNATURE)
+
+app: $(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources
+
+$(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE_APP_INFO) $(PRESENTER_ICON) $(GO_SRC) go.mod go.sum
+	rm -rf $(KEYNOPE_APP)
+	@mkdir -p $(KEYNOPE_APP)/Contents/MacOS $(KEYNOPE_APP)/Contents/Helpers $(KEYNOPE_APP)/Contents/Resources
+	cp $(KEYNOPE_APP_INFO) $(KEYNOPE_APP)/Contents/Info.plist
+	cp $(PRESENTER_ICON) $(KEYNOPE_APP)/Contents/Resources/KeynopeMenuTemplate.png
+	$(GO) build -o $(KEYNOPE_APP_ENGINE) .
+	$(SWIFTC) $(SWIFTFLAGS) -target $(SWIFT_TARGET) -O $(PRESENTER_FRAMEWORKS) $(PRESENTER_SRC) -o $(KEYNOPE_APP_EXECUTABLE)
+	$(CODESIGN) --force --sign "$(CODESIGN_IDENTITY)" $(KEYNOPE_APP_ENGINE)
+	$(CODESIGN) --force --deep --sign "$(CODESIGN_IDENTITY)" $(KEYNOPE_APP)
 
 $(KEYNOPE): $(GO_SRC) go.mod go.sum
 	@mkdir -p $(BIN_DIR)
