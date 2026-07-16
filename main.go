@@ -275,6 +275,13 @@ var exportImageAnimationPosition *time.Duration
 var exportImageAnimationMu sync.Mutex
 var authoredTerminalWidth int
 var authoredTerminalHeight int
+var viewportWarning viewportFitWarning
+
+type viewportFitWarning struct {
+	Key       string
+	Text      string
+	ExpiresAt time.Time
+}
 
 func init() {
 	c64QuadFont['·'] = []string{"", " ▗▖", " ▝▘", ""}
@@ -320,6 +327,7 @@ func main() {
 	resolvedSlides := deck.ResolvedSlides()
 	cleanUnusedImageCache(resolvedSlides)
 	width, height := terminalSize()
+	presenterWidth, presenterHeight := authoredRenderSize(width, height)
 	presenterMode := !args.ExportOnly && !args.Classic
 	presenterModeActive = presenterMode
 	nativeAppModeActive = args.AppMode
@@ -328,8 +336,6 @@ func main() {
 	}
 	if args.ExportOnly {
 		width, height = exportRenderSize(resolvedSlides)
-	} else if presenterMode {
-		width, height = authoredRenderSize(width, height)
 	}
 	prewarmImageCache(resolvedSlides, width, height)
 	if args.ExportOnly {
@@ -348,7 +354,7 @@ func main() {
 		defer func() { activeNativeEditor = nil }()
 	}
 	if presenterMode {
-		presenter, err = startPresenterCompanion(args.DeckPath, resolvedSlides, width, height, !args.AppMode)
+		presenter, err = startPresenterCompanion(args.DeckPath, resolvedSlides, presenterWidth, presenterHeight, !args.AppMode)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "presenter companion unavailable: %v\n", err)
 		} else {
@@ -395,9 +401,7 @@ func main() {
 			displaySlides = deck.ResolvedSlidesForEditing()
 		}
 		width, height := terminalSize()
-		if presenterMode {
-			width, height = authoredRenderSize(width, height)
-		}
+		updateViewportFitWarning(width, height)
 		if current < 0 {
 			current = 0
 		}
@@ -1839,6 +1843,7 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int, la
 		mux.HandleFunc("/api/editor/action", activeNativeEditor.handleAction)
 		mux.HandleFunc("/api/editor/preview", activeNativeEditor.handlePreview)
 		mux.HandleFunc("/api/editor/fit-text", activeNativeEditor.handleFitText)
+		mux.HandleFunc("/api/editor/normalize-text-kind", activeNativeEditor.handleNormalizeTextKind)
 		mux.HandleFunc("/api/editor/workspace", activeNativeEditor.handleWorkspace)
 		mux.HandleFunc("/api/editor/upload", activeNativeEditor.handleUpload)
 	}
@@ -1927,7 +1932,8 @@ func (p *presenterCompanion) handlePresenterStatus(w http.ResponseWriter, r *htt
 		return
 	}
 	var status struct {
-		Mode string `json:"mode"`
+		Mode   string `json:"mode"`
+		Paused bool   `json:"paused"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&status); err != nil {
 		http.Error(w, "invalid presenter status", http.StatusBadRequest)
@@ -1941,7 +1947,7 @@ func (p *presenterCompanion) handlePresenterStatus(w http.ResponseWriter, r *htt
 	p.target = status.Mode
 	p.helper = true
 	if nativeAppModeActive {
-		presenting := status.Mode != "none"
+		presenting := status.Mode != "none" && !status.Paused
 		if p.state.Presenting != presenting {
 			p.state.Presenting = presenting
 			p.state.Version++
@@ -2755,7 +2761,7 @@ func exportLines(lines []Line, slide Slide, width, height, slideCount int) []exp
 		if transparentMask {
 			if line.Role == "image" {
 				exportRole = "transparent-image"
-			} else {
+			} else if line.Role != "code" {
 				exportRole = "transparent-text"
 			}
 		}
@@ -2773,6 +2779,11 @@ func exportLines(lines []Line, slide Slide, width, height, slideCount int) []exp
 				background = ansiCSSColour(bg)
 			}
 			parts = exportSolidTextParts(line.Text, line.Col, color, background, width)
+			if transparentMask {
+				for index := range parts {
+					parts[index].Background = ""
+				}
+			}
 		} else {
 			parts = exportANSITextParts(line.Text, line.Col, color, width)
 		}
@@ -2876,7 +2887,7 @@ func applyExportTransparencyToParts(parts []exportPart, row int, transparency ma
 			cellColor := color
 			if cellBG != "" {
 				bg = ansiCSSColour(cellBG)
-				cellColor = darkenCSSForTransparency(color)
+				cellColor = blendCSSForTransparency(color, bg)
 			}
 			appendPart(col, string(r), cellColor, bg)
 		}
@@ -2884,8 +2895,8 @@ func applyExportTransparencyToParts(parts []exportPart, row int, transparency ma
 	return out
 }
 
-func darkenCSSForTransparency(css string) string {
-	return ansiCSSColour(darkenFGForTransparency(cssColourToFG(css, "37")))
+func blendCSSForTransparency(css, overlay string) string {
+	return ansiCSSColour(blendFGForTransparency(cssColourToFG(css, "37"), cssColourToFG(overlay, "30")))
 }
 
 func exportSolidTextParts(text string, baseCol int, color, background string, width int) []exportPart {
@@ -3128,12 +3139,31 @@ body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Libe
 .keynope-app-toolbar button { color: inherit; background: #292929; border: 1px solid #555; border-radius: 6px; padding: 6px 12px; font: inherit; cursor: default; }
 .keynope-app-toolbar button:active { background: #444; }
 .keynope-app-toolbar button.active { border-color: #70b7ff; background: #244766; }
+.keynope-app-toolbar button:disabled { opacity: .38; filter: grayscale(1); }
+.keynope-app-toolbar button.keynope-app-icon-button { display: inline-grid; width: 42px; min-width: 42px; height: 36px; place-items: center; padding: 3px; }
+.keynope-app-icon-button svg { display: block; width: 34px; height: 26px; }
+.keynope-app-toolbar button.keynope-app-tag-button { position: relative; overflow: visible; }
+.keynope-app-tag-button svg { transform: translateY(-2px); }
+.keynope-app-button-tag { position: absolute; left: 50%; bottom: 1px; transform: translateX(-50%); padding: 0 3px; border: 1px solid #59616a; border-radius: 3px; color: #d8dee5; background: #151719; font: 700 6px/8px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .05em; box-shadow: 0 1px 2px rgba(0,0,0,.7); }
+.keynope-app-toolbar button[hidden] { display: none; }
+.keynope-presentation-control { position: relative; }
+.keynope-presentation-control > svg { opacity: .62; }
+.keynope-presentation-glyph { position: absolute; left: 50%; top: 50%; display: grid; width: 21px; height: 21px; place-items: center; transform: translate(-50%, -50%); border-radius: 50%; background: rgba(16,18,22,.84); font: 700 18px/21px "Apple Symbols", "SF Pro", -apple-system, sans-serif; font-variant-emoji: text; text-shadow: 0 1px 2px #000; }
+.keynope-presentation-glyph.pause { color: #ffd166; }
+.keynope-presentation-glyph.resume { color: #72df94; }
+.keynope-presentation-glyph.stop { color: #ff6868; }
 .keynope-timer-input { width: 72px; box-sizing: border-box; color: #eee; background: #111; border: 1px solid #70b7ff; border-radius: 5px; padding: 6px; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .keynope-editor-status { margin-right: auto; color: #aeb4bb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 html[data-keynope-app="true"] .keynope-app-toolbar { display: flex; }
 html[data-keynope-app="true"] #stage { left: 210px; right: 0; }
+html[data-keynope-app="true"] button { transition: border-color 90ms ease, background-color 90ms ease, box-shadow 90ms ease, transform 70ms ease; }
+html[data-keynope-app="true"] button:hover:not(:disabled),
+html[data-keynope-app="true"] button:focus-visible:not(:disabled) { border-color: #70b7ff !important; box-shadow: 0 0 0 1px rgba(112,183,255,.28); outline: none; }
+html[data-keynope-app="true"] button:active:not(:disabled) { background-color: #202c36; box-shadow: inset 0 2px 5px rgba(0,0,0,.72), 0 0 0 1px rgba(112,183,255,.22); transform: translateY(1px); }
+html[data-keynope-app="true"] button:active:not(:disabled) > svg,
+html[data-keynope-app="true"] button:active:not(:disabled) > span { translate: 0 1px; }
 .keynope-editor-topbar { position: fixed; left: 210px; right: 0; top: 0; height: 52px; z-index: 21; display: none; align-items: center; gap: 6px; padding: 0 10px; box-sizing: border-box; overflow-x: auto; background: #181818; border-bottom: 1px solid #444; font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
-.keynope-topbar-mode { display: flex; min-width: max-content; align-items: center; gap: 6px; }
+.keynope-topbar-mode { display: flex; min-width: max-content; flex: 1 0 max-content; align-items: center; gap: 6px; }
 .keynope-topbar-mode[hidden] { display: none; }
 .keynope-topbar-mode button { padding: 4px 7px; }
 .keynope-topbar-label { max-width: 180px; overflow: hidden; color: #bfc7cf; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
@@ -3156,14 +3186,33 @@ html[data-keynope-timer-active="true"] .keynope-canvas-overlay { display: none; 
 .keynope-editor-topbar button, .keynope-editor-panel button { color: #eee; background: #292929; border: 1px solid #555; border-radius: 5px; padding: 5px 9px; font: inherit; }
 .keynope-editor-topbar button.keynope-icon-button { width: 30px; min-width: 30px; height: 30px; padding: 3px; font-size: 18px; line-height: 1.1; }
 .keynope-editor-topbar button.keynope-rotate-button { position: relative; display: inline-grid; place-items: center; padding: 0; overflow: visible; line-height: 1; }
-.keynope-rotate-icon { font-size: 27px; line-height: 27px; }
-.keynope-rotate-label { position: absolute; left: 50%; bottom: -2px; transform: translateX(-50%); padding: 0 2px; border: 1px solid #59616a; border-radius: 3px; color: #d8dee5; background: #151719; font: 700 5px/8px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .03em; box-shadow: 0 1px 2px rgba(0,0,0,.7); }
+.keynope-rotate-icon { font-size: 27px; line-height: 27px; transform: translateY(-1px); }
+.keynope-rotate-label { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); padding: 0 2px; border: 1px solid #59616a; border-radius: 3px; color: #d8dee5; background: #151719; font: 700 5px/8px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .03em; box-shadow: 0 1px 2px rgba(0,0,0,.7); }
 .keynope-editor-topbar button.keynope-monochrome-icon { display: inline-grid; place-items: center; padding: 0; color: #fff; font-family: "Apple Symbols", "SF Pro", -apple-system, sans-serif; font-variant-emoji: text; line-height: 1; }
 .keynope-monochrome-glyph { display: block; line-height: 1; transform: translateY(1px); }
+.keynope-editor-topbar button.keynope-export-button { position: relative; overflow: visible; }
+.keynope-export-button svg { width: 22px; height: 22px; transform: translateY(-2px); }
+.keynope-export-label { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); padding: 0 3px; border: 1px solid #59616a; border-radius: 3px; color: #d8dee5; background: #151719; font: 700 6px/8px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .05em; box-shadow: 0 1px 2px rgba(0,0,0,.7); }
 .keynope-monochrome-icon svg { display: block; width: 20px; height: 20px; fill: currentColor; }
 .keynope-editor-topbar button.keynope-history-button { position: relative; display: inline-grid; width: 30px; min-width: 30px; height: 30px; place-items: center; padding: 0; overflow: visible; line-height: 1; }
-.keynope-history-icon { font-size: 27px; line-height: 27px; }
-.keynope-history-label { position: absolute; left: 50%; bottom: -2px; transform: translateX(-50%); padding: 0 3px; border: 1px solid #59616a; border-radius: 3px; color: #d8dee5; background: #151719; font: 700 6px/8px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .06em; box-shadow: 0 1px 2px rgba(0,0,0,.7); }
+.keynope-history-icon { font-size: 27px; line-height: 27px; transform: translateY(-1px); }
+.keynope-history-label { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); padding: 0 3px; border: 1px solid #59616a; border-radius: 3px; color: #d8dee5; background: #151719; font: 700 6px/8px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .06em; box-shadow: 0 1px 2px rgba(0,0,0,.7); }
+.keynope-toolbar-delete { margin-left: auto; }
+.keynope-delete-button { display: inline-grid; place-items: center; padding: 3px !important; }
+.keynope-delete-button svg { display: block; width: 21px; height: 21px; }
+.keynope-clone-button { display: inline-grid; place-items: center; padding: 3px !important; }
+.keynope-clone-button svg { display: block; width: 21px; height: 21px; }
+.keynope-see-through-button { display: inline-grid; width: 30px; min-width: 30px; height: 30px; margin-left: auto; place-items: center; padding: 3px !important; }
+.keynope-see-through-button + .keynope-toolbar-delete { margin-left: 0; }
+.keynope-see-through-button svg { display: block; width: 20px; height: 20px; }
+.keynope-adjust-image-button, .keynope-image-outline-button { display: inline-grid; width: 30px; min-width: 30px; height: 30px; place-items: center; padding: 3px !important; color: #fff; }
+.keynope-adjust-image-button svg { display: block; width: 22px; height: 22px; }
+.keynope-image-outline-button svg { display: block; width: 21px; height: 21px; }
+.keynope-layer-button { display: inline-grid; width: 30px; min-width: 30px; height: 30px; place-items: center; padding: 3px !important; }
+.keynope-layer-button svg { display: block; width: 22px; height: 19px; }
+.keynope-layer-button svg rect, .keynope-layer-button svg path, .keynope-layer-button svg g { fill: none !important; }
+.keynope-link-button { display: inline-grid; place-items: center; padding: 3px !important; }
+.keynope-link-button svg { display: block; width: 21px; height: 21px; }
 .keynope-editor-topbar button.keynope-svg-button { display: inline-grid; width: 30px; height: 30px; place-items: center; padding: 4px; }
 .keynope-svg-button svg { display: block; width: 19px; height: 19px; }
 .keynope-canvas-shape-kind svg { display: block; width: 18px; height: 18px; }
@@ -3289,12 +3338,14 @@ let refreshEditorPresenterControls = () => {};
 let editorCanvasCaret = null;
 let editorExportConfirmation = null;
 let keynopeEditorMasterMode = false;
+let keynopeEditorSelectionActive = false;
 if (keynopeAppSurface) {
   document.documentElement.setAttribute('data-keynope-app', 'true');
   document.documentElement.setAttribute('data-keynope-notes', 'true');
   document.title = 'Keynope';
 }
 let frame = 0;
+let contentAnimationFrame = 0;
 let contentAnimationCache = new Map();
 let canvasCell = 1;
 let canvasCharWidth = 1;
@@ -3656,12 +3707,12 @@ function transparencyCellMap(lines) {
   }
   return cells;
 }
-function darkenCSSForTransparency(color) {
+function blendCSSForTransparency(color, overlay) {
   const rgb = parseCSSColor(color || '#f3efe0');
   if (!rgb) return color || '#f3efe0';
-  const luma = (299 * rgb[0] + 587 * rgb[1] + 114 * rgb[2]) / 255000;
-  const factor = 0.8 - Math.pow(Math.max(0, Math.min(1, luma)), 3) * 0.6;
-  return 'rgb(' + rgb.map(v => Math.max(0, Math.min(255, Math.round(v * factor)))).join(',') + ')';
+  const overlayRGB = parseCSSColor(overlay || '#000000');
+  if (!overlayRGB) return color || '#f3efe0';
+  return 'rgb(' + rgb.map((v, i) => Math.round((v + overlayRGB[i]) / 2)).join(',') + ')';
 }
 function parseCSSColor(color) {
   const hex = /^#([0-9a-f]{6})$/i.exec(color || '');
@@ -3697,7 +3748,7 @@ function applyBackdropTransparency(lines, transparency) {
         const bg = cells.get(key);
         if (bg) {
           occupied.add(key);
-          pushPart(parts, col, text[i], darkenCSSForTransparency(part.color), bg);
+          pushPart(parts, col, text[i], blendCSSForTransparency(part.color, bg), bg);
         } else {
           pushPart(parts, col, text[i], part.color, part.background || '');
         }
@@ -3722,7 +3773,7 @@ function drawCanvasBackdropTransparency(lines, transparency) {
   drawCanvasLines(applyBackdropTransparency(lines, transparency));
 }
 function drawCanvasPageLabel(page) {
-	if (page.hideChromePageNumber) return;
+  if (!keynopeAppSurface || page.hideChromePageNumber) return;
   const text = label(page);
   presenterContext.font = canvasFont;
   presenterContext.textBaseline = 'top';
@@ -4228,7 +4279,7 @@ function render() {
   stage.style.background = page.bg;
   effectLayer.style.color = page.fg;
   contentLayer.style.color = page.fg;
-  chromeLayer.innerHTML = page.hideChromePageNumber ? '' : '<span class="page-no">' + esc(label(page)) + '</span>';
+  chromeLayer.innerHTML = keynopeAppSurface && !page.hideChromePageNumber ? '<span class="page-no">' + esc(label(page)) + '</span>' : '';
   drawFrame();
   if (keynopeAppSurface) requestAnimationFrame(renderEditorCanvasOverlay);
 }
@@ -4793,7 +4844,7 @@ function presenterContentLinesFor(index, page) {
   if (!page) return [];
   if (index === pageIndex) {
     const contentFrames = decodedContentFrames(page);
-    if (contentFrames && contentFrames.length) return contentFrames[frame % contentFrames.length].lines;
+    if (contentFrames && contentFrames.length) return contentFrames[contentAnimationFrame % contentFrames.length].lines;
   }
   return page.lines || [];
 }
@@ -4808,7 +4859,11 @@ function tick() {
     } catch (_fallbackErr) {
     }
   }
-  setTimeout(() => { frame++; tick(); }, 70);
+  setTimeout(() => {
+    frame++;
+    if (!keynopeEditorSelectionActive) contentAnimationFrame++;
+    tick();
+  }, 70);
 }
 addEventListener('resize', () => { resize(); render(); });
 function activateLink(target) {
@@ -5188,12 +5243,16 @@ if (keynopeAppSurface) {
   let editorState = null;
   let editorStateVersion = -1;
   let activeInlineEditor = null;
+  let inlineEditCompletion = Promise.resolve();
+  let inlineEditTransitionSequence = 0;
   let suppressSelectionTopbar = false;
   let pendingCanvasSelection = null;
   let editorStatus = null;
   let editorNormalPages = null;
   let editorWorkspaceSequence = 0;
   let editorMutationPreviewSequence = 0;
+  let editorTransparencyIconSequence = 0;
+  let editorElementClipboard = [];
   let activeCanvasVisualMenu = null;
   let activeCanvasLinkDialog = null;
   async function editorAction(action) {
@@ -5213,6 +5272,42 @@ if (keynopeAppSurface) {
     renderEditorPanels();
     await syncEditorWorkspace();
   }
+  const editorClipboardPrefix = 'keynope-elements:';
+  function editorClipboardTextTarget(target) {
+    return !!target && (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable);
+  }
+  function selectedEditorElements() {
+    if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return [];
+    const elements = editorState.slides[editorState.current].elements || [];
+    const indices = (editorState.selection || []).filter(index => index >= 0 && index < elements.length);
+    if (!indices.length && editorState.selected >= 0 && editorState.selected < elements.length) indices.push(editorState.selected);
+    return indices.map(index => JSON.parse(JSON.stringify(elements[index])));
+  }
+  async function editorClipboardCommand(command) {
+    if (command === 'copy' || command === 'cut') {
+      const elements = selectedEditorElements();
+      if (!elements.length) return;
+      editorElementClipboard = elements;
+      try { await navigator.clipboard.writeText(editorClipboardPrefix + JSON.stringify(elements)); } catch (_err) {}
+      if (command === 'cut') {
+        const action = (editorState.selection || []).length > 1
+          ? {action: 'delete-selection'}
+          : {action: 'delete-element', element: editorState.selected};
+        await editorAction(action);
+      }
+      return;
+    }
+    let elements = editorElementClipboard;
+    try {
+      const value = await navigator.clipboard.readText();
+      if (value.startsWith(editorClipboardPrefix)) {
+        const parsed = JSON.parse(value.slice(editorClipboardPrefix.length));
+        if (Array.isArray(parsed)) elements = parsed;
+      }
+    } catch (_err) {}
+    if (elements && elements.length) await editorAction({action: 'paste-elements', elementsData: elements});
+  }
+  window.keynopeClipboardCommand = editorClipboardCommand;
   function editorButton(label, action, parent) {
     const button = document.createElement('button');
     button.type = 'button';
@@ -5292,13 +5387,17 @@ if (keynopeAppSurface) {
     mainTopbar.appendChild(button);
     return button;
   }
-  const addSlideButton = svgToolbarButton('Add slide', '<path d="M5 2.5h7l3 3V17.5H5z"/><path d="M12 2.5v3h3M2 11h6M5 8v6"/>', () => editorAction({action: 'add-slide'}).catch(() => {}));
-  const cloneSlideButton = editorButton('⿻', {action: 'clone-slide'}, mainTopbar);
-  cloneSlideButton.classList.add('keynope-icon-button');
+  const addSlideButton = svgToolbarButton('Add slide', '<g transform="scale(.025)" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M680 445V152Q680 120 648 120H112Q80 120 80 152V548Q80 580 112 580H450" stroke="#fff" stroke-width="30"/><circle cx="250" cy="290" r="68" stroke="#fff" stroke-width="28"/><path d="M380 255h190M380 325h190M175 445h335" stroke="#fff" stroke-width="28"/><circle cx="620" cy="600" r="150" stroke="#fff" stroke-width="30"/><path d="M620 495v210M515 600h210" stroke="#9b9b9b" stroke-width="62"/><path d="M620 495v210M515 600h210" stroke="#fff" stroke-width="36"/></g>', () => editorAction({action: 'add-slide'}).catch(() => {}));
+  const cloneIconSVG = '<svg viewBox="0 0 800 800" aria-hidden="true"><path d="M540 225V170Q540 130 500 130H170Q130 130 130 170V500Q130 540 170 540h55" fill="none" stroke="#9b9b9b" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/><rect x="245" y="245" width="425" height="425" rx="42" fill="none" stroke="#fff" stroke-width="34"/></svg>';
+  const cloneSlideButton = editorButton('', {action: 'clone-slide'}, mainTopbar);
+  cloneSlideButton.classList.add('keynope-icon-button', 'keynope-clone-button');
+  cloneSlideButton.innerHTML = cloneIconSVG;
   cloneSlideButton.title = 'Clone slide';
   cloneSlideButton.setAttribute('aria-label', 'Clone slide');
-  const deleteSlideButton = editorButton('🗑️', {action: 'delete-slide'}, mainTopbar);
-  deleteSlideButton.classList.add('keynope-icon-button');
+  const deleteIconSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><path d="M245 205h310l-25 300c-2 25-23 44-48 44H318c-25 0-46-19-48-44Z" fill="none" stroke="#fff" stroke-width="28" stroke-linejoin="round"/><path d="M205 190h390" fill="none" stroke="#fff" stroke-width="34" stroke-linecap="round"/><path d="M330 180v-48c0-18 14-32 32-32h76c18 0 32 14 32 32v48" fill="none" stroke="#fff" stroke-width="30" stroke-linejoin="round"/><path d="M330 280v170M400 280v170M470 280v170" fill="none" stroke="#fff" stroke-width="25" stroke-linecap="round"/></svg>';
+  const deleteSlideButton = editorButton('', {action: 'delete-slide'}, mainTopbar);
+  deleteSlideButton.classList.add('keynope-icon-button', 'keynope-delete-button');
+  deleteSlideButton.innerHTML = deleteIconSVG;
   deleteSlideButton.title = 'Delete slide';
   deleteSlideButton.setAttribute('aria-label', 'Delete slide');
   const appearanceButton = svgToolbarButton('Appearance', '<path d="M4 4h12M4 10h12M4 16h12"/><circle cx="8" cy="4" r="2" fill="currentColor"/><circle cx="13" cy="10" r="2" fill="currentColor"/><circle cx="7" cy="16" r="2" fill="currentColor"/>', () => {
@@ -5401,12 +5500,14 @@ if (keynopeAppSurface) {
   redoButton.setAttribute('aria-label', 'Redo');
   const exportButton = document.createElement('button');
   exportButton.type = 'button';
-  exportButton.innerHTML = '<span class="keynope-monochrome-glyph" aria-hidden="true">🌐︎</span>';
+  exportButton.innerHTML = '<svg viewBox="0 0 800 600" aria-hidden="true"><path d="M120 55h290l130 130v350H120Z" fill="none" stroke="#fff" stroke-width="28" stroke-linejoin="round"/><path d="M410 55v130h130" fill="none" stroke="#fff" stroke-width="28" stroke-linejoin="round"/><path d="m250 245-65 55 65 55M405 245l65 55-65 55M350 220l-55 160" fill="none" stroke="#9b9b9b" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/><path d="M350 445h330M610 375l70 70-70 70" fill="none" stroke="#fff" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="keynope-export-label">HTML</span>';
   exportButton.addEventListener('click', () => editorAction({action: 'export'}).then(showEditorExportConfirmation).catch(() => {}));
   mainTopbar.appendChild(exportButton);
-  exportButton.classList.add('keynope-icon-button', 'keynope-monochrome-icon');
+  exportButton.classList.add('keynope-icon-button', 'keynope-monochrome-icon', 'keynope-export-button');
   exportButton.title = 'Export to HTML';
   exportButton.setAttribute('aria-label', 'Export to HTML');
+  deleteSlideButton.classList.add('keynope-toolbar-delete');
+  mainTopbar.appendChild(deleteSlideButton);
   document.body.appendChild(topbar);
 
   const slidesPanel = document.createElement('aside');
@@ -5568,8 +5669,15 @@ if (keynopeAppSurface) {
     });
     return {rawToResolved, resolvedToRaw};
   }
-  function beginInlineEdit(index, hit) {
-    if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return;
+  async function beginInlineEdit(index, hit) {
+    const transition = ++inlineEditTransitionSequence;
+    if (activeInlineEditor && activeInlineEditor.element === index && activeInlineEditor.editor.isConnected) {
+      activeInlineEditor.editor.focus();
+      return;
+    }
+    const pendingEdit = activeInlineEditor ? activeInlineEditor.finish(true) : inlineEditCompletion;
+    await pendingEdit;
+    if (transition !== inlineEditTransitionSequence || !editorState || !editorState.slides || !editorState.slides[editorState.current]) return;
     const original = editorState.slides[editorState.current].elements[index];
     if (!original || !['heading','text','bullet','code'].includes(original.kind)) {
       if (editorStatus) editorStatus.textContent = 'Select a text element to edit its content';
@@ -5577,7 +5685,6 @@ if (keynopeAppSurface) {
     }
     if (!hit) hit = canvasOverlay.querySelector('[data-element="' + index + '"]');
     if (!hit) return;
-    if (activeInlineEditor) activeInlineEditor.finish(true);
     if (pendingCanvasSelection) {
       clearTimeout(pendingCanvasSelection);
       pendingCanvasSelection = null;
@@ -5596,8 +5703,9 @@ if (keynopeAppSurface) {
     while (end >= 0 && end < deck.pages.length && deck.pages[end].slide === slide) end++;
     editorPreviewOriginal = first >= 0 ? {slide, pages: deck.pages.slice(first, end)} : null;
     let finished = false;
+    let finishPromise = null;
     const finish = save => {
-      if (finished) return;
+      if (finished) return finishPromise || Promise.resolve();
       finished = true;
       activeInlineEditor = null;
       suppressSelectionTopbar = true;
@@ -5621,13 +5729,13 @@ if (keynopeAppSurface) {
         restoreEditorPreview();
         drawFrame();
       }
-      completion.finally(() => {
-        editorAction({action: 'select-element', element: -1}).catch(() => {}).finally(() => {
+      finishPromise = completion.then(() => editorAction({action: 'select-element', element: -1}).catch(() => {})).finally(() => {
           suppressSelectionTopbar = false;
           renderEditorTopbar();
-        });
       });
+      inlineEditCompletion = finishPromise;
       if (editorStatus) editorStatus.textContent = save ? 'Text saved' : 'Editing cancelled';
+      return finishPromise;
     };
     const updateCaret = () => {
       editorCanvasCaret = {element: resolvedElement == null ? index : resolvedElement, text: editor.value, cursor: editor.selectionStart, started: performance.now()};
@@ -5688,11 +5796,42 @@ if (keynopeAppSurface) {
     previewCanvasMutation(index, element);
     editorAction({action: 'update-element', element: index, elementData: element}).catch(() => {});
   }
-  function setCanvasTextKind(index, kind, level) {
-    updateCanvasElement(index, element => {
-      element.kind = kind;
-      element.level = kind === 'heading' ? level : 0;
+  async function normalizeCanvasTextKind(index, element) {
+    const page = deck.pages && deck.pages[pageIndex] ? deck.pages[pageIndex].page || 0 : 0;
+    const response = await fetch('/api/editor/normalize-text-kind', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({element: index, elementData: element, page, cols: deck.cols, rows: deck.rows})
     });
+    if (!response.ok) throw new Error('Could not normalize text kind');
+    return response.json();
+  }
+  async function setCanvasTextKind(index, kind, level) {
+    const element = canvasElementAt(index);
+    if (!element) return;
+    const query = new URLSearchParams(element.query || '');
+    const wasHeading = element.kind === 'heading';
+    const colour = query.get(wasHeading ? 'header' : 'fg') || query.get(wasHeading ? 'fg' : 'header');
+    for (const key of ['render','source','scale','text-size']) query.delete(key);
+    if (kind === 'heading') {
+      query.delete('fg');
+      if (colour) query.set('header', colour); else query.delete('header');
+    } else {
+      query.delete('header');
+      if (colour) query.set('fg', colour); else query.delete('fg');
+    }
+    element.kind = kind;
+    element.level = kind === 'heading' ? level : 0;
+    element.query = query.toString();
+    try {
+      const result = await normalizeCanvasTextKind(index, element);
+      replaceEditorPreviewPages(editorState.current, result.pages);
+      drawFrame();
+      await editorAction({action: 'update-element', element: index, elementData: result.element});
+    } catch (_err) {
+      previewCanvasMutation(index, element);
+      editorAction({action: 'update-element', element: index, elementData: element}).catch(() => {});
+    }
   }
   function appendCanvasTextKindTools(container, index, element) {
     const choices = [
@@ -5800,6 +5939,10 @@ if (keynopeAppSurface) {
     }
     const outline = query.get('outline') || '';
     const button = canvasTool(label, outline ? 'active' : '', () => cycleCanvasOutline(index));
+    if (element.kind === 'image') {
+      button.innerHTML = '<svg viewBox="0 0 800 600" aria-hidden="true"><path d="M391 74 C468 70 499 124 550 151 C609 182 667 191 680 250 C694 314 646 348 614 393 C580 441 572 503 511 520 C451 537 414 493 360 484 C297 473 245 518 196 477 C145 434 174 376 143 327 C114 279 119 217 169 188 C220 158 270 181 312 130 C335 102 356 78 391 74Z" fill="#9b9b9b" stroke="#fff" stroke-width="32" stroke-linejoin="round"/></svg>';
+      button.classList.add('keynope-image-outline-button');
+    }
     if (large) button.classList.add('keynope-outline-large');
     if (shapeIcon) {
       const symbol = document.createElement('span');
@@ -5813,9 +5956,20 @@ if (keynopeAppSurface) {
     return button;
   }
   function canvasDuplicateTool(index) {
-    const button = canvasTool('⿻', 'keynope-icon-button', () => editorAction({action: 'duplicate-element', element: index}).catch(() => {}));
+    const button = canvasTool('', 'keynope-icon-button keynope-clone-button', () => editorAction({action: 'duplicate-element', element: index}).catch(() => {}));
+    button.innerHTML = cloneIconSVG;
     button.title = 'Clone element';
     button.setAttribute('aria-label', 'Clone element');
+    return button;
+  }
+  function canvasLayerTool(index, direction) {
+    const backward = direction === 'backward';
+    const button = canvasTool('', 'keynope-icon-button keynope-layer-button', () => editorAction({action: 'move-element', element: index, kind: direction}).catch(() => {}));
+    button.innerHTML = backward
+      ? '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="180" y="180" width="300" height="300" rx="28" fill="none" stroke="#fff" stroke-width="28"/><rect x="290" y="70" width="300" height="300" rx="28" fill="none" stroke="#9b9b9b" stroke-width="28"/><g fill="none" stroke="#fff" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"><path d="M655 135v265"/><path d="m598 343 57 57 57-57"/></g></svg>'
+      : '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="210" y="180" width="300" height="300" rx="28" fill="none" stroke="#9b9b9b" stroke-width="28"/><rect x="320" y="70" width="300" height="300" rx="28" fill="none" stroke="#fff" stroke-width="28"/><g fill="none" stroke="#fff" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"><path d="M145 430V165"/><path d="m88 222 57-57 57 57"/></g></svg>';
+    button.title = backward ? 'Send backward' : 'Bring forward';
+    button.setAttribute('aria-label', button.title);
     return button;
   }
   function rotateCanvasText(index) {
@@ -5834,7 +5988,7 @@ if (keynopeAppSurface) {
     const select = document.createElement('select');
     select.title = 'Text rendering style';
     select.setAttribute('aria-label', 'Text rendering style');
-    for (const [value, label] of [['','Style: Default'],['blocks','Style: Blocks'],['braille','Style: Braille'],['shade','Style: Shade'],['ascii','Style: ASCII'],['dense','Style: Dense']]) {
+    for (const [value, label] of [['','Style: Default'],['blocks','Style: Blocks'],['braille','Style: Braille'],['ascii','Style: ASCII'],['dense','Style: Dense']]) {
       const option = document.createElement('option');
       option.value = value;
       option.textContent = label;
@@ -5912,7 +6066,17 @@ if (keynopeAppSurface) {
         : marker + text + marker;
     });
   }
+  function canvasElementIsGIF(element) {
+    return !!element && element.kind === 'image' && /\.gif(?:$|[?#])/i.test(element.path || '');
+  }
+  function canvasElementSupportsTransparency(element) {
+    if (!element || canvasElementIsGIF(element) || !['heading','text','text-image','bullet','code','shape','image'].includes(element.kind)) return false;
+    const glyph = (new URLSearchParams(element.query || '').get('glyph') || '').toLowerCase();
+    return glyph === '' || glyph === 'blocks' || glyph === 'block';
+  }
   function toggleCanvasTransparency(index) {
+    const current = canvasElementAt(index);
+    if (!canvasElementSupportsTransparency(current)) return;
     updateCanvasElement(index, element => {
       const query = new URLSearchParams(element.query || '');
       if (query.get('transparent') === '1') query.delete('transparent'); else query.set('transparent', '1');
@@ -5921,7 +6085,9 @@ if (keynopeAppSurface) {
   }
   function canvasTransparencyTool(index, query) {
     const enabled = query.get('transparent') === '1';
-    const button = canvasTool('See through', enabled ? 'active' : '', () => toggleCanvasTransparency(index));
+    const patternID = 'keynope-checkerboard-' + (++editorTransparencyIconSequence);
+    const button = canvasTool('', (enabled ? 'active ' : '') + 'keynope-icon-button keynope-see-through-button', () => toggleCanvasTransparency(index));
+    button.innerHTML = '<svg viewBox="157 57 486 486" aria-hidden="true"><defs><pattern id="' + patternID + '" x="183" y="83" width="217" height="217" patternUnits="userSpaceOnUse"><rect width="217" height="217" fill="#fff"/><rect width="108.5" height="108.5" fill="#9b9b9b"/><rect x="108.5" y="108.5" width="108.5" height="108.5" fill="#9b9b9b"/></pattern></defs><rect x="183" y="83" width="434" height="434" rx="15" fill="url(#' + patternID + ')"/><rect x="170" y="70" width="460" height="460" rx="28" fill="none" stroke="#fff" stroke-width="26"/></svg>';
     button.title = enabled ? 'Disable see through' : 'Enable see through';
     button.setAttribute('aria-label', button.title);
     return button;
@@ -5948,7 +6114,8 @@ if (keynopeAppSurface) {
     }
   }
   function canvasDeleteTool(index) {
-    const button = canvasTool('🗑️', 'danger keynope-icon-button', () => editorAction({action: 'delete-element', element: index}).catch(() => {}));
+    const button = canvasTool('', 'danger keynope-icon-button keynope-delete-button keynope-toolbar-delete', () => editorAction({action: 'delete-element', element: index}).catch(() => {}));
+    button.innerHTML = deleteIconSVG;
     button.title = 'Delete element';
     button.setAttribute('aria-label', 'Delete element');
     return button;
@@ -5988,7 +6155,7 @@ if (keynopeAppSurface) {
     panel.append(label, input);
   }
   function canvasVisualMenu(index, element) {
-    const button = canvasTool('Adjust Image', '', () => {
+    const button = canvasTool('', 'keynope-icon-button keynope-adjust-image-button', () => {
       if (activeCanvasVisualMenu && activeCanvasVisualMenu.button === button) {
         closeCanvasVisualMenu();
         return;
@@ -6006,6 +6173,13 @@ if (keynopeAppSurface) {
       activeCanvasVisualMenu = {index, button, panel, dismiss};
       document.addEventListener('pointerdown', dismiss, true);
     });
+    const uploadSVG = importButton.querySelector('svg');
+    button.innerHTML = '<svg viewBox="-13 80 1050 1040" aria-hidden="true" fill="currentColor">' +
+      (uploadSVG ? uploadSVG.innerHTML : '') +
+      '<g transform="translate(805 330)" fill="currentColor">' +
+        '<rect x="-28" y="-225" width="56" height="112" rx="14"/><rect x="-28" y="-225" width="56" height="112" rx="14" transform="rotate(45)"/><rect x="-28" y="-225" width="56" height="112" rx="14" transform="rotate(90)"/><rect x="-28" y="-225" width="56" height="112" rx="14" transform="rotate(135)"/><rect x="-28" y="-225" width="56" height="112" rx="14" transform="rotate(180)"/><rect x="-28" y="-225" width="56" height="112" rx="14" transform="rotate(225)"/><rect x="-28" y="-225" width="56" height="112" rx="14" transform="rotate(270)"/><rect x="-28" y="-225" width="56" height="112" rx="14" transform="rotate(315)"/>' +
+        '<circle r="155" fill="#181818" stroke="currentColor" stroke-width="42"/><circle r="58" fill="none" stroke="currentColor" stroke-width="42"/>' +
+      '</g></svg>';
     button.title = 'Adjust image';
     button.setAttribute('aria-label', 'Adjust image');
     const panel = document.createElement('div');
@@ -6018,7 +6192,7 @@ if (keynopeAppSurface) {
   function appendCanvasVisualControls(panel, index, element) {
     const query = new URLSearchParams(element.query || '');
     if (element.kind === 'image') {
-      visualQueryControl(panel, index, 'Glyph', 'glyph', query.get('glyph') || 'blocks', {values: [['blocks','Blocks'],['braille','Braille'],['shade','Shade'],['ascii','ASCII'],['dense','Dense']]});
+      visualQueryControl(panel, index, 'Glyph', 'glyph', query.get('glyph') || 'blocks', {values: [['blocks','Blocks'],['braille','Braille'],['ascii','ASCII'],['dense','Dense']]});
       visualQueryControl(panel, index, 'Sampling', 'shape', query.get('shape') || 'subject', {values: [['subject','Subject'],['contrast','Contrast'],['saturation','Saturation'],['luma','Luma'],['alpha','Alpha']]});
       visualQueryControl(panel, index, 'Brightness', 'brightness', query.get('brightness'), {min:.2,max:2,step:.1,fallback:1});
       visualQueryControl(panel, index, 'Contrast', 'contrast', query.get('contrast'), {min:.2,max:2,step:.1,fallback:1});
@@ -6147,7 +6321,8 @@ if (keynopeAppSurface) {
   }
   function canvasLinkTool(index, query) {
     const linked = query.has('slide') || query.has('link');
-    const button = canvasTool('🔗', linked ? 'active keynope-icon-button' : 'keynope-icon-button', () => openCanvasLinkDialog(index));
+    const button = canvasTool('', (linked ? 'active ' : '') + 'keynope-icon-button keynope-link-button', () => openCanvasLinkDialog(index));
+    button.innerHTML = '<svg viewBox="0 0 800 600" aria-hidden="true"><g transform="translate(100 0) scale(25)" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></g></svg>';
     button.title = linked ? 'Edit link' : 'Add link';
     button.setAttribute('aria-label', button.title);
     return button;
@@ -6155,6 +6330,7 @@ if (keynopeAppSurface) {
   function renderEditorTopbar() {
     const slide = editorState && editorState.slides && editorState.slides[editorState.current];
     const index = editorState ? editorState.selected : -1;
+    keynopeEditorSelectionActive = index >= 0;
     const element = slide && index >= 0 ? slide.elements[index] : null;
     if (activeCanvasVisualMenu && (!element || activeCanvasVisualMenu.index !== index)) closeCanvasVisualMenu();
     const contextual = !suppressSelectionTopbar && (!!activeInlineEditor || !!element);
@@ -6218,13 +6394,13 @@ if (keynopeAppSurface) {
       selectionTopbar.appendChild(canvasLinkTool(index, query));
     }
     if (element.kind === 'shape') selectionTopbar.appendChild(canvasColourTool(index, element, ''));
-    if (selectedText || element.kind === 'shape' || element.kind === 'image') selectionTopbar.appendChild(canvasTransparencyTool(index, query));
     if (element.kind === 'shape') appendCanvasShapeKindTools(selectionTopbar, index, query);
     if (element.kind === 'image') selectionTopbar.appendChild(canvasVisualMenu(index, element));
     selectionTopbar.appendChild(canvasOutlineTool(index, element, query));
     selectionTopbar.appendChild(canvasDuplicateTool(index));
-    selectionTopbar.appendChild(canvasTool('Back', '', () => editorAction({action: 'move-element', element: index, kind: 'backward'}).catch(() => {})));
-    selectionTopbar.appendChild(canvasTool('Front', '', () => editorAction({action: 'move-element', element: index, kind: 'forward'}).catch(() => {})));
+    selectionTopbar.appendChild(canvasLayerTool(index, 'backward'));
+    selectionTopbar.appendChild(canvasLayerTool(index, 'forward'));
+    if (canvasElementSupportsTransparency(element)) selectionTopbar.appendChild(canvasTransparencyTool(index, query));
     selectionTopbar.appendChild(canvasDeleteTool(index));
   }
 
@@ -6287,6 +6463,10 @@ if (keynopeAppSurface) {
       hit.addEventListener('pointerdown', event => {
         event.preventDefault();
         event.stopPropagation();
+        if (activeInlineEditor && activeInlineEditor.element !== index) {
+          activeInlineEditor.finish(true).then(() => editorAction({action: 'select-element', element: index, name: event.shiftKey ? 'toggle' : ''}).catch(() => {}));
+          return;
+        }
         const originX = event.clientX;
         const originY = event.clientY;
         const start = {...bounds};
@@ -6495,19 +6675,21 @@ if (keynopeAppSurface) {
     editorColor(slideContextMenu, 'Foreground', slide.fg || '', '#f3efe0', value => { slide.fg = value; slide.fgSet = true; updateSlide(); });
     editorColor(slideContextMenu, 'Background colour', slide.bg || '', '#000000', value => { slide.bg = value; slide.bgSet = true; updateSlide(); });
     editorColor(slideContextMenu, 'Header colour', slide.headerFg || '', '#ffffff', value => { slide.headerFg = value; slide.headerFgSet = true; updateSlide(); });
-    const reset = document.createElement('button');
-    reset.type = 'button';
-    reset.textContent = 'Use master appearance';
-    reset.addEventListener('click', () => {
-      slide.effect = ''; slide.effectSet = false;
-      slide.background = ''; slide.backgroundSet = false;
-      slide.fg = ''; slide.fgSet = false;
-      slide.bg = ''; slide.bgSet = false;
-      slide.headerFg = ''; slide.headerFgSet = false;
-      closeSlideContextMenu();
-      updateSlide();
-    });
-    slideContextMenu.appendChild(reset);
+    if (!editorState.masterMode) {
+      const reset = document.createElement('button');
+      reset.type = 'button';
+      reset.textContent = 'Use master appearance';
+      reset.addEventListener('click', () => {
+        slide.effect = ''; slide.effectSet = false;
+        slide.background = ''; slide.backgroundSet = false;
+        slide.fg = ''; slide.fgSet = false;
+        slide.bg = ''; slide.bgSet = false;
+        slide.headerFg = ''; slide.headerFgSet = false;
+        closeSlideContextMenu();
+        updateSlide();
+      });
+      slideContextMenu.appendChild(reset);
+    }
     slideContextMenu.classList.add('open');
     const rect = slideContextMenu.getBoundingClientRect();
     slideContextMenu.style.left = Math.max(8, Math.min(innerWidth - rect.width - 8, clientX)) + 'px';
@@ -6546,12 +6728,12 @@ if (keynopeAppSurface) {
     if (selectedText && element.kind !== 'code') actions.appendChild(canvasStyleSelect(index, element));
     if (selectedText || element.kind === 'shape') actions.appendChild(canvasColourTool(index, element, ''));
     if (selectedText) actions.appendChild(canvasLinkTool(index, query));
-    if (selectedText || element.kind === 'shape' || element.kind === 'image') actions.appendChild(canvasTransparencyTool(index, query));
     if (element.kind === 'shape') appendCanvasShapeKindTools(actions, index, query);
     actions.appendChild(canvasOutlineTool(index, element, query));
     actions.appendChild(canvasDuplicateTool(index));
-    actions.appendChild(canvasTool('Back', '', () => editorAction({action: 'move-element', element: index, kind: 'backward'}).catch(() => {})));
-    actions.appendChild(canvasTool('Front', '', () => editorAction({action: 'move-element', element: index, kind: 'forward'}).catch(() => {})));
+    actions.appendChild(canvasLayerTool(index, 'backward'));
+    actions.appendChild(canvasLayerTool(index, 'forward'));
+    if (canvasElementSupportsTransparency(element)) actions.appendChild(canvasTransparencyTool(index, query));
     actions.appendChild(canvasDeleteTool(index));
     slideContextMenu.appendChild(actions);
     if (element.kind === 'image') {
@@ -6687,8 +6869,8 @@ if (keynopeAppSurface) {
       if (['heading','text','bullet','code'].includes(element.kind)) {
         actions.appendChild(canvasTool('Edit text', '', () => beginInlineEdit(selected)));
       }
-      actions.appendChild(canvasTool('Duplicate', '', () => editorAction({action: 'duplicate-element', element: selected}).catch(() => {})));
-      const remove = canvasTool('Delete', 'danger', () => editorAction({action: 'delete-element', element: selected}).catch(() => {}));
+      actions.appendChild(canvasDuplicateTool(selected));
+      const remove = canvasDeleteTool(selected);
       actions.appendChild(remove);
       elementSection.appendChild(actions);
       if (['heading','text','bullet','code'].includes(element.kind)) {
@@ -6863,13 +7045,22 @@ if (keynopeAppSurface) {
   document.body.appendChild(timerInputBlocker);
   notesToggleButton = document.createElement('button');
   notesToggleButton.type = 'button';
-  notesToggleButton.textContent = 'Notes';
+  notesToggleButton.className = 'keynope-app-icon-button keynope-app-tag-button';
+  notesToggleButton.title = 'Speaker notes';
+  notesToggleButton.setAttribute('aria-label', 'Speaker notes');
+  notesToggleButton.innerHTML = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="135" y="55" width="530" height="490" rx="30" fill="none" stroke="#fff" stroke-width="28"/><rect x="185" y="105" width="430" height="235" rx="20" fill="#9b9b9b"/><circle cx="300" cy="220" r="55" fill="#fff"/><path d="M390 190h150M390 245h150" fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round"/><path d="M200 400h400M200 465h300" fill="none" stroke="#fff" stroke-width="26" stroke-linecap="round"/></svg><span class="keynope-app-button-tag">NOTES</span>';
   notesToggleButton.addEventListener('click', () => setSpeakerNotesVisible(!editorSpeakerNotesVisible, !editorSpeakerNotesVisible));
   toolbar.appendChild(notesToggleButton);
   setSpeakerNotesVisible(false, false);
   const timerButton = document.createElement('button');
   timerButton.type = 'button';
-  timerButton.textContent = 'Timer';
+  timerButton.className = 'keynope-app-icon-button';
+  timerButton.title = 'Timer';
+  timerButton.setAttribute('aria-label', 'Timer');
+  timerButton.innerHTML = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="345" y="45" width="110" height="65" rx="18" fill="#fff"/><path d="M400 105v45" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round"/><path d="m555 145 44 44" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round"/><circle cx="400" cy="340" r="195" fill="none" stroke="#fff" stroke-width="30"/><path d="M400 190v35M400 455v35M250 340h35M515 340h35" fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round"/><path d="M400 340V235M400 340l92 52" fill="none" stroke="#fff" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/><circle cx="400" cy="340" r="22" fill="#fff"/></svg>';
+  let externalDisplayAvailable = false;
+  let editorPresentationMode = 'none';
+  let editorPresentationPaused = false;
   function openEditorTimer() {
     presenterTimerMode = 'config';
     presenterTimerInput = '';
@@ -6898,13 +7089,15 @@ if (keynopeAppSurface) {
   refreshEditorPresenterControls = () => {
     const running = presenterTimerMode === 'running';
     const active = presenterTimerMode === 'config' || running;
-    timerButton.textContent = active ? 'Stop Timer' : 'Timer';
+    timerButton.title = active ? 'Stop timer' : 'Timer';
+    timerButton.setAttribute('aria-label', timerButton.title);
     timerButton.classList.toggle('active', active);
     timerButton.setAttribute('aria-pressed', active ? 'true' : 'false');
     timerInputBlocker.hidden = !active;
     canvasOverlay.hidden = active;
     document.documentElement.setAttribute('data-keynope-timer-active', active ? 'true' : 'false');
     for (const button of toolbar.querySelectorAll('button')) button.disabled = active && button !== timerButton;
+    externalButton.disabled = active || !externalDisplayAvailable;
     for (const button of slidesPanel.querySelectorAll('button')) button.disabled = active;
     speakerNotesInput.disabled = active;
   };
@@ -6913,35 +7106,81 @@ if (keynopeAppSurface) {
   editorStatus.className = 'keynope-editor-status';
   editorStatus.textContent = 'Select an element · double-click text to edit · drag to move';
   toolbar.appendChild(editorStatus);
-  const controls = [
-    ['← Previous', {action: 'previous-slide'}],
-    ['Next →', {action: 'next-slide'}]
-  ];
-  for (const [label, action] of controls) {
+  function appToolbarIconButton(label, svg, action) {
     const button = document.createElement('button');
     button.type = 'button';
-    button.textContent = label;
+    button.className = 'keynope-app-icon-button';
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    button.innerHTML = svg;
     button.addEventListener('click', event => {
       event.preventDefault();
       event.stopPropagation();
-      editorAction(action).catch(() => {});
+      action();
     });
     toolbar.appendChild(button);
+    return button;
   }
-  const presentButton = document.createElement('button');
-  presentButton.textContent = 'Present';
-  presentButton.addEventListener('click', () => {
+
+  const previousSlideSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="220" y="95" width="430" height="390" rx="28" fill="none" stroke="#fff" stroke-width="26"/><circle cx="410" cy="230" r="54" fill="#fff"/><path d="M500 210h85M500 260h85M340 360h245" fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round"/><path d="M185 215 65 300l120 85M80 300h310" fill="none" stroke="#30343a" stroke-width="62" stroke-linecap="round" stroke-linejoin="round"/><path d="M185 215 65 300l120 85M80 300h310" fill="none" stroke="#c8ccd2" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const nextSlideSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><g transform="translate(800 0) scale(-1 1)"><rect x="220" y="95" width="430" height="390" rx="28" fill="none" stroke="#fff" stroke-width="26"/><circle cx="410" cy="230" r="54" fill="#fff"/><path d="M500 210h85M500 260h85M340 360h245" fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round"/><path d="M185 215 65 300l120 85M80 300h310" fill="none" stroke="#30343a" stroke-width="62" stroke-linecap="round" stroke-linejoin="round"/><path d="M185 215 65 300l120 85M80 300h310" fill="none" stroke="#c8ccd2" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/></g></svg>';
+  const presentMainSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="165" y="70" width="470" height="355" rx="30" fill="none" stroke="#fff" stroke-width="28"/><path d="m350 175 150 72-150 72Z" fill="#fff" stroke="#fff" stroke-width="12" stroke-linejoin="round"/><path d="M145 445h510l67 62c13 12 4 33-14 33H92c-18 0-27-21-14-33Z" fill="#fff"/><rect x="332" y="465" width="136" height="18" rx="9" fill="none" stroke="#fff" stroke-width="10"/></svg>';
+  const presentExternalSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="55" y="300" width="270" height="190" rx="22" fill="none" stroke="#fff" stroke-width="24"/><path d="M38 505h304l35 34c9 9 3 24-10 24H13c-13 0-19-15-10-24Z" fill="#fff"/><path d="M315 265h80M350 220l45 45-45 45" fill="none" stroke="#fff" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/><rect x="430" y="55" width="330" height="330" rx="28" fill="none" stroke="#fff" stroke-width="28"/><path d="m555 145 100 75-100 75Z" fill="#fff" stroke="#fff" stroke-width="8" stroke-linejoin="round"/><path d="M595 385v100M515 500h160" fill="none" stroke="#fff" stroke-width="28" stroke-linecap="round"/></svg>';
+
+  appToolbarIconButton('Previous', previousSlideSVG, () => editorAction({action: 'previous-slide'}).catch(() => {}));
+  appToolbarIconButton('Next', nextSlideSVG, () => editorAction({action: 'next-slide'}).catch(() => {}));
+  const presentButton = appToolbarIconButton('Present on this computer', presentMainSVG, () => {
     const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
     if (handler) handler.postMessage({action: 'show-main'});
   });
-  toolbar.appendChild(presentButton);
-  const externalButton = document.createElement('button');
-  externalButton.textContent = 'Present External';
-  externalButton.addEventListener('click', () => {
+  const externalButton = appToolbarIconButton('Present on external screen', presentExternalSVG, () => {
     const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
     if (handler) handler.postMessage({action: 'show-external'});
   });
-  toolbar.appendChild(externalButton);
+  const pauseButton = appToolbarIconButton('Pause presentation', presentExternalSVG, () => {
+    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+    if (handler) handler.postMessage({action: editorPresentationPaused ? 'resume' : 'pause'});
+  });
+  pauseButton.classList.add('keynope-presentation-control');
+  pauseButton.hidden = true;
+  const stopPresentationButton = appToolbarIconButton('Stop presentation', presentExternalSVG, () => {
+    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+    if (handler) handler.postMessage({action: 'stop'});
+  });
+  stopPresentationButton.classList.add('keynope-presentation-control');
+  stopPresentationButton.hidden = true;
+  toolbar.insertBefore(stopPresentationButton, pauseButton);
+  const aboutSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><circle cx="400" cy="300" r="220" fill="none" stroke="#fff" stroke-width="30"/><circle cx="400" cy="190" r="28" fill="#fff"/><path d="M400 270v165" fill="none" stroke="#fff" stroke-width="42" stroke-linecap="round"/></svg>';
+  appToolbarIconButton('About Keynope', aboutSVG, () => {
+    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+    if (handler) handler.postMessage({action: 'show-about'});
+  });
+  externalButton.disabled = true;
+  window.keynopeSetExternalDisplayAvailable = available => {
+    externalDisplayAvailable = !!available;
+    externalButton.disabled = presenterTimerMode === 'config' || presenterTimerMode === 'running' || !externalDisplayAvailable;
+  };
+  window.keynopeSetPresentationState = (mode, paused) => {
+    editorPresentationMode = mode === 'main' || mode === 'external' ? mode : 'none';
+    editorPresentationPaused = !!paused && editorPresentationMode !== 'none';
+    const active = editorPresentationMode !== 'none';
+    const baseSVG = editorPresentationMode === 'main' ? presentMainSVG : presentExternalSVG;
+    presentButton.hidden = active;
+    externalButton.hidden = active;
+    pauseButton.hidden = !active;
+    stopPresentationButton.hidden = !active;
+    if (active) {
+      const pauseGlyph = editorPresentationPaused ? '▶︎' : '⏸︎';
+      const pauseKind = editorPresentationPaused ? 'resume' : 'pause';
+      pauseButton.innerHTML = baseSVG + '<span class="keynope-presentation-glyph ' + pauseKind + '">' + pauseGlyph + '</span>';
+      pauseButton.title = editorPresentationPaused ? 'Resume presentation' : 'Pause presentation';
+      pauseButton.setAttribute('aria-label', pauseButton.title);
+      stopPresentationButton.innerHTML = baseSVG + '<span class="keynope-presentation-glyph stop">⏹︎</span>';
+    }
+    document.documentElement.setAttribute('data-keynope-presentation-mode', editorPresentationMode);
+  };
+  const presenterHandler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+  if (presenterHandler) presenterHandler.postMessage({action: 'query-display-state'});
   document.body.appendChild(toolbar);
   function nudgeSelected(dx, dy) {
     if (!editorState || editorState.selected < 0) return false;
@@ -7016,6 +7255,14 @@ if (keynopeAppSurface) {
       e.preventDefault();
       e.stopImmediatePropagation();
       editorAction({action: 'toggle-master-mode'}).catch(() => {});
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && ['c','x','v'].includes(e.key.toLowerCase())) {
+      if (editorClipboardTextTarget(e.target)) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const command = e.key.toLowerCase() === 'c' ? 'copy' : e.key.toLowerCase() === 'x' ? 'cut' : 'paste';
+      editorClipboardCommand(command).catch(() => {});
       return;
     }
     if ((e.metaKey || e.ctrlKey) && (e.key.toLowerCase() === 'z' || e.key.toLowerCase() === 'y')) {
@@ -7526,7 +7773,7 @@ func addPlacementValue(values url.Values, key, value string) {
 		switch strings.ToLower(value) {
 		case "blocks", "block":
 			values.Set("glyph", "blocks")
-		case "braille", "shade", "ascii", "dense":
+		case "braille", "ascii", "dense":
 			values.Set("glyph", strings.ToLower(value))
 		}
 	case "shape":
@@ -7814,12 +8061,110 @@ func authoredRenderSize(width, height int) (int, int) {
 	return width, height
 }
 
+type terminalContentGeometry struct {
+	Width   int
+	Height  int
+	OffsetX int
+	OffsetY int
+	Scale   float64
+	Fitted  bool
+}
+
+func fittedTerminalContentGeometry(width, height int) terminalContentGeometry {
+	geometry := terminalContentGeometry{Width: max(1, width), Height: max(1, height), Scale: 1}
+	authorWidth, authorHeight := authoredRenderSize(width, height)
+	if width <= 0 || height <= 0 || authorWidth <= 0 || authorHeight <= 0 {
+		return geometry
+	}
+	if authorWidth <= width && authorHeight <= height {
+		geometry.Width = authorWidth
+		geometry.Height = authorHeight
+		return geometry
+	}
+	geometry.Scale = math.Min(float64(width)/float64(authorWidth), float64(height)/float64(authorHeight))
+	geometry.Scale = clampFloat(geometry.Scale, 0.01, 1)
+	geometry.Width = max(1, min(width, int(math.Floor(float64(authorWidth)*geometry.Scale))))
+	geometry.Height = max(1, min(height, int(math.Floor(float64(authorHeight)*geometry.Scale))))
+	geometry.OffsetX = max(0, (width-geometry.Width)/2)
+	geometry.OffsetY = max(0, (height-geometry.Height)/2)
+	geometry.Fitted = true
+	return geometry
+}
+
+func updateViewportFitWarning(width, height int) {
+	geometry := fittedTerminalContentGeometry(width, height)
+	if !geometry.Fitted {
+		viewportWarning = viewportFitWarning{}
+		return
+	}
+	authorWidth, authorHeight := authoredRenderSize(width, height)
+	key := fmt.Sprintf("%dx%d:%dx%d", width, height, authorWidth, authorHeight)
+	if viewportWarning.Key == key {
+		return
+	}
+	viewportWarning = viewportFitWarning{
+		Key: key,
+		Text: fmt.Sprintf(
+			"Viewport %dx%d; deck %dx%d — scaled %.0f%%. Decrease font or enlarge window for full fidelity.",
+			width, height, authorWidth, authorHeight, geometry.Scale*100,
+		),
+		ExpiresAt: time.Now().Add(8 * time.Second),
+	}
+}
+
+func offsetTerminalLines(lines []Line, offsetX, offsetY int) []Line {
+	if offsetX == 0 && offsetY == 0 {
+		return lines
+	}
+	out := append([]Line(nil), lines...)
+	for index := range out {
+		out[index].Col += offsetX
+		out[index].Row += offsetY
+	}
+	return out
+}
+
+var ansiCursorPositionRE = regexp.MustCompile("\\x1b\\[(?:(\\d+);(\\d+))?([Hf])")
+
+func offsetTerminalFrame(frame string, offsetX, offsetY int) string {
+	if frame == "" || offsetX == 0 && offsetY == 0 {
+		return frame
+	}
+	return ansiCursorPositionRE.ReplaceAllStringFunc(frame, func(sequence string) string {
+		match := ansiCursorPositionRE.FindStringSubmatch(sequence)
+		row, col := 1, 1
+		if match[1] != "" {
+			row, _ = strconv.Atoi(match[1])
+			col, _ = strconv.Atoi(match[2])
+		}
+		return fmt.Sprintf("\033[%d;%d%s", row+offsetY, col+offsetX, match[3])
+	})
+}
+
+func clearPhysicalTerminalViewport() {
+	termPrint("\033[0;40m\033[2J\033[H")
+}
+
+func drawTerminalSlideCanvas(slide Slide, width, height int, drawLocal func(terminalContentGeometry)) (string, terminalContentGeometry) {
+	geometry := fittedTerminalContentGeometry(width, height)
+	localFrame := captureTerminalOutput(func() {
+		repaintFrameBackground(slideBG(slide), geometry.Width, geometry.Height)
+		drawStaticBackground(slide.Background, geometry.Width, geometry.Height, slideBG(slide))
+		if drawLocal != nil {
+			drawLocal(geometry)
+		}
+	})
+	frame := offsetTerminalFrame(localFrame, geometry.OffsetX, geometry.OffsetY)
+	termPrint(frame)
+	return frame, geometry
+}
+
 func terminalScaleX(width, height int) float64 {
 	authorWidth, _ := authoredRenderSize(width, height)
 	if authorWidth <= 0 || width <= 0 {
 		return 1
 	}
-	return float64(width) / float64(authorWidth)
+	return float64(fittedTerminalContentGeometry(width, height).Width) / float64(authorWidth)
 }
 
 func terminalScaleY(width, height int) float64 {
@@ -7827,7 +8172,7 @@ func terminalScaleY(width, height int) float64 {
 	if authorHeight <= 0 || height <= 0 {
 		return 1
 	}
-	return float64(height) / float64(authorHeight)
+	return float64(fittedTerminalContentGeometry(width, height).Height) / float64(authorHeight)
 }
 
 func displayLines(slide Slide, width, height, page int) []Line {
@@ -7839,7 +8184,8 @@ func displayLines(slide Slide, width, height, page int) []Line {
 }
 
 func displayPages(slide Slide, width, height int) [][]Line {
-	lines := displayLayout(slide, width, height)
+	geometry := fittedTerminalContentGeometry(width, height)
+	lines := layout(scaleSlideForTerminal(slide, geometry.Width, geometry.Height), geometry.Width, geometry.Height)
 	var repeatedPageNumber []Line
 	var content []Line
 	for _, line := range lines {
@@ -7849,13 +8195,15 @@ func displayPages(slide Slide, width, height int) [][]Line {
 		}
 		content = append(content, line)
 	}
-	pages := paginateLayout(content, height)
-	if len(repeatedPageNumber) == 0 {
-		return pages
+	pages := paginateLayout(content, geometry.Height)
+	if len(repeatedPageNumber) > 0 {
+		for index := range pages {
+			pageNumber := append([]Line(nil), repeatedPageNumber...)
+			pages[index] = append(pageNumber, pages[index]...)
+		}
 	}
 	for index := range pages {
-		pageNumber := append([]Line(nil), repeatedPageNumber...)
-		pages[index] = append(pageNumber, pages[index]...)
+		pages[index] = offsetTerminalLines(pages[index], geometry.OffsetX, geometry.OffsetY)
 	}
 	return pages
 }
@@ -7878,7 +8226,9 @@ func authoredStep(direction string, step, width, height, authorWidth, authorHeig
 }
 
 func displayLayout(slide Slide, width, height int) []Line {
-	return layout(scaleSlideForTerminal(slide, width, height), width, height)
+	geometry := fittedTerminalContentGeometry(width, height)
+	lines := layout(scaleSlideForTerminal(slide, geometry.Width, geometry.Height), geometry.Width, geometry.Height)
+	return offsetTerminalLines(lines, geometry.OffsetX, geometry.OffsetY)
 }
 
 func scaleSlideForTerminal(slide Slide, width, height int) Slide {
@@ -7982,11 +8332,8 @@ func scaleQueryIntForTerminal(query, key string, defaultValue int, factor float6
 
 func renderSlide(slide Slide, width, height, page int, view ViewState) {
 	flushTerminalFrame(func() {
-		termPrintf("\033[%sm\033[2J\033[H", slideBG(slide))
-		backgroundFrame := captureTerminalOutput(func() {
-			drawStaticBackground(slide.Background, width, height, slideBG(slide))
-		})
-		termPrint(backgroundFrame)
+		clearPhysicalTerminalViewport()
+		backgroundFrame, _ := drawTerminalSlideCanvas(slide, width, height, nil)
 		lines := displayLines(slide, width, height, page)
 		backgroundLines := ansiFrameToExportLines(backgroundFrame, width, height, ansiCSSColour(slideFG(slide)))
 		drawTransparentShapeBackdrop(lines, backgroundLines, width, height, slide)
@@ -8063,13 +8410,17 @@ func playAnimatedSlide(slide Slide, width, height, page int, view ViewState) str
 }
 
 func playStaticSlide(slide Slide, width, height, page int, view ViewState) string {
-	if view.TimerMode == "" {
+	if view.TimerMode == "" && !viewportFitWarningActive() {
 		renderSlide(slide, width, height, page, view)
 		return waitKey()
 	}
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for {
+		if view.TimerMode == "" && !viewportFitWarningActive() {
+			renderSlide(slide, width, height, page, view)
+			return waitKey()
+		}
 		if action := pollKey(); action != "" {
 			return action
 		}
@@ -8188,7 +8539,7 @@ func drawTransparentShapeBackdrop(lines []Line, backdrop []exportLine, width, he
 				if bg == "" {
 					continue
 				}
-				termPrintf("\033[0;%s;%sm\033[%d;%dH%s", darkenFGForTransparency(fg), bg, line.Row+1, col+1, string(r))
+				termPrintf("\033[0;%s;%sm\033[%d;%dH%s", blendFGForTransparency(fg, bg), bg, line.Row+1, col+1, string(r))
 			}
 		}
 	}
@@ -8198,12 +8549,13 @@ func drawOverlayRows(lines []Line, width, height int, slide Slide, rows map[int]
 	if len(rows) == 0 {
 		return
 	}
-	blank := strings.Repeat(" ", max(0, width))
+	geometry := fittedTerminalContentGeometry(width, height)
+	blank := strings.Repeat(" ", geometry.Width)
 	for row := range rows {
-		if row < 0 || row >= height {
+		if row < geometry.OffsetY || row >= geometry.OffsetY+geometry.Height {
 			continue
 		}
-		termPrintf("\033[%sm\033[%d;1H%s", slideBG(slide), row+1, blank)
+		termPrintf("\033[%sm\033[%d;%dH%s", slideBG(slide), row+1, geometry.OffsetX+1, blank)
 	}
 	drawOverlayLineSet(lines, width, height, slide, rows)
 }
@@ -8275,6 +8627,48 @@ func transparentShapeCellsFrom(lines []Line, start int, width, height int, slide
 			continue
 		}
 		element := slide.Elements[line.Element]
+		if line.Role == "code" {
+			bg := codeLineBG(line)
+			for offset := 0; offset < displayWidth(stripANSI(line.Text)); offset++ {
+				col := line.Col + offset
+				if col < 0 || col >= width {
+					continue
+				}
+				if cells[line.Row] == nil {
+					cells[line.Row] = map[int]string{}
+				}
+				cells[line.Row][col] = bg
+			}
+			continue
+		}
+		if line.Role == "image" {
+			defaultFG := slideFG(slide)
+			if fg := elementFG(element.Query, false); fg != "" {
+				defaultFG = fg
+			}
+			parts := exportANSITextParts(line.Text, line.Col, ansiCSSColour(defaultFG), width)
+			for _, part := range parts {
+				fg := cssColourToFG(part.Color, defaultFG)
+				bg, ok := fgCodeToBG(fg)
+				if !ok {
+					bg = slideBG(slide)
+				}
+				for offset, r := range []rune(part.Text) {
+					if r == ' ' {
+						continue
+					}
+					col := part.Col + offset
+					if col < 0 || col >= width {
+						continue
+					}
+					if cells[line.Row] == nil {
+						cells[line.Row] = map[int]string{}
+					}
+					cells[line.Row][col] = bg
+				}
+			}
+			continue
+		}
 		bg := transparentElementBG(slide, element, line.Role)
 		plain := []rune(stripANSI(line.Text))
 		for offset, r := range plain {
@@ -8372,7 +8766,7 @@ func drawStyledLine(row, startCol int, text string, width int, baseFG, baseBG st
 			if rowCells := transparency[row-1]; rowCells != nil {
 				if bg := rowCells[col-1]; bg != "" {
 					cellBG = bg
-					cellFG = darkenFGForTransparency(cellFG)
+					cellFG = blendFGForTransparency(cellFG, bg)
 				}
 			}
 			termPrintf("\033[0;%s;%sm\033[%d;%dH%s", cellFG, cellBG, row, col, string(r))
@@ -8397,17 +8791,6 @@ func ansiSequenceFG(sequence string) string {
 	return ""
 }
 
-func darkenFG(code string, factor float64) string {
-	r, g, b, ok := ansiCodeRGB(code)
-	if !ok {
-		return code
-	}
-	r = int(math.Round(float64(r) * factor))
-	g = int(math.Round(float64(g) * factor))
-	b = int(math.Round(float64(b) * factor))
-	return fmt.Sprintf("38;2;%d;%d;%d", max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
-}
-
 func lightenFG(code string) string {
 	r, g, b, ok := ansiCodeRGB(code)
 	if !ok {
@@ -8419,14 +8802,19 @@ func lightenFG(code string) string {
 	return fmt.Sprintf("38;2;%d;%d;%d", max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
 }
 
-func darkenFGForTransparency(code string) string {
+func blendFGForTransparency(code, overlay string) string {
 	r, g, b, ok := ansiCodeRGB(code)
 	if !ok {
 		return code
 	}
-	luma := float64(299*r+587*g+114*b) / 255000.0
-	factor := 0.8 - math.Pow(clampFloat(luma, 0, 1), 3.0)*0.6
-	return darkenFG(code, factor)
+	overlayR, overlayG, overlayB, overlayOK := ansiCodeRGB(overlay)
+	if !overlayOK {
+		return code
+	}
+	return fmt.Sprintf("38;2;%d;%d;%d",
+		int(math.Round(float64(r+overlayR)/2)),
+		int(math.Round(float64(g+overlayG)/2)),
+		int(math.Round(float64(b+overlayB)/2)))
 }
 
 func fgCodeToBG(code string) (string, bool) {
@@ -8457,6 +8845,9 @@ func ansiCodeRGB(code string) (int, int, int, bool) {
 		}
 	}
 	if parsed, err := strconv.Atoi(code); err == nil {
+		if parsed >= 40 && parsed <= 47 || parsed >= 100 && parsed <= 107 {
+			parsed -= 10
+		}
 		colours := map[int][3]int{
 			30: {0, 0, 0}, 31: {170, 0, 0}, 32: {0, 170, 0}, 33: {170, 170, 0},
 			34: {0, 0, 170}, 35: {170, 0, 170}, 36: {0, 170, 170}, 37: {243, 239, 224},
@@ -8886,13 +9277,13 @@ func playEditMode(deck *Deck, current int, width, height, page int, deckPath str
 	var editStars *starsEffect
 	var editBursts *burstEffect
 	for {
-		width, height = terminalAuthoredSize()
+		width, height = terminalSize()
 		if width != lastEditWidth || height != lastEditHeight {
 			lastEditWidth, lastEditHeight = width, height
 			fullEditRedraw = true
 			editDirty = true
 		}
-		if (slideListOpen || notesOpen || state.TimerMode != "" || slideHasAnimatedImage(*slide) || slide.Effect != "") && time.Since(lastAnimationFrame) >= 70*time.Millisecond {
+		if (slideListOpen || notesOpen || state.TimerMode != "" || selected < 0 && slideHasAnimatedImage(*slide) || slide.Effect != "") && time.Since(lastAnimationFrame) >= 70*time.Millisecond {
 			lastAnimationFrame = time.Now()
 			animationFrame++
 			editDirty = true
@@ -8912,17 +9303,23 @@ func playEditMode(deck *Deck, current int, width, height, page int, deckPath str
 					fastImageRender = true
 					defer func() { fastImageRender = false }()
 					currentLines = displayLines(*slide, width, height, page)
-					if fullEditRedraw || len(prevLines) == 0 {
-						repaintFrameBackground(slideBG(*slide), width, height)
-						drawStaticBackground(slide.Background, width, height, slideBG(*slide))
-						if slide.Effect != "" {
-							if editMatrix == nil || editMatrix.width != width || editMatrix.height != height {
-								editMatrix = newMatrix(width, height)
-								editStars = newStars(width, height)
-								editBursts = newBursts(slide.Effect, width, height)
-							}
-							drawEffectFrame(slide.Effect, width, height, animationFrame, editMatrix, editStars, editBursts, slideBG(*slide))
+					transparentSelection := selected >= 0 && selected < len(slide.Elements) && elementTransparent(slide.Elements[selected])
+					previousTransparentSelection := prevSelected >= 0 && prevSelected < len(slide.Elements) && elementTransparent(slide.Elements[prevSelected])
+					if fullEditRedraw || len(prevLines) == 0 || transparentSelection || previousTransparentSelection {
+						clearPhysicalTerminalViewport()
+						geometry := fittedTerminalContentGeometry(width, height)
+						if slide.Effect != "" && (editMatrix == nil || editMatrix.width != geometry.Width || editMatrix.height != geometry.Height) {
+							editMatrix = newMatrix(geometry.Width, geometry.Height)
+							editStars = newStars(geometry.Width, geometry.Height)
+							editBursts = newBursts(slide.Effect, geometry.Width, geometry.Height)
 						}
+						canvasFrame, _ := drawTerminalSlideCanvas(*slide, width, height, func(canvas terminalContentGeometry) {
+							if slide.Effect != "" {
+								drawEffectFrame(slide.Effect, canvas.Width, canvas.Height, animationFrame, editMatrix, editStars, editBursts, slideBG(*slide))
+							}
+						})
+						backdropLines := ansiFrameToExportLines(canvasFrame, width, height, ansiCSSColour(slideFG(*slide)))
+						drawTransparentShapeBackdrop(currentLines, backdropLines, width, height, *slide)
 						drawOverlayLines(currentLines, width, height, *slide)
 						drawLinkUnderlines(currentLines, width, height, *slide)
 					} else {
@@ -9604,10 +10001,10 @@ func playEditMode(deck *Deck, current int, width, height, page int, deckPath str
 				insertTextAtCursor(slide, selected, cursor, "/")
 				break
 			}
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) && status == "shape selected" {
+			if mode == "select" && selected >= 0 && selected < len(slide.Elements) && elementSupportsTransparency(slide.Elements[selected]) && (status == "text selected" || status == "code text selected" || status == "image selected" || status == "shape selected") {
 				commitPendingSelectionMove()
 				before := cloneSlide(*slide)
-				toggleShapeTransparency(&slide.Elements[selected])
+				toggleElementTransparency(&slide.Elements[selected])
 				commit(before)
 				status = selectionStatus(*slide, selected, multiSelected)
 				fullEditRedraw = true
@@ -10838,7 +11235,7 @@ func playShortcutHelp(title string, items []shortcutHelpItem, slide Slide, page,
 	renderer := &liveSlideRenderer{}
 	runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			renderer.draw(slide, width, height, page, frame, func(lines []Line) { drawShortcutHelp(title, items, width, height) })
 		},
 		Read: readEvent,
@@ -10907,7 +11304,7 @@ func playAxisScalePicker(slide Slide, page, width, height int, initialMode strin
 	renderer := &liveSlideRenderer{}
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			renderer.draw(slide, width, height, page, frame, func(lines []Line) {
 				drawAxisScalePicker(width, height, options, selected)
 			})
@@ -11633,20 +12030,22 @@ type liveSlideRenderer struct {
 }
 
 func (renderer *liveSlideRenderer) draw(slide Slide, width, height, page, frame int, overlay func([]Line)) {
-	if renderer.effect != slide.Effect || renderer.width != width || renderer.height != height || renderer.matrix == nil {
+	geometry := fittedTerminalContentGeometry(width, height)
+	if renderer.effect != slide.Effect || renderer.width != geometry.Width || renderer.height != geometry.Height || renderer.matrix == nil {
 		renderer.effect = slide.Effect
-		renderer.width = width
-		renderer.height = height
-		renderer.matrix = newMatrix(width, height)
-		renderer.stars = newStars(width, height)
-		renderer.fireworks = newBursts(slide.Effect, width, height)
+		renderer.width = geometry.Width
+		renderer.height = geometry.Height
+		renderer.matrix = newMatrix(geometry.Width, geometry.Height)
+		renderer.stars = newStars(geometry.Width, geometry.Height)
+		renderer.fireworks = newBursts(slide.Effect, geometry.Width, geometry.Height)
 	}
 	flushTerminalFrame(func() {
-		termPrintf("\033[%sm\033[2J\033[H", slideBG(slide))
-		drawStaticBackground(slide.Background, width, height, slideBG(slide))
-		if slide.Effect != "" {
-			drawEffectFrame(slide.Effect, width, height, frame, renderer.matrix, renderer.stars, renderer.fireworks, slideBG(slide))
-		}
+		clearPhysicalTerminalViewport()
+		drawTerminalSlideCanvas(slide, width, height, func(canvas terminalContentGeometry) {
+			if slide.Effect != "" {
+				drawEffectFrame(slide.Effect, canvas.Width, canvas.Height, frame, renderer.matrix, renderer.stars, renderer.fireworks, slideBG(slide))
+			}
+		})
 		lines := displayLines(slide, width, height, page)
 		drawOverlayLines(lines, width, height, slide)
 		drawLinkUnderlines(lines, width, height, slide)
@@ -11677,21 +12076,23 @@ func playEffectPicker(slide Slide, width, height int) (string, bool) {
 	result := ""
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(tick int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
+			geometry := fittedTerminalContentGeometry(width, height)
 			previewEffect := availableEffects[selected]
-			if previewEffect != lastEffect || matrix == nil || matrix.width != width || matrix.height != height {
-				matrix = newMatrix(width, height)
-				stars = newStars(width, height)
-				fireworks = newBursts(previewEffect, width, height)
+			if previewEffect != lastEffect || matrix == nil || matrix.width != geometry.Width || matrix.height != geometry.Height {
+				matrix = newMatrix(geometry.Width, geometry.Height)
+				stars = newStars(geometry.Width, geometry.Height)
+				fireworks = newBursts(previewEffect, geometry.Width, geometry.Height)
 				lastEffect = previewEffect
 				frame = 0
 			}
 			flushTerminalFrame(func() {
-				termPrintf("\033[%sm\033[2J\033[H", slideBG(slide))
-				drawStaticBackground(slide.Background, width, height, slideBG(slide))
-				if previewEffect != "none" {
-					drawEffectFrame(previewEffect, width, height, frame, matrix, stars, fireworks, slideBG(slide))
-				}
+				clearPhysicalTerminalViewport()
+				drawTerminalSlideCanvas(slide, width, height, func(canvas terminalContentGeometry) {
+					if previewEffect != "none" {
+						drawEffectFrame(previewEffect, canvas.Width, canvas.Height, frame, matrix, stars, fireworks, slideBG(slide))
+					}
+				})
 				drawOverlayLines(displayLines(slide, width, height, 0), width, height, slide)
 				drawEffectPicker(width, height, selected)
 				termPrint("\033[0m")
@@ -11737,7 +12138,7 @@ func playShapePicker(slide Slide, width, height, page int, current string) (stri
 	renderer := &liveSlideRenderer{}
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			renderer.draw(slide, width, height, page, frame, func(lines []Line) { drawShapePicker(width, height, selected) })
 		},
 		Read: readEffectPickerKeyEvent,
@@ -11783,7 +12184,7 @@ func playBackgroundPicker(slide Slide, width, height int) (string, bool) {
 	renderer := &liveSlideRenderer{}
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			preview := slide
 			previewBackground := availableBackgrounds[selected]
 			if previewBackground == "none" {
@@ -11997,7 +12398,7 @@ func playColorPicker(slide Slide, current string, selected, width, height, page 
 	renderer := &liveSlideRenderer{}
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			withFastImageRender(func() {
 				renderer.draw(slide, width, height, page, frame, func(lines []Line) {
 					if selected >= 0 && selected < len(slide.Elements) {
@@ -12488,7 +12889,7 @@ type imagePlacementResult struct {
 }
 
 func playImagePlacementMode(slide *Slide, slideIndex, slideCount, imageIndex, width, height, page int, original Slide, clipboard **Element, persist func() bool) imagePlacementResult {
-	width, height = terminalAuthoredSize()
+	width, height = terminalSize()
 	withFastImageRender(func() {
 		normalizeImagePlacement(slide, imageIndex, width, height)
 	})
@@ -12502,7 +12903,7 @@ func playImagePlacementMode(slide *Slide, slideIndex, slideCount, imageIndex, wi
 			if imageIndex < 0 || imageIndex >= len(slide.Elements) {
 				return
 			}
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			background := cloneSlide(*slide)
 			background.Elements = append(background.Elements[:imageIndex], background.Elements[imageIndex+1:]...)
 			withFastImageRender(func() {
@@ -12676,7 +13077,7 @@ type imageSettingField struct {
 }
 
 var imageSettingFields = []imageSettingField{
-	{Key: "glyph", Label: "Glyph", Values: []string{"blocks", "braille", "shade", "ascii", "dense"}},
+	{Key: "glyph", Label: "Glyph", Values: []string{"blocks", "braille", "ascii", "dense"}},
 	{Key: "shape", Label: "Shape", Values: []string{"subject", "contrast", "saturation", "luma", "alpha"}},
 	{Key: "brightness", Label: "Brightness", Min: 0.2, Max: 2.0, Step: 0.1},
 	{Key: "contrast", Label: "Contrast", Min: 0.2, Max: 2.0, Step: 0.1},
@@ -12686,7 +13087,7 @@ var imageSettingFields = []imageSettingField{
 }
 
 var textSettingFields = []imageSettingField{
-	{Key: "glyph", Label: "Glyph", Values: []string{"blocks", "braille", "shade", "ascii", "dense"}},
+	{Key: "glyph", Label: "Glyph", Values: []string{"blocks", "braille", "ascii", "dense"}},
 }
 
 func playImageSettingsDialog(slide Slide, imageIndex, width, height, page int) (string, bool) {
@@ -12709,7 +13110,7 @@ func playImageSettingsDialog(slide Slide, imageIndex, width, height, page int) (
 	renderer := &liveSlideRenderer{}
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			preview := cloneSlide(slide)
 			preview.Elements[imageIndex].Query = query
 			withFastImageRender(func() {
@@ -13708,8 +14109,8 @@ func elementHasOutline(element Element) bool {
 	return err == nil && values.Get("outline") != ""
 }
 
-func toggleShapeTransparency(element *Element) {
-	if element == nil || element.Kind != "shape" {
+func toggleElementTransparency(element *Element) {
+	if element == nil || !elementSupportsTransparency(*element) {
 		return
 	}
 	values, _ := url.ParseQuery(element.Query)
@@ -13723,7 +14124,28 @@ func toggleShapeTransparency(element *Element) {
 
 func elementTransparent(element Element) bool {
 	values, err := url.ParseQuery(element.Query)
-	return err == nil && values.Get("transparent") == "1"
+	return err == nil && values.Get("transparent") == "1" && elementSupportsTransparency(element)
+}
+
+func elementSupportsTransparency(element Element) bool {
+	switch element.Kind {
+	case "heading", "text", "text-image", "bullet", "code", "shape", "image":
+	default:
+		return false
+	}
+	if element.Kind == "image" && strings.EqualFold(filepath.Ext(strings.SplitN(element.Path, "?", 2)[0]), ".gif") {
+		return false
+	}
+	values, err := url.ParseQuery(element.Query)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(values.Get("glyph")) {
+	case "", "block", "blocks":
+		return true
+	default:
+		return false
+	}
 }
 
 func outlineLineQuery(query string) string {
@@ -13764,7 +14186,7 @@ func playSearchMode(slides []Slide, current, page, width, height int, lastQuery 
 	renderer := &liveSlideRenderer{}
 	runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			renderer.draw(slides[current], width, height, page, frame, func(lines []Line) {
 				drawSearchHighlights(lines, slides[current], width, height, query)
 				drawSearchField(width, height, query, status)
@@ -13826,7 +14248,7 @@ func playLinkInput(slide Slide, width, height, page int, current string, slideCo
 	renderer := &liveSlideRenderer{}
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			renderer.draw(slide, width, height, page, frame, func(lines []Line) { drawLinkField(width, height, query, status) })
 		},
 		Read: readLinkInputKeyEvent,
@@ -13878,7 +14300,7 @@ func playJumpMode(slides []Slide, current, page, width, height int) (int, int) {
 	renderer := &liveSlideRenderer{}
 	runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			renderer.draw(slides[current], width, height, page, frame, func(lines []Line) { drawJumpField(width, height, query, status) })
 		},
 		Read: readJumpKeyEvent,
@@ -14173,6 +14595,21 @@ func drawViewOverlays(width, height int, view ViewState) {
 	if view.TimerMode != "" {
 		drawTimerOverlay(width, height, view.TimerMode, view.TimerInput, view.TimerDeadline)
 	}
+	drawViewportFitWarning(width, height)
+}
+
+func viewportFitWarningActive() bool {
+	return viewportWarning.Text != "" && time.Now().Before(viewportWarning.ExpiresAt)
+}
+
+func drawViewportFitWarning(width, height int) {
+	if width <= 0 || height <= 1 || !viewportFitWarningActive() {
+		return
+	}
+	text := cropANSIVisible(viewportWarning.Text, max(1, width-4))
+	textWidth := displayWidth(text)
+	col := max(1, (width-textWidth)/2+1)
+	termPrintf("\033[0;30;103m\033[1;%dH %s \033[0m", col, text)
 }
 
 func slideNumberLabel(view ViewState) string {
@@ -14482,9 +14919,10 @@ const (
 )
 
 type interactionContext struct {
-	Mode      editorMode
-	Selection selectionKind
-	Master    bool
+	Mode                 editorMode
+	Selection            selectionKind
+	Master               bool
+	SupportsTransparency bool
 }
 
 type actionSpec struct {
@@ -14518,6 +14956,7 @@ func interactionContextFor(mode string, slide Slide, selected int, selection map
 	if selected < 0 || selected >= len(slide.Elements) {
 		return ctx
 	}
+	ctx.SupportsTransparency = elementSupportsTransparency(slide.Elements[selected])
 	if status == "code text selected" {
 		ctx.Selection = selectionCode
 		return ctx
@@ -14592,7 +15031,7 @@ func editActionSpecs(ctx interactionContext) []actionSpec {
 			action("1", "slide overview", "1 slides", "1", true, 3, "slide-list"),
 			action("2", "speaker notes", "2 notes", "2", true, 3, "speaker-notes"),
 			action("Ctrl-V", "paste element", "", "", false, 4, "paste"),
-			action("t / i / s", "insert text, image, or shape", "", "", false, 3, "insert-text", "insert-image", "style"),
+			action("t / i / s", "insert text, image, or shape", "", "", false, 3, "insert-text", "insert-image", "shape-picker"),
 		)
 	}
 	if ctx.Master {
@@ -14644,10 +15083,10 @@ func editActionSpecs(ctx interactionContext) []actionSpec {
 	if ctx.Selection == selectionText || ctx.Selection == selectionImage || ctx.Selection == selectionShape {
 		specs = append(specs, action("l", "set link", "", "", false, 3, "link"))
 	}
-	if ctx.Selection == selectionShape {
-		specs = append(specs, action("/", "toggle see-through shape", "/ see-through", "/", true, 2, "transparency"))
+	if ctx.SupportsTransparency && (ctx.Selection == selectionText || ctx.Selection == selectionCode || ctx.Selection == selectionImage || ctx.Selection == selectionShape) {
+		specs = append(specs, action("/", "toggle see-through", "/ see-through", "/", true, 2, "transparency"))
 	}
-	if ctx.Selection == selectionMulti {
+	if ctx.Selection == selectionText || ctx.Selection == selectionImage || ctx.Selection == selectionShape || ctx.Selection == selectionMulti {
 		specs = append(specs, action("< / = / >", "align left, center, or right", "align", "align", true, 2, "align-left", "align-center", "align-right"))
 	}
 	if ctx.Selection != selectionNone && ctx.Selection != selectionCode && ctx.Selection != selectionPage {
@@ -17416,7 +17855,7 @@ func parseImageASCIIOptions(query string) imageASCIIOptions {
 		return opts
 	}
 	switch strings.ToLower(values.Get("glyph")) {
-	case "braille", "shade", "ascii", "dense":
+	case "braille", "ascii", "dense":
 		opts.glyph = strings.ToLower(values.Get("glyph"))
 	case "blocks", "block", "":
 		opts.glyph = "blocks"
@@ -17533,11 +17972,6 @@ func unicodeImageCellRune(block [8]rgba8, decisions [8]bool, opts imageASCIIOpti
 			}
 		}
 		return rune(0x2800 + mask)
-	case "shade":
-		if opts.binaryTone {
-			return binaryToneGlyph(decisions, []rune(" ░▒▓█"))
-		}
-		return toneGlyph(block, decisions, []rune(" ░▒▓█"))
 	case "ascii":
 		if opts.binaryTone {
 			return binaryToneGlyph(decisions, []rune(" .:-=+*#%@"))
@@ -18150,42 +18584,23 @@ func playEffect(slide Slide, width, height, page int, view ViewState) string {
 	frame := 0
 	overlay := displayLines(slide, width, height, page)
 	hasAnimatedOverlay := slideHasAnimatedImage(slide)
-	matrix := newMatrix(width, height)
-	stars := newStars(width, height)
-	fireworks := newBursts(name, width, height)
-	cleared := false
+	geometry := fittedTerminalContentGeometry(width, height)
+	matrix := newMatrix(geometry.Width, geometry.Height)
+	stars := newStars(geometry.Width, geometry.Height)
+	fireworks := newBursts(name, geometry.Width, geometry.Height)
 	for {
 		if action := pollKey(); action != "" {
 			return action
 		}
 		flushTerminalFrame(func() {
-			var backdropLines []exportLine
-			if name == "matrix" || name == "plasma" {
-				if !cleared {
-					termPrintf("\033[%sm\033[2J\033[H%s", slideBG(slide), slideStyle(slide, false))
-					backgroundFrame := captureTerminalOutput(func() {
-						drawStaticBackground(slide.Background, width, height, slideBG(slide))
-					})
-					termPrint(backgroundFrame)
-					backdropLines = append(backdropLines, ansiFrameToExportLines(backgroundFrame, width, height, ansiCSSColour(slideFG(slide)))...)
-					cleared = true
-				}
-			} else {
-				termPrintf("\033[%sm\033[2J\033[H%s", slideBG(slide), slideStyle(slide, false))
-				backgroundFrame := captureTerminalOutput(func() {
-					drawStaticBackground(slide.Background, width, height, slideBG(slide))
-				})
-				termPrint(backgroundFrame)
-				backdropLines = append(backdropLines, ansiFrameToExportLines(backgroundFrame, width, height, ansiCSSColour(slideFG(slide)))...)
-			}
-			effectFrame := captureTerminalOutput(func() {
-				drawEffectFrame(name, width, height, frame, matrix, stars, fireworks, slideBG(slide))
+			clearPhysicalTerminalViewport()
+			canvasFrame, _ := drawTerminalSlideCanvas(slide, width, height, func(canvas terminalContentGeometry) {
+				drawEffectFrame(name, canvas.Width, canvas.Height, frame, matrix, stars, fireworks, slideBG(slide))
 			})
-			termPrint(effectFrame)
 			if hasAnimatedOverlay {
 				overlay = displayLines(slide, width, height, page)
 			}
-			backdropLines = append(backdropLines, ansiFrameToExportLines(effectFrame, width, height, ansiCSSColour(slideFG(slide)))...)
+			backdropLines := ansiFrameToExportLines(canvasFrame, width, height, ansiCSSColour(slideFG(slide)))
 			drawTransparentShapeBackdrop(overlay, backdropLines, width, height, slide)
 			drawOverlayLines(overlay, width, height, slide)
 			drawLinkUnderlines(overlay, width, height, slide)

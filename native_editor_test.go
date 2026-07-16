@@ -32,8 +32,39 @@ func TestNativeEditorMutationsPersistAndUndo(t *testing.T) {
 	if len(state.Slides[0].Elements) != 1 || state.Slides[0].Elements[0].Text != "Original" {
 		t.Fatalf("state after undo = %#v", state)
 	}
+	if state.Selected != -1 || len(state.Selection) != 0 {
+		t.Fatalf("selection after undo = selected %d, selection %v", state.Selected, state.Selection)
+	}
+	if err := session.apply(nativeEditorAction{Action: "select-element", Element: 0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.apply(nativeEditorAction{Action: "redo"}); err != nil {
+		t.Fatal(err)
+	}
+	state = session.state()
+	if len(state.Slides[0].Elements) != 2 || state.Selected != -1 || len(state.Selection) != 0 {
+		t.Fatalf("state after redo = %#v", state)
+	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestNativeEditorPastesCopiedElementsWithFreshIDs(t *testing.T) {
+	session := newNativeEditorSession(filepath.Join(t.TempDir(), "deck.md"), Deck{Slides: []Slide{{Elements: []Element{{Kind: "text", Text: "Existing", ID: "existing"}}}}})
+	copied := []Element{{Kind: "text", Text: "Copied", ID: "old-copy"}, {Kind: "shape", Query: "shape=diamond", ID: "old-shape"}}
+	if err := session.apply(nativeEditorAction{Action: "paste-elements", ElementsData: copied}); err != nil {
+		t.Fatal(err)
+	}
+	state := session.state()
+	if len(state.Slides[0].Elements) != 3 || state.Selected != 2 {
+		t.Fatalf("state after paste = %#v", state)
+	}
+	if state.Slides[0].Elements[1].Text != "Copied" || state.Slides[0].Elements[2].Query != "shape=diamond" {
+		t.Fatalf("pasted elements = %#v", state.Slides[0].Elements)
+	}
+	if state.Slides[0].Elements[1].ID == "old-copy" || state.Slides[0].Elements[2].ID == "old-shape" {
+		t.Fatalf("pasted elements kept source IDs: %#v", state.Slides[0].Elements)
 	}
 }
 
@@ -306,8 +337,123 @@ func TestNativeEditorDuplicatesElementWithNewIdentity(t *testing.T) {
 	}
 }
 
+func TestNormalizedTextKindPlacementKeepsLargerHeadingOnCurrentPage(t *testing.T) {
+	element := Element{Kind: "heading", Level: 1, Text: "Hi", ID: "edge", Query: "left_pct=0.950000&top=20"}
+	normalized := normalizedTextKindPlacement(Slide{Elements: []Element{element}}, element, 0, 80, 25, 0)
+	preview := Slide{Elements: []Element{normalized}}
+	top, bottom, left, right, ok := elementFullBox(preview, 0, 80, 25)
+	if !ok {
+		t.Fatal("normalized heading did not render")
+	}
+	if top < 0 || bottom >= 25 || left < 0 || right >= 80 {
+		t.Fatalf("normalized bounds = top:%d bottom:%d left:%d right:%d query=%q", top, bottom, left, right, normalized.Query)
+	}
+	if placement := parseImagePlacement(normalized.Query); placement.top == nil || *placement.top >= 20 {
+		t.Fatalf("normalized query did not move heading up: %q", normalized.Query)
+	} else if placement.leftPct == nil || *placement.leftPct >= 0.95 {
+		t.Fatalf("normalization did not retain a safe relative horizontal placement: %q", normalized.Query)
+	}
+}
+
+func TestNormalizedTextKindPlacementPreservesAlignmentAndRelativeOffsets(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		check func(imagePlacement) bool
+	}{
+		{name: "alignment", query: "align=center&row_delta=2", check: func(placement imagePlacement) bool {
+			return placement.align == "center" && placement.rowDelta != nil && *placement.rowDelta == 2
+		}},
+		{name: "relative offset", query: "left_pct=0.350000&top=2", check: func(placement imagePlacement) bool {
+			return placement.leftPct != nil && *placement.leftPct == 0.35 && placement.top != nil && *placement.top == 2
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			element := Element{Kind: "heading", Level: 2, Text: "Hi", ID: "placed", Query: test.query}
+			normalized := normalizedTextKindPlacement(Slide{Elements: []Element{element}}, element, 0, 80, 25, 0)
+			if placement := parseImagePlacement(normalized.Query); !test.check(placement) {
+				t.Fatalf("placement changed from %q to %q", test.query, normalized.Query)
+			}
+		})
+	}
+}
+
+func TestNormalizedLongHeadingRemainsVisibleOnConversionPage(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		text  string
+		query string
+	}{
+		{name: "bottom", text: "Bottom", query: "left_pct=0.100000&top=22"},
+		{name: "long from middle", text: "This is a longer sentence converted into a large heading", query: "left_pct=0.100000&top=12"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			element := Element{Kind: "heading", Level: 1, Text: test.text, ID: "converted", Query: test.query}
+			normalized := normalizedTextKindPlacement(Slide{Elements: []Element{element}}, element, 0, 80, 25, 0)
+			pages := exportSlidePages(Slide{Elements: []Element{normalized}}, 0, 1, 80, 25)
+			if len(pages) == 0 {
+				t.Fatal("conversion rendered no pages")
+			}
+			visible := false
+			for _, line := range pages[0].Lines {
+				if line.Element == 0 && len(line.Parts) > 0 {
+					visible = true
+					break
+				}
+			}
+			if !visible {
+				t.Fatalf("converted heading absent from first page: query=%q pages=%d", normalized.Query, len(pages))
+			}
+		})
+	}
+}
+
+func TestNormalizeTextKindFindsUnidentifiedLocalElementAfterMasterContent(t *testing.T) {
+	deck := Deck{
+		Masters: defaultMasterDeck(),
+		Slides:  []Slide{{LayoutID: "title", Elements: []Element{{Kind: "text", Text: "Bottom", Query: "left_pct=0.100000&top=22"}}}},
+	}
+	session := newNativeEditorSession(filepath.Join(t.TempDir(), "deck.md"), deck)
+	action := nativeEditorAction{
+		Element: 0, Cols: 80, Rows: 25,
+		ElementData: &Element{Kind: "heading", Level: 1, Text: "Bottom", Query: "left_pct=0.100000&top=22"},
+	}
+	body, err := json.Marshal(action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/editor/normalize-text-kind", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	session.handleNormalizeTextKind(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("normalization status = %d: %s", response.Code, response.Body.String())
+	}
+	var result nativeEditorTextFit
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Element.ID == "" {
+		t.Fatal("normalization did not assign a stable element identity")
+	}
+	placement := parseImagePlacement(result.Element.Query)
+	if placement.top == nil || *placement.top >= 22 {
+		t.Fatalf("master-resolved heading was not moved onto the current page: %q", result.Element.Query)
+	}
+	visible := false
+	for _, line := range result.Pages[0].Lines {
+		if line.Element > 0 && len(line.Parts) > 0 {
+			visible = true
+			break
+		}
+	}
+	if !visible {
+		t.Fatal("normalized local heading is absent behind master content")
+	}
+}
+
 func TestNativeEditorRefreshScopeAvoidsFullDeckReloadForElementMutations(t *testing.T) {
-	for _, action := range []string{"add-element", "duplicate-element", "update-element", "delete-element", "delete-selection", "move-element", "update-slide", "set-layout"} {
+	for _, action := range []string{"add-element", "duplicate-element", "paste-elements", "update-element", "delete-element", "delete-selection", "move-element", "update-slide", "set-layout"} {
 		if got := nativeEditorRefreshScope(action); got != "slide" {
 			t.Fatalf("refresh scope for %q = %q, want slide", action, got)
 		}

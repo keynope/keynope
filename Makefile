@@ -5,6 +5,8 @@ LIBEXECDIR ?= $(PREFIX)/libexec/keynope
 GO ?= go
 SWIFTC ?= swiftc
 CODESIGN ?= codesign
+ACTOOL ?= xcrun actool
+PLUTIL ?= plutil
 SWIFTFLAGS ?= -warnings-as-errors -strict-concurrency=complete
 MACOSX_DEPLOYMENT_TARGET ?= 14.0
 SWIFT_ARCH ?= $(shell uname -m)
@@ -19,6 +21,10 @@ KEYNOPE_APP := $(BIN_DIR)/Keynope.app
 KEYNOPE_APP_EXECUTABLE := $(KEYNOPE_APP)/Contents/MacOS/Keynope
 KEYNOPE_APP_ENGINE := $(KEYNOPE_APP)/Contents/Helpers/keynope-engine
 KEYNOPE_APP_INFO := app/Info.plist
+KEYNOPE_APP_ICON := assets/KeynopeApp.icon
+KEYNOPE_APP_ICON_FILES := $(shell find $(KEYNOPE_APP_ICON) -type f)
+KEYNOPE_APP_ICON_INFO := $(BIN_DIR)/KeynopeAppIconInfo.plist
+KEYNOPE_VERSION := $(shell awk '/^\#\# [0-9]/{print $$2; exit}' CHANGELOG.md)
 PRESENTER_INFO := presenter/Info.plist
 PRESENTER_ICON := assets/KeynopeMenuTemplate.png
 PRESENTER_SIGNATURE := $(PRESENTER_APP)/Contents/_CodeSignature/CodeResources
@@ -38,10 +44,12 @@ presenter: $(PRESENTER_SIGNATURE)
 
 app: $(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources
 
-$(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE_APP_INFO) $(PRESENTER_ICON) $(GO_SRC) go.mod go.sum
+$(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE_APP_INFO) $(KEYNOPE_APP_ICON_FILES) $(PRESENTER_ICON) $(GO_SRC) go.mod go.sum CHANGELOG.md
 	rm -rf $(KEYNOPE_APP)
 	@mkdir -p $(KEYNOPE_APP)/Contents/MacOS $(KEYNOPE_APP)/Contents/Helpers $(KEYNOPE_APP)/Contents/Resources
 	cp $(KEYNOPE_APP_INFO) $(KEYNOPE_APP)/Contents/Info.plist
+	$(PLUTIL) -replace CFBundleShortVersionString -string "$(KEYNOPE_VERSION)" $(KEYNOPE_APP)/Contents/Info.plist
+	$(ACTOOL) $(KEYNOPE_APP_ICON) --compile $(KEYNOPE_APP)/Contents/Resources --platform macosx --minimum-deployment-target $(MACOSX_DEPLOYMENT_TARGET) --app-icon KeynopeApp --output-partial-info-plist $(KEYNOPE_APP_ICON_INFO)
 	cp $(PRESENTER_ICON) $(KEYNOPE_APP)/Contents/Resources/KeynopeMenuTemplate.png
 	$(GO) build -o $(KEYNOPE_APP_ENGINE) .
 	$(SWIFTC) $(SWIFTFLAGS) -target $(SWIFT_TARGET) -O $(PRESENTER_FRAMEWORKS) $(PRESENTER_SRC) -o $(KEYNOPE_APP_EXECUTABLE)

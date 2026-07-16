@@ -1,8 +1,10 @@
 package main
 
 import (
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -164,10 +166,10 @@ func TestSelectionActionMatrix(t *testing.T) {
 		allowed    []string
 		disallowed []string
 	}{
-		{selectionText, []string{"enter", "promote", "color", "style", "outline", "rotate", "link", "copy"}, []string{"shape-toggle", "layer-back", "transparency"}},
+		{selectionText, []string{"enter", "promote", "color", "style", "outline", "rotate", "link", "copy", "align-left", "align-center", "align-right"}, []string{"shape-toggle", "layer-back"}},
 		{selectionCode, []string{"enter", "color", "outline"}, []string{"up", "promote", "style", "copy", "shape-toggle"}},
-		{selectionImage, []string{"up", "promote", "shape-toggle", "style", "outline", "layer-back", "link", "copy"}, []string{"color", "rotate", "transparency"}},
-		{selectionShape, []string{"up", "promote", "shape-toggle", "color", "style", "outline", "layer-back", "link", "transparency", "copy"}, []string{"rotate"}},
+		{selectionImage, []string{"up", "promote", "shape-toggle", "style", "outline", "layer-back", "link", "copy", "align-left", "align-center", "align-right"}, []string{"color", "rotate"}},
+		{selectionShape, []string{"up", "promote", "shape-toggle", "color", "style", "outline", "layer-back", "link", "copy", "align-left", "align-center", "align-right"}, []string{"rotate"}},
 		{selectionMulti, []string{"up", "shift-right", "align-center", "copy", "cut", "backspace"}, []string{"promote", "demote", "shape-toggle", "style", "color"}},
 	}
 	for _, test := range tests {
@@ -184,6 +186,43 @@ func TestSelectionActionMatrix(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSeeThroughActionOnlyAppearsForBlockGlyphElements(t *testing.T) {
+	tests := []struct {
+		name    string
+		element Element
+		status  string
+		want    bool
+	}{
+		{name: "default block text", element: Element{Kind: "text"}, status: "text selected", want: true},
+		{name: "block text", element: Element{Kind: "text", Query: "glyph=blocks"}, status: "text selected", want: true},
+		{name: "block image", element: Element{Kind: "image", Path: "still.png", Query: "glyph=blocks"}, status: "image selected", want: true},
+		{name: "block shape", element: Element{Kind: "shape", Query: "glyph=blocks"}, status: "shape selected", want: true},
+		{name: "braille text", element: Element{Kind: "text", Query: "glyph=braille"}, status: "text selected"},
+		{name: "ascii image", element: Element{Kind: "image", Path: "still.png", Query: "glyph=ascii"}, status: "image selected"},
+		{name: "ascii shape", element: Element{Kind: "shape", Query: "glyph=ascii"}, status: "shape selected"},
+		{name: "animated gif", element: Element{Kind: "image", Path: "animated.gif", Query: "glyph=blocks"}, status: "image selected"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			slide := Slide{Elements: []Element{test.element}}
+			ctx := interactionContextFor("select", slide, 0, nil, test.status)
+			if got := actionSpecsAllow(editActionSpecs(ctx), "transparency"); got != test.want {
+				t.Fatalf("see-through action = %v, want %v for %#v", got, test.want, test.element)
+			}
+		})
+	}
+}
+
+func TestEmptySelectionUsesSForShapePicker(t *testing.T) {
+	specs := editActionSpecs(interactionContext{Mode: editorModeSelect, Selection: selectionNone})
+	if !actionSpecsAllow(specs, "shape-picker") {
+		t.Fatal("empty selection does not allow shape picker")
+	}
+	if actionSpecsAllow(specs, "style") {
+		t.Fatal("empty selection unexpectedly routes s to style")
 	}
 }
 
@@ -235,6 +274,122 @@ func TestAdaptiveToolbarFitsWholeSegments(t *testing.T) {
 	}
 }
 
+func TestFittedTerminalContentGeometryUsesUniformScale(t *testing.T) {
+	previousWidth, previousHeight := authoredTerminalWidth, authoredTerminalHeight
+	defer func() {
+		authoredTerminalWidth, authoredTerminalHeight = previousWidth, previousHeight
+	}()
+	authoredTerminalWidth, authoredTerminalHeight = 245, 56
+
+	tests := []struct {
+		name                     string
+		width, height            int
+		wantWidth, wantHeight    int
+		wantOffsetX, wantOffsetY int
+		wantFitted               bool
+	}{
+		{name: "width constrained", width: 180, height: 56, wantWidth: 180, wantHeight: 41, wantOffsetY: 7, wantFitted: true},
+		{name: "height constrained", width: 245, height: 40, wantWidth: 175, wantHeight: 40, wantOffsetX: 35, wantFitted: true},
+		{name: "both fit", width: 300, height: 70, wantWidth: 245, wantHeight: 56},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := fittedTerminalContentGeometry(test.width, test.height)
+			if got.Width != test.wantWidth || got.Height != test.wantHeight || got.OffsetX != test.wantOffsetX || got.OffsetY != test.wantOffsetY || got.Fitted != test.wantFitted {
+				t.Fatalf("geometry = %#v, want %dx%d offset %d,%d fitted=%v", got, test.wantWidth, test.wantHeight, test.wantOffsetX, test.wantOffsetY, test.wantFitted)
+			}
+			if got.Fitted {
+				scaleX := float64(got.Width) / 245
+				scaleY := float64(got.Height) / 56
+				if math.Abs(scaleX-scaleY) > 0.02 {
+					t.Fatalf("non-uniform scale: x=%.3f y=%.3f", scaleX, scaleY)
+				}
+			}
+		})
+	}
+}
+
+func TestFittedDisplayLinesStayInsidePhysicalViewport(t *testing.T) {
+	previousWidth, previousHeight := authoredTerminalWidth, authoredTerminalHeight
+	defer func() {
+		authoredTerminalWidth, authoredTerminalHeight = previousWidth, previousHeight
+	}()
+	authoredTerminalWidth, authoredTerminalHeight = 245, 56
+
+	slide := Slide{Elements: []Element{
+		{Kind: "heading", Level: 1, Text: "RIGHT EDGE", Query: "align=right"},
+		{Kind: "shape", Query: "shape=square&right=0&bottom=0&width=24&height=8"},
+	}}
+	const width, height = 120, 32
+	for _, line := range displayLines(slide, width, height, 0) {
+		if line.Row < 0 || line.Row >= height {
+			t.Fatalf("line row %d outside height %d", line.Row, height)
+		}
+		if line.Col < 0 || line.Col >= width {
+			t.Fatalf("line column %d outside width %d", line.Col, width)
+		}
+		if end := line.Col + displayWidth(stripANSI(line.Text)); end > width {
+			t.Fatalf("line ends at column %d beyond width %d: %#v", end, width, line)
+		}
+	}
+}
+
+func TestLargerTerminalKeepsSlideInsideAuthoredViewport(t *testing.T) {
+	previousWidth, previousHeight := authoredTerminalWidth, authoredTerminalHeight
+	defer func() {
+		authoredTerminalWidth, authoredTerminalHeight = previousWidth, previousHeight
+	}()
+	authoredTerminalWidth, authoredTerminalHeight = 80, 25
+
+	slide := Slide{Elements: []Element{
+		{Kind: "shape", Query: "shape=square&right=0&bottom=0&width=12&height=6"},
+	}}
+	lines := displayLines(slide, 120, 40, 0)
+	if len(lines) == 0 {
+		t.Fatal("expected rendered shape")
+	}
+	for _, line := range lines {
+		if line.Row < 0 || line.Row >= 25 {
+			t.Fatalf("line row %d escaped authored height", line.Row)
+		}
+		if line.Col < 0 || line.Col+displayWidth(stripANSI(line.Text)) > 80 {
+			t.Fatalf("line escaped authored width: %#v", line)
+		}
+	}
+	if got := elementAtPoint(lines, 100, 10); got != -1 {
+		t.Fatalf("outside-authored click selected element %d", got)
+	}
+}
+
+func TestSlideCanvasBackgroundDoesNotPaintTerminalMargins(t *testing.T) {
+	previousWidth, previousHeight := authoredTerminalWidth, authoredTerminalHeight
+	previousFrame := terminalFrame
+	defer func() {
+		authoredTerminalWidth, authoredTerminalHeight = previousWidth, previousHeight
+		terminalFrame = previousFrame
+	}()
+	authoredTerminalWidth, authoredTerminalHeight = 80, 25
+
+	slide := Slide{Background: "mesh", BG: "44", BGSet: true}
+	var output strings.Builder
+	terminalFrame = &output
+	frame, geometry := drawTerminalSlideCanvas(slide, 120, 40, nil)
+	terminalFrame = previousFrame
+	if geometry.Width != 80 || geometry.Height != 25 {
+		t.Fatalf("canvas geometry = %#v", geometry)
+	}
+	for _, line := range ansiFrameToExportLines(frame, 120, 40, "#ffffff") {
+		if line.Row < geometry.OffsetY || line.Row >= geometry.OffsetY+geometry.Height {
+			t.Fatalf("background row %d painted terminal margin", line.Row)
+		}
+		for _, part := range line.Parts {
+			if part.Col < geometry.OffsetX || part.Col+displayWidth(part.Text) > geometry.OffsetX+geometry.Width {
+				t.Fatalf("background part painted terminal margin: %#v", part)
+			}
+		}
+	}
+}
+
 func TestOverlayLoopCommit(t *testing.T) {
 	draws := 0
 	reads := 0
@@ -271,6 +426,17 @@ func TestPresenterStatusHandler(t *testing.T) {
 	available, target, live := companion.Status()
 	if !available || target != "external" || !live {
 		t.Fatalf("available=%v target=%q live=%v", available, target, live)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/presenter-status", strings.NewReader(`{"mode":"external","paused":true}`))
+	recorder = httptest.NewRecorder()
+	companion.handlePresenterStatus(recorder, request)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("paused status = %d", recorder.Code)
+	}
+	_, target, live = companion.Status()
+	if target != "external" || live {
+		t.Fatalf("paused target=%q live=%v", target, live)
 	}
 
 	request = httptest.NewRequest(http.MethodPost, "/presenter-status", strings.NewReader(`{"mode":"none"}`))
@@ -491,9 +657,63 @@ func TestTransparentTextMaskUsesResolvedTextColour(t *testing.T) {
 	}
 }
 
+func TestTransparentCodeKeepsTextOpaqueAndMakesBackdropTransparent(t *testing.T) {
+	slide := Slide{Elements: []Element{{Kind: "code", Text: "go", Query: "transparent=1"}}}
+	lines := []Line{{Text: "go  ", Role: "code", Row: 2, Col: 3, Element: 0, Query: "transparent=1"}}
+	exported := exportLines(lines, slide, 20, 10, 1)
+	if len(exported) != 1 || exported[0].Role != "code" {
+		t.Fatalf("transparent code export = %#v, want opaque code text", exported)
+	}
+	for _, part := range exported[0].Parts {
+		if part.Background != "" {
+			t.Fatalf("transparent code text retained background %q", part.Background)
+		}
+	}
+	cells := transparentShapeCells(lines, 20, 10, slide)
+	for col := 3; col < 7; col++ {
+		if got := cells[2][col]; got != "100" {
+			t.Fatalf("transparent code backdrop cell %d = %q, want gray background 100", col, got)
+		}
+	}
+}
+
+func TestTransparencyOnlyAppliesToBlockGlyphElements(t *testing.T) {
+	for _, element := range []Element{
+		{Kind: "text", Query: "transparent=1"},
+		{Kind: "shape", Query: "glyph=blocks&transparent=1"},
+		{Kind: "image", Path: "still.png", Query: "glyph=block&transparent=1"},
+	} {
+		if !elementTransparent(element) {
+			t.Fatalf("block element should be transparent: %#v", element)
+		}
+	}
+	for _, element := range []Element{
+		{Kind: "text", Query: "glyph=braille&transparent=1"},
+		{Kind: "shape", Query: "glyph=ascii&transparent=1"},
+		{Kind: "image", Path: "animated.gif", Query: "glyph=blocks&transparent=1"},
+	} {
+		if elementTransparent(element) {
+			t.Fatalf("non-block or animated GIF element should ignore transparency: %#v", element)
+		}
+		if values, _ := url.ParseQuery(element.Query); values.Get("transparent") != "1" {
+			t.Fatalf("ignored transparency flag was removed: %#v", element)
+		}
+	}
+}
+
+func TestTransparencyAveragesUnderlyingAndOverlayColours(t *testing.T) {
+	const want = "38;2;85;85;85"
+	if got := blendFGForTransparency("33", "44"); got != want {
+		t.Fatalf("bright underlying item blended with dark see-through item = %q, want %q", got, want)
+	}
+	if got := blendFGForTransparency("34", "43"); got != want {
+		t.Fatalf("dark underlying item blended with bright see-through item = %q, want %q", got, want)
+	}
+}
+
 func TestTransparentImageExportsAsSelectableTransparencyMask(t *testing.T) {
 	slide := Slide{Elements: []Element{{Kind: "image", Query: "transparent=1"}}}
-	lines := []Line{{Text: "██", Role: "image", Row: 2, Col: 3, Element: 0, Query: "transparent=1"}}
+	lines := []Line{{Text: "\033[31m█\033[34m█", Role: "image", Row: 2, Col: 3, Element: 0, Query: "transparent=1"}}
 	exported := exportLines(lines, slide, 20, 10, 1)
 	if len(exported) != 1 || exported[0].Role != "transparent-image" {
 		t.Fatalf("transparent image export = %#v, want selectable transparent-image source", exported)
@@ -501,6 +721,13 @@ func TestTransparentImageExportsAsSelectableTransparencyMask(t *testing.T) {
 	mask := transparentShapeExportLines(lines, 20, 10, slide)
 	if len(mask) != 1 || mask[0].Row != 2 || len(mask[0].Parts) == 0 {
 		t.Fatalf("transparent image mask = %#v, want row 2 mask", mask)
+	}
+	cells := transparentShapeCells(lines, 20, 10, slide)
+	if got := ansiCSSColour(cells[2][3]); got != "rgb(170,0,0)" {
+		t.Fatalf("first transparent image cell = %q, want red", got)
+	}
+	if got := ansiCSSColour(cells[2][4]); got != "rgb(0,0,170)" {
+		t.Fatalf("second transparent image cell = %q, want blue", got)
 	}
 }
 

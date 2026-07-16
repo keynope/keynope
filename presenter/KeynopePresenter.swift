@@ -18,6 +18,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
     private var statusItem: NSStatusItem?
     private var editorWindow: NSWindow?
     private var editorWebView: WKWebView?
+    private var aboutWindow: NSWindow?
     private var window: NSWindow?
     private var webView: WKWebView?
     private var compositeView: PresenterCompositeView?
@@ -30,6 +31,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
     private var loadingShareSources = false
     private let screenShareController = ScreenShareController()
     private var presentationMode: String = "none"
+    private var presentationPaused = false
     private let presentationModeKey = "keynope.presenter.mode"
 
     init(
@@ -132,7 +134,8 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
         let mainMenu = NSMenu()
         let applicationItem = NSMenuItem()
         let applicationMenu = NSMenu()
-        applicationMenu.addItem(withTitle: "About Keynope", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        let aboutItem = applicationMenu.addItem(withTitle: "About Keynope", action: #selector(showAbout), keyEquivalent: "")
+        aboutItem.target = self
         applicationMenu.addItem(NSMenuItem.separator())
         applicationMenu.addItem(withTitle: "Quit Keynope", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         applicationItem.submenu = applicationMenu
@@ -237,6 +240,158 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
         showEditorWindow()
     }
 
+    @objc private func showAbout() {
+        if let aboutWindow {
+            NSApp.activate(ignoringOtherApps: true)
+            aboutWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 440),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "About Keynope"
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.isMovableByWindowBackground = true
+        panel.isReleasedWhenClosed = false
+
+        let background = NSVisualEffectView()
+        background.material = .underWindowBackground
+        background.blendingMode = .behindWindow
+        background.state = .active
+        panel.contentView = background
+
+        let iconView = NSImageView(image: NSApp.applicationIconImage)
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            iconView.widthAnchor.constraint(equalToConstant: 104),
+            iconView.heightAnchor.constraint(equalToConstant: 104)
+        ])
+
+        let nameLabel = aboutLabel("Keynope", size: 28, weight: .semibold, color: .labelColor)
+        let versionLabel = aboutLabel("Version \(version)", size: 12, weight: .medium, color: .secondaryLabelColor)
+        let versionBadge = NSView()
+        versionBadge.wantsLayer = true
+        versionBadge.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        versionBadge.layer?.cornerRadius = 10
+        versionBadge.addSubview(versionLabel)
+        versionBadge.translatesAutoresizingMaskIntoConstraints = false
+        versionLabel.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            versionBadge.widthAnchor.constraint(greaterThanOrEqualToConstant: 104),
+            versionBadge.heightAnchor.constraint(equalToConstant: 22),
+            versionLabel.centerXAnchor.constraint(equalTo: versionBadge.centerXAnchor),
+            versionLabel.centerYAnchor.constraint(equalTo: versionBadge.centerYAnchor, constant: -1.5),
+            versionLabel.leadingAnchor.constraint(greaterThanOrEqualTo: versionBadge.leadingAnchor, constant: 10),
+            versionLabel.trailingAnchor.constraint(lessThanOrEqualTo: versionBadge.trailingAnchor, constant: -10)
+        ])
+
+        let projectTitle = aboutLabel("PROJECT", size: 10, weight: .semibold, color: .tertiaryLabelColor)
+        let projectLinks = NSStackView(views: [
+            aboutLinkButton(
+                "keynope.sh",
+                url: "https://keynope.sh/",
+                icon: NSImage(systemSymbolName: "globe", accessibilityDescription: "Website")
+            ),
+            aboutLinkButton("GitHub", url: "https://github.com/keynope/", icon: githubMarkImage())
+        ])
+        projectLinks.orientation = .horizontal
+        projectLinks.alignment = .centerY
+        projectLinks.distribution = .fillEqually
+        projectLinks.spacing = 10
+
+        let separator = NSBox()
+        separator.boxType = .separator
+
+        let copyright = aboutLabel("(c) 2026 Dennis Vink", size: 12, weight: .medium, color: .secondaryLabelColor)
+        let authorLinks = NSStackView(views: [
+            aboutLinkButton("drvink.com", url: "https://drvink.com"),
+            aboutLinkButton("LinkedIn", url: "https://linkedin.com/in/drvink/")
+        ])
+        authorLinks.orientation = .horizontal
+        authorLinks.alignment = .centerY
+        authorLinks.distribution = .fillEqually
+        authorLinks.spacing = 10
+
+        let stack = NSStackView(views: [
+            iconView,
+            nameLabel,
+            versionBadge,
+            projectTitle,
+            projectLinks,
+            separator,
+            copyright,
+            authorLinks
+        ])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 8
+        stack.setCustomSpacing(16, after: versionBadge)
+        stack.setCustomSpacing(10, after: projectLinks)
+        stack.setCustomSpacing(12, after: separator)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        background.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: background.topAnchor, constant: 25),
+            stack.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: 42),
+            stack.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -42),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: background.bottomAnchor, constant: -24),
+            projectLinks.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            separator.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            authorLinks.widthAnchor.constraint(equalTo: stack.widthAnchor)
+        ])
+
+        panel.center()
+        aboutWindow = panel
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    private func aboutLabel(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.alignment = .center
+        label.font = NSFont.systemFont(ofSize: size, weight: weight)
+        label.textColor = color
+        return label
+    }
+
+    private func aboutLinkButton(_ title: String, url: String, icon: NSImage? = nil) -> NSButton {
+        let button = NSButton(title: title, target: self, action: #selector(openAboutLink(_:)))
+        button.bezelStyle = .rounded
+        button.controlSize = .large
+        button.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        button.identifier = NSUserInterfaceItemIdentifier(url)
+        button.toolTip = url
+        if let icon {
+            icon.size = NSSize(width: 16, height: 16)
+            button.image = icon
+            button.imagePosition = .imageLeading
+        }
+        return button
+    }
+
+    @objc private func openAboutLink(_ sender: NSButton) {
+        guard let value = sender.identifier?.rawValue, let url = URL(string: value) else {
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    private func githubMarkImage() -> NSImage? {
+        let svg = """
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="12" fill="#ffffff"/>
+          <path fill="#181717" d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2.02c-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.25-1.28-5.25-5.69 0-1.26.45-2.29 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.16 1.18A10.9 10.9 0 0 1 12 6.16c.98 0 1.95.13 2.87.39 2.19-1.49 3.15-1.18 3.15-1.18.63 1.59.23 2.76.11 3.05.74.8 1.19 1.83 1.19 3.09 0 4.42-2.7 5.39-5.27 5.68.42.36.78 1.06.78 2.14v3.02c0 .31.21.67.79.56A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"/>
+        </svg>
+        """
+        return NSImage(data: Data(svg.utf8))
+    }
+
     @objc private func openDeck() {
         let panel = NSOpenPanel()
         panel.title = "Open a Keynope Deck"
@@ -273,7 +428,8 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
     }
 
     private func updateDisplayState() {
-        if hasExternalDisplay {
+        let externalDisplayAvailable = hasExternalDisplay
+        if externalDisplayAvailable {
             externalDisplayItem?.title = "Show on External Display"
             externalDisplayItem?.isEnabled = true
             statusItem?.button?.toolTip = "Keynope Presenter"
@@ -286,6 +442,19 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
             }
         }
         updatePresentationMenuState()
+        publishExternalDisplayState(externalDisplayAvailable)
+        publishPresentationState()
+    }
+
+    private func publishExternalDisplayState(_ available: Bool? = nil) {
+        let value = available ?? hasExternalDisplay
+        editorWebView?.evaluateJavaScript("window.keynopeSetExternalDisplayAvailable?.(\(value ? "true" : "false"))")
+    }
+
+    private func publishPresentationState() {
+        editorWebView?.evaluateJavaScript(
+            "window.keynopeSetPresentationState?.('\(presentationMode)', \(presentationPaused ? "true" : "false"))"
+        )
     }
 
     private func updatePresentationMenuState() {
@@ -316,6 +485,13 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
             noPresentation()
             return
         }
+        presentationMode = preferExternal ? "external" : "main"
+        presentationPaused = false
+        if remember {
+            UserDefaults.standard.set(presentationMode, forKey: presentationModeKey)
+        }
+        reportPresentationMode()
+
         let screen = targetScreen(preferExternal: preferExternal)
         let frame = screen.frame
         let config = WKWebViewConfiguration()
@@ -339,25 +515,23 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
         newWindow.isReleasedWhenClosed = false
         newWindow.level = .normal
         newWindow.setFrame(frame, display: true)
-        newWindow.makeKeyAndOrderFront(nil)
-        newWindow.makeFirstResponder(view)
-        if !preferExternal {
+        if preferExternal {
+            newWindow.orderFrontRegardless()
+            editorWindow?.makeKeyAndOrderFront(nil)
+        } else {
+            newWindow.makeKeyAndOrderFront(nil)
+            newWindow.makeFirstResponder(view)
             NSApp.activate(ignoringOtherApps: true)
+            newWindow.orderFrontRegardless()
         }
-        newWindow.orderFrontRegardless()
 
         window?.close()
         window = newWindow
         webView = view
         compositeView = composite
         screenShareController.previewView = composite.captureView
-        presentationMode = preferExternal ? "external" : "main"
-        if remember {
-            UserDefaults.standard.set(presentationMode, forKey: presentationModeKey)
-        }
         updateDisplayState()
         refreshShareMenu()
-        reportPresentationMode()
     }
 
     private func presenterURLForSurface(_ surface: String) -> URL {
@@ -376,9 +550,11 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
             return
         }
         components.path = "/presenter-status"
-        components.query = nil
         guard let url = components.url,
-              let body = try? JSONSerialization.data(withJSONObject: ["mode": presentationMode]) else {
+              let body = try? JSONSerialization.data(withJSONObject: [
+                  "mode": presentationMode,
+                  "paused": presentationPaused
+              ]) else {
             return
         }
         var request = URLRequest(url: url)
@@ -404,6 +580,24 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
         noPresentation()
     }
 
+    private func pausePresentation() {
+        guard presentationMode != "none", !presentationPaused else {
+            return
+        }
+        presentationPaused = true
+        reportPresentationMode()
+        publishPresentationState()
+    }
+
+    private func resumePresentation() {
+        guard presentationMode != "none", presentationPaused else {
+            return
+        }
+        presentationPaused = false
+        reportPresentationMode()
+        publishPresentationState()
+    }
+
     @objc private func reload() {
         webView?.reload()
     }
@@ -418,12 +612,14 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
         compositeView = nil
         screenShareController.previewView = nil
         presentationMode = "none"
+        presentationPaused = false
         if remember {
             UserDefaults.standard.set(presentationMode, forKey: presentationModeKey)
         }
         updatePresentationMenuState()
         refreshShareMenu()
         reportPresentationMode()
+        publishPresentationState()
     }
 
     @objc private func screenParametersChanged() {
@@ -692,6 +888,15 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, WKScriptMessageH
                 showPresentation(preferExternal: false)
             } else if action == "show-external" {
                 showPresentation(preferExternal: true)
+            } else if action == "query-display-state" {
+                publishExternalDisplayState()
+                publishPresentationState()
+            } else if action == "pause" {
+                pausePresentation()
+            } else if action == "resume" {
+                resumePresentation()
+            } else if action == "show-about" {
+                showAbout()
             }
         }
     }
