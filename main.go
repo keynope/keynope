@@ -192,6 +192,7 @@ type appArgs struct {
 	ExportOnly bool
 	Classic    bool
 	AppMode    bool
+	Licenses   bool
 	DeckPath   string
 	Startup    bool
 }
@@ -308,16 +309,20 @@ func init() {
 }
 
 func main() {
+	args, ok := parseArgs(os.Args[1:])
+	if !ok {
+		fmt.Fprintln(os.Stderr, "usage: keynope [--export] [--classic] [--app] [deck.md] | keynope --licenses")
+		os.Exit(2)
+	}
+	if args.Licenses {
+		fmt.Print(bundledLicenseText())
+		return
+	}
 	if err := startSandboxAccessFromEnvironment(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	defer stopSandboxAccess()
-	args, ok := parseArgs(os.Args[1:])
-	if !ok {
-		fmt.Fprintln(os.Stderr, "usage: keynope [--export] [--classic] [--app] [deck.md]")
-		os.Exit(2)
-	}
 	if args.Startup {
 		path, err := startupDeckPath()
 		if errors.Is(err, errStartupCancelled) {
@@ -518,12 +523,17 @@ func parseArgs(raw []string) (appArgs, bool) {
 			args.Classic = true
 		case "--app":
 			args.AppMode = true
+		case "--licenses":
+			args.Licenses = true
 		default:
 			if strings.HasPrefix(value, "-") || args.DeckPath != "" {
 				return appArgs{}, false
 			}
 			args.DeckPath = value
 		}
+	}
+	if args.Licenses {
+		return args, args.DeckPath == "" && !args.ExportOnly && !args.Classic && !args.AppMode
 	}
 	if args.DeckPath == "" || (args.ExportOnly && args.Classic) || (args.AppMode && (args.ExportOnly || args.Classic)) {
 		return appArgs{}, false

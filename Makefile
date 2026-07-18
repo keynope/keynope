@@ -49,7 +49,7 @@ presenter: $(PRESENTER_SIGNATURE)
 
 app: $(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources
 
-$(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE_APP_INFO) $(KEYNOPE_APP_ENTITLEMENTS) $(KEYNOPE_APP_ENGINE_ENTITLEMENTS) $(KEYNOPE_APP_PRIVACY) $(KEYNOPE_APP_WELCOME) $(KEYNOPE_APP_ICON_FILES) $(PRESENTER_ICON) $(KEYNOPE_EMOJI_ASSETS) $(GO_SRC) sandbox_bridge_darwin.m go.mod go.sum CHANGELOG.md
+$(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE_APP_INFO) $(KEYNOPE_APP_ENTITLEMENTS) $(KEYNOPE_APP_ENGINE_ENTITLEMENTS) $(KEYNOPE_APP_PRIVACY) $(KEYNOPE_APP_WELCOME) $(KEYNOPE_APP_ICON_FILES) $(PRESENTER_ICON) $(KEYNOPE_EMOJI_ASSETS) $(GO_SRC) sandbox_bridge_darwin.m go.mod go.sum CHANGELOG.md LICENSE.txt
 	rm -rf $(KEYNOPE_APP)
 	@mkdir -p $(KEYNOPE_APP)/Contents/MacOS $(KEYNOPE_APP)/Contents/Helpers $(KEYNOPE_APP)/Contents/Resources
 	cp $(KEYNOPE_APP_INFO) $(KEYNOPE_APP)/Contents/Info.plist
@@ -65,7 +65,7 @@ $(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE
 	$(CODESIGN) --force --options runtime --identifier sh.keynope.app.engine --entitlements $(KEYNOPE_APP_ENGINE_ENTITLEMENTS) --sign "$(CODESIGN_IDENTITY)" $(KEYNOPE_APP_ENGINE)
 	$(CODESIGN) --force --options runtime --entitlements $(KEYNOPE_APP_ENTITLEMENTS) --sign "$(CODESIGN_IDENTITY)" $(KEYNOPE_APP)
 
-$(KEYNOPE): $(GO_SRC) $(KEYNOPE_EMOJI_ASSETS) go.mod go.sum
+$(KEYNOPE): $(GO_SRC) $(KEYNOPE_EMOJI_ASSETS) go.mod go.sum LICENSE.txt
 	@mkdir -p $(BIN_DIR)
 	$(GO) build -o $(KEYNOPE) .
 

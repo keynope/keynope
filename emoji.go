@@ -22,6 +22,21 @@ var storedEmojiGlyphArchive []byte
 //go:embed assets/emoji/emoji-test.txt
 var unicodeEmojiTestData string
 
+//go:embed LICENSE.txt
+var keynopeLicenseText string
+
+//go:embed assets/emoji/NOTICE.txt
+var emojiNoticeText string
+
+//go:embed assets/emoji/OFL.txt
+var emojiOFLText string
+
+//go:embed assets/emoji/NOTO-REGION-FLAGS-LICENSE.txt
+var emojiRegionFlagsLicenseText string
+
+//go:embed assets/emoji/UNICODE-LICENSE.txt
+var unicodeLicenseText string
+
 type emojiCatalogEntry struct {
 	Emoji    string `json:"emoji"`
 	Name     string `json:"name"`
@@ -63,6 +78,29 @@ var emojiGlyphCache = struct {
 	sync.RWMutex
 	rows map[string][]string
 }{rows: map[string][]string{}}
+
+func bundledLicenseText() string {
+	sections := []struct {
+		title string
+		text  string
+	}{
+		{title: "KEYNOPE", text: keynopeLicenseText},
+		{title: "KEYNOPE EMOJI GLYPHS NOTICE", text: emojiNoticeText},
+		{title: "SIL OPEN FONT LICENSE 1.1", text: emojiOFLText},
+		{title: "NOTO REGIONAL FLAGS", text: emojiRegionFlagsLicenseText},
+		{title: "UNICODE DATA FILES", text: unicodeLicenseText},
+	}
+	var out strings.Builder
+	for index, section := range sections {
+		if index > 0 {
+			out.WriteString("\n")
+		}
+		out.WriteString("===== " + section.title + " =====\n\n")
+		out.WriteString(strings.TrimSpace(section.text))
+		out.WriteString("\n")
+	}
+	return out.String()
+}
 
 func ensureEmojiData() {
 	emojiData.Do(func() {

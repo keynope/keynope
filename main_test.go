@@ -114,6 +114,34 @@ func TestParseAppMode(t *testing.T) {
 	}
 }
 
+func TestParseLicensesMode(t *testing.T) {
+	args, ok := parseArgs([]string{"--licenses"})
+	if !ok || !args.Licenses || args.DeckPath != "" {
+		t.Fatalf("args = %#v, ok = %v", args, ok)
+	}
+	for _, invalid := range [][]string{{"--licenses", "deck.md"}, {"--licenses", "--app"}, {"--licenses", "--export"}} {
+		if _, ok := parseArgs(invalid); ok {
+			t.Fatalf("licenses accepted incompatible arguments %v", invalid)
+		}
+	}
+}
+
+func TestBundledLicensesContainProgramAndEmojiNotices(t *testing.T) {
+	licenses := bundledLicenseText()
+	for _, required := range []string{
+		"===== KEYNOPE =====",
+		"MIT License",
+		"Keynope Emoji Glyphs",
+		"Copyright 2013 Google LLC",
+		"SIL OPEN FONT LICENSE Version 1.1",
+		"UNICODE LICENSE V3",
+	} {
+		if !strings.Contains(licenses, required) {
+			t.Fatalf("bundled license output is missing %q", required)
+		}
+	}
+}
+
 func TestParseDeckDefaultsMissingAuthoredSize(t *testing.T) {
 	previousWidth, previousHeight := authoredTerminalWidth, authoredTerminalHeight
 	t.Cleanup(func() {
