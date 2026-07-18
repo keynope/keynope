@@ -6,9 +6,12 @@ This project follows semantic versioning.
 
 ## 0.1.2
 
+Release candidate
+
 Added:
 
 - Mac app for Keynope
+- Bunch of improvements
 
 ## 0.1.1
 

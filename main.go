@@ -248,11 +248,13 @@ func inputRead(buffer []byte) (int, error) {
 	return os.Stdin.Read(buffer)
 }
 
-func startNativeInputReader() {
+func startNativeInputReader(reader io.Reader) <-chan struct{} {
+	closed := make(chan struct{})
 	go func() {
+		defer close(closed)
 		buffer := make([]byte, 64*1024)
 		for {
-			n, err := os.Stdin.Read(buffer)
+			n, err := reader.Read(buffer)
 			if n > 0 {
 				nativeInputMu.Lock()
 				_, _ = nativeInputBuffer.Write(buffer[:n])
@@ -263,6 +265,7 @@ func startNativeInputReader() {
 			}
 		}
 	}()
+	return closed
 }
 
 var queuedEditEvent *KeyEvent
@@ -273,8 +276,15 @@ var activeUINotice uiNotice
 var uiNoticeMu sync.Mutex
 var exportImageAnimationPosition *time.Duration
 var exportImageAnimationMu sync.Mutex
+
+const (
+	defaultAuthoredTerminalWidth  = 245
+	defaultAuthoredTerminalHeight = 56
+)
+
 var authoredTerminalWidth int
 var authoredTerminalHeight int
+var parsedDeckElementOrderChanged bool
 var viewportWarning viewportFitWarning
 
 type viewportFitWarning struct {
@@ -287,17 +297,22 @@ func init() {
 	c64QuadFont['·'] = []string{"", " ▗▖", " ▝▘", ""}
 	c64FullFont['·'] = []string{
 		"        ",
-		"        ",
-		"  ████  ",
-		"  ████  ",
-		"  ████  ",
-		"  ████  ",
-		"        ",
+		"  ███   ",
+		" █████  ",
+		" █████  ",
+		" █████  ",
+		" █████  ",
+		"  ███   ",
 		"        ",
 	}
 }
 
 func main() {
+	if err := startSandboxAccessFromEnvironment(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer stopSandboxAccess()
 	args, ok := parseArgs(os.Args[1:])
 	if !ok {
 		fmt.Fprintln(os.Stderr, "usage: keynope [--export] [--classic] [--app] [deck.md]")
@@ -320,6 +335,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	if args.AppMode {
+		ensureDefaultAuthoredSize()
+		if parsedDeckElementOrderChanged {
+			if err := saveDeck(args.DeckPath, deck); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+		}
+	}
 	if len(deck.Slides) == 0 {
 		fmt.Fprintln(os.Stderr, "deck has no slides")
 		os.Exit(1)
@@ -331,8 +355,9 @@ func main() {
 	presenterMode := !args.ExportOnly && !args.Classic
 	presenterModeActive = presenterMode
 	nativeAppModeActive = args.AppMode
+	var nativeInputClosed <-chan struct{}
 	if args.AppMode {
-		startNativeInputReader()
+		nativeInputClosed = startNativeInputReader(os.Stdin)
 	}
 	if args.ExportOnly {
 		width, height = exportRenderSize(resolvedSlides)
@@ -372,7 +397,8 @@ func main() {
 		nativeEditor.companion = presenter
 		nativeEditor.mu.Unlock()
 		presenter.Update(0, 0, false, nil)
-		select {}
+		<-nativeInputClosed
+		return
 	}
 
 	restore := func() {}
@@ -1476,6 +1502,7 @@ func handleAction(action string, deck *Deck, current, page, width, height int, d
 }
 
 func parseDeck(path string) (Deck, error) {
+	parsedDeckElementOrderChanged = false
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Deck{}, err
@@ -1495,19 +1522,39 @@ func parseDeck(path string) (Deck, error) {
 	text = remaining
 	base := filepath.Dir(path)
 	resolveMasterDeckImagePaths(&masters, base)
+	parsedDeckElementOrderChanged = elementOrderMappingChanged(canonicalizeSlideElementOrder(&masters.Base.Slide, authoredTerminalWidth, authoredTerminalHeight))
+	for index := range masters.Layouts {
+		parsedDeckElementOrderChanged = elementOrderMappingChanged(canonicalizeSlideElementOrder(&masters.Layouts[index].Slide, authoredTerminalWidth, authoredTerminalHeight)) || parsedDeckElementOrderChanged
+	}
 	var slides []Slide
 	for _, part := range splitSlides(text) {
 		slide := parseSlide(part, base)
 		if len(slide.Elements) > 0 || slide.EffectSet || slide.BackgroundSet || slide.FGSet || slide.BGSet || slide.HeaderFGSet || slide.Effect != "" || slide.Background != "" || slide.FG != "" || slide.BG != "" || slide.HeaderFG != "" || slide.Notes != "" || slide.LayoutID != "" || slide.PageNumber != "" {
+			parsedDeckElementOrderChanged = elementOrderMappingChanged(canonicalizeSlideElementOrder(&slide, authoredTerminalWidth, authoredTerminalHeight)) || parsedDeckElementOrderChanged
 			slides = append(slides, slide)
 		}
 	}
 	return Deck{Slides: slides, Masters: masters}, nil
 }
 
+func ensureDefaultAuthoredSize() {
+	if authoredTerminalWidth <= 0 || authoredTerminalHeight <= 0 {
+		authoredTerminalWidth = defaultAuthoredTerminalWidth
+		authoredTerminalHeight = defaultAuthoredTerminalHeight
+	}
+}
+
 func saveDeck(path string, deck Deck) error {
 	if authoredTerminalWidth <= 0 || authoredTerminalHeight <= 0 {
 		authoredTerminalWidth, authoredTerminalHeight = terminalSize()
+	}
+	deck = cloneDeck(deck)
+	for index := range deck.Slides {
+		canonicalizeSlideElementOrder(&deck.Slides[index], authoredTerminalWidth, authoredTerminalHeight)
+	}
+	canonicalizeSlideElementOrder(&deck.Masters.Base.Slide, authoredTerminalWidth, authoredTerminalHeight)
+	for index := range deck.Masters.Layouts {
+		canonicalizeSlideElementOrder(&deck.Masters.Layouts[index].Slide, authoredTerminalWidth, authoredTerminalHeight)
 	}
 	var out strings.Builder
 	if authoredTerminalWidth > 0 && authoredTerminalHeight > 0 {
@@ -1586,7 +1633,12 @@ func saveDeck(path string, deck Deck) error {
 					fmt.Fprintf(&out, "## %s\n", element.Text)
 				}
 			case "bullet":
-				fmt.Fprintf(&out, "- %s\n", element.Text)
+				for _, item := range splitBulletListItems(normalizeBulletText(element.Text), false) {
+					fmt.Fprintf(&out, "- %s\n", item.Text)
+					for _, continuation := range item.Continuations {
+						fmt.Fprintf(&out, "  %s\n", continuation)
+					}
+				}
 			case "code":
 				out.WriteString("```\n")
 				out.WriteString(element.Text)
@@ -1596,8 +1648,10 @@ func saveDeck(path string, deck Deck) error {
 				out.WriteString("```\n")
 			case "image":
 				src := element.Path
-				if rel, err := filepath.Rel(filepath.Dir(path), element.Path); err == nil && !strings.HasPrefix(rel, "..") {
-					src = rel
+				if !isExternalImageSource(element.Path) {
+					if rel, err := filepath.Rel(filepath.Dir(path), element.Path); err == nil && !strings.HasPrefix(rel, "..") {
+						src = rel
+					}
 				}
 				if element.Query != "" {
 					src += "?" + element.Query
@@ -1623,6 +1677,119 @@ func saveDeck(path string, deck Deck) error {
 		activePresenter.RefreshActiveSlideAsync(deck.ResolvedSlides(), width, height)
 	}
 	return nil
+}
+
+func canonicalizeSlideElementOrder(slide *Slide, width, height int) []int {
+	if slide == nil || len(slide.Elements) < 2 {
+		return nil
+	}
+	width, height = authoredRenderSize(width, height)
+	if width <= 0 {
+		width = defaultAuthoredTerminalWidth
+	}
+	if height <= 0 {
+		height = defaultAuthoredTerminalHeight
+	}
+	type position struct {
+		element Element
+		old     int
+		top     int
+		left    int
+		name    string
+	}
+	positions := make([]position, len(slide.Elements))
+	for index, element := range slide.Elements {
+		positions[index] = position{element: element, old: index, top: int(^uint(0) >> 1), left: int(^uint(0) >> 1), name: elementSortName(element)}
+	}
+	for _, line := range layout(*slide, width, height) {
+		if line.Element < 0 || line.Element >= len(positions) || line.Role == "outline" {
+			continue
+		}
+		item := &positions[line.Element]
+		if line.Row < item.top || line.Row == item.top && line.Col < item.left {
+			item.top, item.left = line.Row, line.Col
+		}
+	}
+	sort.SliceStable(positions, func(i, j int) bool {
+		if positions[i].top != positions[j].top {
+			return positions[i].top < positions[j].top
+		}
+		if positions[i].left != positions[j].left {
+			return positions[i].left < positions[j].left
+		}
+		if positions[i].name != positions[j].name {
+			return positions[i].name < positions[j].name
+		}
+		return false
+	})
+	oldToNew := make([]int, len(positions))
+	for newIndex, item := range positions {
+		slide.Elements[newIndex] = item.element
+		oldToNew[item.old] = newIndex
+	}
+	return oldToNew
+}
+
+func elementSortName(element Element) string {
+	name := strings.TrimSpace(element.Text)
+	if name == "" {
+		name = strings.TrimSpace(element.Path)
+	}
+	if name == "" && element.Kind == "shape" {
+		name = shapeName(element)
+	}
+	return strings.ToLower(name)
+}
+
+func elementOrderMappingChanged(oldToNew []int) bool {
+	for oldIndex, newIndex := range oldToNew {
+		if oldIndex != newIndex {
+			return true
+		}
+	}
+	return false
+}
+
+type bulletListItem struct {
+	Text          string
+	Continuations []string
+}
+
+func splitBulletListItems(text string, keepEmpty bool) []bulletListItem {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	items := make([]bulletListItem, 0, len(lines))
+	for _, line := range lines {
+		continuation := len(line) > 0 && (line[0] == ' ' || line[0] == '\t')
+		value := strings.TrimSpace(line)
+		if continuation && len(items) > 0 {
+			if value != "" || keepEmpty {
+				items[len(items)-1].Continuations = append(items[len(items)-1].Continuations, value)
+			}
+			continue
+		}
+		if value == "" && !keepEmpty {
+			continue
+		}
+		items = append(items, bulletListItem{Text: value})
+	}
+	return items
+}
+
+func normalizeBulletText(text string) string {
+	items := splitBulletListItems(text, false)
+	lines := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Text == "" {
+			continue
+		}
+		lines = append(lines, item.Text)
+		for _, continuation := range item.Continuations {
+			if continuation != "" {
+				lines = append(lines, "  "+continuation)
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func setUINotice(message string) {
@@ -1844,6 +2011,7 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int, la
 		mux.HandleFunc("/api/editor/preview", activeNativeEditor.handlePreview)
 		mux.HandleFunc("/api/editor/fit-text", activeNativeEditor.handleFitText)
 		mux.HandleFunc("/api/editor/normalize-text-kind", activeNativeEditor.handleNormalizeTextKind)
+		mux.HandleFunc("/api/editor/emojis", activeNativeEditor.handleEmojiCatalog)
 		mux.HandleFunc("/api/editor/workspace", activeNativeEditor.handleWorkspace)
 		mux.HandleFunc("/api/editor/upload", activeNativeEditor.handleUpload)
 	}
@@ -2811,6 +2979,28 @@ func transparentShapeExportLines(lines []Line, width, height int, slide Slide) [
 	if len(cells) == 0 {
 		return nil
 	}
+	// Keep the rendered block glyph for transparent text and images.  A colour
+	// cell alone describes a full rectangle and loses the quarter-block mask at
+	// curved/antialiased edges (particularly visible on colour emoji).
+	glyphs := map[int]map[int]rune{}
+	for _, line := range lines {
+		if !transparencyMaskLine(line, slide) || line.Role == "shape" || line.Role == "code" {
+			continue
+		}
+		parts := exportANSITextParts(line.Text, line.Col, ansiCSSColour(slideFG(slide)), width)
+		for _, part := range parts {
+			for offset, r := range []rune(part.Text) {
+				col := part.Col + offset
+				if r == ' ' || col < 0 || col >= width || cells[line.Row] == nil || cells[line.Row][col] == "" {
+					continue
+				}
+				if glyphs[line.Row] == nil {
+					glyphs[line.Row] = map[int]rune{}
+				}
+				glyphs[line.Row][col] = r
+			}
+		}
+	}
 	rows := make([]int, 0, len(cells))
 	for row := range cells {
 		rows = append(rows, row)
@@ -2831,9 +3021,17 @@ func transparentShapeExportLines(lines []Line, width, height int, slide Slide) [
 		prev := cols[0]
 		bg := cells[row][start]
 		flush := func(end int, runBG string) {
+			var text strings.Builder
+			for col := start; col <= end; col++ {
+				if glyph := glyphs[row][col]; glyph != 0 {
+					text.WriteRune(glyph)
+				} else {
+					text.WriteByte(' ')
+				}
+			}
 			parts = append(parts, exportPart{
 				Col:        start,
-				Text:       strings.Repeat(" ", end-start+1),
+				Text:       text.String(),
 				Color:      ansiCSSColour(slideFG(slide)),
 				Background: ansiCSSColour(runBG),
 			})
@@ -2918,6 +3116,7 @@ func exportANSITextParts(text string, baseCol int, defaultColor string, width in
 	var parts []exportPart
 	normalColor := defaultColor
 	color := defaultColor
+	background := ""
 	bold := false
 	col := baseCol
 	var run []rune
@@ -2926,7 +3125,7 @@ func exportANSITextParts(text string, baseCol int, defaultColor string, width in
 		if len(run) == 0 {
 			return
 		}
-		parts = append(parts, exportPart{Col: runCol, Text: string(run), Color: color})
+		parts = append(parts, exportPart{Col: runCol, Text: string(run), Color: color, Background: background})
 		run = nil
 	}
 	for i := 0; i < len(text) && col < width; {
@@ -2938,6 +3137,13 @@ func exportANSITextParts(text string, baseCol int, defaultColor string, width in
 			}
 			if end < len(text) {
 				sequence := text[i : end+1]
+				if ansiParamsContain(sequence, "0") || ansiParamsContain(sequence, "39") {
+					normalColor = defaultColor
+					color = defaultColor
+				}
+				if ansiParamsContain(sequence, "0") || ansiParamsContain(sequence, "49") {
+					background = ""
+				}
 				if ansiSequenceBoldOff(sequence) {
 					bold = false
 					color = normalColor
@@ -2953,6 +3159,9 @@ func exportANSITextParts(text string, baseCol int, defaultColor string, width in
 						color = lightenCSSColour(normalColor)
 					}
 				}
+				if css := ansiSequenceCSSBackground(sequence); css != "" {
+					background = css
+				}
 				i = end + 1
 				continue
 			}
@@ -2961,7 +3170,7 @@ func exportANSITextParts(text string, baseCol int, defaultColor string, width in
 		if r == utf8.RuneError && size == 0 {
 			break
 		}
-		if r == ' ' {
+		if r == ' ' && background == "" {
 			flush()
 			col++
 			i += size
@@ -2976,6 +3185,13 @@ func exportANSITextParts(text string, baseCol int, defaultColor string, width in
 	}
 	flush()
 	return parts
+}
+
+func ansiSequenceCSSBackground(sequence string) string {
+	if background := ansiSequenceBG(sequence); background != "" {
+		return ansiCSSColour(background)
+	}
+	return ""
 }
 
 func ansiSequenceBoldOn(sequence string) bool {
@@ -3172,8 +3388,22 @@ html[data-keynope-app="true"] button:active:not(:disabled) > span { translate: 0
 .keynope-visual-panel[hidden] { display: none; }
 .keynope-visual-panel label { align-self: center; color: #aeb4bb; font-size: 11px; }
 .keynope-visual-panel select, .keynope-visual-panel input { width: 100%; min-width: 0; box-sizing: border-box; }
+.keynope-emoji-picker { position: fixed; z-index: 110; width: 430px; max-height: 430px; padding: 10px; box-sizing: border-box; border: 1px solid #67717b; border-radius: 9px; color: #ddd; background: #202124; box-shadow: 0 16px 42px rgba(0,0,0,.65); font: 12px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-emoji-picker[hidden] { display: none; }
+.keynope-emoji-picker-controls { display: grid; grid-template-columns: 1fr 150px; gap: 7px; margin-bottom: 8px; }
+.keynope-emoji-picker input, .keynope-emoji-picker select { min-width: 0; box-sizing: border-box; padding: 6px 7px; color: #eee; background: #111; border: 1px solid #555; border-radius: 5px; font: inherit; }
+.keynope-emoji-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; max-height: 330px; overflow: auto; padding: 2px; }
+.keynope-emoji-grid button { display: grid; min-width: 0; height: 96px; place-items: center; padding: 4px; color: #eee; background: #292929; border: 1px solid #555; border-radius: 6px; }
+.keynope-emoji-preview { position: relative; width: 86px; height: 86px; overflow: hidden; background: #101010; }
+.keynope-emoji-preview .line { position: absolute; left: calc(var(--x) * 5.25px); top: calc(var(--y) * 10.5px); color: #f3efe0; font: 7px/7px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre; transform: scaleY(1.5); transform-origin: top left; }
+.keynope-emoji-more { display: block; width: 100%; margin-top: 8px; padding: 6px; color: #ddd; background: #292929; border: 1px solid #555; border-radius: 5px; }
+.keynope-emoji-tool { display: inline-grid; width: 30px; min-width: 30px; height: 30px; place-items: center; padding: 3px !important; }
+.keynope-emoji-tool svg { display: block; width: 20px; height: 20px; }
 .keynope-link-dialog { position: fixed; z-index: 100; width: 360px; padding: 12px; box-sizing: border-box; border: 1px solid #67717b; border-radius: 8px; color: #ddd; background: #202124; box-shadow: 0 14px 38px rgba(0,0,0,.6); font: 12px -apple-system, BlinkMacSystemFont, sans-serif; }
 .keynope-link-dialog h3 { margin: 0 0 10px; color: #fff; font-size: 13px; }
+.keynope-discard-dialog p { margin: 0 0 12px; color: #bfc7cf; line-height: 1.45; }
+.keynope-modal-blocker { position: fixed; inset: 0; z-index: 119; display: grid; place-items: start center; padding-top: max(60px, 18vh); box-sizing: border-box; background: rgba(0,0,0,.42); }
+.keynope-modal-blocker .keynope-discard-dialog { position: relative; z-index: 120; }
 .keynope-link-dialog label { display: block; margin: 0 0 8px; color: #aeb4bb; }
 .keynope-link-dialog [hidden] { display: none; }
 .keynope-link-dialog input, .keynope-link-dialog select { display: block; width: 100%; margin-top: 4px; box-sizing: border-box; padding: 6px; color: #eee; background: #111; border: 1px solid #555; border-radius: 4px; }
@@ -3213,8 +3443,20 @@ html[data-keynope-timer-active="true"] .keynope-canvas-overlay { display: none; 
 .keynope-layer-button svg rect, .keynope-layer-button svg path, .keynope-layer-button svg g { fill: none !important; }
 .keynope-link-button { display: inline-grid; place-items: center; padding: 3px !important; }
 .keynope-link-button svg { display: block; width: 21px; height: 21px; }
+.keynope-text-kind-code { display: inline-grid; width: 30px; min-width: 30px; height: 30px; place-items: center; padding: 3px !important; }
+.keynope-text-kind-code svg { display: block; width: 20px; height: 20px; }
+.keynope-vertical-align-button { display: inline-grid; width: 30px; min-width: 30px; height: 30px; place-items: center; padding: 3px !important; }
+.keynope-vertical-align-button svg { display: block; width: 21px; height: 21px; }
 .keynope-editor-topbar button.keynope-svg-button { display: inline-grid; width: 30px; height: 30px; place-items: center; padding: 4px; }
+.keynope-editor-topbar button[hidden] { display: none; }
 .keynope-svg-button svg { display: block; width: 19px; height: 19px; }
+.keynope-editor-topbar button.keynope-page-number-button { position: relative; }
+.keynope-page-number-button svg { transform: translateY(-2px); }
+.keynope-page-number-tag { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); padding: 0 3px; border: 1px solid #59616a; border-radius: 3px; color: #d8dee5; background: #151719; font: 700 6px/8px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .05em; box-shadow: 0 1px 2px rgba(0,0,0,.7); }
+.keynope-editor-topbar button.keynope-page-number-button.inherited { border-color: #62d98b; box-shadow: 0 0 0 1px rgba(98,217,139,.3); }
+html[data-keynope-app="true"] .keynope-editor-topbar button.keynope-page-number-button.off:hover:not(:disabled) { border-color: #555 !important; box-shadow: 0 0 0 1px rgba(120,120,120,.25); }
+html[data-keynope-app="true"] .keynope-editor-topbar button.keynope-page-number-button.inherited:hover:not(:disabled) { border-color: #62d98b !important; box-shadow: 0 0 0 1px rgba(98,217,139,.3); }
+html[data-keynope-app="true"] .keynope-editor-topbar button.keynope-page-number-button.active:hover:not(:disabled) { border-color: #70b7ff !important; box-shadow: 0 0 0 1px rgba(112,183,255,.28); }
 .keynope-canvas-shape-kind svg { display: block; width: 18px; height: 18px; }
 .keynope-add-shape-menu { position: fixed; z-index: 95; display: grid; grid-template-columns: repeat(2, 54px); gap: 7px; padding: 8px; color: #eee; background: #202124; border: 1px solid #5b6168; border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.55); }
 .keynope-add-shape-menu[hidden] { display: none; }
@@ -3229,6 +3471,7 @@ html[data-keynope-timer-active="true"] .keynope-canvas-overlay { display: none; 
 .keynope-slides-header { display: flex; min-height: 30px; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 8px; }
 .keynope-slides-header h3 { margin: 0; }
 .keynope-slides-header button { min-width: 30px; padding: 3px 7px; font-size: 18px; line-height: 1.1; }
+.keynope-slides-header button.active { border-color: #70b7ff; background: #244766; box-shadow: 0 0 0 1px rgba(112,183,255,.28); }
 .keynope-speaker-notes { position: fixed; left: 210px; right: 0; top: var(--editor-notes-top, 100%); bottom: 52px; z-index: 19; display: none; flex-direction: column; gap: 5px; padding: 7px 10px; box-sizing: border-box; color: #ddd; background: #171717; border-top: 1px solid #444; font: 12px -apple-system, BlinkMacSystemFont, sans-serif; }
 .keynope-slide-context { position: fixed; z-index: 60; display: none; width: 270px; max-height: calc(100vh - 20px); overflow: auto; box-sizing: border-box; padding: 10px; color: #ddd; background: #202124; border: 1px solid #5b6168; border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.55); font: 12px -apple-system, BlinkMacSystemFont, sans-serif; }
 .keynope-slide-context.open { display: block; }
@@ -3245,6 +3488,11 @@ html[data-keynope-timer-active="true"] .keynope-canvas-overlay { display: none; 
 html[data-keynope-app="true"][data-keynope-notes="true"] .keynope-speaker-notes { display: flex; }
 .keynope-slide-item { display: block; width: 100%; margin: 0 0 6px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .keynope-slide-item.active { border-color: #70b7ff; background: #244766; }
+.keynope-slide-item.master-reorderable { cursor: grab; }
+.keynope-slide-item.master-drag-outline { border-color: #b9ddff !important; box-shadow: 0 0 0 2px rgba(112,183,255,.5); }
+.keynope-slide-item.master-dragging { height: 0 !important; min-height: 0 !important; margin: 0; padding-top: 0; padding-bottom: 0; overflow: hidden; border-width: 0; opacity: 0; pointer-events: none; }
+.keynope-master-drop-placeholder { width: 100%; min-height: 30px; margin: 0 0 6px; box-sizing: border-box; border: 2px dashed #70b7ff; border-radius: 6px; background: rgba(112,183,255,.1); box-shadow: inset 0 0 12px rgba(112,183,255,.08); }
+.keynope-master-drag-image { position: fixed; top: -1000px; left: -1000px; z-index: 9999; box-sizing: border-box; color: #fff; background: #244766; border: 2px solid #b9ddff !important; border-radius: 6px; box-shadow: 0 0 0 2px rgba(112,183,255,.5), 0 8px 20px rgba(0,0,0,.5); opacity: 1 !important; pointer-events: none; }
 .keynope-editor-section { margin: 0 0 14px; padding: 0 0 12px; border-bottom: 1px solid #3c3c3c; }
 .keynope-editor-section h3 { margin: 0 0 7px; color: #fff; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
 .keynope-editor-actions { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 10px; }
@@ -3265,8 +3513,8 @@ button.keynope-shape-outline-button { display: inline-flex; align-items: center;
 .keynope-canvas-overlay { position: absolute; left: 50%; top: 50%; z-index: 12; transform: translate(-50%, -50%); pointer-events: none; }
 .keynope-canvas-element { position: absolute; min-width: 22px; min-height: 22px; box-sizing: border-box; border: 1px solid transparent; background: transparent; pointer-events: auto; cursor: move; }
 .keynope-canvas-element:hover { border-color: rgba(112,183,255,.65); }
-.keynope-canvas-element.active { border: 2px solid #70b7ff; box-shadow: 0 0 0 1px #111; }
-.keynope-resize-handle { position: absolute; z-index: 2; width: 9px; height: 9px; border: 1px solid #111; background: #70b7ff; }
+.keynope-canvas-element.active { border: 2px solid #ffd166; box-shadow: 0 0 0 1px #111; }
+.keynope-resize-handle { position: absolute; z-index: 2; width: 9px; height: 9px; border: 1px solid #111; background: #ffd166; }
 .keynope-resize-handle.nw { left: -6px; top: -6px; cursor: nwse-resize; }
 .keynope-resize-handle.ne { right: -6px; top: -6px; cursor: nesw-resize; }
 .keynope-resize-handle.sw { left: -6px; bottom: -6px; cursor: nesw-resize; }
@@ -3461,6 +3709,7 @@ function renderLines(lines) {
 function drawCanvasLines(lines) {
   presenterContext.font = canvasFont;
   presenterContext.textBaseline = 'top';
+  drawEditorCanvasSelection();
   const textOutlineElements = textOutlineElementMap(lines);
   const textOutlineMasks = canvasTextPixelOutlineMasks(lines, textOutlineElements);
   const drawnTextOutlines = new Set();
@@ -3492,8 +3741,23 @@ function drawCanvasLines(lines) {
   }
   drawEditorCanvasCaret(lines);
 }
+function drawEditorCanvasSelection() {
+  if (!keynopeAppSurface || !editorCanvasCaret || !editorCanvasCaret.selection) return;
+  presenterContext.fillStyle = 'rgba(85, 170, 255, .58)';
+  for (const row of editorCanvasCaret.selection) {
+    drawCanvasCellRun(row.col, row.row, row.cells);
+  }
+}
 function drawEditorCanvasCaret(lines) {
   if (!keynopeAppSurface || !editorCanvasCaret || (performance.now() - editorCanvasCaret.started) % 900 >= 650) return;
+  if (editorCanvasCaret.exact) {
+    const caret = editorCanvasCaret.exact;
+    const x = Math.floor(Math.max(0, caret.col || 0) * canvasCharWidth);
+    const y = Math.max(0, Math.ceil((Math.max(0, caret.row || 0) + 1) * canvasCell) - Math.max(2, Math.round(window.devicePixelRatio || 1)));
+    presenterContext.fillStyle = '#70b7ff';
+    presenterContext.fillRect(x, y, Math.max(2, Math.ceil(Math.max(1, caret.cells || 1) * canvasCharWidth)), Math.max(2, Math.round(window.devicePixelRatio || 1)));
+    return;
+  }
   const matching = (lines || []).filter(line => line.element === editorCanvasCaret.element);
   if (!matching.length) return;
   let minX = deck.cols, minY = deck.rows, maxX = 0, maxY = 0;
@@ -3518,7 +3782,9 @@ function drawEditorCanvasCaret(lines) {
   const renderedHeight = Math.max(1, maxY - minY);
   const caretCol = Math.min(deck.cols - 1, maxX, minX + column / rawLineLength * renderedWidth);
   const caretRow = Math.min(maxY - 1, minY + Math.ceil((lineIndex + 1) / Math.max(1, rawLines.length) * renderedHeight) - 1);
-  const caretCells = Math.max(1, renderedWidth / rawLineLength);
+  const caretQuery = new URLSearchParams(editorCanvasCaret.query || '');
+  const caretScale = Math.max(.1, Number.parseFloat(caretQuery.get('scale') || '1') || 1);
+  const caretCells = Math.max(1, Math.round(4 * caretScale));
   const x = Math.floor(caretCol * canvasCharWidth);
   const y = Math.max(0, Math.ceil((caretRow + 1) * canvasCell) - Math.max(2, Math.round(window.devicePixelRatio || 1)));
   presenterContext.fillStyle = '#70b7ff';
@@ -3603,11 +3869,11 @@ function addBlockGlyphMaskPixels(out, col, row, mask) {
 function drawCanvasQuarterPixel(qx, qy) {
   if (qx < 0 || qy < 0 || qx >= deck.cols * 2 || qy >= deck.rows * 2) return;
   const col = Math.floor(qx / 2), row = Math.floor(qy / 2);
-  const x1 = Math.floor((col + (qx % 2) * 0.5) * canvasCharWidth);
-  const y1 = Math.floor((row + (qy % 2) * 0.5) * canvasCell);
-  const x2 = Math.ceil((col + (qx % 2 ? 1 : 0.5)) * canvasCharWidth);
-  const y2 = Math.ceil((row + (qy % 2 ? 1 : 0.5)) * canvasCell);
-  presenterContext.fillRect(x1, y1, Math.max(1, x2 - x1 + 1), Math.max(1, y2 - y1 + 1));
+  const x1 = Math.round((col + (qx % 2) * 0.5) * canvasCharWidth);
+  const y1 = Math.round((row + (qy % 2) * 0.5) * canvasCell);
+  const x2 = Math.round((col + (qx % 2 ? 1 : 0.5)) * canvasCharWidth);
+  const y2 = Math.round((row + (qy % 2 ? 1 : 0.5)) * canvasCell);
+  presenterContext.fillRect(x1, y1, Math.max(1, x2 - x1), Math.max(1, y2 - y1));
 }
 function drawCanvasBlockGlyphs(text, col, row, color) {
   const chars = [...text];
@@ -3665,16 +3931,16 @@ function drawCanvasBlockGlyph(col, row, mask) {
     drawCanvasCellRun(col, row, 1);
     return;
   }
-  const x1 = Math.floor(col * canvasCharWidth);
-  const y1 = Math.floor(row * canvasCell);
-  const xMid = Math.floor((col + 0.5) * canvasCharWidth);
-  const yMid = Math.floor((row + 0.5) * canvasCell);
-  const x2 = Math.ceil((col + 1) * canvasCharWidth);
-  const y2 = Math.ceil((row + 1) * canvasCell);
-  if (mask & 1) presenterContext.fillRect(x1, y1, Math.max(1, xMid - x1 + 1), Math.max(1, yMid - y1 + 1));
-  if (mask & 2) presenterContext.fillRect(xMid, y1, Math.max(1, x2 - xMid + 1), Math.max(1, yMid - y1 + 1));
-  if (mask & 4) presenterContext.fillRect(x1, yMid, Math.max(1, xMid - x1 + 1), Math.max(1, y2 - yMid + 1));
-  if (mask & 8) presenterContext.fillRect(xMid, yMid, Math.max(1, x2 - xMid + 1), Math.max(1, y2 - yMid + 1));
+  const x1 = Math.round(col * canvasCharWidth);
+  const y1 = Math.round(row * canvasCell);
+  const xMid = Math.round((col + 0.5) * canvasCharWidth);
+  const yMid = Math.round((row + 0.5) * canvasCell);
+  const x2 = Math.round((col + 1) * canvasCharWidth);
+  const y2 = Math.round((row + 1) * canvasCell);
+  if (mask & 1) presenterContext.fillRect(x1, y1, Math.max(1, xMid - x1), Math.max(1, yMid - y1));
+  if (mask & 2) presenterContext.fillRect(xMid, y1, Math.max(1, x2 - xMid), Math.max(1, yMid - y1));
+  if (mask & 4) presenterContext.fillRect(x1, yMid, Math.max(1, xMid - x1), Math.max(1, y2 - yMid));
+  if (mask & 8) presenterContext.fillRect(xMid, yMid, Math.max(1, x2 - xMid), Math.max(1, y2 - yMid));
 }
 function drawCanvasOutlineLine(line) {
   for (const part of line.parts || []) {
@@ -3689,11 +3955,11 @@ function drawCanvasOutlineLine(line) {
   }
 }
 function drawCanvasCellRun(col, row, len) {
-  const x1 = Math.floor(col * canvasCharWidth);
-  const y1 = Math.floor(row * canvasCell);
-  const x2 = Math.ceil((col + len) * canvasCharWidth);
-  const y2 = Math.ceil((row + 1) * canvasCell);
-  presenterContext.fillRect(x1, y1, Math.max(1, x2 - x1 + 1), Math.max(1, y2 - y1 + 1));
+  const x1 = Math.round(col * canvasCharWidth);
+  const y1 = Math.round(row * canvasCell);
+  const x2 = Math.round((col + len) * canvasCharWidth);
+  const y2 = Math.round((row + 1) * canvasCell);
+  presenterContext.fillRect(x1, y1, Math.max(1, x2 - x1), Math.max(1, y2 - y1));
 }
 function transparencyCellMap(lines) {
   const cells = new Map();
@@ -3701,7 +3967,10 @@ function transparencyCellMap(lines) {
     for (const part of line.parts || []) {
       const text = part.text || '';
       for (let i = 0; i < text.length; i++) {
-        cells.set(line.row + ':' + (part.col + i), part.background || '#000');
+        cells.set(line.row + ':' + (part.col + i), {
+          background: part.background || '#000',
+          glyph: text[i] || ' '
+        });
       }
     }
   }
@@ -3745,10 +4014,15 @@ function applyBackdropTransparency(lines, transparency) {
       for (let i = 0; i < text.length; i++) {
         const col = part.col + i;
         const key = line.row + ':' + col;
-        const bg = cells.get(key);
-        if (bg) {
+        const transparentCell = cells.get(key);
+        if (transparentCell) {
+          const bg = transparentCell.background;
           occupied.add(key);
-          pushPart(parts, col, text[i], blendCSSForTransparency(part.color, bg), bg);
+          if (blockGlyphMask(transparentCell.glyph) >= 0 && transparentCell.glyph !== ' ') {
+            pushPart(parts, col, transparentCell.glyph, blendCSSForTransparency(part.color, bg), '');
+          } else {
+            pushPart(parts, col, text[i], blendCSSForTransparency(part.color, bg), bg);
+          }
         } else {
           pushPart(parts, col, text[i], part.color, part.background || '');
         }
@@ -3757,12 +4031,17 @@ function applyBackdropTransparency(lines, transparency) {
     if (parts.length) out.push({...line, parts});
   }
   const fillerRows = new Map();
-  for (const [key, bg] of cells.entries()) {
+  for (const [key, transparentCell] of cells.entries()) {
     if (occupied.has(key)) continue;
     const [rowText, colText] = key.split(':');
     const row = Number(rowText), col = Number(colText);
     if (!fillerRows.has(row)) fillerRows.set(row, []);
-    pushPart(fillerRows.get(row), col, ' ', '#000000', bg);
+    const bg = transparentCell.background;
+    if (blockGlyphMask(transparentCell.glyph) >= 0 && transparentCell.glyph !== ' ') {
+      pushPart(fillerRows.get(row), col, transparentCell.glyph, bg, '');
+    } else {
+      pushPart(fillerRows.get(row), col, ' ', '#000000', bg);
+    }
   }
   for (const [row, parts] of fillerRows.entries()) {
     if (parts.length) out.push({row, role: 'transparent', parts});
@@ -4817,7 +5096,7 @@ function drawPresenterPage(page, frameValue, contentLines) {
   drawCanvasLines(contentLines);
   drawCanvasLinkUnderlines(contentLines);
   drawCanvasPageLabel(page);
-  drawPresenterPhosphor(presenterCanvas.width, presenterCanvas.height);
+  if (!keynopeAppSurface) drawPresenterPhosphor(presenterCanvas.width, presenterCanvas.height);
 }
 function drawPresenterPageFallback() {
   const page = presenterPageAt(pageIndex);
@@ -4833,7 +5112,7 @@ function drawPresenterPageFallback() {
   drawCanvasLines(page.lines || []);
   drawCanvasLinkUnderlines(page.lines || []);
   drawCanvasPageLabel(page);
-  drawPresenterPhosphor(presenterCanvas.width, presenterCanvas.height);
+  if (!keynopeAppSurface) drawPresenterPhosphor(presenterCanvas.width, presenterCanvas.height);
 }
 function presenterPageAt(index) {
   if (!deck.pages || !deck.pages.length) return null;
@@ -4913,7 +5192,12 @@ function publishPresenterTimer(seconds) {
     body: JSON.stringify(seconds > 0 ? {action: 'start-timer', value: seconds} : {action: 'stop-timer'})
   }).catch(() => {});
 }
+function keynopeFormControlTarget(target) {
+  return !!target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
+}
 addEventListener('keydown', e => {
+  if (keynopeFormControlTarget(e.target)) return;
+  if (keynopeAppSurface && keynopeEditorMasterMode) return;
   if (window.KEYNOPE_PRESENTER && presenterMainSurface) {
     if (presenterTimerMode === 'config') {
       if (/^\d$/.test(e.key) && String(presenterTimerInput || '').length < 4) {
@@ -4996,7 +5280,7 @@ let presenterTransitionUntil = 0;
 let presenterTransitionFromIndex = 0;
 let presenterTransitionToIndex = 0;
 function startPageTransition(fromIndex, toIndex) {
-  if (fromIndex === toIndex) return;
+  if (fromIndex === toIndex || keynopeAppSurface) return;
   presenterTransitionStarted = performance.now();
   presenterTransitionUntil = presenterTransitionStarted + 180;
   presenterTransitionFromIndex = fromIndex;
@@ -5255,6 +5539,8 @@ if (keynopeAppSurface) {
   let editorElementClipboard = [];
   let activeCanvasVisualMenu = null;
   let activeCanvasLinkDialog = null;
+  let emojiPickerPanel = null;
+  let emojiPickerTarget = null;
   async function editorAction(action) {
     const enteringMasters = action.action === 'toggle-master-mode' && editorState && !editorState.masterMode;
     if (enteringMasters) editorNormalPages = (deck.pages || []).slice();
@@ -5426,6 +5712,13 @@ if (keynopeAppSurface) {
   addElementIconButton('Add text', 'text', '<path d="M3 4h14M10 4v12M7 16h6"/>');
   addElementIconButton('Add bullet point', 'bullet', '<circle cx="4" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="4" cy="14" r="1" fill="currentColor" stroke="none"/><path d="M8 6h9M8 14h9"/>');
   addElementIconButton('Add code', 'code', '<path d="M7 5 3 10l4 5M13 5l4 5-4 5M11 3 9 17"/>');
+  addElementIconButton('Add emoji', 'text', '<circle cx="10" cy="10" r="7"/><circle cx="7.5" cy="8" r=".8" fill="currentColor" stroke="none"/><circle cx="12.5" cy="8" r=".8" fill="currentColor" stroke="none"/><path d="M6.5 11.5c1.5 2.5 5.5 2.5 7 0"/>', 0, button => openEmojiPicker(button, -1, 'add'));
+  const addPageNumberButton = addElementIconButton('Show slide number', 'page-number', '<g transform="scale(.025)" fill="none" stroke-linejoin="round"><path d="M145 65h350l160 160v510H145Z" stroke="#fff" stroke-width="32"/><path d="M495 65v160h160" stroke="#fff" stroke-width="32"/><path d="M230 300h340M230 385h340M230 470h250" stroke="#9b9b9b" stroke-width="28" stroke-linecap="round"/><path d="M205 560h390" stroke="#fff" stroke-width="26" stroke-linecap="round"/><path d="m370 630 34-25v85M365 690h90" stroke="#fff" stroke-width="30" stroke-linecap="round"/></g>', 0, () => editorAction({action: 'toggle-page-number'}).catch(() => {}));
+  addPageNumberButton.classList.add('keynope-page-number-button');
+  const addPageNumberTag = document.createElement('span');
+  addPageNumberTag.className = 'keynope-page-number-tag';
+  addPageNumberButton.appendChild(addPageNumberTag);
+  addPageNumberButton.hidden = true;
   const addShapeMenu = document.createElement('div');
   addShapeMenu.className = 'keynope-add-shape-menu';
   addShapeMenu.hidden = true;
@@ -5468,15 +5761,19 @@ if (keynopeAppSurface) {
   imageInput.hidden = true;
   imageInput.addEventListener('change', async () => {
     if (!imageInput.files || !imageInput.files[0]) return;
-    const body = new FormData();
-    body.append('image', imageInput.files[0]);
-    const response = await fetch('/api/editor/upload', {method: 'POST', body});
-    if (response.ok) {
+    try {
+      const body = new FormData();
+      body.append('image', imageInput.files[0]);
+      const response = await fetch('/api/editor/upload', {method: 'POST', body});
+      if (!response.ok) throw new Error((await response.text()).trim() || 'Image upload failed');
       editorState = await response.json();
       editorStateVersion = editorState.version;
       renderEditorPanels();
+    } catch (error) {
+      window.alert('Could not import image\n\n' + (error && error.message ? error.message : String(error)));
+    } finally {
+      imageInput.value = '';
     }
-    imageInput.value = '';
   });
   const importButton = document.createElement('button');
   importButton.innerHTML = '<svg viewBox="-13 80 1050 1040" aria-hidden="true"><path d="M-13 1120V80h1050v1040Zm292-428q-18 0-27.5-17t-9.5-35.5 8-28q-4-10-4-23 0-12 4-23.75t13.5-15.25q-4.5-9-4.5-22 0-20.5 6-38.5t12.5-18 12.5 17.75 6 38.75q0 13-4.5 22 10 3.5 13.75 15t3.75 23q0 7.5-1.25 13.75T305 611.5q8.5 10 8.5 30.5 0 17.5-8.5 33.75T279 692m130.5 32.5q-15 0-33.5-4.75t-32-14.25-13.5-24q0-13.5 6.5-22.75T353 648q-3.5-6.5-3.5-13.5 0-10.5 7.5-18.25t18.5-9.75q-1-3-1-6 0-11 5.75-18.5t13.75-7.5q7.5 0 12.5 7t5 17q0 4.5-1.5 10 13 12 13 28 0 9-5 15.5 11 9 16.75 20t5.75 22.5q0 16-7 23t-24 7m266 97.5q-81.5 0-151.25-23T378.5 742q-54-24.5-99-38.25T191 684l6-40q46 6.5 93.75 21.5T394.5 706q74.5 34 139.75 55t140.25 21q34 0 70.75-5t79.25-15.5l10 39q-44.5 11-84 16.25t-75 5.25M27 1080h970V120H27Zm147-145.5v-669h676v669Zm40-40h596v-589H214ZM404.5 750v-40q40 0 73.5-2t64-7q24.5-4 47.75-11.25A1586 1586 0 0 0 637.5 674q40-14.5 86-26.5T829 633l2 40q-56 2-98.75 13.5t-82.25 25q-24.5 8.5-49.25 16T549 740q-32 6-67.25 8t-77.25 2m84-193q-29.5 0-46-24-17.5 1.5-30-9.25T400 497q0-15.5 10.5-26.25t26-12.25Q434 447 434 437q0-28 20.5-48t48.5-20q23.5 0 43 14.5t24.5 36.5q27.5-1.5 41.75 9.75T625 464.5q17.5-1.5 30.25 9.5T668 499t-13.75 24.25T621 533.5q-11.5 0-23.5-4-13 17-39 17-16 0-28.5-8-17.5 18.5-41.5 18.5m129 130q0-17 10.5-30.5t25-20 26.5-3q2.5-16 17-24.5t28.5-8.5q17.5 0 22.5 10.5 5-16.5 24.75-30t44.25-13.5V642q-50.5 0-104.75 14.75T617.5 687"/></svg>';
@@ -5513,6 +5810,58 @@ if (keynopeAppSurface) {
   const slidesPanel = document.createElement('aside');
   slidesPanel.className = 'keynope-editor-panel keynope-editor-slides';
   document.body.appendChild(slidesPanel);
+  let draggedMasterIndex = -1;
+  let draggedMasterButton = null;
+  let masterDropDestination = -1;
+  let masterDropPlaceholder = null;
+  let masterDragImage = null;
+  function finishMasterDrag() {
+    if (draggedMasterButton) {
+      draggedMasterButton.classList.remove('master-dragging', 'master-drag-outline');
+    }
+    if (masterDropPlaceholder) masterDropPlaceholder.remove();
+    if (masterDragImage) masterDragImage.remove();
+    draggedMasterIndex = -1;
+    draggedMasterButton = null;
+    masterDropDestination = -1;
+    masterDropPlaceholder = null;
+    masterDragImage = null;
+  }
+  function updateMasterDropPlaceholder(clientY) {
+    if (draggedMasterIndex <= 0 || !draggedMasterButton) return;
+    const remaining = Array.from(slidesPanel.querySelectorAll('.keynope-slide-item[data-master-index]'))
+      .filter(item => Number(item.dataset.masterIndex) > 0 && Number(item.dataset.masterIndex) !== draggedMasterIndex);
+    const reference = remaining.find(item => clientY < item.getBoundingClientRect().top + item.getBoundingClientRect().height / 2) || null;
+    masterDropDestination = reference ? remaining.indexOf(reference) + 1 : remaining.length + 1;
+    if (!masterDropPlaceholder) {
+      masterDropPlaceholder = document.createElement('div');
+      masterDropPlaceholder.className = 'keynope-master-drop-placeholder';
+      masterDropPlaceholder.setAttribute('aria-hidden', 'true');
+      masterDropPlaceholder.style.height = Math.max(30, draggedMasterButton.getBoundingClientRect().height) + 'px';
+    }
+    if (reference) slidesPanel.insertBefore(masterDropPlaceholder, reference);
+    else slidesPanel.appendChild(masterDropPlaceholder);
+  }
+  slidesPanel.addEventListener('dragover', event => {
+    if (draggedMasterIndex <= 0) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    updateMasterDropPlaceholder(event.clientY);
+    const panelRect = slidesPanel.getBoundingClientRect();
+    if (event.clientY < panelRect.top + 36) slidesPanel.scrollBy({top: -18});
+    else if (event.clientY > panelRect.bottom - 36) slidesPanel.scrollBy({top: 18});
+  });
+  slidesPanel.addEventListener('drop', event => {
+    if (draggedMasterIndex <= 0) return;
+    event.preventDefault();
+    updateMasterDropPlaceholder(event.clientY);
+    const source = draggedMasterIndex;
+    const destination = masterDropDestination;
+    finishMasterDrag();
+    if (destination > 0 && destination !== source) {
+      editorAction({action: 'reorder-master', slide: source, value: destination}).catch(() => {});
+    }
+  });
   const masterModeButton = document.createElement('button');
   masterModeButton.type = 'button';
   masterModeButton.textContent = 'M';
@@ -5634,17 +5983,25 @@ if (keynopeAppSurface) {
     replaceEditorPreviewPages(editorPreviewOriginal.slide, editorPreviewOriginal.pages);
     editorPreviewOriginal = null;
   }
-  async function previewEditorText(index, element, sequence) {
+  async function previewEditorText(index, element, cursor, selectionStart, selectionEnd, sequence) {
     try {
       const response = await fetch('/api/editor/preview', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({element: index, elementData: element, cols: deck.cols, rows: deck.rows})
+        body: JSON.stringify({name:'inline-edit', element: index, elementData: element, cursor, selectionStart, selectionEnd,
+          page: deck.pages && deck.pages[pageIndex] ? (deck.pages[pageIndex].page || 0) : 0,
+          cols: deck.cols, rows: deck.rows})
       });
       if (!response.ok) return;
-      const pages = await response.json();
+      const payload = await response.json();
+      const pages = Array.isArray(payload) ? payload : payload.pages;
       if (!activeInlineEditor || activeInlineEditor.element !== index || sequence !== editorPreviewSequence) return;
       replaceEditorPreviewPages(editorState.current, pages);
+      if (payload && payload.caret && editorCanvasCaret) {
+        editorCanvasCaret.exact = payload.caret;
+        editorCanvasCaret.selection = Array.isArray(payload.selectionRows) && payload.selectionRows.length
+          ? payload.selectionRows : null;
+      }
       drawFrame();
     } catch (_err) {}
   }
@@ -5668,6 +6025,239 @@ if (keynopeAppSurface) {
       resolvedToRaw.set(resolvedIndex, rawIndex);
     });
     return {rawToResolved, resolvedToRaw};
+  }
+  function inlineEditorVerticalCursor(value, cursor, direction, kind) {
+    const starts = [0];
+    for (let index = 0; index < value.length; index++) if (value[index] === '\n') starts.push(index + 1);
+    let lineIndex = 0;
+    while (lineIndex + 1 < starts.length && starts[lineIndex + 1] <= cursor) lineIndex++;
+    const targetIndex = lineIndex + direction;
+    if (targetIndex < 0 || targetIndex >= starts.length) return null;
+    const lineEnd = lineIndex + 1 < starts.length ? starts[lineIndex + 1] - 1 : value.length;
+    const targetEnd = targetIndex + 1 < starts.length ? starts[targetIndex + 1] - 1 : value.length;
+    const currentLine = value.slice(starts[lineIndex], lineEnd);
+    const targetLine = value.slice(starts[targetIndex], targetEnd);
+    const bulletIndent = line => kind === 'bullet' && /^\s/.test(line) ? (line.match(/^\s*/) || [''])[0].length : 0;
+    const currentIndent = bulletIndent(currentLine);
+    const targetIndent = bulletIndent(targetLine);
+    const visibleColumn = Math.max(0, Math.min(currentLine.length, cursor - starts[lineIndex]) - currentIndent);
+    const targetLength = Math.max(0, targetLine.length - targetIndent);
+    return starts[targetIndex] + targetIndent + Math.min(visibleColumn, targetLength);
+  }
+  function inlineEditorFormattingJump(value, cursor, direction) {
+    const expression = /\[color=#[0-9a-f]{6}\]|\[\/color\]/ig;
+    let match;
+    while ((match = expression.exec(value)) !== null) {
+      const start = match.index;
+      const end = start + match[0].length;
+      if (direction < 0 && cursor > start && cursor <= end) return start;
+      if (direction > 0 && cursor >= start && cursor < end) return end;
+    }
+    return null;
+  }
+  function moveInlineEditorAcrossFormatting(editor, direction, extend) {
+    if (!extend && editor.selectionStart !== editor.selectionEnd) return false;
+    const active = editor.selectionDirection === 'backward' ? editor.selectionStart : editor.selectionEnd;
+    let target = inlineEditorFormattingJump(editor.value, active, direction);
+    if (target == null) return false;
+    if (!extend) {
+      editor.setSelectionRange(target, target);
+      return true;
+    }
+    while (true) {
+      const nextTagBoundary = inlineEditorFormattingJump(editor.value, target, direction);
+      if (nextTagBoundary == null) break;
+      target = nextTagBoundary;
+    }
+    target = direction < 0
+      ? inlineEditorPreviousTextBoundary(editor.value, target)
+      : inlineEditorNextTextBoundary(editor.value, target);
+    const anchor = editor.selectionDirection === 'backward' ? editor.selectionEnd : editor.selectionStart;
+    editor.setSelectionRange(Math.min(anchor, target), Math.max(anchor, target), target < anchor ? 'backward' : 'forward');
+    return true;
+  }
+  const inlineEditorGraphemeSegmenter = typeof Intl !== 'undefined' && Intl.Segmenter
+    ? new Intl.Segmenter(undefined, {granularity:'grapheme'}) : null;
+  function inlineEditorPreviousTextBoundary(value, cursor) {
+    if (cursor <= 0) return 0;
+    if (!inlineEditorGraphemeSegmenter) return cursor - ([...value.slice(0, cursor)].pop() || '').length;
+    let previous = 0;
+    for (const segment of inlineEditorGraphemeSegmenter.segment(value.slice(0, cursor))) previous = segment.index;
+    return previous;
+  }
+  function inlineEditorNextTextBoundary(value, cursor) {
+    if (cursor >= value.length) return value.length;
+    if (!inlineEditorGraphemeSegmenter) return cursor + ([...value.slice(cursor)][0] || '').length;
+    for (const segment of inlineEditorGraphemeSegmenter.segment(value)) {
+      if (segment.index >= cursor) return segment.index + segment.segment.length;
+    }
+    return value.length;
+  }
+  function cleanupInlineEditorEmptyColorTags(editor) {
+    const pattern = /\[color=#[0-9a-f]{6}\]\[\/color\]/ig;
+    let value = editor.value;
+    let selectionStart = editor.selectionStart || 0;
+    let selectionEnd = editor.selectionEnd || 0;
+    let changed = false;
+    let match;
+    while ((match = pattern.exec(value)) !== null) {
+      const start = match.index;
+      const end = start + match[0].length;
+      const removed = end - start;
+      const adjust = position => position <= start ? position : position < end ? start : position - removed;
+      selectionStart = adjust(selectionStart);
+      selectionEnd = adjust(selectionEnd);
+      value = value.slice(0, start) + value.slice(end);
+      pattern.lastIndex = 0;
+      changed = true;
+    }
+    if (!changed) return false;
+    editor.value = value;
+    editor.setSelectionRange(selectionStart, selectionEnd, editor.selectionDirection || 'none');
+    return true;
+  }
+  function deleteInlineEditorColorContent(editor, direction) {
+    if (editor.selectionStart !== editor.selectionEnd) return false;
+    const cursor = editor.selectionStart || 0;
+    if (direction < 0) {
+      const closing = /\[\/color\]$/i.exec(editor.value.slice(0, cursor));
+      if (closing) {
+        const closeStart = cursor - closing[0].length;
+        const prefix = editor.value.slice(0, closeStart);
+        const openings = [...prefix.matchAll(/\[color=#[0-9a-f]{6}\]/ig)];
+        const opening = openings[openings.length - 1];
+        if (opening) {
+          const contentStart = opening.index + opening[0].length;
+          const removeStart = inlineEditorPreviousTextBoundary(editor.value, closeStart);
+          if (removeStart >= contentStart) {
+            editor.setRangeText('', removeStart, closeStart, 'end');
+            const nextCursor = cursor - (closeStart - removeStart);
+            editor.setSelectionRange(nextCursor, nextCursor);
+            editor.dispatchEvent(new Event('input', {bubbles:true}));
+            return true;
+          }
+        }
+      }
+    } else {
+      const opening = /^\[color=#[0-9a-f]{6}\]/i.exec(editor.value.slice(cursor));
+      if (opening) {
+        const contentStart = cursor + opening[0].length;
+        const closeOffset = editor.value.slice(contentStart).search(/\[\/color\]/i);
+        if (closeOffset >= 0) {
+          const closeStart = contentStart + closeOffset;
+          const removeEnd = inlineEditorNextTextBoundary(editor.value, contentStart);
+          if (removeEnd <= closeStart && removeEnd > contentStart) {
+            editor.setRangeText('', contentStart, removeEnd, 'start');
+            editor.setSelectionRange(cursor, cursor);
+            editor.dispatchEvent(new Event('input', {bubbles:true}));
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+  function deleteInlineEditorAcrossFormatting(editor, direction) {
+    if (editor.selectionStart !== editor.selectionEnd) return false;
+    const cursor = editor.selectionStart || 0;
+    const boundary = inlineEditorFormattingJump(editor.value, cursor, direction);
+    if (boundary == null) return false;
+    if (direction < 0) {
+      const removeStart = inlineEditorPreviousTextBoundary(editor.value, boundary);
+      if (removeStart < boundary) editor.setRangeText('', removeStart, boundary, 'end');
+    } else {
+      const removeEnd = inlineEditorNextTextBoundary(editor.value, boundary);
+      if (removeEnd > boundary) editor.setRangeText('', boundary, removeEnd, 'start');
+      editor.setSelectionRange(cursor, cursor);
+    }
+    editor.dispatchEvent(new Event('input', {bubbles:true}));
+    return true;
+  }
+  function deleteInlineEditorSelectionPreservingFormatting(editor) {
+    const start = editor.selectionStart || 0;
+    const end = editor.selectionEnd || 0;
+    if (start === end) return false;
+    const tags = [...editor.value.matchAll(/\[color=#[0-9a-f]{6}\]|\[\/color\]/ig)]
+      .filter(match => match.index >= start && match.index + match[0].length <= end);
+    if (!tags.length) return false;
+    const preserved = tags.map(match => match[0]).join('');
+    editor.value = editor.value.slice(0, start) + preserved + editor.value.slice(end);
+    const cursor = start + preserved.length;
+    editor.setSelectionRange(cursor, cursor);
+    editor.dispatchEvent(new Event('input', {bubbles:true}));
+    return true;
+  }
+  function inlineEditorInitialCursor(value) {
+    if (/^\[color=#[0-9a-f]{6}\][\s\S]*\[\/color\]$/i.test(value)) return value.length - '[/color]'.length;
+    for (const marker of ['***', '**', '*']) {
+      if (value.length >= marker.length * 2 && value.startsWith(marker) && value.endsWith(marker)) {
+        return value.length - marker.length;
+      }
+    }
+    return value.length;
+  }
+  function applyInlineSelectionWrapper(marker) {
+    const active = activeInlineEditor;
+    if (!active) return;
+    const editor = active.editor;
+    const start = editor.selectionStart || 0;
+    const end = editor.selectionEnd || 0;
+    if (start === end) return;
+    const selected = editor.value.slice(start, end);
+    const wrapped = selected.length >= marker.length * 2 && selected.startsWith(marker) && selected.endsWith(marker);
+    const replacement = wrapped ? selected.slice(marker.length, -marker.length) : marker + selected + marker;
+    editor.setRangeText(replacement, start, end, 'select');
+    const innerStart = start + (wrapped ? 0 : marker.length);
+    editor.setSelectionRange(innerStart, innerStart + (wrapped ? replacement.length : selected.length));
+    editor.dispatchEvent(new Event('input', {bubbles:true}));
+  }
+  function applyInlineSelectionColour(color, savedSelection) {
+    const active = activeInlineEditor;
+    if (!active || !/^#[0-9a-f]{6}$/i.test(color || '')) return;
+    const editor = active.editor;
+    const start = savedSelection ? savedSelection.start : (editor.selectionStart || 0);
+    const end = savedSelection ? savedSelection.end : (editor.selectionEnd || 0);
+    if (start === end) return;
+    const selected = editor.value.slice(start, end);
+    const replacement = '[color=' + color.toLowerCase() + ']' + selected + '[/color]';
+    editor.setRangeText(replacement, start, end, 'select');
+    const innerStart = start + color.length + 8;
+    editor.setSelectionRange(innerStart, innerStart + selected.length);
+    editor.dispatchEvent(new Event('input', {bubbles:true}));
+  }
+  function inlineSelectionColourTool() {
+    const label = document.createElement('label');
+    label.className = 'keynope-colour-tool';
+    label.textContent = 'A';
+    label.title = 'Colour selected text';
+    label.setAttribute('aria-label', label.title);
+    label.style.setProperty('--keynope-tool-colour', '#55aaff');
+    const input = document.createElement('input');
+    input.type = 'color';
+    input.value = '#55aaff';
+    input.setAttribute('aria-label', 'Choose selection colour');
+    input.addEventListener('pointerdown', event => {
+      event.stopPropagation();
+      if (!activeInlineEditor) return;
+      activeInlineEditor.savedSelection = {start:activeInlineEditor.editor.selectionStart || 0, end:activeInlineEditor.editor.selectionEnd || 0};
+      activeInlineEditor.suspendBlur = true;
+    });
+    input.addEventListener('change', event => {
+      event.stopPropagation();
+      const active = activeInlineEditor;
+      if (!active) return;
+      applyInlineSelectionColour(input.value, active.savedSelection);
+      active.suspendBlur = false;
+      active.editor.focus();
+    });
+    input.addEventListener('blur', () => {
+      const active = activeInlineEditor;
+      if (!active || !active.suspendBlur) return;
+      active.suspendBlur = false;
+      active.editor.focus();
+    });
+    label.appendChild(input);
+    return label;
   }
   async function beginInlineEdit(index, hit) {
     const transition = ++inlineEditTransitionSequence;
@@ -5704,19 +6294,45 @@ if (keynopeAppSurface) {
     editorPreviewOriginal = first >= 0 ? {slide, pages: deck.pages.slice(first, end)} : null;
     let finished = false;
     let finishPromise = null;
+    let discardDialog = null;
+    const normalizedText = value => {
+      if (element.kind !== 'bullet') return value;
+      const lines = [];
+      for (const raw of value.split(/\r?\n/)) {
+        const text = raw.trim();
+        if (!text) continue;
+        const continuation = /^\s/.test(raw) && lines.length > 0;
+        lines.push(continuation ? '  ' + text : text);
+      }
+      return lines.join('\n');
+    };
     const finish = save => {
       if (finished) return finishPromise || Promise.resolve();
       finished = true;
+      if (discardDialog) {
+        discardDialog.remove();
+        discardDialog = null;
+      }
       activeInlineEditor = null;
       suppressSelectionTopbar = true;
-      const text = editor.value;
+      const text = save ? normalizedText(editor.value) : editor.value;
       editor.remove();
       editorCanvasCaret = null;
       mainTopbar.hidden = false;
       selectionTopbar.hidden = true;
       selectionTopbar.replaceChildren();
+      drawFrame();
+      renderEditorTopbar();
       let completion = Promise.resolve();
-      if (save && text !== originalText) {
+      if (save && element.kind === 'bullet' && !text) {
+        const originalPreview = editorPreviewOriginal;
+        editorPreviewOriginal = null;
+        completion = editorAction({action: 'delete-element', element: index}).catch(() => {
+          editorPreviewOriginal = originalPreview;
+          restoreEditorPreview();
+          drawFrame();
+        });
+      } else if (save && text !== originalText) {
         const originalPreview = editorPreviewOriginal;
         editorPreviewOriginal = null;
         element.text = text;
@@ -5737,37 +6353,158 @@ if (keynopeAppSurface) {
       if (editorStatus) editorStatus.textContent = save ? 'Text saved' : 'Editing cancelled';
       return finishPromise;
     };
+    const confirmEscape = () => {
+      if (editor.value === originalText) {
+        finish(false);
+        return;
+      }
+      if (discardDialog) return;
+      activeInlineEditor.suspendBlur = true;
+      const blocker = document.createElement('div');
+      blocker.className = 'keynope-modal-blocker';
+      blocker.setAttribute('role', 'presentation');
+      const dialog = document.createElement('form');
+      dialog.className = 'keynope-link-dialog keynope-discard-dialog';
+      dialog.setAttribute('role', 'alertdialog');
+      dialog.setAttribute('aria-modal', 'true');
+      const heading = document.createElement('h3');
+      heading.textContent = 'Keep text changes?';
+      const message = document.createElement('p');
+      message.textContent = 'The text was modified. Keep the changes or revert to the text from before editing?';
+      const actions = document.createElement('div');
+      actions.className = 'keynope-editor-actions';
+      const keep = canvasTool('Yes', '', () => {
+        activeInlineEditor.suspendBlur = false;
+        finish(true);
+      });
+      const revert = canvasTool('No, revert', '', () => {
+        activeInlineEditor.suspendBlur = false;
+        finish(false);
+      });
+      actions.append(keep, revert);
+      dialog.append(heading, message, actions);
+      dialog.addEventListener('submit', event => {
+        event.preventDefault();
+        activeInlineEditor.suspendBlur = false;
+        finish(true);
+      });
+      dialog.addEventListener('keydown', event => {
+        event.stopPropagation();
+        if (event.key === 'Tab') {
+          event.preventDefault();
+          (document.activeElement === keep ? revert : keep).focus();
+          return;
+        }
+        if (event.key === 'Escape') event.preventDefault();
+      });
+      blocker.addEventListener('pointerdown', event => {
+        if (event.target !== blocker) return;
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      blocker.addEventListener('contextmenu', event => event.preventDefault());
+      blocker.addEventListener('wheel', event => event.preventDefault(), {passive:false});
+      blocker.appendChild(dialog);
+      document.body.appendChild(blocker);
+      discardDialog = blocker;
+      requestAnimationFrame(() => keep.focus());
+    };
     const updateCaret = () => {
-      editorCanvasCaret = {element: resolvedElement == null ? index : resolvedElement, text: editor.value, cursor: editor.selectionStart, started: performance.now()};
+      if (finished) return;
+      const selectionStart = [...editor.value.slice(0, editor.selectionStart || 0)].length;
+      const selectionEnd = [...editor.value.slice(0, editor.selectionEnd || 0)].length;
+      const cursor = editor.selectionDirection === 'backward' ? selectionStart : selectionEnd;
+      editorCanvasCaret = {element: resolvedElement == null ? index : resolvedElement, text: editor.value, cursor,
+        kind: element.kind, query: element.query || '', started: performance.now()};
       drawFrame();
+      const sequence = ++editorPreviewSequence;
+      previewEditorText(index, {...element, text:editor.value}, cursor, selectionStart, selectionEnd, sequence);
     };
     activeInlineEditor = {element: index, finish, editor};
     renderEditorTopbar();
     editor.addEventListener('input', () => {
+      cleanupInlineEditorEmptyColorTags(editor);
       element.text = editor.value;
       updateCaret();
-      const sequence = ++editorPreviewSequence;
-      previewEditorText(index, {...element}, sequence);
     });
     editor.addEventListener('select', updateCaret);
     editor.addEventListener('click', updateCaret);
     editor.addEventListener('keyup', updateCaret);
     editor.addEventListener('keydown', keyEvent => {
-      if (keyEvent.key === 'Enter' && !keyEvent.shiftKey) {
+      if ((keyEvent.key === 'Backspace' || keyEvent.key === 'Delete') && deleteInlineEditorSelectionPreservingFormatting(editor)) {
         keyEvent.preventDefault();
-        finish(true);
+      } else if (keyEvent.key === 'Backspace' && deleteInlineEditorColorContent(editor, -1)) {
+        keyEvent.preventDefault();
+      } else if (keyEvent.key === 'Delete' && deleteInlineEditorColorContent(editor, 1)) {
+        keyEvent.preventDefault();
+      } else if (keyEvent.key === 'Backspace' && deleteInlineEditorAcrossFormatting(editor, -1)) {
+        keyEvent.preventDefault();
+      } else if (keyEvent.key === 'Delete' && deleteInlineEditorAcrossFormatting(editor, 1)) {
+        keyEvent.preventDefault();
+      } else if (keyEvent.key === 'Backspace' && editor.selectionStart === editor.selectionEnd && (editor.selectionStart || 0) <= 1 && editor.value.startsWith(String.fromCharCode(96))) {
+        keyEvent.preventDefault();
+        editor.setRangeText('', 0, 1, 'start');
+        editor.dispatchEvent(new Event('input', {bubbles:true}));
+      } else if ((keyEvent.key === 'ArrowLeft' || keyEvent.key === 'ArrowRight') && !keyEvent.metaKey && !keyEvent.ctrlKey && !keyEvent.altKey &&
+          moveInlineEditorAcrossFormatting(editor, keyEvent.key === 'ArrowLeft' ? -1 : 1, keyEvent.shiftKey)) {
+        keyEvent.preventDefault();
+        updateCaret();
+      } else if ((keyEvent.key === 'ArrowUp' || keyEvent.key === 'ArrowDown') && !keyEvent.shiftKey && !keyEvent.metaKey && !keyEvent.ctrlKey && !keyEvent.altKey) {
+        const nextCursor = inlineEditorVerticalCursor(editor.value, editor.selectionStart || 0, keyEvent.key === 'ArrowUp' ? -1 : 1, element.kind);
+        keyEvent.preventDefault();
+        if (nextCursor != null) {
+          editor.setSelectionRange(nextCursor, nextCursor);
+          updateCaret();
+        }
+      } else if (keyEvent.key === 'Enter') {
+        keyEvent.preventDefault();
+        if (element.kind === 'bullet' || element.kind === 'code' || element.kind === 'text') {
+          const start = editor.selectionStart || 0;
+          const lineStart = editor.value.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+          const lineEnd = editor.value.indexOf('\n', start);
+          const currentLine = editor.value.slice(lineStart, lineEnd < 0 ? editor.value.length : lineEnd);
+          if (!keyEvent.shiftKey && !currentLine.trim()) {
+            if (element.kind === 'code' || element.kind === 'text') {
+              const removeStart = lineStart > 0 ? lineStart - 1 : 0;
+              const removeEnd = lineStart > 0 ? (lineEnd < 0 ? editor.value.length : lineEnd) : (lineEnd < 0 ? 0 : lineEnd + 1);
+              editor.setRangeText('', removeStart, removeEnd, 'start');
+              element.text = editor.value;
+            }
+            finish(true);
+          } else {
+            const newline = element.kind === 'bullet' && keyEvent.shiftKey ? '\n  ' : '\n';
+            editor.setRangeText(newline, editor.selectionStart || 0, editor.selectionEnd || 0, 'end');
+            editor.dispatchEvent(new Event('input', {bubbles:true}));
+          }
+        } else {
+          finish(true);
+        }
       } else if (keyEvent.key === 'Escape') {
         keyEvent.preventDefault();
-        finish(false);
+        confirmEscape();
+      } else if ((keyEvent.metaKey || keyEvent.ctrlKey) && keyEvent.key.toLowerCase() === 'b') {
+        keyEvent.preventDefault();
+        applyInlineSelectionWrapper('**');
       }
       keyEvent.stopPropagation();
     });
-    editor.addEventListener('blur', () => finish(true), {once: true});
+    editor.addEventListener('blur', event => {
+      if (activeInlineEditor && activeInlineEditor.suspendBlur) return;
+      if (emojiPickerPanel && emojiPickerPanel.contains(event.relatedTarget)) return;
+      finish(true);
+    });
     canvasOverlay.appendChild(editor);
     editor.focus();
-    editor.setSelectionRange(editor.value.length, editor.value.length);
+    const initialCursor = inlineEditorInitialCursor(editor.value);
+    editor.setSelectionRange(initialCursor, initialCursor);
     updateCaret();
-    if (editorStatus) editorStatus.textContent = 'Editing text · Enter save · Shift+Enter newline · Esc cancel';
+    if (editorStatus) editorStatus.textContent = element.kind === 'bullet'
+      ? 'Editing bullet list · Enter new bullet · Shift+Enter continuation · Enter on empty bullet save · Esc cancel'
+      : element.kind === 'code'
+        ? 'Editing code · Enter newline · Enter on empty line save · Shift+Enter newline · Esc cancel'
+        : element.kind === 'text'
+          ? 'Editing text block · Enter newline · Enter on empty line save · Shift+Enter newline · Esc cancel'
+          : 'Editing text · Enter save · Esc cancel';
   }
 
   function canvasTool(label, className, action) {
@@ -5784,10 +6521,166 @@ if (keynopeAppSurface) {
     return button;
   }
 
+  function ensureEmojiPicker() {
+    if (emojiPickerPanel) return emojiPickerPanel;
+    const panel = document.createElement('div');
+    panel.className = 'keynope-emoji-picker';
+    panel.hidden = true;
+    const controls = document.createElement('div');
+    controls.className = 'keynope-emoji-picker-controls';
+    const search = document.createElement('input');
+    search.type = 'search';
+    search.placeholder = 'Search all emoji';
+    search.setAttribute('aria-label', 'Search emoji');
+    const group = document.createElement('select');
+    group.setAttribute('aria-label', 'Emoji category');
+    group.appendChild(new Option('All categories', ''));
+    controls.append(search, group);
+    const grid = document.createElement('div');
+    grid.className = 'keynope-emoji-grid';
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'keynope-emoji-more';
+    more.textContent = 'More';
+    panel.append(controls, grid, more);
+    document.body.appendChild(panel);
+    panel._search = search;
+    panel._group = group;
+    panel._grid = grid;
+    panel._more = more;
+    panel._offset = 0;
+    panel._request = 0;
+    let searchTimer = 0;
+    const restart = () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => loadEmojiPicker(true), 120);
+    };
+    search.addEventListener('input', restart);
+    group.addEventListener('change', () => loadEmojiPicker(true));
+    more.addEventListener('click', event => { event.preventDefault(); loadEmojiPicker(false); });
+    emojiPickerPanel = panel;
+    return panel;
+  }
+
+  function emojiPickerPreview(lines) {
+    const preview = document.createElement('span');
+    preview.className = 'keynope-emoji-preview';
+    for (const line of lines || []) {
+      for (const part of line.parts || []) {
+        const span = document.createElement('span');
+        span.className = 'line';
+        span.style.setProperty('--x', part.col || 0);
+        span.style.setProperty('--y', line.row || 0);
+        span.style.color = part.color || '#f3efe0';
+        if (part.background) span.style.backgroundColor = part.background;
+        span.textContent = part.text || '';
+        preview.appendChild(span);
+      }
+    }
+    return preview;
+  }
+
+  async function loadEmojiPicker(reset) {
+    const panel = ensureEmojiPicker();
+    if (reset) {
+      panel._offset = 0;
+      panel._grid.replaceChildren();
+    }
+    const request = ++panel._request;
+    const params = new URLSearchParams({q:panel._search.value || '', group:panel._group.value || '', offset:String(panel._offset), limit:'72', size:'10'});
+    try {
+      const response = await fetch('/api/editor/emojis?' + params.toString());
+      if (!response.ok) throw new Error('Could not load emoji');
+      const payload = await response.json();
+      if (request !== panel._request) return;
+      if (panel._group.options.length === 1) {
+        for (const name of payload.groups || []) panel._group.appendChild(new Option(name, name));
+      }
+      for (const item of payload.items || []) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.title = item.name;
+        button.setAttribute('aria-label', item.name);
+        button.appendChild(emojiPickerPreview(item.lines));
+        button.addEventListener('pointerdown', event => event.preventDefault());
+        button.addEventListener('click', event => {
+          event.preventDefault();
+          chooseEmoji(item.emoji);
+        });
+        panel._grid.appendChild(button);
+      }
+      panel._offset += (payload.items || []).length;
+      panel._more.hidden = (payload.items || []).length < 72;
+    } catch (_err) {
+      panel._more.textContent = 'Could not load emoji';
+      panel._more.disabled = true;
+    }
+  }
+
+  async function chooseEmoji(emoji) {
+    const target = emojiPickerTarget;
+    if (!target) return;
+    if (target.mode === 'add') {
+      await editorAction({action:'add-element', kind:'text', elementData:{kind:'text', text:emoji, query:'render=text-image&source=bitmap&scale=5.00&text-size=25'}}).catch(() => {});
+    } else {
+      if (!activeInlineEditor || activeInlineEditor.element !== target.index) await beginInlineEdit(target.index);
+      if (activeInlineEditor && activeInlineEditor.element === target.index) {
+        const editor = activeInlineEditor.editor;
+        editor.setRangeText(emoji, editor.selectionStart || 0, editor.selectionEnd || 0, 'end');
+        editor.dispatchEvent(new Event('input', {bubbles:true}));
+        editor.focus();
+      }
+    }
+    ensureEmojiPicker().hidden = true;
+  }
+
+  function openEmojiPicker(anchor, index, mode) {
+    const panel = ensureEmojiPicker();
+    emojiPickerTarget = {index, mode};
+    panel.hidden = false;
+    panel._more.textContent = 'More';
+    panel._more.disabled = false;
+    const rect = anchor.getBoundingClientRect();
+    const panelRect = panel.getBoundingClientRect();
+    panel.style.left = Math.max(8, Math.min(innerWidth-panelRect.width-8, rect.left)) + 'px';
+    panel.style.top = Math.max(8, Math.min(innerHeight-panelRect.height-8, rect.bottom+6)) + 'px';
+    loadEmojiPicker(true);
+  }
+
+  function canvasEmojiTool(index) {
+    const button = canvasTool('', 'keynope-emoji-tool', () => openEmojiPicker(button, index, 'insert'));
+    button.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7"/><circle cx="7.5" cy="8" r=".8" fill="currentColor" stroke="none"/><circle cx="12.5" cy="8" r=".8" fill="currentColor" stroke="none"/><path d="M6.5 11.5c1.5 2.5 5.5 2.5 7 0"/></svg>';
+    button.title = 'Insert emoji';
+    button.setAttribute('aria-label', 'Insert emoji');
+    return button;
+  }
+  document.addEventListener('pointerdown', event => {
+    if (emojiPickerPanel && !emojiPickerPanel.hidden && !emojiPickerPanel.contains(event.target) && !event.target.closest('.keynope-emoji-tool')) {
+      emojiPickerPanel.hidden = true;
+    }
+  }, true);
+
   function canvasElementAt(index) {
     if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return null;
     const element = editorState.slides[editorState.current].elements[index];
     return element ? {...element} : null;
+  }
+  function canvasSelectedIndices(index, compatible) {
+    if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return [];
+    const elements = editorState.slides[editorState.current].elements || [];
+    let indices = (editorState.selection || []).length > 1 ? [...editorState.selection] : [index];
+    return indices.filter(candidate => candidate >= 0 && candidate < elements.length && (!compatible || compatible(elements[candidate])));
+  }
+  function updateCanvasElements(index, compatible, mutate) {
+    const indices = canvasSelectedIndices(index, compatible);
+    if (!indices.length) return;
+    const elements = editorState.slides[editorState.current].elements || [];
+    const updates = indices.map(candidate => {
+      const element = JSON.parse(JSON.stringify(elements[candidate]));
+      mutate(element, candidate);
+      return element;
+    });
+    editorAction({action:'update-elements', elementIndices:indices, elementsData:updates}).catch(() => {});
   }
   function updateCanvasElement(index, mutate) {
     const element = canvasElementAt(index);
@@ -5809,6 +6702,18 @@ if (keynopeAppSurface) {
   async function setCanvasTextKind(index, kind, level) {
     const element = canvasElementAt(index);
     if (!element) return;
+    if (canvasSelectedIndices(index, candidate => ['heading','text','text-image','bullet','code'].includes(candidate.kind)).length > 1) {
+      try {
+        await editorAction({action:'convert-selected-text-kind', kind, level:level || 0, cols:deck.cols, rows:deck.rows});
+      } catch (_err) {}
+      return;
+    }
+    if (element.kind === 'bullet' || element.kind === 'code' || kind === 'bullet' || kind === 'code') {
+      try {
+        await editorAction({action: 'convert-text-kind', element: index, kind, level: level || 0, cols: deck.cols, rows: deck.rows});
+      } catch (_err) {}
+      return;
+    }
     const query = new URLSearchParams(element.query || '');
     const wasHeading = element.kind === 'heading';
     const colour = query.get(wasHeading ? 'header' : 'fg') || query.get(wasHeading ? 'fg' : 'header');
@@ -5835,14 +6740,16 @@ if (keynopeAppSurface) {
   }
   function appendCanvasTextKindTools(container, index, element) {
     const choices = [
-      ['H1', 'heading', 1, element.kind === 'heading' && element.level !== 2],
-      ['H2', 'heading', 2, element.kind === 'heading' && element.level === 2],
-      ['T', 'text', 0, element.kind === 'text' || element.kind === 'text-image'],
-      ['⏺', 'bullet', 0, element.kind === 'bullet']
+      ['H1', 'heading', 1, element.kind === 'heading' && element.level !== 2, false],
+      ['H2', 'heading', 2, element.kind === 'heading' && element.level === 2, false],
+      ['T', 'text', 0, element.kind === 'text' || element.kind === 'text-image', false],
+      ['⏺', 'bullet', 0, element.kind === 'bullet', false],
+      ['', 'code', 0, element.kind === 'code', true]
     ];
-    for (const [label, kind, level, active] of choices) {
-      const button = canvasTool(label, active ? 'active' : '', () => setCanvasTextKind(index, kind, level));
-      button.title = kind === 'heading' ? 'Convert to heading ' + level : kind === 'bullet' ? 'Convert to bullet point' : 'Convert to plain text';
+    for (const [label, kind, level, active, codeIcon] of choices) {
+      const button = canvasTool(label, (active ? 'active ' : '') + (codeIcon ? 'keynope-text-kind-code' : ''), () => setCanvasTextKind(index, kind, level));
+      if (codeIcon) button.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5 3 10l4 5M13 5l4 5-4 5M11 3 9 17"/></svg>';
+      button.title = kind === 'heading' ? 'Convert to heading ' + level : kind === 'bullet' ? (active ? 'Convert bullets to text' : 'Convert to bullet points') : kind === 'code' ? (active ? 'Convert code block to text' : 'Convert to code block') : 'Convert to plain text';
       button.setAttribute('aria-label', button.title);
       container.appendChild(button);
     }
@@ -5912,7 +6819,7 @@ if (keynopeAppSurface) {
     element.query = query.toString();
   }
   function changeCanvasTextSize(index, delta) {
-    updateCanvasElement(index, element => applyCanvasTextSize(element, canvasTextSize(element) + delta));
+    updateCanvasElements(index, element => ['heading','text','text-image','bullet','code'].includes(element.kind), element => applyCanvasTextSize(element, canvasTextSize(element) + delta));
   }
   function cycleCanvasOutline(index) {
     updateCanvasElement(index, element => {
@@ -5973,7 +6880,7 @@ if (keynopeAppSurface) {
     return button;
   }
   function rotateCanvasText(index) {
-    updateCanvasElement(index, element => {
+    updateCanvasElements(index, element => ['heading','text','text-image','bullet'].includes(element.kind), element => {
       const query = new URLSearchParams(element.query || '');
       const orientation = query.get('orientation') || '';
       if (!orientation) query.set('orientation', 'cw');
@@ -5998,7 +6905,7 @@ if (keynopeAppSurface) {
     select.addEventListener('pointerdown', event => event.stopPropagation());
     select.addEventListener('change', event => {
       event.stopPropagation();
-      updateCanvasElement(index, updated => {
+      updateCanvasElements(index, updated => ['heading','text','text-image','bullet'].includes(updated.kind), updated => {
         const values = new URLSearchParams(updated.query || '');
         if (select.value) {
           values.set('glyph', select.value);
@@ -6039,10 +6946,11 @@ if (keynopeAppSurface) {
     });
     input.addEventListener('change', event => {
       event.stopPropagation();
-      updateCanvasElement(index, updated => {
+      updateCanvasElements(index, updated => ['heading','text','text-image','bullet','code','shape','page-number'].includes(updated.kind), updated => {
         const values = new URLSearchParams(updated.query || '');
-        values.set(colourKey, input.value);
-        if (colourKey === 'header') values.delete('fg');
+        const key = updated.kind === 'heading' ? 'header' : 'fg';
+        values.set(key, input.value);
+        if (key === 'header') values.delete('fg');
         updated.query = values.toString();
       });
     });
@@ -6050,15 +6958,36 @@ if (keynopeAppSurface) {
     return label;
   }
   function setCanvasAlignment(index, alignment) {
-    updateCanvasElement(index, element => {
+    updateCanvasElements(index, element => ['heading','text','text-image','bullet','code','shape','image','page-number'].includes(element.kind), element => {
       const query = new URLSearchParams(element.query || '');
       query.set('align', alignment);
       for (const key of ['left','right','left_pct','right_pct']) query.delete(key);
       element.query = query.toString();
     });
   }
+  function setCanvasVerticalAlignment(index, alignment) {
+    updateCanvasElements(index, element => ['heading','text','text-image','bullet','code','shape','image','page-number'].includes(element.kind), element => {
+      const query = new URLSearchParams(element.query || '');
+      query.set('valign', alignment);
+      for (const key of ['top','bottom','row_delta']) query.delete(key);
+      element.query = query.toString();
+    });
+  }
+  function canvasVerticalAlignmentTool(index, alignment, active) {
+    const arrows = {
+      top: 'M5 15V5M2.5 7.5 5 5l2.5 2.5',
+      middle: 'M5 5v10M2.5 7.5 5 5l2.5 2.5M2.5 12.5 5 15l2.5-2.5',
+      bottom: 'M5 5v10M2.5 12.5 5 15l2.5-2.5'
+    };
+    const titles = {top:'Align top', middle:'Align middle', bottom:'Align bottom'};
+    const button = canvasTool('', (active ? 'active ' : '') + 'keynope-vertical-align-button', () => setCanvasVerticalAlignment(index, alignment));
+    button.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="' + arrows[alignment] + '"/><path d="M11 6v8M14 6v8M17 6v8"/></svg>';
+    button.title = titles[alignment];
+    button.setAttribute('aria-label', button.title);
+    return button;
+  }
   function toggleCanvasMarkdownStyle(index, marker) {
-    updateCanvasElement(index, element => {
+    updateCanvasElements(index, element => ['heading','text','text-image','bullet'].includes(element.kind), element => {
       const text = element.text || '';
       if (!text) return;
       element.text = text.startsWith(marker) && text.endsWith(marker) && text.length >= marker.length * 2
@@ -6114,7 +7043,7 @@ if (keynopeAppSurface) {
     }
   }
   function canvasDeleteTool(index) {
-    const button = canvasTool('', 'danger keynope-icon-button keynope-delete-button keynope-toolbar-delete', () => editorAction({action: 'delete-element', element: index}).catch(() => {}));
+    const button = canvasTool('', 'danger keynope-icon-button keynope-delete-button keynope-toolbar-delete', () => editorAction((editorState.selection || []).length > 1 ? {action:'delete-selection'} : {action:'delete-element', element:index}).catch(() => {}));
     button.innerHTML = deleteIconSVG;
     button.title = 'Delete element';
     button.setAttribute('aria-label', 'Delete element');
@@ -6218,6 +7147,9 @@ if (keynopeAppSurface) {
     else if (query.get('align') === 'right') left = deck.cols - width;
     let top = Number.parseInt(query.get('top') || '0', 10) - Math.max(0, pageNumber || 0) * deck.rows;
     if (query.has('bottom')) top = deck.rows - height - (Number.parseInt(query.get('bottom'), 10) || 0);
+    else if (query.get('valign') === 'middle') top = Math.floor((deck.rows - height) / 2);
+    else if (query.get('valign') === 'bottom') top = deck.rows - height;
+    else if (query.get('valign') === 'top') top = 0;
     if (top >= deck.rows || top + height <= 0) return null;
     left = Math.max(0, Math.min(deck.cols - 1, left));
     top = Math.max(0, Math.min(deck.rows - 1, top));
@@ -6329,9 +7261,29 @@ if (keynopeAppSurface) {
   }
   function renderEditorTopbar() {
     const slide = editorState && editorState.slides && editorState.slides[editorState.current];
+    const masterPageNumberMode = slide ? (slide.pageNumber || '') : '';
+    const baseMaster = !!(editorState && editorState.masterMode && editorState.current === 0);
+    const pageNumberState = baseMaster
+      ? (masterPageNumberMode === 'show' ? 'on' : 'off')
+      : (masterPageNumberMode === 'show' ? 'on' : masterPageNumberMode === 'hide' ? 'off' : 'inherited');
+    addPageNumberButton.hidden = !(editorState && editorState.masterMode);
+    addPageNumberButton.classList.toggle('active', pageNumberState === 'on');
+    addPageNumberButton.classList.toggle('inherited', pageNumberState === 'inherited');
+    addPageNumberButton.classList.toggle('off', pageNumberState === 'off');
+    addPageNumberTag.textContent = pageNumberState === 'inherited' ? 'INH.' : pageNumberState.toUpperCase();
+    addPageNumberButton.title = baseMaster
+      ? (pageNumberState === 'on' ? 'Turn slide number off' : 'Turn slide number on')
+      : (pageNumberState === 'off' ? 'Inherit slide number' : pageNumberState === 'inherited' ? 'Add local slide number' : 'Turn slide number off');
+    addPageNumberButton.setAttribute('aria-label', addPageNumberButton.title);
     const index = editorState ? editorState.selected : -1;
     keynopeEditorSelectionActive = index >= 0;
     const element = slide && index >= 0 ? slide.elements[index] : null;
+    const selectedIndices = slide && (editorState.selection || []).length > 1 ? [...editorState.selection] : (element ? [index] : []);
+    const selectedElements = slide ? selectedIndices.map(candidate => slide.elements[candidate]).filter(Boolean) : [];
+    const textIndex = selectedIndices.find(candidate => ['heading','text','text-image','bullet','code'].includes(slide.elements[candidate].kind));
+    const textElement = textIndex == null ? null : slide.elements[textIndex];
+    const shapeIndex = selectedIndices.find(candidate => slide.elements[candidate].kind === 'shape');
+    const shapeElement = shapeIndex == null ? null : slide.elements[shapeIndex];
     if (activeCanvasVisualMenu && (!element || activeCanvasVisualMenu.index !== index)) closeCanvasVisualMenu();
     const contextual = !suppressSelectionTopbar && (!!activeInlineEditor || !!element);
     mainTopbar.hidden = contextual;
@@ -6340,9 +7292,17 @@ if (keynopeAppSurface) {
     if (!contextual) return;
     const label = document.createElement('span');
     label.className = 'keynope-topbar-label';
-    label.textContent = activeInlineEditor ? 'Editing text' : ((element.kind || 'element') + ' selected');
+    label.textContent = activeInlineEditor ? 'Editing text' : selectedElements.length > 1 ? (selectedElements.length + ' elements selected') : ((element.kind || 'element') + ' selected');
     selectionTopbar.appendChild(label);
     if (activeInlineEditor) {
+      const boldSelection = canvasTool('B', '', () => applyInlineSelectionWrapper('**'));
+      boldSelection.title = 'Bold selected text';
+      boldSelection.setAttribute('aria-label', boldSelection.title);
+      const highlightSelection = canvasTool('H', '', () => applyInlineSelectionWrapper('*'));
+      highlightSelection.title = 'Highlight selected text';
+      highlightSelection.setAttribute('aria-label', highlightSelection.title);
+      selectionTopbar.append(boldSelection, highlightSelection, inlineSelectionColourTool());
+      selectionTopbar.appendChild(canvasEmojiTool(index));
       selectionTopbar.appendChild(canvasTool('Commit', '', () => activeInlineEditor && activeInlineEditor.finish(true)));
       selectionTopbar.appendChild(canvasTool('Cancel', '', () => activeInlineEditor && activeInlineEditor.finish(false)));
       return;
@@ -6352,22 +7312,25 @@ if (keynopeAppSurface) {
     done.setAttribute('aria-label', 'Done');
     selectionTopbar.appendChild(done);
     const query = new URLSearchParams(element.query || '');
-    const selectedText = ['heading','text','text-image','bullet','code'].includes(element.kind);
-    const rotatableText = ['heading','text','text-image','bullet'].includes(element.kind);
-    const positionable = selectedText || element.kind === 'shape' || element.kind === 'image';
+    const selectedText = !!textElement;
+    const rotatableText = selectedElements.some(candidate => ['heading','text','text-image','bullet'].includes(candidate.kind));
+    const positionable = selectedElements.some(candidate => ['heading','text','text-image','bullet','code','shape','image','page-number'].includes(candidate.kind));
     if (selectedText) {
-      const edit = canvasTool('✎', '', () => beginInlineEdit(index));
-      edit.title = 'Edit text';
-      edit.setAttribute('aria-label', 'Edit text');
-      selectionTopbar.appendChild(edit);
-      if (element.kind !== 'code') appendCanvasTextKindTools(selectionTopbar, index, element);
-      selectionTopbar.appendChild(canvasTool('−', '', () => changeCanvasTextSize(index, -1)));
-      selectionTopbar.appendChild(canvasTool('+', '', () => changeCanvasTextSize(index, 1)));
-      if (element.kind !== 'code') {
-        const bold = canvasTool('B', (element.text || '').startsWith('**') && (element.text || '').endsWith('**') ? 'active' : '', () => toggleCanvasMarkdownStyle(index, '**'));
+      if (selectedElements.length === 1) {
+        const edit = canvasTool('✎', '', () => beginInlineEdit(textIndex));
+        edit.title = 'Edit text';
+        edit.setAttribute('aria-label', 'Edit text');
+        selectionTopbar.appendChild(edit);
+      }
+      appendCanvasTextKindTools(selectionTopbar, textIndex, textElement);
+      if (selectedElements.length === 1) selectionTopbar.appendChild(canvasEmojiTool(textIndex));
+      selectionTopbar.appendChild(canvasTool('−', '', () => changeCanvasTextSize(textIndex, -1)));
+      selectionTopbar.appendChild(canvasTool('+', '', () => changeCanvasTextSize(textIndex, 1)));
+      if (selectedElements.some(candidate => ['heading','text','text-image','bullet'].includes(candidate.kind))) {
+        const bold = canvasTool('B', (textElement.text || '').startsWith('**') && (textElement.text || '').endsWith('**') ? 'active' : '', () => toggleCanvasMarkdownStyle(textIndex, '**'));
         bold.title = 'Bold';
         bold.setAttribute('aria-label', 'Bold');
-        const highlight = canvasTool('H', (element.text || '').startsWith('*') && (element.text || '').endsWith('*') ? 'active' : '', () => toggleCanvasMarkdownStyle(index, '*'));
+        const highlight = canvasTool('H', (textElement.text || '').startsWith('*') && (textElement.text || '').endsWith('*') ? 'active' : '', () => toggleCanvasMarkdownStyle(textIndex, '*'));
         highlight.title = 'Highlight';
         highlight.setAttribute('aria-label', 'Highlight');
         selectionTopbar.append(bold, highlight);
@@ -6380,27 +7343,28 @@ if (keynopeAppSurface) {
         button.setAttribute('aria-label', title);
         selectionTopbar.appendChild(button);
       }
+      for (const alignment of ['top','middle','bottom']) selectionTopbar.appendChild(canvasVerticalAlignmentTool(index, alignment, query.get('valign') === alignment));
     }
     if (selectedText) {
       if (rotatableText) {
-        const rotate = canvasTool('⟳', 'keynope-icon-button keynope-rotate-button', () => rotateCanvasText(index));
+        const rotate = canvasTool('⟳', 'keynope-icon-button keynope-rotate-button', () => rotateCanvasText(textIndex));
         rotate.innerHTML = '<span class="keynope-rotate-icon" aria-hidden="true">⟳</span><span class="keynope-rotate-label">ROTATE</span>';
         rotate.title = 'Rotate';
         rotate.setAttribute('aria-label', 'Rotate');
         selectionTopbar.appendChild(rotate);
       }
-      if (element.kind !== 'code') selectionTopbar.appendChild(canvasStyleSelect(index, element));
-      selectionTopbar.appendChild(canvasColourTool(index, element, ''));
-      selectionTopbar.appendChild(canvasLinkTool(index, query));
+      if (selectedElements.some(candidate => ['heading','text','text-image','bullet'].includes(candidate.kind))) selectionTopbar.appendChild(canvasStyleSelect(textIndex, textElement));
+      selectionTopbar.appendChild(canvasColourTool(textIndex, textElement, ''));
+      if (selectedElements.length === 1) selectionTopbar.appendChild(canvasLinkTool(textIndex, query));
     }
-    if (element.kind === 'shape') selectionTopbar.appendChild(canvasColourTool(index, element, ''));
-    if (element.kind === 'shape') appendCanvasShapeKindTools(selectionTopbar, index, query);
-    if (element.kind === 'image') selectionTopbar.appendChild(canvasVisualMenu(index, element));
-    selectionTopbar.appendChild(canvasOutlineTool(index, element, query));
-    selectionTopbar.appendChild(canvasDuplicateTool(index));
-    selectionTopbar.appendChild(canvasLayerTool(index, 'backward'));
-    selectionTopbar.appendChild(canvasLayerTool(index, 'forward'));
-    if (canvasElementSupportsTransparency(element)) selectionTopbar.appendChild(canvasTransparencyTool(index, query));
+    if (!selectedText && shapeElement) selectionTopbar.appendChild(canvasColourTool(shapeIndex, shapeElement, ''));
+    if (selectedElements.length === 1 && element.kind === 'shape') appendCanvasShapeKindTools(selectionTopbar, index, query);
+    if (selectedElements.length === 1 && element.kind === 'image') selectionTopbar.appendChild(canvasVisualMenu(index, element));
+    if (selectedElements.length === 1) selectionTopbar.appendChild(canvasOutlineTool(index, element, query));
+    if (selectedElements.length === 1) selectionTopbar.appendChild(canvasDuplicateTool(index));
+    if (selectedElements.length === 1) selectionTopbar.appendChild(canvasLayerTool(index, 'backward'));
+    if (selectedElements.length === 1) selectionTopbar.appendChild(canvasLayerTool(index, 'forward'));
+    if (selectedElements.length === 1 && canvasElementSupportsTransparency(element)) selectionTopbar.appendChild(canvasTransparencyTool(index, query));
     selectionTopbar.appendChild(canvasDeleteTool(index));
   }
 
@@ -6463,7 +7427,7 @@ if (keynopeAppSurface) {
       hit.addEventListener('pointerdown', event => {
         event.preventDefault();
         event.stopPropagation();
-        if (activeInlineEditor && activeInlineEditor.element !== index) {
+        if (activeInlineEditor) {
           activeInlineEditor.finish(true).then(() => editorAction({action: 'select-element', element: index, name: event.shiftKey ? 'toggle' : ''}).catch(() => {}));
           return;
         }
@@ -6496,7 +7460,7 @@ if (keynopeAppSurface) {
         const fitElementForBounds = next => {
           const element = {...sourceElement};
           const query = new URLSearchParams(element.query || '');
-          for (const key of ['right','right_pct','bottom','row_delta','align','left','width','height']) query.delete(key);
+          for (const key of ['right','right_pct','bottom','row_delta','valign','align','left','width','height']) query.delete(key);
           query.set('left_pct', Math.max(0, Math.min(1, next.minX / deck.cols)).toFixed(6));
           query.set('top', String(next.minY));
           element.query = query.toString();
@@ -6505,7 +7469,7 @@ if (keynopeAppSurface) {
         const resizedElementForBounds = next => {
           const element = {...sourceElement};
           const query = new URLSearchParams(element.query || '');
-          for (const key of ['right','right_pct','bottom','row_delta','align','left']) query.delete(key);
+          for (const key of ['right','right_pct','bottom','row_delta','valign','align','left']) query.delete(key);
           query.set('left_pct', Math.max(0, Math.min(1, next.minX / deck.cols)).toFixed(6));
           query.set('top', String(next.minY));
           query.set('width', String(Math.max(1, next.maxX - next.minX)));
@@ -6597,13 +7561,13 @@ if (keynopeAppSurface) {
           const query = new URLSearchParams(element.query || '');
           if (resizing) {
             const next = resizedBounds(dx, dy);
-            query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('align'); query.delete('left');
+            query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('valign'); query.delete('align'); query.delete('left');
             query.set('left_pct', Math.max(0, Math.min(1, next.minX / deck.cols)).toFixed(6));
             query.set('top', String(next.minY));
             query.set('width', String(Math.max(1, next.maxX - next.minX)));
             query.set('height', String(Math.max(1, next.maxY - next.minY)));
           } else {
-            query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('align'); query.delete('left');
+            query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('valign'); query.delete('align'); query.delete('left');
             query.set('left_pct', Math.max(0, Math.min(1, (start.minX + dx) / deck.cols)).toFixed(6));
             query.set('top', String(Math.max(0, start.minY + dy)));
           }
@@ -6626,6 +7590,14 @@ if (keynopeAppSurface) {
       canvasOverlay.appendChild(hit);
     }
   };
+
+  canvasOverlay.addEventListener('pointerdown', event => {
+    if (!activeInlineEditor || activeInlineEditor.editor.contains(event.target)) return;
+    if (event.target.closest && event.target.closest('.keynope-canvas-element')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    activeInlineEditor.finish(true);
+  });
 
   function slideTitle(slide, index) {
     const element = (slide.elements || []).find(item => item.text && (item.kind === 'heading' || item.kind === 'text'));
@@ -6708,10 +7680,11 @@ if (keynopeAppSurface) {
     const query = new URLSearchParams(element.query || '');
     const selectedText = ['heading','text','text-image','bullet','code'].includes(element.kind);
     const rotatableText = ['heading','text','text-image','bullet'].includes(element.kind);
-    const positionable = selectedText || element.kind === 'shape' || element.kind === 'image';
+    const positionable = selectedText || element.kind === 'shape' || element.kind === 'image' || element.kind === 'page-number';
     if (selectedText) {
       actions.appendChild(canvasTool('✎', '', () => beginInlineEdit(index)));
-      if (element.kind !== 'code') appendCanvasTextKindTools(actions, index, element);
+      appendCanvasTextKindTools(actions, index, element);
+      actions.appendChild(canvasEmojiTool(index));
       actions.appendChild(canvasTool('−', '', () => changeCanvasTextSize(index, -1)));
       actions.appendChild(canvasTool('+', '', () => changeCanvasTextSize(index, 1)));
       if (element.kind !== 'code') {
@@ -6723,6 +7696,7 @@ if (keynopeAppSurface) {
       actions.appendChild(canvasTool('Left', '', () => setCanvasAlignment(index, 'left')));
       actions.appendChild(canvasTool('Centre', '', () => setCanvasAlignment(index, 'center')));
       actions.appendChild(canvasTool('Right', '', () => setCanvasAlignment(index, 'right')));
+      for (const alignment of ['top','middle','bottom']) actions.appendChild(canvasVerticalAlignmentTool(index, alignment, query.get('valign') === alignment));
     }
     if (rotatableText) actions.appendChild(canvasTool('⟳', '', () => rotateCanvasText(index)));
     if (selectedText && element.kind !== 'code') actions.appendChild(canvasStyleSelect(index, element));
@@ -6779,6 +7753,7 @@ if (keynopeAppSurface) {
     masterModeButton.title = editorState.masterMode ? 'Exit master slides' : 'Master slides';
     masterModeButton.setAttribute('aria-label', masterModeButton.title);
     masterModeButton.classList.toggle('active', !!editorState.masterMode);
+    refreshEditorBottomToolbarVisibility();
     editorState.slides.forEach((slide, index) => {
       const button = document.createElement('button');
       button.className = 'keynope-slide-item' + (index === editorState.current ? ' active' : '');
@@ -6793,6 +7768,41 @@ if (keynopeAppSurface) {
         if (editorState.current === index) open();
         else editorAction({action: 'select-slide', slide: index}).then(open).catch(() => {});
       });
+      if (editorState.masterMode) {
+        button.dataset.masterIndex = String(index);
+        if (index > 0) {
+          button.draggable = true;
+          button.classList.add('master-reorderable');
+          button.title = 'Drag to reorder master slide';
+          button.addEventListener('dragstart', event => {
+            draggedMasterIndex = index;
+            draggedMasterButton = button;
+            button.classList.add('master-drag-outline');
+            if (event.dataTransfer) {
+              event.dataTransfer.effectAllowed = 'move';
+              event.dataTransfer.setData('text/plain', String(index));
+              const rect = button.getBoundingClientRect();
+              masterDragImage = button.cloneNode(true);
+              masterDragImage.removeAttribute('data-master-index');
+              masterDragImage.classList.remove('master-reorderable', 'master-dragging');
+              masterDragImage.classList.add('keynope-master-drag-image');
+              masterDragImage.style.width = rect.width + 'px';
+              masterDragImage.style.height = rect.height + 'px';
+              masterDragImage.style.margin = '0';
+              document.body.appendChild(masterDragImage);
+              event.dataTransfer.setDragImage(
+                masterDragImage,
+                Math.max(0, Math.min(rect.width, event.clientX - rect.left)),
+                Math.max(0, Math.min(rect.height, event.clientY - rect.top))
+              );
+            }
+            requestAnimationFrame(() => {
+              if (draggedMasterButton === button) button.classList.add('master-dragging');
+            });
+          });
+          button.addEventListener('dragend', finishMasterDrag);
+        }
+      }
       slidesPanel.appendChild(button);
     });
 
@@ -7096,8 +8106,10 @@ if (keynopeAppSurface) {
     timerInputBlocker.hidden = !active;
     canvasOverlay.hidden = active;
     document.documentElement.setAttribute('data-keynope-timer-active', active ? 'true' : 'false');
-    for (const button of toolbar.querySelectorAll('button')) button.disabled = active && button !== timerButton;
-    externalButton.disabled = active || !externalDisplayAvailable;
+    for (const button of toolbar.querySelectorAll('button')) {
+      button.disabled = active && button !== timerButton && button !== stopPresentationButton && button !== pauseButton;
+    }
+    externalButton.disabled = !!(editorState && editorState.masterMode) || active || !externalDisplayAvailable;
     for (const button of slidesPanel.querySelectorAll('button')) button.disabled = active;
     speakerNotesInput.disabled = active;
   };
@@ -7122,13 +8134,26 @@ if (keynopeAppSurface) {
     return button;
   }
 
+  async function navigateEditorPage(delta) {
+    if (!deck.pages || !deck.pages.length || !editorState || editorState.masterMode) return;
+    if (activeInlineEditor) await activeInlineEditor.finish(true);
+    const targetIndex = Math.max(0, Math.min(deck.pages.length - 1, pageIndex + delta));
+    if (targetIndex === pageIndex) return;
+    const target = deck.pages[targetIndex];
+    pageIndex = targetIndex;
+    frame = 0;
+    render();
+    requestAnimationFrame(renderEditorCanvasOverlay);
+    await editorAction({action:'navigate-presentation', slide:target.slide, page:target.page || 0});
+  }
+
   const previousSlideSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="220" y="95" width="430" height="390" rx="28" fill="none" stroke="#fff" stroke-width="26"/><circle cx="410" cy="230" r="54" fill="#fff"/><path d="M500 210h85M500 260h85M340 360h245" fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round"/><path d="M185 215 65 300l120 85M80 300h310" fill="none" stroke="#30343a" stroke-width="62" stroke-linecap="round" stroke-linejoin="round"/><path d="M185 215 65 300l120 85M80 300h310" fill="none" stroke="#c8ccd2" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   const nextSlideSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><g transform="translate(800 0) scale(-1 1)"><rect x="220" y="95" width="430" height="390" rx="28" fill="none" stroke="#fff" stroke-width="26"/><circle cx="410" cy="230" r="54" fill="#fff"/><path d="M500 210h85M500 260h85M340 360h245" fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round"/><path d="M185 215 65 300l120 85M80 300h310" fill="none" stroke="#30343a" stroke-width="62" stroke-linecap="round" stroke-linejoin="round"/><path d="M185 215 65 300l120 85M80 300h310" fill="none" stroke="#c8ccd2" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/></g></svg>';
   const presentMainSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="165" y="70" width="470" height="355" rx="30" fill="none" stroke="#fff" stroke-width="28"/><path d="m350 175 150 72-150 72Z" fill="#fff" stroke="#fff" stroke-width="12" stroke-linejoin="round"/><path d="M145 445h510l67 62c13 12 4 33-14 33H92c-18 0-27-21-14-33Z" fill="#fff"/><rect x="332" y="465" width="136" height="18" rx="9" fill="none" stroke="#fff" stroke-width="10"/></svg>';
   const presentExternalSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="55" y="300" width="270" height="190" rx="22" fill="none" stroke="#fff" stroke-width="24"/><path d="M38 505h304l35 34c9 9 3 24-10 24H13c-13 0-19-15-10-24Z" fill="#fff"/><path d="M315 265h80M350 220l45 45-45 45" fill="none" stroke="#fff" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/><rect x="430" y="55" width="330" height="330" rx="28" fill="none" stroke="#fff" stroke-width="28"/><path d="m555 145 100 75-100 75Z" fill="#fff" stroke="#fff" stroke-width="8" stroke-linejoin="round"/><path d="M595 385v100M515 500h160" fill="none" stroke="#fff" stroke-width="28" stroke-linecap="round"/></svg>';
 
-  appToolbarIconButton('Previous', previousSlideSVG, () => editorAction({action: 'previous-slide'}).catch(() => {}));
-  appToolbarIconButton('Next', nextSlideSVG, () => editorAction({action: 'next-slide'}).catch(() => {}));
+  const previousButton = appToolbarIconButton('Previous', previousSlideSVG, () => navigateEditorPage(-1).catch(() => {}));
+  const nextButton = appToolbarIconButton('Next', nextSlideSVG, () => navigateEditorPage(1).catch(() => {}));
   const presentButton = appToolbarIconButton('Present on this computer', presentMainSVG, () => {
     const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
     if (handler) handler.postMessage({action: 'show-main'});
@@ -7151,24 +8176,35 @@ if (keynopeAppSurface) {
   stopPresentationButton.hidden = true;
   toolbar.insertBefore(stopPresentationButton, pauseButton);
   const aboutSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><circle cx="400" cy="300" r="220" fill="none" stroke="#fff" stroke-width="30"/><circle cx="400" cy="190" r="28" fill="#fff"/><path d="M400 270v165" fill="none" stroke="#fff" stroke-width="42" stroke-linecap="round"/></svg>';
-  appToolbarIconButton('About Keynope', aboutSVG, () => {
+  const aboutButton = appToolbarIconButton('About Keynope', aboutSVG, () => {
     const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
     if (handler) handler.postMessage({action: 'show-about'});
   });
+  function refreshEditorBottomToolbarVisibility() {
+    const masterMode = !!(editorState && editorState.masterMode);
+    const presenting = editorPresentationMode !== 'none';
+    if (masterMode && editorSpeakerNotesVisible) setSpeakerNotesVisible(false, false);
+    notesToggleButton.hidden = masterMode;
+    timerButton.hidden = masterMode;
+    editorStatus.hidden = masterMode;
+    previousButton.hidden = masterMode;
+    nextButton.hidden = masterMode;
+    presentButton.hidden = masterMode || presenting;
+    externalButton.hidden = masterMode || presenting;
+    pauseButton.hidden = masterMode || !presenting;
+    stopPresentationButton.hidden = masterMode || !presenting;
+    aboutButton.hidden = false;
+  }
   externalButton.disabled = true;
   window.keynopeSetExternalDisplayAvailable = available => {
     externalDisplayAvailable = !!available;
-    externalButton.disabled = presenterTimerMode === 'config' || presenterTimerMode === 'running' || !externalDisplayAvailable;
+    externalButton.disabled = !!(editorState && editorState.masterMode) || presenterTimerMode === 'config' || presenterTimerMode === 'running' || !externalDisplayAvailable;
   };
   window.keynopeSetPresentationState = (mode, paused) => {
     editorPresentationMode = mode === 'main' || mode === 'external' ? mode : 'none';
     editorPresentationPaused = !!paused && editorPresentationMode !== 'none';
     const active = editorPresentationMode !== 'none';
     const baseSVG = editorPresentationMode === 'main' ? presentMainSVG : presentExternalSVG;
-    presentButton.hidden = active;
-    externalButton.hidden = active;
-    pauseButton.hidden = !active;
-    stopPresentationButton.hidden = !active;
     if (active) {
       const pauseGlyph = editorPresentationPaused ? '▶︎' : '⏸︎';
       const pauseKind = editorPresentationPaused ? 'resume' : 'pause';
@@ -7178,9 +8214,11 @@ if (keynopeAppSurface) {
       stopPresentationButton.innerHTML = baseSVG + '<span class="keynope-presentation-glyph stop">⏹︎</span>';
     }
     document.documentElement.setAttribute('data-keynope-presentation-mode', editorPresentationMode);
+    refreshEditorBottomToolbarVisibility();
   };
   const presenterHandler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
   if (presenterHandler) presenterHandler.postMessage({action: 'query-display-state'});
+  refreshEditorBottomToolbarVisibility();
   document.body.appendChild(toolbar);
   function nudgeSelected(dx, dy) {
     if (!editorState || editorState.selected < 0) return false;
@@ -7193,7 +8231,7 @@ if (keynopeAppSurface) {
     const query = new URLSearchParams(updated.query || '');
     const renderedLeft = parseFloat(hit.style.left || '0') / 100;
     const renderedTop = Math.round(parseFloat(hit.style.top || '0') * deck.rows / 100);
-    query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('align'); query.delete('left');
+    query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('valign'); query.delete('align'); query.delete('left');
     query.set('left_pct', Math.max(0, Math.min(1, Number(query.get('left_pct') || renderedLeft) + dx / deck.cols)).toFixed(6));
     query.set('top', String(Math.max(0, Number(query.get('top') || renderedTop) + dy)));
     updated.query = query.toString();
@@ -7238,7 +8276,7 @@ if (keynopeAppSurface) {
       if (e.key === 'Escape' || e.key.toLowerCase() === 'q') editorAction({action: 'stop-timer'}).catch(() => {});
       return;
     }
-    if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+    if (keynopeFormControlTarget(e.target)) return;
     if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'Tab') {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -7256,6 +8294,15 @@ if (keynopeAppSurface) {
       e.stopImmediatePropagation();
       editorAction({action: 'toggle-master-mode'}).catch(() => {});
       return;
+    }
+    if (!e.metaKey && !e.ctrlKey && !e.altKey && editorState && editorState.masterMode) {
+      const navigationKey = [' ', 'PageUp', 'PageDown'].includes(e.key) ||
+        ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && editorState.selected < 0);
+      if (navigationKey || ['0', '2', 'p', 'P'].includes(e.key)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
     }
     if ((e.metaKey || e.ctrlKey) && ['c','x','v'].includes(e.key.toLowerCase())) {
       if (editorClipboardTextTarget(e.target)) return;
@@ -7332,7 +8379,7 @@ if (keynopeAppSurface) {
       e.preventDefault();
       e.stopImmediatePropagation();
       if (!nudgeSelected((e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 5 : 1), 0)) {
-        editorAction({action: e.key === 'ArrowLeft' ? 'previous-slide' : 'next-slide'}).catch(() => {});
+        navigateEditorPage(e.key === 'ArrowLeft' ? -1 : 1).catch(() => {});
       }
       return;
     }
@@ -7452,6 +8499,7 @@ func parseSlide(text, base string) Slide {
 	pendingQuery := ""
 	pendingMasterSlot := ""
 	pendingPlaceholder := false
+	bulletBlock := -1
 
 	flushParagraph := func() {
 		if len(paragraph) > 0 {
@@ -7475,6 +8523,11 @@ func parseSlide(text, base string) Slide {
 	for lineIndex, raw := range lines {
 		line := strings.TrimRight(raw, "\r")
 		trimmed := strings.TrimSpace(line)
+		bulletLine := strings.HasPrefix(trimmed, "- ")
+		bulletContinuation := bulletBlock >= 0 && len(line) > 0 && (line[0] == ' ' || line[0] == '\t') && trimmed != "" && !strings.HasPrefix(trimmed, "<!--")
+		if !bulletLine && !bulletContinuation {
+			bulletBlock = -1
+		}
 		if match := effectRE.FindStringSubmatch(trimmed); match != nil {
 			slide.EffectSet = true
 			if match[1] != "none" {
@@ -7535,13 +8588,19 @@ func parseSlide(text, base string) Slide {
 			flushParagraph()
 			continue
 		}
+		if bulletContinuation {
+			slide.Elements[bulletBlock].Text += "\n  " + trimmed
+			continue
+		}
 		if match := imageRE.FindStringSubmatch(trimmed); match != nil {
 			flushParagraph()
 			src, query := splitImageSource(os.ExpandEnv(match[1]))
-			if !filepath.IsAbs(src) {
-				src = filepath.Join(base, src)
+			if !isExternalImageSource(src) {
+				if !filepath.IsAbs(src) {
+					src = filepath.Join(base, src)
+				}
+				src = filepath.Clean(src)
 			}
-			src = filepath.Clean(src)
 			slide.Elements = append(slide.Elements, Element{Kind: "image", Path: src, Query: query, MasterSlotID: pendingMasterSlot, Placeholder: pendingPlaceholder})
 			pendingQuery = ""
 			pendingMasterSlot = ""
@@ -7578,7 +8637,13 @@ func parseSlide(text, base string) Slide {
 		}
 		if strings.HasPrefix(trimmed, "- ") {
 			flushParagraph()
-			slide.Elements = append(slide.Elements, Element{Kind: "bullet", Text: strings.TrimSpace(trimmed[2:]), Query: pendingQuery, MasterSlotID: pendingMasterSlot, Placeholder: pendingPlaceholder})
+			item := strings.TrimSpace(trimmed[2:])
+			if bulletBlock >= 0 && pendingQuery == "" && pendingMasterSlot == "" && !pendingPlaceholder {
+				slide.Elements[bulletBlock].Text += "\n" + item
+			} else {
+				slide.Elements = append(slide.Elements, Element{Kind: "bullet", Text: item, Query: pendingQuery, MasterSlotID: pendingMasterSlot, Placeholder: pendingPlaceholder})
+				bulletBlock = len(slide.Elements) - 1
+			}
 			pendingQuery = ""
 			pendingMasterSlot = ""
 			pendingPlaceholder = false
@@ -7674,7 +8739,7 @@ func textPlacementComment(line string) (string, bool) {
 	}
 	values := url.Values{}
 	if parsed, err := url.ParseQuery(match[1]); err == nil {
-		for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "link", "slide", "master-clear"} {
+		for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "link", "slide", "master-clear"} {
 			for _, value := range parsed[key] {
 				addPlacementValue(values, key, value)
 			}
@@ -7738,6 +8803,10 @@ func addPlacementValue(values url.Values, key, value string) {
 		}
 	case "align":
 		if value == "left" || value == "center" || value == "right" {
+			values.Set(key, value)
+		}
+	case "valign":
+		if value == "top" || value == "middle" || value == "bottom" {
 			values.Set(key, value)
 		}
 	case "render":
@@ -7818,7 +8887,7 @@ func placementCommentText(query string) string {
 		return query
 	}
 	var fields []string
-	for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "fg", "bg", "header", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "slide", "link", "master-clear"} {
+	for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "fg", "bg", "header", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "slide", "link", "master-clear"} {
 		if value := values.Get(key); value != "" {
 			if key == "link" {
 				fields = append(fields, key+"="+url.QueryEscape(value))
@@ -8052,6 +9121,11 @@ func splitImageSource(src string) (string, string) {
 		return src, ""
 	}
 	return before, after
+}
+
+func isExternalImageSource(src string) bool {
+	parsed, err := url.Parse(src)
+	return err == nil && parsed.Scheme != "" && parsed.Scheme != "file"
 }
 
 func authoredRenderSize(width, height int) (int, int) {
@@ -8641,7 +9715,7 @@ func transparentShapeCellsFrom(lines []Line, start int, width, height int, slide
 			}
 			continue
 		}
-		if line.Role == "image" {
+		if line.Role == "image" || strings.Contains(line.Text, "\033[38;2;") {
 			defaultFG := slideFG(slide)
 			if fg := elementFG(element.Query, false); fg != "" {
 				defaultFG = fg
@@ -8729,6 +9803,7 @@ func drawStyledLine(row, startCol int, text string, width int, baseFG, baseBG st
 	col := startCol
 	normalFG := baseFG
 	fg := baseFG
+	bg := baseBG
 	bold := false
 	for i := 0; i < len(text) && col <= width; {
 		if text[i] == 0x1b {
@@ -8738,6 +9813,13 @@ func drawStyledLine(row, startCol int, text string, width int, baseFG, baseBG st
 			}
 			if end < len(text) {
 				sequence := text[i : end+1]
+				if ansiParamsContain(sequence, "0") || ansiParamsContain(sequence, "39") {
+					normalFG = baseFG
+					fg = baseFG
+				}
+				if ansiParamsContain(sequence, "0") || ansiParamsContain(sequence, "49") {
+					bg = baseBG
+				}
 				if ansiSequenceBoldOff(sequence) {
 					bold = false
 					fg = normalFG
@@ -8753,6 +9835,9 @@ func drawStyledLine(row, startCol int, text string, width int, baseFG, baseBG st
 						fg = lightenFG(normalFG)
 					}
 				}
+				if parsed := ansiSequenceBG(sequence); parsed != "" {
+					bg = parsed
+				}
 				i = end + 1
 				continue
 			}
@@ -8761,8 +9846,8 @@ func drawStyledLine(row, startCol int, text string, width int, baseFG, baseBG st
 		if r == utf8.RuneError && size == 0 {
 			break
 		}
-		if r != ' ' || solid {
-			cellFG, cellBG := fg, baseBG
+		if r != ' ' || solid || bg != baseBG {
+			cellFG, cellBG := fg, bg
 			if rowCells := transparency[row-1]; rowCells != nil {
 				if bg := rowCells[col-1]; bg != "" {
 					cellBG = bg
@@ -8781,10 +9866,45 @@ func ansiSequenceFG(sequence string) string {
 	sequence = strings.TrimSuffix(sequence, "m")
 	fields := strings.Split(sequence, ";")
 	for i := 0; i < len(fields); i++ {
-		if (fields[i] == "38") && i+4 < len(fields) && fields[i+1] == "2" {
-			return strings.Join(fields[i:i+5], ";")
+		if (fields[i] == "38" || fields[i] == "48") && i+1 < len(fields) {
+			if fields[i+1] == "2" && i+4 < len(fields) {
+				if fields[i] == "38" {
+					return strings.Join(fields[i:i+5], ";")
+				}
+				i += 4
+				continue
+			}
+			if fields[i+1] == "5" && i+2 < len(fields) {
+				i += 2
+				continue
+			}
 		}
 		if parsed, err := strconv.Atoi(fields[i]); err == nil && (parsed >= 30 && parsed <= 37 || parsed >= 90 && parsed <= 97) {
+			return strconv.Itoa(parsed)
+		}
+	}
+	return ""
+}
+
+func ansiSequenceBG(sequence string) string {
+	sequence = strings.TrimPrefix(sequence, "\033[")
+	sequence = strings.TrimSuffix(sequence, "m")
+	fields := strings.Split(sequence, ";")
+	for i := 0; i < len(fields); i++ {
+		if (fields[i] == "38" || fields[i] == "48") && i+1 < len(fields) {
+			if fields[i+1] == "2" && i+4 < len(fields) {
+				if fields[i] == "48" {
+					return strings.Join(fields[i:i+5], ";")
+				}
+				i += 4
+				continue
+			}
+			if fields[i+1] == "5" && i+2 < len(fields) {
+				i += 2
+				continue
+			}
+		}
+		if parsed, err := strconv.Atoi(fields[i]); err == nil && (parsed >= 40 && parsed <= 47 || parsed >= 100 && parsed <= 107) {
 			return strconv.Itoa(parsed)
 		}
 	}
@@ -10156,8 +11276,13 @@ func playEditMode(deck *Deck, current int, width, height, page int, deckPath str
 				selected = editBackspace(slide, selected, cursor)
 			}
 		case "insert-newline":
-			if mode == "text" && selected >= 0 && selected < len(slide.Elements) && slide.Elements[selected].Kind == "code" {
-				insertTextAtCursor(slide, selected, cursor, "\n")
+			if mode == "text" && selected >= 0 && selected < len(slide.Elements) {
+				switch slide.Elements[selected].Kind {
+				case "code":
+					insertTextAtCursor(slide, selected, cursor, "\n")
+				case "bullet":
+					insertTextAtCursor(slide, selected, cursor, "\n  ")
+				}
 			}
 		case "enter":
 			if mode == "move" || mode == "resize" {
@@ -10215,6 +11340,24 @@ func playEditMode(deck *Deck, current int, width, height, page int, deckPath str
 					return ""
 				}
 			} else if mode == "text" && selected >= 0 && selected < len(slide.Elements) {
+				insertedLine := false
+				switch slide.Elements[selected].Kind {
+				case "bullet":
+					if !bulletItemAtCursorEmpty(slide.Elements[selected].Text, cursor[selected]) {
+						insertTextAtCursor(slide, selected, cursor, "\n")
+						insertedLine = true
+					}
+				case "code":
+					if !bulletItemAtCursorEmpty(slide.Elements[selected].Text, cursor[selected]) {
+						insertTextAtCursor(slide, selected, cursor, "\n")
+						insertedLine = true
+					} else {
+						cursor[selected] = removeEmptyTextLineAtCursor(&slide.Elements[selected], cursor[selected])
+					}
+				}
+				if insertedLine {
+					break
+				}
 				selected = finalizeTextEdit(slide, selected, cursor)
 				commit(modeOriginal)
 				mode = "select"
@@ -10354,10 +11497,11 @@ func drawEditCursor(lines []Line, selected, cursor, width, height int, slide Sli
 	if startRow == -1 {
 		return
 	}
-	if selected >= 0 && selected < len(slide.Elements) && slide.Elements[selected].Kind == "code" && !rendersAsTextImage(slide.Elements[selected]) {
-		visualLine, col := codeCursorVisualLineCol(slide.Elements[selected].Text, codeCharsPerVisualLine(width-startCol), cursor)
+	if selected >= 0 && selected < len(slide.Elements) && slide.Elements[selected].Kind == "code" {
+		visualLine, col := codeCursorVisualLineCol(slide.Elements[selected].Text, codeCharsPerVisualLineForElement(slide.Elements[selected], width-startCol), cursor)
 		glyphWidth := editGlyphWidth(slide.Elements[selected])
-		row := startRow + codeBlockPadY + visualLine*4 + 3
+		glyphHeight := codeGlyphHeight(slide.Elements[selected])
+		row := startRow + codeBlockPadY + visualLine*glyphHeight + glyphHeight - 1
 		if row < 0 || row >= height {
 			return
 		}
@@ -10875,9 +12019,9 @@ func cursorForClick(element Element, x, y int, lines []Line, elementIndex, width
 	case "heading":
 		return max(0, min(len([]rune(element.Text)), x/max(1, editGlyphWidth(element))))
 	case "code":
-		lineOffset := max(0, y-startRow-codeBlockPadY) / 4
+		lineOffset := max(0, y-startRow-codeBlockPadY) / codeGlyphHeight(element)
 		col := max(0, x-codeBlockPadX) / max(1, editGlyphWidth(element))
-		return codeCursorIndexForVisualLineCol(element.Text, codeCharsPerVisualLine(width-startCol), lineOffset, col)
+		return codeCursorIndexForVisualLineCol(element.Text, codeCharsPerVisualLineForElement(element, width-startCol), lineOffset, col)
 	default:
 		lineOffset := max(0, y-startRow)
 		bodyCol := max(0, x/4)
@@ -13025,8 +14169,8 @@ func drawImagePlacementPreview(element Element, width, height, page int) {
 	row, col := 0, 0
 	if placement.top != nil {
 		row = *placement.top - page*max(1, height)
-	} else if placement.bottom != nil {
-		row = height - len(rows) - *placement.bottom
+	} else {
+		row = placementTopRow(placement, height, len(rows), 0)
 	}
 	if placement.hasHorizontalOffset() {
 		col = placementLeftCol(placement, width, imageWidth)
@@ -13410,7 +14554,7 @@ func normalizeImagePlacement(slide *Slide, imageIndex, width, height int) {
 	}
 	query := setImageQueryInt(slide.Elements[imageIndex].Query, "top", max(0, top))
 	query = setPlacementHorizontalPct(query, left, right, width)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta")
+	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
 	slide.Elements[imageIndex].Query = query
 }
 
@@ -13440,7 +14584,7 @@ func normalizeTextPlacement(slide *Slide, elementIndex, width, height int) {
 	query := slide.Elements[elementIndex].Query
 	query = setPlacementHorizontalPct(query, left, right, width)
 	query = setImageQueryInt(query, "top", max(0, top))
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta")
+	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
 	slide.Elements[elementIndex].Query = query
 }
 
@@ -13473,7 +14617,7 @@ func moveTextElement(slide *Slide, elementIndex int, direction string, width, he
 	left = max(0, min(max(0, width-1), left))
 	query := setImageQueryInt(slide.Elements[elementIndex].Query, "top", top)
 	query = setPlacementHorizontalPct(query, left, left, width)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta")
+	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
 	slide.Elements[elementIndex].Query = query
 }
 
@@ -13517,7 +14661,7 @@ func moveElementByBounds(slide *Slide, elementIndex int, direction string, width
 	query := slide.Elements[elementIndex].Query
 	query = setPlacementHorizontalPct(query, left, right, width)
 	query = setImageQueryInt(query, "top", top)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta")
+	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
 	slide.Elements[elementIndex].Query = query
 }
 
@@ -13575,14 +14719,14 @@ func naturalElementTop(slide Slide, elementIndex, width, height int, query strin
 		return 0, false
 	}
 	clone := cloneSlide(slide)
-	clone.Elements[elementIndex].Query = removeImageQueryKeys(query, "top", "bottom", "row_delta")
+	clone.Elements[elementIndex].Query = removeImageQueryKeys(query, "top", "bottom", "row_delta", "valign")
 	top, _, _, ok := elementBounds(clone, elementIndex, width, height)
 	return top, ok
 }
 
 func setPlacementRowDeltaForTop(slide Slide, elementIndex int, query string, top, width, height int) string {
 	if elementIndex < 0 || elementIndex >= len(slide.Elements) || width <= 0 || height <= 0 {
-		return removeImageQueryKeys(query, "top", "bottom", "row_delta")
+		return removeImageQueryKeys(query, "top", "bottom", "row_delta", "valign")
 	}
 	return setPlacementRowDelta(query, max(0, top))
 }
@@ -13594,7 +14738,7 @@ func normalizeFlowRelativePlacements(slide *Slide, width, height int) {
 	original := cloneSlide(*slide)
 	for index, element := range slide.Elements {
 		placement := parseImagePlacement(element.Query)
-		if !placement.hasHorizontalOffset() || placement.rowDelta != nil || !placement.hasVerticalOffset() {
+		if !placement.hasHorizontalOffset() || placement.rowDelta != nil || placement.verticalAlign != "" || !placement.hasVerticalOffset() {
 			continue
 		}
 		top, _, _, ok := elementBounds(original, index, width, height)
@@ -13602,7 +14746,7 @@ func normalizeFlowRelativePlacements(slide *Slide, width, height int) {
 			continue
 		}
 		query := setPlacementRowDeltaForTop(original, index, element.Query, top, width, height)
-		query = removeImageQueryKeys(query, "top", "bottom")
+		query = removeImageQueryKeys(query, "top", "bottom", "valign")
 		slide.Elements[index].Query = query
 	}
 }
@@ -13633,7 +14777,7 @@ func initializeInsertedImagePlacement(slide *Slide, imageIndex int) {
 	query = setImageQueryInt(query, "top", 1)
 	query = setImageQueryInt(query, "left", 1)
 	query = setImageQueryFloat(query, "scale", 1.0)
-	query = removeImageQueryKeys(query, "align", "left_pct", "right", "right_pct", "bottom", "row_delta")
+	query = removeImageQueryKeys(query, "align", "left_pct", "right", "right_pct", "bottom", "row_delta", "valign")
 	slide.Elements[imageIndex].Query = query
 }
 
@@ -13664,7 +14808,7 @@ func initializeInsertedTextPlacement(slide *Slide, elementIndex, top, left, widt
 	query := slide.Elements[elementIndex].Query
 	query = setImageQueryInt(query, "top", max(0, top))
 	query = setPlacementHorizontalPct(query, left, left+max(0, displayWidth(slide.Elements[elementIndex].Text)-1), width)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta")
+	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
 	slide.Elements[elementIndex].Query = query
 }
 
@@ -13676,7 +14820,7 @@ func initializeInsertedShapePlacement(slide *Slide, elementIndex, top, left, wid
 	query := slide.Elements[elementIndex].Query
 	query = setImageQueryInt(query, "top", max(0, top))
 	query = setPlacementHorizontalPct(query, left, left+shapeWidth-1, width)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta")
+	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
 	slide.Elements[elementIndex].Query = query
 }
 
@@ -13691,7 +14835,7 @@ func clipboardElementFromSelection(slide Slide, elementIndex, width, height int)
 	}
 	element.Query = setImageQueryInt(element.Query, "top", top)
 	element.Query = setPlacementHorizontalPct(element.Query, left, right, width)
-	element.Query = removeImageQueryKeys(element.Query, "align", "left", "right", "bottom", "row_delta")
+	element.Query = removeImageQueryKeys(element.Query, "align", "left", "right", "bottom", "row_delta", "valign")
 	return element
 }
 
@@ -13709,19 +14853,21 @@ func elementForPastePage(element Element, page, width, height int) Element {
 		localTop = max(0, height-elementLayoutHeight(element, width, height)-*placement.bottom)
 	case placement.rowDelta != nil:
 		localTop = max(0, *placement.rowDelta)
+	case placement.verticalAlign != "":
+		localTop = max(0, placementTopRow(placement, height, elementLayoutHeight(element, width, height), 0))
 	default:
 		if page == 0 {
 			return element
 		}
 	}
 	element.Query = setImageQueryInt(element.Query, "top", page*height+localTop)
-	element.Query = removeImageQueryKeys(element.Query, "bottom", "row_delta")
+	element.Query = removeImageQueryKeys(element.Query, "bottom", "row_delta", "valign")
 	return element
 }
 
 func elementLayoutHeight(element Element, width, height int) int {
 	if element.Kind == "image" {
-		return max(1, len(renderASCIIImage(element.Path, element.Query, width, height)))
+		return max(1, len(renderImageElementRows(element, width, height)))
 	}
 	return max(1, len(layoutElementRows(element, width)))
 }
@@ -13744,7 +14890,7 @@ func moveImageElement(element *Element, direction string, width, height, page, s
 	if placement.top != nil {
 		top = *placement.top - pageTop
 	}
-	rows := renderASCIIImage(element.Path, element.Query, width, height)
+	rows := renderImageElementRows(*element, width, height)
 	imageWidth := max(1, maxLineDisplayWidth(rows))
 	left = placementLeftCol(placement, width, imageWidth)
 	right := left + imageWidth - 1
@@ -13765,7 +14911,7 @@ func moveImageElement(element *Element, direction string, width, height, page, s
 	right = left + imageWidth - 1
 	query := setImageQueryInt(element.Query, "top", pageTop+top)
 	query = setPlacementHorizontalPct(query, left, right, width)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta")
+	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
 	element.Query = query
 }
 
@@ -13988,7 +15134,7 @@ func setElementSize(query string, width, height int) string {
 func setElementTopLeft(query string, top, left int) string {
 	query = setImageQueryInt(query, "top", max(0, top))
 	query = setImageQueryInt(query, "left", max(0, left))
-	return removeImageQueryKeys(query, "align", "left_pct", "right", "right_pct", "bottom", "row_delta")
+	return removeImageQueryKeys(query, "align", "left_pct", "right", "right_pct", "bottom", "row_delta", "valign")
 }
 
 func setImageResizeSize(query string, width, height int) string {
@@ -14070,6 +15216,7 @@ func setPlacementRowDelta(query string, delta int) string {
 	values.Del("top")
 	values.Del("bottom")
 	values.Del("row_delta")
+	values.Del("valign")
 	if delta != 0 {
 		values.Set("row_delta", strconv.Itoa(delta))
 	}
@@ -14476,18 +15623,181 @@ func drawRenderedHeadingMatch(element Element, renderedRows []string, width, hei
 
 func renderedOffsetForCursor(element Element, width, cursor int) (int, int) {
 	cursor = max(0, min(cursor, len([]rune(element.Text))))
-	if element.Kind == "heading" && !rendersAsTextImage(element) {
-		return 0, cursor * editGlyphWidth(element)
+	if element.Kind == "bullet" {
+		row, col, _ := bulletCaretMetrics(element, width, cursor)
+		return row, col
 	}
-	if element.Kind == "code" && !rendersAsTextImage(element) {
-		visualLine, col := codeCursorVisualLineCol(element.Text, codeCharsPerVisualLine(width), cursor)
-		return codeBlockPadY + visualLine*4 + 3, codeBlockPadX + col*editGlyphWidth(element)
+	if element.Kind == "heading" && !rendersAsTextImage(element) {
+		rows := editableRowsForElementPrefix(element, width, cursor)
+		if len(rows) == 0 {
+			return max(0, editGlyphHeight(element)-1), 0
+		}
+		glyphHeight := max(1, editGlyphHeight(element))
+		return max(0, glyphHeight-1), maxLineDisplayWidth(rows[max(0, len(rows)-glyphHeight):]) + editorTrailingSpaceWidth(element, cursor)
+	}
+	if element.Kind == "code" {
+		visualLine, col := codeCursorVisualLineCol(element.Text, codeCharsPerVisualLineForElement(element, width), cursor)
+		glyphHeight := codeGlyphHeight(element)
+		return codeBlockPadY + visualLine*glyphHeight + glyphHeight - 1, codeBlockPadX + col*editGlyphWidth(element)
 	}
 	rows := editableRowsForElementPrefix(element, width, cursor)
 	if len(rows) == 0 {
 		return 0, 0
 	}
-	return len(rows) - 1, displayWidth(strings.TrimRight(rows[len(rows)-1], " "))
+	if rendersAsTextImage(element) {
+		glyphHeight := max(1, editGlyphHeight(element))
+		return len(rows) - 1, maxLineDisplayWidth(rows[max(0, len(rows)-glyphHeight):]) + editorTrailingSpaceWidth(element, cursor)
+	}
+	if hasEmoji(element.Text) {
+		glyphHeight := max(1, editGlyphHeight(element))
+		return len(rows) - 1, maxLineDisplayWidth(rows[max(0, len(rows)-glyphHeight):]) + editorTrailingSpaceWidth(element, cursor)
+	}
+	lastRow := strings.TrimRight(stripANSI(rows[len(rows)-1]), " ")
+	return len(rows) - 1, displayWidth(lastRow) + editorTrailingSpaceWidth(element, cursor)
+}
+
+func editorTrailingSpaceWidth(element Element, cursor int) int {
+	spans := parseMarkdownStyledSpansUntil(element.Text, cursor)
+	width := 0
+	for spanIndex := len(spans) - 1; spanIndex >= 0; spanIndex-- {
+		span := spans[spanIndex]
+		unitWidth := editorStyledSpaceWidth(element, span.Bold)
+		runes := []rune(span.Text)
+		for index := len(runes) - 1; index >= 0; index-- {
+			switch runes[index] {
+			case ' ', '\t':
+				width += unitWidth
+			case '\n', '\r':
+				return 0
+			default:
+				return width
+			}
+		}
+	}
+	return width
+}
+
+func editorStyledSpaceWidth(element Element, bold bool) int {
+	unitWidth := editGlyphWidth(element)
+	if bold {
+		if rendersAsTextImage(element) {
+			unitWidth = max(unitWidth, int(math.Ceil(5*textImageScale(element))))
+		} else if element.Kind == "heading" && element.Level == 1 {
+			unitWidth = 20
+		} else {
+			unitWidth = 5
+			if element.Kind == "heading" {
+				unitWidth = 10
+			}
+		}
+	}
+	return unitWidth
+}
+
+func bulletCaretMetrics(element Element, width, cursor int) (int, int, int) {
+	runes := []rune(element.Text)
+	cursor = max(0, min(cursor, len(runes)))
+	before := string(runes[:cursor])
+	lines := strings.Split(strings.ReplaceAll(before, "\r\n", "\n"), "\n")
+	current := lines[len(lines)-1]
+	continuation := len(current) > 0 && (current[0] == ' ' || current[0] == '\t')
+	allLines := strings.Split(strings.ReplaceAll(element.Text, "\r\n", "\n"), "\n")
+	lineIndex := min(len(allLines)-1, len(lines)-1)
+	fullCurrent := allLines[lineIndex]
+	leading := len([]rune(fullCurrent)) - len([]rune(strings.TrimLeft(fullCurrent, " \t")))
+	contentCursor := max(0, len([]rune(current))-leading)
+	content := strings.TrimLeft(fullCurrent, " \t")
+	row := 0
+	if len(lines) > 1 {
+		previous := strings.Join(lines[:len(lines)-1], "\n")
+		if rendersAsTextImage(element) {
+			copyElement := element
+			copyElement.Text = previous
+			row += len(renderTextImageBulletElement(copyElement, width, textImageScale(element)))
+		} else {
+			row += len(renderBulletWrapped(previous, width))
+		}
+	}
+	if rendersAsTextImage(element) {
+		itemRow, col, cells := textImageBulletItemCaretMetrics(element, content, contentCursor, width, !continuation)
+		return row + itemRow, col, cells
+	}
+
+	const prefixWidth = 8
+	prefixText := string([]rune(content)[:min(contentCursor, len([]rune(content)))])
+	_, trailing := trimTrailingEditorSpaces(prefixText)
+	spans := parseMarkdownStyledSpansUntil(content, contentCursor)
+	chunks := wrapStyledSpans(spans, max(1, width-prefixWidth), 4, 5)
+	chunkIndex := max(0, len(chunks)-1)
+	textRows := renderQuadStyled(chunks[chunkIndex])
+	col := prefixWidth + maxLineDisplayWidth(textRows) + trailing*4
+	if continuation {
+		row += chunkIndex*4 + max(0, len(textRows)-1)
+	} else if chunkIndex == 0 {
+		row += max(0, (len(renderBulletMarkerRows())-len(textRows))/2) + max(0, len(textRows)-1)
+		if len(textRows) == 0 {
+			row += 4
+		}
+	} else {
+		row += len(renderBulletMarkerRows()) + (chunkIndex-1)*4 + max(0, len(textRows)-1)
+	}
+	return row, min(width, col), 4
+}
+
+func textImageScale(element Element) float64 {
+	values, _ := url.ParseQuery(element.Query)
+	if scale, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && scale > 0 {
+		return scale
+	}
+	return 1
+}
+
+func textImageBulletItemCaretMetrics(element Element, current string, cursor, width int, showMarker bool) (int, int, int) {
+	scale := textImageScale(element)
+	marker := element
+	marker.Kind = "text"
+	marker.Text = "·"
+	markerRows := renderTextImageElement(marker, width)
+	markerWidth := max(1, maxLineDisplayWidth(markerRows))
+	prefixWidth := min(max(1, width-1), markerWidth+max(1, int(math.Ceil(scale))))
+	contentWidth := max(1, width-prefixWidth)
+	glyphWidth := max(1, int(math.Ceil(4*scale)))
+	boldWidth := max(glyphWidth, int(math.Ceil(5*scale)))
+	runes := []rune(current)
+	cursor = max(0, min(cursor, len(runes)))
+	_, trailing := trimTrailingEditorSpaces(string(runes[:cursor]))
+	chunks := wrapStyledSpans(parseMarkdownStyledSpansUntil(current, cursor), contentWidth, glyphWidth, boldWidth)
+	row := 0
+	for chunkIndex, chunk := range chunks {
+		textElement := element
+		textElement.Kind = "text"
+		textRows := renderTextImageStyledSpans(textElement, contentWidth, chunk)
+		if chunkIndex < len(chunks)-1 {
+			if showMarker && chunkIndex == 0 {
+				row += max(len(markerRows), len(textRows))
+			} else {
+				row += len(textRows)
+			}
+			continue
+		}
+		textOffset := 0
+		if showMarker && chunkIndex == 0 {
+			textOffset = max(0, (max(len(markerRows), len(textRows))-len(textRows))/2)
+		}
+		row += textOffset + max(0, len(textRows)-1)
+		col := prefixWidth + maxLineDisplayWidth(textRows) + trailing*glyphWidth
+		return row, min(width, col), glyphWidth
+	}
+	return row, prefixWidth, glyphWidth
+}
+
+func trimTrailingEditorSpaces(text string) (string, int) {
+	runes := []rune(text)
+	end := len(runes)
+	for end > 0 && (runes[end-1] == ' ' || runes[end-1] == '\t') {
+		end--
+	}
+	return string(runes[:end]), len(runes) - end
 }
 
 func runeSliceWithPadding(text string, start, end int) string {
@@ -14694,21 +16004,25 @@ func padRight(text string, width int) string {
 }
 
 func editableRowsForElementPrefix(element Element, width, cursor int) []string {
+	text := editablePrefixText(element, cursor)
 	runes := []rune(element.Text)
 	cursor = max(0, min(cursor, len(runes)))
-	text := string(runes[:cursor])
-	if rendersAsTextImage(element) {
+	if element.Kind == "code" {
 		copyElement := element
 		copyElement.Text = text
-		return renderTextImageElement(copyElement, width)
+		return renderCodeBlockRows(copyElement, width)
 	}
+	if rendersAsTextImage(element) {
+		return renderTextImageStyledSpans(element, width, parseMarkdownStyledSpansUntil(element.Text, cursor))
+	}
+	spans := parseMarkdownStyledSpansUntil(element.Text, cursor)
 	switch element.Kind {
 	case "heading":
 		scale := 1
 		if element.Level == 1 {
 			scale = 2
 		}
-		return renderFull(text, scale)
+		return renderFullStyledWrapped(spans, width, scale)
 	case "bullet":
 		return renderBulletWrapped(text, width)
 	case "code":
@@ -14716,8 +16030,36 @@ func editableRowsForElementPrefix(element Element, width, cursor int) []string {
 		copyElement.Text = text
 		return renderCodeBlockRows(copyElement, width)
 	default:
-		return renderBodyWrapped(text, width, "", "")
+		return renderStyledBodyWrapped(spans, width, "", "")
 	}
+}
+
+func editablePrefixText(element Element, cursor int) string {
+	runes := []rune(element.Text)
+	cursor = max(0, min(cursor, len(runes)))
+	text := string(runes[:cursor])
+	if strings.Count(text, "[color=") > strings.Count(text, "[/color]") && strings.Contains(string(runes[cursor:]), "[/color]") {
+		text += "[/color]"
+	}
+	for _, marker := range []string{"***", "**", "*"} {
+		markerRunes := []rune(marker)
+		if len(runes) >= len(markerRunes)*2 && strings.HasPrefix(element.Text, marker) && strings.HasSuffix(element.Text, marker) && cursor >= len(markerRunes) && cursor <= len(runes)-len(markerRunes) {
+			text += marker
+			break
+		}
+	}
+	return text
+}
+
+func codeCharsPerVisualLineForElement(element Element, width int) int {
+	return max(1, (max(1, width)-codeBlockPadX*2)/max(1, editGlyphWidth(element)))
+}
+
+func codeGlyphHeight(element Element) int {
+	if !rendersAsTextImage(element) {
+		return 4
+	}
+	return max(1, len(renderBitmapTextImage("M", textImageScale(element))))
 }
 
 func editGlyphWidth(element Element) int {
@@ -14746,6 +16088,22 @@ func editGlyphWidth(element Element) int {
 	}
 	if element.Kind == "code" {
 		return 4
+	}
+	return 4
+}
+
+func editGlyphHeight(element Element) int {
+	if element.Kind == "code" {
+		return codeGlyphHeight(element)
+	}
+	if rendersAsTextImage(element) {
+		return max(1, len(renderBitmapTextImage("M", textImageScale(element))))
+	}
+	if element.Kind == "heading" && element.Level == 1 {
+		return 16
+	}
+	if element.Kind == "heading" {
+		return 8
 	}
 	return 4
 }
@@ -14803,19 +16161,18 @@ func codeCursorIndexForLineCol(text string, targetLine, targetCol int) int {
 	return len(runes)
 }
 
-func codeCharsPerVisualLine(width int) int {
-	return max(1, max(1, width-codeBlockPadX*2)/4)
-}
-
 func codeCursorVisualLineCol(text string, charsPerLine, cursor int) (int, int) {
 	charsPerLine = max(1, charsPerLine)
 	line, col := codeCursorLineCol(text, cursor)
 	visualLine := 0
 	for index, rawLine := range strings.Split(text, "\n") {
 		if index == line {
-			return visualLine + col/charsPerLine, col % charsPerLine
+			runes := []rune(rawLine)
+			visualCol := textVisualUnitWidth(string(runes[:min(col, len(runes))]))
+			return visualLine + visualCol/charsPerLine, visualCol % charsPerLine
 		}
-		visualLine += max(1, (len([]rune(rawLine))+charsPerLine-1)/charsPerLine)
+		visualWidth := textVisualUnitWidth(rawLine)
+		visualLine += max(1, (visualWidth+charsPerLine-1)/charsPerLine)
 	}
 	return visualLine, 0
 }
@@ -14828,11 +16185,20 @@ func codeCursorIndexForVisualLineCol(text string, charsPerLine, targetVisualLine
 	visualLine := 0
 	for _, rawLine := range strings.Split(text, "\n") {
 		runes := []rune(rawLine)
-		chunkCount := max(1, (len(runes)+charsPerLine-1)/charsPerLine)
+		visualWidth := textVisualUnitWidth(rawLine)
+		chunkCount := max(1, (visualWidth+charsPerLine-1)/charsPerLine)
 		if targetVisualLine < visualLine+chunkCount {
 			chunk := targetVisualLine - visualLine
-			col := min(len(runes), chunk*charsPerLine+targetCol)
-			return offset + col
+			targetWidth := min(visualWidth, chunk*charsPerLine+targetCol)
+			runeCol, used := 0, 0
+			for _, unit := range textVisualUnits(rawLine) {
+				if used+unit.width > targetWidth {
+					break
+				}
+				used += unit.width
+				runeCol += len([]rune(unit.text))
+			}
+			return offset + min(len(runes), runeCol)
 		}
 		offset += len(runes)
 		if offset < len([]rune(text)) {
@@ -14844,7 +16210,7 @@ func codeCursorIndexForVisualLineCol(text string, charsPerLine, targetVisualLine
 }
 
 func moveCodeCursorVertical(element Element, cursor, delta, width int) int {
-	charsPerLine := codeCharsPerVisualLine(width)
+	charsPerLine := codeCharsPerVisualLineForElement(element, width)
 	visualLine, col := codeCursorVisualLineCol(element.Text, charsPerLine, cursor)
 	return codeCursorIndexForVisualLineCol(element.Text, charsPerLine, visualLine+delta, col)
 }
@@ -15390,10 +16756,54 @@ func finalizeTextEdit(slide *Slide, selected int, cursor map[int]int) int {
 	if selected < 0 || selected >= len(slide.Elements) {
 		return selected
 	}
+	if slide.Elements[selected].Kind == "bullet" {
+		slide.Elements[selected].Text = normalizeBulletText(slide.Elements[selected].Text)
+	}
 	if slide.Elements[selected].Placeholder || strings.TrimSpace(slide.Elements[selected].Text) == "" {
 		return removeEditableElement(slide, selected, cursor)
 	}
 	return selected
+}
+
+func bulletItemAtCursorEmpty(text string, cursor int) bool {
+	runes := []rune(text)
+	cursor = max(0, min(cursor, len(runes)))
+	start := cursor
+	for start > 0 && runes[start-1] != '\n' {
+		start--
+	}
+	end := cursor
+	for end < len(runes) && runes[end] != '\n' {
+		end++
+	}
+	return strings.TrimSpace(string(runes[start:end])) == ""
+}
+
+func removeEmptyTextLineAtCursor(element *Element, cursor int) int {
+	if element == nil {
+		return cursor
+	}
+	runes := []rune(element.Text)
+	cursor = max(0, min(cursor, len(runes)))
+	start := cursor
+	for start > 0 && runes[start-1] != '\n' {
+		start--
+	}
+	end := cursor
+	for end < len(runes) && runes[end] != '\n' {
+		end++
+	}
+	if strings.TrimSpace(string(runes[start:end])) != "" {
+		return cursor
+	}
+	removeStart, removeEnd := start, end
+	if start > 0 {
+		removeStart--
+	} else if end < len(runes) {
+		removeEnd++
+	}
+	element.Text = string(append(append([]rune(nil), runes[:removeStart]...), runes[removeEnd:]...))
+	return removeStart
 }
 
 func removeEditableElement(slide *Slide, selected int, cursor map[int]int) int {
@@ -15463,6 +16873,9 @@ func renderElementRows(element Element, width int) []string {
 
 func renderElementRowsBase(element Element, width int) []string {
 	width = constrainedElementWidth(element, width)
+	if element.Kind == "code" {
+		return renderCodeBlockRows(element, width)
+	}
 	if rendersAsTextImage(element) {
 		return renderTextImageElement(element, width)
 	}
@@ -15475,8 +16888,6 @@ func renderElementRowsBase(element Element, width int) []string {
 		return renderFullWrapped(element.Text, width, scale)
 	case "bullet":
 		return renderBulletWrapped(element.Text, width)
-	case "code":
-		return renderCodeBlockRows(element, width)
 	case "shape":
 		return renderShapeRows(element, width)
 	default:
@@ -15656,7 +17067,7 @@ func renderCodeBlockRows(element Element, width int) []string {
 	if width <= 0 {
 		return nil
 	}
-	glyphRows := renderCodeGlyphRows(element.Text, max(1, width-codeBlockPadX*2))
+	glyphRows := renderCodeGlyphRows(element, max(1, width-codeBlockPadX*2))
 	contentWidth := max(1, maxLineDisplayWidth(glyphRows))
 	blockWidth := min(width, contentWidth+codeBlockPadX*2)
 	blank := strings.Repeat(" ", blockWidth)
@@ -15673,13 +17084,21 @@ func renderCodeBlockRows(element Element, width int) []string {
 	return rows
 }
 
-func renderCodeGlyphRows(text string, width int) []string {
-	charsPerLine := max(1, width/4)
+func renderCodeGlyphRows(element Element, width int) []string {
+	glyphWidth := 4
+	if rendersAsTextImage(element) {
+		glyphWidth = editGlyphWidth(element)
+	}
+	charsPerLine := max(1, width/max(1, glyphWidth))
 	var rows []string
-	for _, rawLine := range strings.Split(text, "\n") {
+	for _, rawLine := range strings.Split(element.Text, "\n") {
 		chunks := fixedRuneChunks(rawLine, charsPerLine)
 		for _, chunk := range chunks {
-			rows = append(rows, renderQuad(chunk)...)
+			if rendersAsTextImage(element) {
+				rows = append(rows, renderBitmapTextImage(chunk, textImageScale(element))...)
+			} else {
+				rows = append(rows, renderQuad(chunk)...)
+			}
 		}
 	}
 	if len(rows) == 0 {
@@ -15689,18 +17108,7 @@ func renderCodeGlyphRows(text string, width int) []string {
 }
 
 func fixedRuneChunks(text string, width int) []string {
-	width = max(1, width)
-	runes := []rune(text)
-	if len(runes) == 0 {
-		return []string{""}
-	}
-	chunks := make([]string, 0, (len(runes)+width-1)/width)
-	for len(runes) > 0 {
-		n := min(width, len(runes))
-		chunks = append(chunks, string(runes[:n]))
-		runes = runes[n:]
-	}
-	return chunks
+	return splitTextVisualUnits(text, width)
 }
 
 func layoutElementRows(element Element, width int) []string {
@@ -15782,19 +17190,9 @@ func layout(slide Slide, width, height int) []Line {
 			imageElement := slide.Elements[block[0].Element]
 			maxImageWidth := constrainedElementWidth(imageElement, width)
 			maxImageRows = constrainedElementHeight(imageElement, maxImageRows)
-			rows := renderASCIIImage(block[0].Text, block[0].Query, maxImageWidth, maxImageRows)
-			if len(rows) == 0 && imageElement.Placeholder {
-				rows = renderImagePlaceholderRows(imageElement, maxImageWidth, maxImageRows)
-			}
+			rows := renderImageElementRows(imageElement, maxImageWidth, maxImageRows)
 			imageWidth := maxLineDisplayWidth(rows)
-			row := currentRow
-			if placement.top != nil {
-				row = *placement.top
-			} else if placement.bottom != nil {
-				row = height - len(rows) - *placement.bottom
-			} else if placement.rowDelta != nil {
-				row = *placement.rowDelta
-			}
+			row := placementTopRow(placement, height, len(rows), currentRow)
 			col := 0
 			if placement.hasHorizontalOffset() {
 				col = placementLeftCol(placement, width, imageWidth)
@@ -15808,7 +17206,7 @@ func layout(slide Slide, width, height int) []Line {
 			}
 			if placement.top != nil {
 				row = max(0, row)
-			} else if placement.bottom != nil {
+			} else if placement.bottom != nil || placement.verticalAlign != "" {
 				row = max(0, min(height-1, row))
 			} else {
 				row = max(0, row)
@@ -15840,14 +17238,7 @@ func layout(slide Slide, width, height int) []Line {
 			for _, line := range block {
 				blockWidth = max(blockWidth, displayWidth(stripANSI(line.Text)))
 			}
-			row := currentRow
-			if placement.top != nil {
-				row = *placement.top
-			} else if placement.bottom != nil {
-				row = height - blockHeight - *placement.bottom
-			} else if placement.rowDelta != nil {
-				row = *placement.rowDelta
-			}
+			row := placementTopRow(placement, height, blockHeight, currentRow)
 			col := 0
 			if placement.hasHorizontalOffset() {
 				col = placementLeftCol(placement, width, blockWidth)
@@ -15861,19 +17252,25 @@ func layout(slide Slide, width, height int) []Line {
 			}
 			if placement.top != nil {
 				row = max(0, row)
-			} else if placement.bottom != nil {
+			} else if placement.bottom != nil || placement.verticalAlign != "" {
 				row = max(0, min(max(0, height-1), row))
 			} else {
 				row = max(0, row)
 			}
-			col = clampBlockCol(col, width, blockWidth)
+			if placement.left != nil || placement.leftPct != nil {
+				// A left anchor is stable. Re-render into the remaining width below
+				// instead of shifting the element left as its content grows.
+				col = max(0, min(max(0, width-1), col))
+			} else {
+				col = clampBlockCol(col, width, blockWidth)
+			}
 			availableWidth := max(1, width-col)
 			if availableWidth < width {
 				role := block[0].Role
 				block = roleLines(layoutElementRows(slide.Elements[block[0].Element], availableWidth), role, block[0].Element, block[0].Query)
 				blockHeight = len(block)
-				if placement.bottom != nil {
-					row = height - blockHeight - *placement.bottom
+				if placement.bottom != nil || placement.verticalAlign != "" {
+					row = placementTopRow(placement, height, blockHeight, currentRow)
 					row = max(0, min(max(0, height-1), row))
 				}
 			}
@@ -15941,6 +17338,31 @@ func renderImagePlaceholderRows(element Element, maxWidth, maxHeight int) []stri
 		rows[middle] = string(runes)
 	}
 	return rows
+}
+
+func renderUnavailableImageRows(maxWidth, maxHeight int) []string {
+	if maxWidth <= 0 || maxHeight <= 0 {
+		return nil
+	}
+	rows := renderBodyWrapped("[IMG]", maxWidth, "", "")
+	if len(rows) > maxHeight {
+		rows = rows[:maxHeight]
+	}
+	return rows
+}
+
+func renderImageElementRows(element Element, maxWidth, maxHeight int) []string {
+	var rows []string
+	if !isExternalImageSource(element.Path) {
+		rows = renderASCIIImage(element.Path, element.Query, maxWidth, maxHeight)
+	}
+	if len(rows) > 0 {
+		return rows
+	}
+	if element.Placeholder {
+		return renderImagePlaceholderRows(element, maxWidth, maxHeight)
+	}
+	return renderUnavailableImageRows(maxWidth, maxHeight)
 }
 
 func resolveTextCollisions(lines []Line) []Line {
@@ -16248,12 +17670,13 @@ func hasPage(slide Slide, width, height, page int) bool {
 }
 
 type imagePlacement struct {
-	align       string
-	top, bottom *int
-	left, right *int
-	rowDelta    *int
-	leftPct     *float64
-	rightPct    *float64
+	align         string
+	verticalAlign string
+	top, bottom   *int
+	left, right   *int
+	rowDelta      *int
+	leftPct       *float64
+	rightPct      *float64
 }
 
 func parseImagePlacement(query string) imagePlacement {
@@ -16265,6 +17688,10 @@ func parseImagePlacement(query string) imagePlacement {
 	switch values.Get("align") {
 	case "center", "right", "left":
 		placement.align = values.Get("align")
+	}
+	switch values.Get("valign") {
+	case "top", "middle", "bottom":
+		placement.verticalAlign = values.Get("valign")
 	}
 	placement.top = intQuery(values, "top")
 	placement.bottom = intQuery(values, "bottom")
@@ -16281,11 +17708,30 @@ func (placement imagePlacement) hasHorizontalOffset() bool {
 }
 
 func (placement imagePlacement) hasVerticalOffset() bool {
-	return placement.top != nil || placement.bottom != nil || placement.rowDelta != nil
+	return placement.top != nil || placement.bottom != nil || placement.rowDelta != nil || placement.verticalAlign != ""
 }
 
 func (placement imagePlacement) hasAbsoluteOffset() bool {
 	return placement.hasVerticalOffset()
+}
+
+func placementTopRow(placement imagePlacement, height, contentHeight, fallback int) int {
+	switch {
+	case placement.top != nil:
+		return *placement.top
+	case placement.bottom != nil:
+		return height - contentHeight - *placement.bottom
+	case placement.rowDelta != nil:
+		return *placement.rowDelta
+	case placement.verticalAlign == "middle":
+		return (height - contentHeight) / 2
+	case placement.verticalAlign == "bottom":
+		return height - contentHeight
+	case placement.verticalAlign == "top":
+		return 0
+	default:
+		return fallback
+	}
 }
 
 func placementLeftCol(placement imagePlacement, width, contentWidth int) int {
@@ -16414,11 +17860,18 @@ func renderFull(text string, scale int) []string {
 }
 
 func renderFullWithFont(text string, scale int, font map[rune][]string, glyphWidth int) []string {
-	rows := renderFullRawWithFont(text, font, glyphWidth)
-	rows = trimBlank(rows)
-	if scale > 1 {
-		rows = scaleRows(rows, scale)
+	scale = max(1, scale)
+	rows := renderTextWithEmoji(text, 8*scale, func(chunk string) []string {
+		plain := renderFullRawWithFont(chunk, font, glyphWidth)
+		if scale > 1 {
+			plain = scaleRows(plain, scale)
+		}
+		return plain
+	})
+	if hasEmoji(text) {
+		return rows
 	}
+	rows = trimBlank(rows)
 	return rows
 }
 
@@ -16437,7 +17890,7 @@ func renderFullRawWithFont(text string, font map[rune][]string, glyphWidth int) 
 }
 
 func renderFullWrapped(text string, width, scale int) []string {
-	if strings.Contains(text, "*") {
+	if strings.ContainsAny(text, "*`") || strings.Contains(text, "[color=") {
 		return renderFullStyledWrapped(parseMarkdownStyledSpans(text), width, scale)
 	}
 	glyphWidth := max(1, 8*max(1, scale))
@@ -16470,9 +17923,18 @@ func renderFullStyled(spans []styledTextSpan, scale int) []string {
 			font = c64BoldFont
 			glyphWidth = 10
 		}
-		chunk := renderFullRawWithFont(span.Text, font, glyphWidth)
-		if scale > 1 {
-			chunk = scaleRows(chunk, scale)
+		chunk := renderTextWithEmoji(span.Text, 8*scale, func(text string) []string {
+			plain := renderFullRawWithFont(text, font, glyphWidth)
+			if scale > 1 {
+				plain = scaleRows(plain, scale)
+			}
+			return plain
+		})
+		if span.Code {
+			chunk = decorateInlineCodeRows(chunk)
+		}
+		if span.Color != "" {
+			chunk = colourStyledRows(chunk, span.Color)
 		}
 		for i := 0; i < len(rows); i++ {
 			if i < len(chunk) {
@@ -16484,8 +17946,19 @@ func renderFullStyled(spans []styledTextSpan, scale int) []string {
 			}
 		}
 	}
-	rows = trimBlank(rows)
+	if !styledSpansContainEmoji(spans) {
+		rows = trimBlank(rows)
+	}
 	return rows
+}
+
+func styledSpansContainEmoji(spans []styledTextSpan) bool {
+	for _, span := range spans {
+		if hasEmoji(span.Text) {
+			return true
+		}
+	}
+	return false
 }
 
 func highlightVisibleText(text string) string {
@@ -16497,21 +17970,57 @@ func highlightVisibleText(text string) string {
 	return text[:left] + "\033[1m" + text[left:right] + "\033[22m" + text[right:]
 }
 
+func colourStyledRows(rows []string, color string) []string {
+	r, g, b, ok := parseHexColour(color)
+	if !ok {
+		return rows
+	}
+	prefix := fmt.Sprintf("\033[38;2;%d;%d;%dm", r, g, b)
+	for index := range rows {
+		rows[index] = prefix + rows[index] + "\033[39m"
+	}
+	return rows
+}
+
+func decorateInlineCodeRows(rows []string) []string {
+	if len(rows) == 0 {
+		return rows
+	}
+	width := max(1, maxLineDisplayWidth(rows))
+	out := make([]string, len(rows))
+	for row, text := range rows {
+		text = padRight(text, width)
+		if row == 0 || row == len(rows)-1 {
+			corner := "▄"
+			if row == len(rows)-1 {
+				corner = "▀"
+			}
+			out[row] = "\033[90;49m" + corner + "\033[39;100m " + text + " \033[90;49m" + corner + "\033[39;49m"
+		} else {
+			out[row] = "\033[39;100m  " + text + "  \033[49m"
+		}
+	}
+	return out
+}
+
 func renderBodyWrapped(text string, width int, firstPrefix, contPrefix string) []string {
 	prefixWidth := max(displayWidth(firstPrefix), displayWidth(contPrefix))
 	chars := max(1, (width-prefixWidth)/4)
-	if strings.Contains(text, "*") {
+	if strings.ContainsAny(text, "*`") || strings.Contains(text, "[color=") {
 		return renderStyledBodyWrapped(parseMarkdownStyledSpans(text), width, firstPrefix, contPrefix)
 	}
-	chunks := wrapWords(text, chars)
 	var out []string
-	for i, chunk := range chunks {
-		prefix := firstPrefix
-		if i > 0 {
-			prefix = contPrefix
-		}
-		for _, row := range renderQuad(chunk) {
-			out = append(out, crop(prefix+row, width))
+	visualLine := 0
+	for _, logicalLine := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		for _, chunk := range wrapWords(logicalLine, chars) {
+			prefix := firstPrefix
+			if visualLine > 0 {
+				prefix = contPrefix
+			}
+			for _, row := range renderQuad(chunk) {
+				out = append(out, crop(prefix+row, width))
+			}
+			visualLine++
 		}
 	}
 	return out
@@ -16519,37 +18028,101 @@ func renderBodyWrapped(text string, width int, firstPrefix, contPrefix string) [
 
 func renderStyledBodyWrapped(spans []styledTextSpan, width int, firstPrefix, contPrefix string) []string {
 	prefixWidth := max(displayWidth(firstPrefix), displayWidth(contPrefix))
-	lines := wrapStyledSpans(spans, max(1, width-prefixWidth), 4, 5)
 	var out []string
-	for i, line := range lines {
-		prefix := firstPrefix
-		if i > 0 {
-			prefix = contPrefix
-		}
-		for _, row := range renderQuadStyled(line) {
-			out = append(out, cropANSIVisible(prefix+row, width))
+	visualLine := 0
+	for _, logicalLine := range splitStyledSpanLines(spans) {
+		for _, line := range wrapStyledSpans(logicalLine, max(1, width-prefixWidth), 4, 5) {
+			prefix := firstPrefix
+			if visualLine > 0 {
+				prefix = contPrefix
+			}
+			for _, row := range renderQuadStyled(line) {
+				out = append(out, cropANSIVisible(prefix+row, width))
+			}
+			visualLine++
 		}
 	}
 	return out
 }
 
+func splitStyledSpanLines(spans []styledTextSpan) [][]styledTextSpan {
+	lines := [][]styledTextSpan{{}}
+	for _, span := range spans {
+		parts := strings.Split(strings.ReplaceAll(span.Text, "\r\n", "\n"), "\n")
+		for index, part := range parts {
+			if part != "" {
+				lines[len(lines)-1] = appendStyledText(lines[len(lines)-1], part, span)
+			}
+			if index < len(parts)-1 {
+				lines = append(lines, []styledTextSpan{})
+			}
+		}
+	}
+	return lines
+}
+
+var bulletMarkerBitmap = []string{
+	"       ",
+	"       ",
+	"       ",
+	"  ###  ",
+	" ##### ",
+	" ##### ",
+	" ##### ",
+	" ##### ",
+	"  ###  ",
+	"       ",
+	"       ",
+	"       ",
+}
+
+func renderBulletMarkerRows() []string {
+	mask := make([][]bool, len(bulletMarkerBitmap))
+	for row, source := range bulletMarkerBitmap {
+		mask[row] = make([]bool, len([]rune(source)))
+		for col, pixel := range []rune(source) {
+			mask[row][col] = pixel != ' '
+		}
+	}
+	return maskToQuadrantsPadded(mask)
+}
+
 func renderBulletWrapped(text string, width int) []string {
+	var out []string
+	for _, item := range splitBulletListItems(text, true) {
+		out = append(out, renderBulletItemWrapped(item.Text, width)...)
+		for _, continuation := range item.Continuations {
+			out = append(out, renderBodyWrapped(continuation, width, "        ", "        ")...)
+		}
+	}
+	return out
+}
+
+func renderBulletItemWrapped(text string, width int) []string {
 	blankPrefix := "        "
 	prefixWidth := displayWidth(blankPrefix)
 	chars := max(1, (width-prefixWidth)/4)
-	if strings.Contains(text, "*") {
-		return renderStyledBulletWrapped(parseMarkdownStyledSpans(text), width, blankPrefix)
+	if strings.ContainsAny(text, "*`") || strings.Contains(text, "[color=") {
+		return renderStyledBulletItemWrapped(parseMarkdownStyledSpans(text), width, blankPrefix)
 	}
 	chunks := wrapWords(text, chars)
-	markerRows := renderQuad("·")
+	markerRows := renderBulletMarkerRows()
 	var out []string
 	for chunkIndex, chunk := range chunks {
-		for rowIndex, row := range renderQuad(chunk) {
+		textRows := renderQuad(chunk)
+		rowCount, textOffset := len(textRows), 0
+		if chunkIndex == 0 {
+			rowCount = max(rowCount, len(markerRows))
+			textOffset = max(0, (rowCount-len(textRows))/2)
+		}
+		for rowIndex := 0; rowIndex < rowCount; rowIndex++ {
 			prefix := blankPrefix
-			if chunkIndex == 0 && rowIndex == 0 {
-				prefix = padRunes(markerRows[0], prefixWidth)
-			} else if chunkIndex == 0 && rowIndex < len(markerRows) {
+			if chunkIndex == 0 && rowIndex < len(markerRows) {
 				prefix = padRunes(markerRows[rowIndex], prefixWidth)
+			}
+			row := ""
+			if rowIndex >= textOffset && rowIndex-textOffset < len(textRows) {
+				row = textRows[rowIndex-textOffset]
 			}
 			out = append(out, crop(prefix+row, width))
 		}
@@ -16557,18 +18130,26 @@ func renderBulletWrapped(text string, width int) []string {
 	return out
 }
 
-func renderStyledBulletWrapped(spans []styledTextSpan, width int, blankPrefix string) []string {
+func renderStyledBulletItemWrapped(spans []styledTextSpan, width int, blankPrefix string) []string {
 	prefixWidth := displayWidth(blankPrefix)
 	lines := wrapStyledSpans(spans, max(1, width-prefixWidth), 4, 5)
-	markerRows := renderQuad("·")
+	markerRows := renderBulletMarkerRows()
 	var out []string
 	for chunkIndex, chunk := range lines {
-		for rowIndex, row := range renderQuadStyled(chunk) {
+		textRows := renderQuadStyled(chunk)
+		rowCount, textOffset := len(textRows), 0
+		if chunkIndex == 0 {
+			rowCount = max(rowCount, len(markerRows))
+			textOffset = max(0, (rowCount-len(textRows))/2)
+		}
+		for rowIndex := 0; rowIndex < rowCount; rowIndex++ {
 			prefix := blankPrefix
-			if chunkIndex == 0 && rowIndex == 0 {
-				prefix = padRunes(markerRows[0], prefixWidth)
-			} else if chunkIndex == 0 && rowIndex < len(markerRows) {
+			if chunkIndex == 0 && rowIndex < len(markerRows) {
 				prefix = padRunes(markerRows[rowIndex], prefixWidth)
+			}
+			row := ""
+			if rowIndex >= textOffset && rowIndex-textOffset < len(textRows) {
+				row = textRows[rowIndex-textOffset]
 			}
 			out = append(out, cropANSIVisible(prefix+row, width))
 		}
@@ -16577,15 +18158,9 @@ func renderStyledBulletWrapped(spans []styledTextSpan, width int, blankPrefix st
 }
 
 func renderQuad(text string) []string {
-	rows := make([]string, 4)
-	for _, r := range text {
-		glyph := c64QuadFont[r]
-		if glyph == nil {
-			glyph = c64QuadFont['?']
-		}
-		for i := 0; i < 4; i++ {
-			rows[i] += padRunes(glyph[i], 4)
-		}
+	rows := renderQuadRaw(text)
+	if hasEmoji(text) {
+		return rows
 	}
 	return trimBlank(rows)
 }
@@ -16594,6 +18169,8 @@ type styledTextSpan struct {
 	Text      string
 	Bold      bool
 	Highlight bool
+	Code      bool
+	Color     string
 }
 
 func toggleMarkdownStyle(text, marker string) string {
@@ -16611,18 +18188,50 @@ func hasMarkdownStyleWrapper(text, marker string) bool {
 }
 
 func parseMarkdownStyledSpans(text string) []styledTextSpan {
+	return parseMarkdownStyledSpansUntil(text, -1)
+}
+
+func parseMarkdownStyledSpansUntil(text string, visibleRuneLimit int) []styledTextSpan {
 	var spans []styledTextSpan
 	var b strings.Builder
 	bold := false
 	highlight := false
+	code := false
+	color := ""
+	sourceRunes := 0
 	flush := func() {
 		if b.Len() == 0 {
 			return
 		}
-		spans = appendStyledSpan(spans, styledTextSpan{Text: b.String(), Bold: bold, Highlight: highlight})
+		spans = appendStyledSpan(spans, styledTextSpan{Text: b.String(), Bold: bold, Highlight: highlight, Code: code, Color: color})
 		b.Reset()
 	}
 	for i := 0; i < len(text); {
+		if strings.HasPrefix(text[i:], "[color=") {
+			if end := strings.IndexByte(text[i:], ']'); end > len("[color=") && strings.Contains(text[i+end+1:], "[/color]") {
+				if hex, ok := normalizeHexColour(text[i+len("[color=") : i+end]); ok {
+					flush()
+					color = hex
+					i += end + 1
+					sourceRunes += len([]rune(text[i-end-1 : i]))
+					continue
+				}
+			}
+		}
+		if color != "" && strings.HasPrefix(text[i:], "[/color]") {
+			flush()
+			color = ""
+			i += len("[/color]")
+			sourceRunes += len([]rune("[/color]"))
+			continue
+		}
+		if text[i] == '`' && (code || strings.Contains(text[i+1:], "`")) {
+			flush()
+			code = !code
+			i++
+			sourceRunes++
+			continue
+		}
 		if text[i] == '*' {
 			run := markdownStarRun(text, i)
 			consume := 0
@@ -16649,6 +18258,7 @@ func parseMarkdownStyledSpans(text string) []styledTextSpan {
 					highlight = !highlight
 				}
 				i += consume
+				sourceRunes += consume
 				continue
 			}
 		}
@@ -16656,8 +18266,11 @@ func parseMarkdownStyledSpans(text string) []styledTextSpan {
 		if r == utf8.RuneError && size == 0 {
 			break
 		}
-		b.WriteRune(r)
+		if visibleRuneLimit < 0 || sourceRunes < visibleRuneLimit {
+			b.WriteRune(r)
+		}
 		i += size
+		sourceRunes++
 	}
 	flush()
 	return spans
@@ -16694,7 +18307,7 @@ func appendStyledSpan(spans []styledTextSpan, span styledTextSpan) []styledTextS
 	if span.Text == "" {
 		return spans
 	}
-	if len(spans) > 0 && spans[len(spans)-1].Bold == span.Bold && spans[len(spans)-1].Highlight == span.Highlight {
+	if len(spans) > 0 && spans[len(spans)-1].Bold == span.Bold && spans[len(spans)-1].Highlight == span.Highlight && spans[len(spans)-1].Code == span.Code && spans[len(spans)-1].Color == span.Color {
 		spans[len(spans)-1].Text += span.Text
 		return spans
 	}
@@ -16767,7 +18380,7 @@ func styledWords(spans []styledTextSpan) [][]styledTextSpan {
 	}
 	for _, span := range spans {
 		for _, r := range span.Text {
-			if unicode.IsSpace(r) {
+			if unicode.IsSpace(r) && !span.Code {
 				flush()
 				continue
 			}
@@ -16780,6 +18393,11 @@ func styledWords(spans []styledTextSpan) [][]styledTextSpan {
 
 func appendStyledRune(spans []styledTextSpan, r rune, style styledTextSpan) []styledTextSpan {
 	style.Text = string(r)
+	return appendStyledSpan(spans, style)
+}
+
+func appendStyledText(spans []styledTextSpan, text string, style styledTextSpan) []styledTextSpan {
+	style.Text = text
 	return appendStyledSpan(spans, style)
 }
 
@@ -16798,7 +18416,15 @@ func styledSpansWidth(spans []styledTextSpan, normalRuneWidth, boldRuneWidth int
 		if span.Bold {
 			runeWidth = boldRuneWidth
 		}
-		total += len([]rune(span.Text)) * runeWidth
+		for _, unit := range textVisualUnits(span.Text) {
+			total += unit.width * runeWidth
+			if unit.emoji {
+				total += 2
+			}
+		}
+		if span.Code {
+			total += 4
+		}
 	}
 	return total
 }
@@ -16811,12 +18437,16 @@ func splitStyledSpans(spans []styledTextSpan, width, normalRuneWidth, boldRuneWi
 		if span.Bold {
 			runeWidth = boldRuneWidth
 		}
-		for _, r := range span.Text {
-			if used+runeWidth <= width || styledSpansLen(left) == 0 {
-				left = appendStyledRune(left, r, span)
-				used += runeWidth
+		for _, unit := range textVisualUnits(span.Text) {
+			unitWidth := unit.width * runeWidth
+			if unit.emoji {
+				unitWidth += 2
+			}
+			if used+unitWidth <= width || styledSpansLen(left) == 0 {
+				left = appendStyledText(left, unit.text, span)
+				used += unitWidth
 			} else {
-				right = appendStyledRune(right, r, span)
+				right = appendStyledText(right, unit.text, span)
 			}
 		}
 	}
@@ -16830,6 +18460,12 @@ func renderQuadStyled(spans []styledTextSpan) []string {
 		if span.Bold {
 			chunk = renderQuadBoldRaw(span.Text)
 		}
+		if span.Code {
+			chunk = decorateInlineCodeRows(chunk)
+		}
+		if span.Color != "" {
+			chunk = colourStyledRows(chunk, span.Color)
+		}
 		for i := 0; i < 4; i++ {
 			if span.Highlight {
 				rows[i] += "\033[1m" + chunk[i] + "\033[22m"
@@ -16838,10 +18474,17 @@ func renderQuadStyled(spans []styledTextSpan) []string {
 			}
 		}
 	}
+	if styledSpansContainEmoji(spans) {
+		return rows
+	}
 	return trimBlank(rows)
 }
 
 func renderQuadBoldRaw(text string) []string {
+	return renderTextWithEmoji(text, 4, renderQuadBoldPlainRaw)
+}
+
+func renderQuadBoldPlainRaw(text string) []string {
 	const pixelWidth = 10
 	rows := make([]string, 4)
 	for _, r := range text {
@@ -16869,6 +18512,10 @@ func renderQuadBoldRaw(text string) []string {
 }
 
 func renderQuadRaw(text string) []string {
+	return renderTextWithEmoji(text, 4, renderQuadPlainRaw)
+}
+
+func renderQuadPlainRaw(text string) []string {
 	rows := make([]string, 4)
 	for _, r := range text {
 		glyph := c64QuadFont[r]
@@ -16889,10 +18536,13 @@ func renderTextImageElement(element Element, width int) []string {
 		scale = parsed
 	}
 	if element.Kind == "bullet" {
-		element.Text = "·  " + element.Text
+		return renderTextImageBulletElement(element, width, scale)
+	}
+	if strings.Contains(strings.ReplaceAll(element.Text, "\r\n", "\n"), "\n") {
+		return renderTextImageStyledSpans(element, width, parseMarkdownStyledSpans(element.Text))
 	}
 	var rows []string
-	if strings.Contains(element.Text, "*") {
+	if strings.ContainsAny(element.Text, "*`") || strings.Contains(element.Text, "[color=") {
 		rows = renderMarkdownBitmapTextImage(element, scale)
 	} else if hasTextImageStyle(element.Query) {
 		rows = renderStyledBitmapTextImage(element, scale)
@@ -16907,11 +18557,85 @@ func renderTextImageElement(element Element, width int) []string {
 			rows[i] = crop(row, width)
 		}
 	}
+	if hasEmoji(element.Text) {
+		return rows
+	}
 	return trimBlank(rows)
 }
 
+func renderTextImageStyledSpans(element Element, width int, spans []styledTextSpan) []string {
+	values, _ := url.ParseQuery(element.Query)
+	scale := 1.0
+	if parsed, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && parsed > 0 {
+		scale = parsed
+	}
+	logicalLines := splitStyledSpanLines(spans)
+	var out []string
+	lineHeight := max(1, len(renderBitmapTextImage("M", scale)))
+	for _, line := range logicalLines {
+		rows := renderMarkdownBitmapTextImageSpans(element, line, scale)
+		if len(rows) == 0 && len(logicalLines) > 1 {
+			rows = make([]string, lineHeight)
+		}
+		for _, row := range rows {
+			out = append(out, cropANSIVisible(row, width))
+		}
+	}
+	return out
+}
+
+func renderTextImageBulletElement(element Element, width int, scale float64) []string {
+	marker := element
+	marker.Kind = "text"
+	marker.Text = "·"
+	markerRows := renderTextImageElement(marker, width)
+	markerWidth := max(1, maxLineDisplayWidth(markerRows))
+	gap := max(1, int(math.Ceil(scale)))
+	prefixWidth := min(max(1, width-1), markerWidth+gap)
+	contentWidth := max(1, width-prefixWidth)
+
+	var out []string
+	renderLine := func(text string, showMarker bool) {
+		normalWidth := max(1, int(math.Ceil(4*scale)))
+		boldWidth := max(normalWidth, int(math.Ceil(5*scale)))
+		chunks := wrapStyledSpans(parseMarkdownStyledSpans(text), contentWidth, normalWidth, boldWidth)
+		for chunkIndex, chunk := range chunks {
+			textElement := element
+			textElement.Kind = "text"
+			textRows := renderTextImageStyledSpans(textElement, contentWidth, chunk)
+			rowCount, textOffset := len(textRows), 0
+			if showMarker && chunkIndex == 0 {
+				rowCount = max(rowCount, len(markerRows))
+				textOffset = max(0, (rowCount-len(textRows))/2)
+			}
+			for rowIndex := 0; rowIndex < rowCount; rowIndex++ {
+				prefix := strings.Repeat(" ", prefixWidth)
+				if showMarker && chunkIndex == 0 && rowIndex < len(markerRows) {
+					markerRow := markerRows[rowIndex]
+					prefix = markerRow + strings.Repeat(" ", max(0, prefixWidth-displayWidth(stripANSI(markerRow))))
+				}
+				row := ""
+				if rowIndex >= textOffset && rowIndex-textOffset < len(textRows) {
+					row = textRows[rowIndex-textOffset]
+				}
+				out = append(out, cropANSIVisible(prefix+row, width))
+			}
+		}
+	}
+	for _, item := range splitBulletListItems(element.Text, true) {
+		renderLine(item.Text, true)
+		for _, continuation := range item.Continuations {
+			renderLine(continuation, false)
+		}
+	}
+	return trimBlank(out)
+}
+
 func renderMarkdownBitmapTextImage(element Element, factor float64) []string {
-	spans := parseMarkdownStyledSpans(element.Text)
+	return renderMarkdownBitmapTextImageSpans(element, parseMarkdownStyledSpans(element.Text), factor)
+}
+
+func renderMarkdownBitmapTextImageSpans(element Element, spans []styledTextSpan, factor float64) []string {
 	chunks := make([][]string, 0, len(spans))
 	maxRows := 0
 	for _, span := range spans {
@@ -16919,17 +18643,24 @@ func renderMarkdownBitmapTextImage(element Element, factor float64) []string {
 		if span.Bold {
 			font, glyphWidth = c64BoldFont, 10
 		}
-		mask := scaledTextMaskWithFont(span.Text, factor, font, glyphWidth)
-		var rows []string
-		if hasTextImageStyle(element.Query) {
-			rows = renderStyledBitmapTextMask(element, mask)
-		} else {
-			rows = maskToQuadrantsPadded(mask)
+		height := bitmapTextRowHeight(factor)
+		rows := renderTextWithEmoji(span.Text, height, func(text string) []string {
+			mask := scaledTextMaskWithFont(text, factor, font, glyphWidth)
+			if hasTextImageStyle(element.Query) {
+				return renderStyledBitmapTextMask(element, mask)
+			}
+			return maskToQuadrantsPadded(mask)
+		})
+		if span.Code {
+			rows = decorateInlineCodeRows(rows)
 		}
 		if span.Highlight {
 			for index := range rows {
 				rows[index] = highlightVisibleText(rows[index])
 			}
+		}
+		if span.Color != "" {
+			rows = colourStyledRows(rows, span.Color)
 		}
 		chunks = append(chunks, rows)
 		maxRows = max(maxRows, len(rows))
@@ -16944,6 +18675,9 @@ func renderMarkdownBitmapTextImage(element Element, factor float64) []string {
 				rows[row] += strings.Repeat(" ", chunkWidth)
 			}
 		}
+	}
+	if hasEmoji(element.Text) {
+		return rows
 	}
 	return trimBlank(rows)
 }
@@ -16996,11 +18730,14 @@ func hasTextImageStyle(query string) bool {
 }
 
 func renderStyledBitmapTextImage(element Element, factor float64) []string {
-	mask := scaledC64TextMask(element.Text, factor)
-	if len(mask) == 0 || len(mask[0]) == 0 {
-		return nil
-	}
-	return renderStyledBitmapTextMask(element, mask)
+	height := bitmapTextRowHeight(factor)
+	return renderTextWithEmoji(element.Text, height, func(text string) []string {
+		mask := scaledC64TextMask(text, factor)
+		if len(mask) == 0 || len(mask[0]) == 0 {
+			return nil
+		}
+		return renderStyledBitmapTextMask(element, mask)
+	})
 }
 
 func renderStyledBitmapTextMask(element Element, mask [][]bool) []string {
@@ -17043,11 +18780,19 @@ func doubleMaskRows(mask [][]bool) [][]bool {
 }
 
 func renderBitmapTextImage(text string, factor float64) []string {
-	mask := scaledC64TextMask(text, factor)
-	if len(mask) == 0 {
-		return nil
-	}
-	return maskToQuadrants(mask)
+	height := bitmapTextRowHeight(factor)
+	return renderTextWithEmoji(text, height, func(chunk string) []string {
+		mask := scaledC64TextMask(chunk, factor)
+		if len(mask) == 0 {
+			return nil
+		}
+		return maskToQuadrants(mask)
+	})
+}
+
+func bitmapTextRowHeight(factor float64) int {
+	pixelHeight := max(1, int(math.Round(8*factor)))
+	return max(1, (pixelHeight+1)/2)
 }
 
 func scaledC64TextMask(text string, factor float64) [][]bool {
@@ -17360,7 +19105,7 @@ func imageRenderQuery(query string) string {
 		return query
 	}
 	for _, key := range []string{
-		"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "width", "height", "layer", "outline", "link", "slide",
+		"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "layer", "outline", "link", "slide",
 	} {
 		values.Del(key)
 	}
@@ -17551,7 +19296,16 @@ func asciiAnimationCachePath(path, query string, maxWidth, maxHeight int) string
 	}
 	sum := sha256.Sum256([]byte(fmt.Sprintf("v3|%s|%s|%s|%dx%d", path, stamp, query, maxWidth, maxHeight)))
 	name := hex.EncodeToString(sum[:]) + ".json"
-	return filepath.Join(".keynope", "cache", name)
+	return filepath.Join(imageCacheDirectory(), name)
+}
+
+func imageCacheDirectory() string {
+	if os.Getenv("APP_SANDBOX_CONTAINER_ID") != "" {
+		if root, err := os.UserCacheDir(); err == nil && root != "" {
+			return filepath.Join(root, "Keynope", "images")
+		}
+	}
+	return filepath.Join(".keynope", "cache")
 }
 
 func cacheSourcePath(path string) string {
@@ -17571,7 +19325,7 @@ func cleanUnusedImageCache(slides []Slide) {
 			}
 		}
 	}
-	entries, err := os.ReadDir(filepath.Join(".keynope", "cache"))
+	entries, err := os.ReadDir(imageCacheDirectory())
 	if err != nil {
 		return
 	}
@@ -17579,7 +19333,7 @@ func cleanUnusedImageCache(slides []Slide) {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
-		path := filepath.Join(".keynope", "cache", entry.Name())
+		path := filepath.Join(imageCacheDirectory(), entry.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
@@ -18127,24 +19881,29 @@ func analyzeImagePixels(pixels []rgba8) imageRenderStats {
 }
 
 func averageImageBlockColour(block [8]rgba8, decisions [8]bool) rgba8 {
-	var r, g, b, n int
+	var r, g, b, weight int
 	for i, p := range block {
 		if decisions[i] {
-			r += int(p.r)
-			g += int(p.g)
-			b += int(p.b)
-			n++
+			alpha := int(p.a)
+			r += int(p.r) * alpha
+			g += int(p.g) * alpha
+			b += int(p.b) * alpha
+			weight += alpha
 		}
 	}
-	if n == 0 {
+	if weight == 0 {
 		for _, p := range block {
-			r += int(p.r)
-			g += int(p.g)
-			b += int(p.b)
+			alpha := int(p.a)
+			r += int(p.r) * alpha
+			g += int(p.g) * alpha
+			b += int(p.b) * alpha
+			weight += alpha
 		}
-		n = len(block)
 	}
-	return rgba8{r: uint8(r / n), g: uint8(g / n), b: uint8(b / n), a: 255}
+	if weight == 0 {
+		return rgba8{}
+	}
+	return rgba8{r: uint8(r / weight), g: uint8(g / weight), b: uint8(b / weight), a: 255}
 }
 
 func adjustImagePixels(pixels []rgba8, opts imageASCIIOptions) {
@@ -18274,9 +20033,9 @@ func resizeLanczosRGBA(img image.Image, box image.Rectangle, targetW, targetH in
 			for i := 0; i < xmax; i++ {
 				p := src[y*srcW+xmin+i]
 				coef := k[i]
-				ssR += int(p.r) * coef
-				ssG += int(p.g) * coef
-				ssB += int(p.b) * coef
+				ssR += int(p.r) * int(p.a) / 255 * coef
+				ssG += int(p.g) * int(p.a) / 255 * coef
+				ssB += int(p.b) * int(p.a) / 255 * coef
 				ssA += int(p.a) * coef
 			}
 			tmp[y*targetW+x] = rgba8{
@@ -18304,12 +20063,16 @@ func resizeLanczosRGBA(img image.Image, box image.Rectangle, targetW, targetH in
 				ssB += int(p.b) * coef
 				ssA += int(p.a) * coef
 			}
-			out[y*targetW+x] = rgba8{
-				r: clipPillow8(ssR),
-				g: clipPillow8(ssG),
-				b: clipPillow8(ssB),
-				a: clipPillow8(ssA),
+			a := clipPillow8(ssA)
+			r, g, b := clipPillow8(ssR), clipPillow8(ssG), clipPillow8(ssB)
+			if a == 0 {
+				r, g, b = 0, 0, 0
+			} else {
+				r = uint8(min(255, int(r)*255/int(a)))
+				g = uint8(min(255, int(g)*255/int(a)))
+				b = uint8(min(255, int(b)*255/int(a)))
 			}
+			out[y*targetW+x] = rgba8{r: r, g: g, b: b, a: a}
 		}
 	}
 	return out
@@ -20373,18 +22136,18 @@ func wrapWords(text string, width int) []string {
 	var lines []string
 	cur := ""
 	for _, word := range words {
-		if len([]rune(word)) > width {
+		if textSpacedVisualUnitWidth(word) > width {
 			if cur != "" {
 				lines = append(lines, cur)
 				cur = ""
 			}
-			rs := []rune(word)
-			for len(rs) > width {
-				lines = append(lines, string(rs[:width]))
-				rs = rs[width:]
+			chunks := splitTextVisualUnits(word, width)
+			for len(chunks) > 1 {
+				lines = append(lines, chunks[0])
+				chunks = chunks[1:]
 			}
-			if len(rs) > 0 {
-				cur = string(rs)
+			if len(chunks) > 0 {
+				cur = chunks[0]
 			}
 			continue
 		}
@@ -20392,7 +22155,7 @@ func wrapWords(text string, width int) []string {
 		if cur != "" {
 			candidate = cur + " " + word
 		}
-		if len([]rune(candidate)) <= width {
+		if textSpacedVisualUnitWidth(candidate) <= width {
 			cur = candidate
 		} else {
 			lines = append(lines, cur)

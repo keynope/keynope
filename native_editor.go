@@ -47,8 +47,12 @@ func (s *nativeEditorSession) handleUpload(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "unsupported image filename", http.StatusBadRequest)
 		return
 	}
-	name := fmt.Sprintf("keynope-%s%s", newStableID("image"), ext)
+	name := filepath.Base(header.Filename)
+	stem := strings.TrimSuffix(name, filepath.Ext(name))
 	destination := filepath.Join(filepath.Dir(s.deckPath), name)
+	for suffix := 2; fileExists(destination); suffix++ {
+		destination = filepath.Join(filepath.Dir(s.deckPath), fmt.Sprintf("%s-%d%s", stem, suffix, ext))
+	}
 	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		http.Error(w, "could not create image", http.StatusInternalServerError)
@@ -61,19 +65,9 @@ func (s *nativeEditorSession) handleUpload(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "could not store image", http.StatusInternalServerError)
 		return
 	}
-	if err := s.apply(nativeEditorAction{Action: "add-element", Kind: "image"}); err != nil {
+	element := Element{Kind: "image", Path: destination}
+	if err := s.apply(nativeEditorAction{Action: "add-element", Kind: "image", ElementData: &element}); err != nil {
 		_ = os.Remove(destination)
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	state := s.state()
-	if state.Selected < 0 {
-		http.Error(w, "could not select image", http.StatusInternalServerError)
-		return
-	}
-	element := state.Slides[state.Current].Elements[state.Selected]
-	element.Path = destination
-	if err := s.apply(nativeEditorAction{Action: "update-element", Element: state.Selected, ElementData: &element}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -94,27 +88,96 @@ type nativeEditorState struct {
 }
 
 type nativeEditorAction struct {
-	Action       string    `json:"action"`
-	Slide        int       `json:"slide,omitempty"`
-	Page         int       `json:"page,omitempty"`
-	Value        int       `json:"value,omitempty"`
-	Cols         int       `json:"cols,omitempty"`
-	Rows         int       `json:"rows,omitempty"`
-	BoxWidth     int       `json:"boxWidth,omitempty"`
-	BoxHeight    int       `json:"boxHeight,omitempty"`
-	Element      int       `json:"element,omitempty"`
-	Kind         string    `json:"kind,omitempty"`
-	Level        int       `json:"level,omitempty"`
-	Name         string    `json:"name,omitempty"`
-	Notes        string    `json:"notes,omitempty"`
-	ElementData  *Element  `json:"elementData,omitempty"`
-	ElementsData []Element `json:"elementsData,omitempty"`
-	SlideData    *Slide    `json:"slideData,omitempty"`
+	Action         string    `json:"action"`
+	Slide          int       `json:"slide,omitempty"`
+	Page           int       `json:"page,omitempty"`
+	Value          int       `json:"value,omitempty"`
+	Cols           int       `json:"cols,omitempty"`
+	Rows           int       `json:"rows,omitempty"`
+	BoxWidth       int       `json:"boxWidth,omitempty"`
+	BoxHeight      int       `json:"boxHeight,omitempty"`
+	Element        int       `json:"element,omitempty"`
+	Cursor         int       `json:"cursor,omitempty"`
+	SelectionStart int       `json:"selectionStart,omitempty"`
+	SelectionEnd   int       `json:"selectionEnd,omitempty"`
+	Kind           string    `json:"kind,omitempty"`
+	Level          int       `json:"level,omitempty"`
+	Name           string    `json:"name,omitempty"`
+	Notes          string    `json:"notes,omitempty"`
+	ElementData    *Element  `json:"elementData,omitempty"`
+	ElementIndices []int     `json:"elementIndices,omitempty"`
+	ElementsData   []Element `json:"elementsData,omitempty"`
+	SlideData      *Slide    `json:"slideData,omitempty"`
+}
+
+type nativeEditorCaret struct {
+	Row   int `json:"row"`
+	Col   int `json:"col"`
+	Cells int `json:"cells"`
+}
+
+type nativeEditorInlinePreview struct {
+	Pages          []exportPage               `json:"pages"`
+	Caret          nativeEditorCaret          `json:"caret"`
+	SelectionStart *nativeEditorCaret         `json:"selectionStart,omitempty"`
+	SelectionEnd   *nativeEditorCaret         `json:"selectionEnd,omitempty"`
+	SelectionRows  []nativeEditorSelectionRow `json:"selectionRows,omitempty"`
+}
+
+type nativeEditorSelectionRow struct {
+	Row   int `json:"row"`
+	Col   int `json:"col"`
+	Cells int `json:"cells"`
 }
 
 type nativeEditorTextFit struct {
 	Element Element      `json:"element"`
 	Pages   []exportPage `json:"pages"`
+}
+
+type nativeEditorEmojiItem struct {
+	Emoji string       `json:"emoji"`
+	Name  string       `json:"name"`
+	Group string       `json:"group"`
+	Lines []exportLine `json:"lines"`
+}
+
+type nativeEditorEmojiCatalog struct {
+	Groups []string                `json:"groups"`
+	Items  []nativeEditorEmojiItem `json:"items"`
+}
+
+func (s *nativeEditorSession) handleEmojiCatalog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 72
+	}
+	size := textSizeHeading
+	if rawSize := r.URL.Query().Get("size"); rawSize != "" {
+		size, _ = strconv.Atoi(rawSize)
+	}
+	size = max(textSizeMin, min(textSizeMax, size))
+	_, scale := textImageSourceAndScale(size)
+	height := bitmapTextRowHeight(scale)
+	entries := emojiCatalogSearch(r.URL.Query().Get("q"), r.URL.Query().Get("group"), offset, limit)
+	items := make([]nativeEditorEmojiItem, 0, len(entries))
+	for index, entry := range entries {
+		rows := renderEmojiGlyph(entry.assetKey, height)
+		lines := make([]exportLine, 0, len(rows))
+		width := max(1, maxLineDisplayWidth(rows))
+		for row, text := range rows {
+			lines = append(lines, exportLine{Row: row, Col: 0, Element: index, Role: "emoji", Parts: exportANSITextParts(text, 0, "#f3efe0", width)})
+		}
+		items = append(items, nativeEditorEmojiItem{Emoji: entry.Emoji, Name: entry.Name, Group: entry.Group, Lines: lines})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "private, max-age=300")
+	_ = json.NewEncoder(w).Encode(nativeEditorEmojiCatalog{Groups: emojiCatalogGroups(), Items: items})
 }
 
 func editorShapeName(name string) string {
@@ -158,7 +221,7 @@ func (s *nativeEditorSession) handleFitText(w http.ResponseWriter, r *http.Reque
 		candidate := *target
 		applyTextSize(&candidate, size)
 		measure := candidate
-		measure.Query = removeImageQueryKeys(measure.Query, "top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "width", "height")
+		measure.Query = removeImageQueryKeys(measure.Query, "top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height")
 		measure.Query = setImageQueryInt(measure.Query, "top", 0)
 		measure.Query = setImageQueryInt(measure.Query, "left", 0)
 		pages := exportSlidePages(Slide{Elements: []Element{measure}}, 0, 1, cols, rows)
@@ -280,7 +343,7 @@ func normalizedTextKindPlacement(preview Slide, target Element, fallbackIndex, w
 	if top < pageTop || bottom > pageBottom {
 		blockHeight := max(1, bottom-top+1)
 		top = max(pageTop, min(top, pageBottom-blockHeight+1))
-		for _, key := range []string{"top", "bottom", "row_delta"} {
+		for _, key := range []string{"top", "bottom", "row_delta", "valign"} {
 			targetValues.Del(key)
 		}
 		targetValues.Set("top", strconv.Itoa(top))
@@ -352,6 +415,171 @@ func (s *nativeEditorSession) handleNormalizeTextKind(w http.ResponseWriter, r *
 	_ = json.NewEncoder(w).Encode(nativeEditorTextFit{Element: normalized, Pages: exportSlidePages(preview, slideIndex, slideCount, cols, rows)})
 }
 
+func convertedTextKindElement(source Element, kind string, level int) Element {
+	converted := source
+	values, _ := url.ParseQuery(source.Query)
+	wasHeading := source.Kind == "heading"
+	colour := values.Get("fg")
+	if wasHeading {
+		colour = values.Get("header")
+		if colour == "" {
+			colour = values.Get("fg")
+		}
+	} else if colour == "" {
+		colour = values.Get("header")
+	}
+	for _, key := range []string{"render", "source", "scale", "text-size"} {
+		values.Del(key)
+	}
+	if kind == "heading" {
+		values.Del("fg")
+		if colour != "" {
+			values.Set("header", colour)
+		}
+	} else {
+		values.Del("header")
+		if colour != "" {
+			values.Set("fg", colour)
+		}
+	}
+	converted.Kind = kind
+	converted.Level = 0
+	if kind == "heading" {
+		converted.Level = level
+	}
+	converted.Query = values.Encode()
+	return converted
+}
+
+func convertNativeEditorTextKind(slide *Slide, index int, kind string, level, width, height int) (int, error) {
+	if slide == nil || index < 0 || index >= len(slide.Elements) || !isEditableElement(slide.Elements[index]) {
+		return -1, errInvalidEditorAction
+	}
+	if kind != "heading" && kind != "text" && kind != "bullet" && kind != "code" {
+		return -1, errInvalidEditorAction
+	}
+	if kind == "heading" && level != 1 && level != 2 {
+		return -1, errInvalidEditorAction
+	}
+	width, height = max(1, width), max(1, height)
+	source := slide.Elements[index]
+	blockSource := source.Kind == "bullet" || source.Kind == "code"
+	split := blockSource && (kind == "heading" || kind == "text" || kind == source.Kind)
+	if !split {
+		converted := convertedTextKindElement(source, kind, level)
+		if converted.Kind == "bullet" {
+			converted.Text = normalizeBulletText(converted.Text)
+		}
+		slide.Elements[index] = converted
+		return index, nil
+	}
+
+	targetKind, targetLevel := kind, level
+	if kind == source.Kind {
+		targetKind, targetLevel = "text", 0
+	}
+	top, _, left, _, found := elementFullBox(*slide, index, width, height)
+	if !found {
+		top, left = 0, 0
+	}
+	rawLines := strings.Split(strings.ReplaceAll(source.Text, "\r\n", "\n"), "\n")
+	converted := make([]Element, 0, len(rawLines))
+	cursor := 0
+	for _, rawLine := range rawLines {
+		rowOffset, colOffset := renderedOffsetForCursor(source, width, cursor)
+		rowOffset -= max(0, editGlyphHeight(source)-1)
+		line := rawLine
+		if source.Kind == "bullet" {
+			line = strings.TrimSpace(line)
+		} else {
+			leading := len([]rune(line)) - len([]rune(strings.TrimLeft(line, " \t")))
+			colOffset += leading * editGlyphWidth(source)
+			line = strings.TrimLeft(line, " \t")
+		}
+		if line != "" {
+			element := convertedTextKindElement(source, targetKind, targetLevel)
+			element.Text = line
+			if len(converted) > 0 {
+				element.ID = newStableID(targetKind)
+				element.SlotID, element.MasterSlotID, element.PlaceholderRole = "", "", ""
+				element.Placeholder = false
+			}
+			query := removeImageQueryKeys(element.Query, "align", "left", "right", "left_pct", "right_pct", "top", "bottom", "row_delta", "valign")
+			query = setImageQueryInt(query, "top", max(0, top+rowOffset))
+			query = setPlacementHorizontalPct(query, max(0, left+colOffset), max(0, left+colOffset), width)
+			element.Query = query
+			converted = append(converted, element)
+		}
+		cursor += len([]rune(rawLine)) + 1
+	}
+	if len(converted) == 0 {
+		element := convertedTextKindElement(source, targetKind, targetLevel)
+		element.Text = ""
+		converted = append(converted, element)
+	}
+	elements := make([]Element, 0, len(slide.Elements)-1+len(converted))
+	elements = append(elements, slide.Elements[:index]...)
+	elements = append(elements, converted...)
+	elements = append(elements, slide.Elements[index+1:]...)
+	slide.Elements = elements
+	return index, nil
+}
+
+func convertNativeEditorTextSelection(slide *Slide, selection map[int]bool, kind string, level, width, height int) (int, map[int]bool, error) {
+	if slide == nil {
+		return -1, nil, errInvalidEditorAction
+	}
+	indices := make([]int, 0, len(selection))
+	for index := range selection {
+		if index >= 0 && index < len(slide.Elements) && isEditableElement(slide.Elements[index]) {
+			indices = append(indices, index)
+		}
+	}
+	if len(indices) == 0 {
+		return -1, nil, errInvalidEditorAction
+	}
+	for index := range slide.Elements {
+		if slide.Elements[index].ID == "" {
+			slide.Elements[index].ID = newStableID("slide-element")
+		}
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(indices)))
+	selectedIDs := map[string]bool{}
+	for index := range selection {
+		if index >= 0 && index < len(slide.Elements) {
+			selectedIDs[slide.Elements[index].ID] = true
+		}
+	}
+	for _, index := range indices {
+		before := len(slide.Elements)
+		blockSource := slide.Elements[index].Kind == "bullet" || slide.Elements[index].Kind == "code"
+		if _, err := convertNativeEditorTextKind(slide, index, kind, level, width, height); err != nil {
+			return -1, nil, err
+		}
+		count := 1 + len(slide.Elements) - before
+		if count == 1 && !blockSource {
+			slide.Elements[index] = normalizedTextKindPlacement(*slide, slide.Elements[index], index, max(1, width), max(1, height), 0)
+		}
+		for offset := 0; offset < count; offset++ {
+			selectedIDs[slide.Elements[index+offset].ID] = true
+		}
+	}
+	remapped := map[int]bool{}
+	selected := -1
+	for index, element := range slide.Elements {
+		if selectedIDs[element.ID] {
+			remapped[index] = true
+			if selected < 0 {
+				selected = index
+			}
+		}
+	}
+	if selected < 0 {
+		return -1, nil, errInvalidEditorAction
+	}
+	return selected, remapped, nil
+}
+
 func (s *nativeEditorSession) handlePreview(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -382,9 +610,10 @@ func (s *nativeEditorSession) handlePreview(w http.ResponseWriter, r *http.Reque
 		if cols <= 0 || rows <= 0 {
 			cols, rows = authoredRenderSize(authoredTerminalWidth, authoredTerminalHeight)
 		}
-		pages := exportSlidePages(masterViewPreview(deck.Masters, currentMaster), currentMaster, len(deck.Masters.Layouts)+1, cols, rows)
+		preview := masterViewPreview(deck.Masters, currentMaster)
+		pages := exportSlidePages(preview, currentMaster, len(deck.Masters.Layouts)+1, cols, rows)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(pages)
+		writeNativeEditorPreview(w, action, preview, pages, cols, rows)
 		return
 	}
 	if action.ElementData == nil || current < 0 || current >= len(deck.Slides) || action.Element < 0 || action.Element >= len(deck.Slides[current].Elements) {
@@ -397,9 +626,127 @@ func (s *nativeEditorSession) handlePreview(w http.ResponseWriter, r *http.Reque
 	if cols <= 0 || rows <= 0 {
 		cols, rows = authoredRenderSize(authoredTerminalWidth, authoredTerminalHeight)
 	}
-	pages := exportSlidePages(resolved[current], current, len(resolved), cols, rows)
+	preview := resolved[current]
+	pages := exportSlidePages(preview, current, len(resolved), cols, rows)
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(pages)
+	writeNativeEditorPreview(w, action, preview, pages, cols, rows)
+}
+
+func writeNativeEditorPreview(w http.ResponseWriter, action nativeEditorAction, preview Slide, pages []exportPage, cols, rows int) {
+	if action.Name != "inline-edit" || action.ElementData == nil {
+		_ = json.NewEncoder(w).Encode(pages)
+		return
+	}
+	elementIndex := action.Element
+	for index := range preview.Elements {
+		candidate := preview.Elements[index]
+		if action.ElementData.ID != "" && candidate.ID == action.ElementData.ID || action.ElementData.ID == "" && nativeEditorElementSignature(candidate) == nativeEditorElementSignature(*action.ElementData) {
+			elementIndex = index
+			break
+		}
+	}
+	caret := editorCaretForElement(preview, elementIndex, action.Cursor, cols, rows, action.Page)
+	response := nativeEditorInlinePreview{Pages: pages, Caret: caret}
+	if action.SelectionStart != action.SelectionEnd {
+		start := editorCaretForElement(preview, elementIndex, min(action.SelectionStart, action.SelectionEnd), cols, rows, action.Page)
+		end := editorCaretForElement(preview, elementIndex, max(action.SelectionStart, action.SelectionEnd), cols, rows, action.Page)
+		response.SelectionStart = &start
+		response.SelectionEnd = &end
+		response.SelectionRows = editorSelectionRows(preview, elementIndex, start, end, cols, rows, action.Page)
+	}
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func editorSelectionRows(slide Slide, elementIndex int, start, end nativeEditorCaret, cols, rows, page int) []nativeEditorSelectionRow {
+	if elementIndex < 0 || elementIndex >= len(slide.Elements) || end.Row < start.Row {
+		return nil
+	}
+	bounds := map[int][2]int{}
+	for _, line := range displayLines(slide, cols, rows, page) {
+		if line.Element != elementIndex || line.Role == "outline" {
+			continue
+		}
+		lineEnd := line.Col + displayWidth(stripANSI(line.Text))
+		if current, ok := bounds[line.Row]; ok {
+			bounds[line.Row] = [2]int{min(current[0], line.Col), max(current[1], lineEnd)}
+		} else {
+			bounds[line.Row] = [2]int{line.Col, lineEnd}
+		}
+	}
+	glyphHeight := max(1, editGlyphHeight(slide.Elements[elementIndex]))
+	startTop := max(0, start.Row-glyphHeight+1)
+	endTop := max(0, end.Row-glyphHeight+1)
+	selection := make([]nativeEditorSelectionRow, 0, end.Row-startTop+1)
+	for row := startTop; row <= end.Row; row++ {
+		rowBounds, ok := bounds[row]
+		if !ok {
+			continue
+		}
+		from, to := rowBounds[0], rowBounds[1]
+		if start.Row == end.Row {
+			from, to = start.Col, end.Col
+		} else {
+			if row <= start.Row {
+				from = start.Col
+			}
+			if row >= endTop {
+				to = end.Col
+			}
+		}
+		from = max(0, min(from, cols))
+		to = max(from, min(to, cols))
+		if to > from {
+			selection = append(selection, nativeEditorSelectionRow{Row: row, Col: from, Cells: to - from})
+		}
+	}
+	return selection
+}
+
+func nativeEditorElementSignature(element Element) string {
+	return strings.Join([]string{element.Kind, strconv.Itoa(element.Level), element.Text, element.Path, element.Query, element.ID, element.MasterSlotID}, "\x1f")
+}
+
+func editorCaretForElement(slide Slide, elementIndex, cursor, cols, rows, page int) nativeEditorCaret {
+	if elementIndex < 0 || elementIndex >= len(slide.Elements) {
+		return nativeEditorCaret{Cells: 1}
+	}
+	element := slide.Elements[elementIndex]
+	renderWidth := constrainedElementWidth(element, cols)
+	placement := parseImagePlacement(element.Query)
+	if placement.left != nil || placement.leftPct != nil {
+		anchor := placementLeftCol(placement, cols, 1)
+		renderWidth = min(renderWidth, max(1, cols-anchor))
+	}
+	localRow, localCol := renderedOffsetForCursor(element, renderWidth, cursor)
+	cells := editGlyphWidth(element)
+	if element.Kind == "bullet" {
+		localRow, localCol, cells = bulletCaretMetrics(element, renderWidth, cursor)
+	}
+	if emojiRunes, ok := emojiRuneLengthAtCursor(element.Text, cursor); ok {
+		endRow, endCol := renderedOffsetForCursor(element, renderWidth, cursor+emojiRunes)
+		if endRow == localRow && endCol > localCol {
+			cells = endCol - localCol
+		} else {
+			cells = cells*2 + 2
+		}
+	}
+	lines := displayLines(slide, cols, rows, page)
+	elementLines := make([]Line, 0)
+	for _, line := range lines {
+		if line.Element == elementIndex && line.Role != "outline" {
+			elementLines = append(elementLines, line)
+		}
+	}
+	if len(elementLines) == 0 {
+		return nativeEditorCaret{Cells: max(1, cells)}
+	}
+	localRow = max(0, min(localRow, len(elementLines)-1))
+	line := elementLines[localRow]
+	return nativeEditorCaret{
+		Row:   max(0, min(rows-1, line.Row)),
+		Col:   max(0, min(cols-1, line.Col+localCol)),
+		Cells: max(1, cells),
+	}
 }
 
 func (s *nativeEditorSession) handleWorkspace(w http.ResponseWriter, r *http.Request) {
@@ -584,6 +931,10 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			}
 		case "text":
 			element.Text = "Text"
+			if action.ElementData != nil && action.ElementData.Kind == "text" && action.ElementData.Text != "" {
+				element = *action.ElementData
+				element.ID = newStableID("text")
+			}
 		case "bullet":
 			element.Text = "List item"
 		case "code":
@@ -591,13 +942,21 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		case "shape":
 			element = newShapeElement(editorShapeName(action.Name))
 		case "image":
-			element.Path = "image.png"
+			if action.ElementData != nil && action.ElementData.Kind == "image" && action.ElementData.Path != "" {
+				element = *action.ElementData
+				element.ID = newStableID("image")
+			} else {
+				element.Path = "image.png"
+			}
 		default:
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		s.deck.Slides[s.current].Elements = append(s.deck.Slides[s.current].Elements, element)
-		s.selected, changed = len(s.deck.Slides[s.current].Elements)-1, true
+		s.selected = insertElementAfter(&s.deck.Slides[s.current], s.selected, element)
+		if element.Kind == "image" && action.ElementData != nil {
+			initializeInsertedImagePlacement(&s.deck.Slides[s.current], s.selected)
+		}
+		changed = true
 		s.selection = map[int]bool{s.selected: true}
 	case "duplicate-element":
 		if s.current < 0 || s.current >= slideCount || action.Element < 0 || action.Element >= len(s.deck.Slides[s.current].Elements) {
@@ -651,6 +1010,50 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		}
 		s.deck.Slides[s.current].Elements[action.Element] = updated
 		s.selected, changed = action.Element, true
+	case "update-elements":
+		if s.current < 0 || s.current >= slideCount || len(action.ElementIndices) == 0 || len(action.ElementIndices) != len(action.ElementsData) {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		for dataIndex, elementIndex := range action.ElementIndices {
+			if elementIndex < 0 || elementIndex >= len(s.deck.Slides[s.current].Elements) {
+				s.mu.Unlock()
+				return errInvalidEditorAction
+			}
+			updated := action.ElementsData[dataIndex]
+			if updated.ID == "" {
+				updated.ID = s.deck.Slides[s.current].Elements[elementIndex].ID
+			}
+			updated.Kind = strings.TrimSpace(updated.Kind)
+			if updated.Kind == "" {
+				s.mu.Unlock()
+				return errInvalidEditorAction
+			}
+			s.deck.Slides[s.current].Elements[elementIndex] = updated
+		}
+		changed = true
+	case "convert-text-kind":
+		if s.current < 0 || s.current >= slideCount {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		selected, err := convertNativeEditorTextKind(&s.deck.Slides[s.current], action.Element, action.Kind, action.Level, action.Cols, action.Rows)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.selected, s.selection, changed = selected, map[int]bool{selected: true}, true
+	case "convert-selected-text-kind":
+		if s.current < 0 || s.current >= slideCount {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		selected, selection, err := convertNativeEditorTextSelection(&s.deck.Slides[s.current], s.selection, action.Kind, action.Level, action.Cols, action.Rows)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.selected, s.selection, changed = selected, selection, true
 	case "delete-element":
 		if s.current < 0 || s.current >= slideCount || action.Element < 0 || action.Element >= len(s.deck.Slides[s.current].Elements) {
 			s.mu.Unlock()
@@ -682,29 +1085,18 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		elements := s.deck.Slides[s.current].Elements
-		target := action.Element
-		if action.Kind == "back" {
-			target = 0
+		layer := ""
+		if action.Kind == "back" || action.Kind == "backward" {
+			layer = "back"
+		} else if action.Kind == "front" || action.Kind == "forward" {
+			layer = "front"
 		}
-		if action.Kind == "backward" {
-			target = max(0, action.Element-1)
+		if layer == "" {
+			s.mu.Unlock()
+			return errInvalidEditorAction
 		}
-		if action.Kind == "forward" {
-			target = min(len(elements)-1, action.Element+1)
-		}
-		if action.Kind == "front" {
-			target = len(elements) - 1
-		}
-		if target != action.Element {
-			element := elements[action.Element]
-			elements = append(elements[:action.Element], elements[action.Element+1:]...)
-			elements = append(elements, Element{})
-			copy(elements[target+1:], elements[target:])
-			elements[target] = element
-			s.deck.Slides[s.current].Elements = elements
-			s.selected, changed = target, true
-		}
+		setElementLayer(&s.deck.Slides[s.current].Elements[action.Element], layer)
+		s.selected, changed = action.Element, true
 	case "update-slide":
 		if action.SlideData == nil || s.current < 0 || s.current >= slideCount {
 			s.mu.Unlock()
@@ -812,6 +1204,9 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.mu.Unlock()
 		return errInvalidEditorAction
 	}
+	if changed && s.current >= 0 && s.current < len(s.deck.Slides) {
+		remapNativeEditorSelection(canonicalizeSlideElementOrder(&s.deck.Slides[s.current], authoredTerminalWidth, authoredTerminalHeight), &s.selected, &s.selection)
+	}
 	if changed && action.Action != "undo" && action.Action != "redo" {
 		s.undo = append(s.undo, before)
 		if len(s.undo) > 100 {
@@ -824,7 +1219,10 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 	current := s.current
 	companion := s.companion
 	if changed {
-		_ = saveDeck(s.deckPath, s.deck)
+		if err := saveDeck(s.deckPath, s.deck); err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("save presentation: %w", err)
+		}
 	}
 	s.mu.Unlock()
 	if companion != nil {
@@ -848,9 +1246,28 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 	return nil
 }
 
+func remapNativeEditorSelection(oldToNew []int, selected *int, selection *map[int]bool) {
+	if len(oldToNew) == 0 {
+		return
+	}
+	if selected != nil && *selected >= 0 && *selected < len(oldToNew) {
+		*selected = oldToNew[*selected]
+	}
+	if selection == nil {
+		return
+	}
+	remapped := map[int]bool{}
+	for oldIndex := range *selection {
+		if oldIndex >= 0 && oldIndex < len(oldToNew) {
+			remapped[oldToNew[oldIndex]] = true
+		}
+	}
+	*selection = remapped
+}
+
 func nativeEditorRefreshScope(action string) string {
 	switch action {
-	case "add-element", "duplicate-element", "paste-elements", "update-element", "delete-element", "delete-selection", "move-element", "update-slide", "set-layout":
+	case "add-element", "toggle-page-number", "duplicate-element", "paste-elements", "update-element", "update-elements", "convert-text-kind", "convert-selected-text-kind", "delete-element", "delete-selection", "move-element", "update-slide", "set-layout":
 		return "slide"
 	case "update-slide-notes":
 		return ""
@@ -915,8 +1332,27 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			source = s.deck.Masters.Layouts[s.currentMaster-1]
 		}
 		clone := cloneMasterLayoutFresh(source)
-		s.deck.Masters.Layouts = append(s.deck.Masters.Layouts, clone)
-		s.currentMaster, s.selected, changed = len(s.deck.Masters.Layouts), -1, true
+		insert := s.currentMaster
+		s.deck.Masters.Layouts = append(s.deck.Masters.Layouts, MasterLayout{})
+		copy(s.deck.Masters.Layouts[insert+1:], s.deck.Masters.Layouts[insert:])
+		s.deck.Masters.Layouts[insert] = clone
+		s.currentMaster, s.selected, changed = insert+1, -1, true
+		s.selection = map[int]bool{}
+	case "reorder-master":
+		if action.Slide <= 0 || action.Slide >= masterCount || action.Value <= 0 || action.Value >= masterCount {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		if action.Slide != action.Value {
+			source, destination := action.Slide-1, action.Value-1
+			layout := s.deck.Masters.Layouts[source]
+			s.deck.Masters.Layouts = append(s.deck.Masters.Layouts[:source], s.deck.Masters.Layouts[source+1:]...)
+			s.deck.Masters.Layouts = append(s.deck.Masters.Layouts, MasterLayout{})
+			copy(s.deck.Masters.Layouts[destination+1:], s.deck.Masters.Layouts[destination:])
+			s.deck.Masters.Layouts[destination] = layout
+			s.currentMaster, changed = action.Value, true
+		}
+		s.selected = -1
 		s.selection = map[int]bool{}
 	case "delete-slide", "delete-layout":
 		if s.currentMaster <= 0 || s.currentMaster-1 >= len(s.deck.Masters.Layouts) {
@@ -932,6 +1368,23 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		}
 		s.currentMaster = min(s.currentMaster, len(s.deck.Masters.Layouts))
 		s.selected, s.selection, changed = -1, map[int]bool{}, true
+	case "toggle-page-number":
+		removePageNumberElements(target)
+		if s.currentMaster == 0 {
+			if target.PageNumber == pageNumberShow {
+				target.PageNumber = pageNumberHide
+			} else {
+				target.PageNumber = pageNumberShow
+			}
+		} else {
+			target.PageNumber = nextPageNumberOverride(target.PageNumber)
+		}
+		if target.PageNumber == pageNumberShow {
+			ensurePageNumberElement(target, "master")
+		}
+		s.selected = -1
+		s.selection = map[int]bool{}
+		changed = true
 	case "add-element":
 		element := Element{Kind: action.Kind, ID: newStableID(action.Kind)}
 		switch action.Kind {
@@ -942,6 +1395,10 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			}
 		case "text":
 			element.Text = "Text"
+			if action.ElementData != nil && action.ElementData.Kind == "text" && action.ElementData.Text != "" {
+				element = *action.ElementData
+				element.ID = newStableID("text")
+			}
 		case "bullet":
 			element.Text = "List item"
 		case "code":
@@ -949,13 +1406,21 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		case "shape":
 			element = newShapeElement(editorShapeName(action.Name))
 		case "image":
-			element.Path = "image.png"
+			if action.ElementData != nil && action.ElementData.Kind == "image" && action.ElementData.Path != "" {
+				element = *action.ElementData
+				element.ID = newStableID("image")
+			} else {
+				element.Path = "image.png"
+			}
 		default:
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		target.Elements = append(target.Elements, element)
-		s.selected, changed = len(target.Elements)-1, true
+		s.selected = insertElementAfter(target, s.selected, element)
+		if element.Kind == "image" && action.ElementData != nil {
+			initializeInsertedImagePlacement(target, s.selected)
+		}
+		changed = true
 		s.selection = map[int]bool{s.selected: true}
 	case "select-element":
 		if action.Element < -1 || action.Element >= len(target.Elements) {
@@ -987,6 +1452,41 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		}
 		target.Elements[action.Element] = updated
 		s.selected, changed = action.Element, true
+	case "update-elements":
+		if len(action.ElementIndices) == 0 || len(action.ElementIndices) != len(action.ElementsData) {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		for dataIndex, elementIndex := range action.ElementIndices {
+			if elementIndex < 0 || elementIndex >= len(target.Elements) {
+				s.mu.Unlock()
+				return errInvalidEditorAction
+			}
+			updated := action.ElementsData[dataIndex]
+			if updated.ID == "" {
+				updated.ID = target.Elements[elementIndex].ID
+			}
+			if strings.TrimSpace(updated.Kind) == "" {
+				s.mu.Unlock()
+				return errInvalidEditorAction
+			}
+			target.Elements[elementIndex] = updated
+		}
+		changed = true
+	case "convert-text-kind":
+		selected, err := convertNativeEditorTextKind(target, action.Element, action.Kind, action.Level, action.Cols, action.Rows)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.selected, s.selection, changed = selected, map[int]bool{selected: true}, true
+	case "convert-selected-text-kind":
+		selected, selection, err := convertNativeEditorTextSelection(target, s.selection, action.Kind, action.Level, action.Cols, action.Rows)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.selected, s.selection, changed = selected, selection, true
 	case "duplicate-element":
 		if action.Element < 0 || action.Element >= len(target.Elements) {
 			s.mu.Unlock()
@@ -1041,25 +1541,18 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		destination := action.Element
-		switch action.Kind {
-		case "back":
-			destination = 0
-		case "backward":
-			destination = max(0, action.Element-1)
-		case "forward":
-			destination = min(len(target.Elements)-1, action.Element+1)
-		case "front":
-			destination = len(target.Elements) - 1
+		layer := ""
+		if action.Kind == "back" || action.Kind == "backward" {
+			layer = "back"
+		} else if action.Kind == "front" || action.Kind == "forward" {
+			layer = "front"
 		}
-		if destination != action.Element {
-			element := target.Elements[action.Element]
-			target.Elements = append(target.Elements[:action.Element], target.Elements[action.Element+1:]...)
-			target.Elements = append(target.Elements, Element{})
-			copy(target.Elements[destination+1:], target.Elements[destination:])
-			target.Elements[destination] = element
-			s.selected, changed = destination, true
+		if layer == "" {
+			s.mu.Unlock()
+			return errInvalidEditorAction
 		}
+		setElementLayer(&target.Elements[action.Element], layer)
+		s.selected, changed = action.Element, true
 	case "update-slide":
 		if action.SlideData == nil {
 			s.mu.Unlock()
@@ -1111,6 +1604,10 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		s.mu.Unlock()
 		return errInvalidEditorAction
 	}
+	if changed {
+		target = masterSlideAt(&s.deck, s.currentMaster)
+		remapNativeEditorSelection(canonicalizeSlideElementOrder(target, authoredTerminalWidth, authoredTerminalHeight), &s.selected, &s.selection)
+	}
 	if changed && action.Action != "undo" && action.Action != "redo" {
 		s.undo = append(s.undo, before)
 		if len(s.undo) > 100 {
@@ -1123,7 +1620,10 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 	deck := cloneDeck(s.deck)
 	companion := s.companion
 	if changed {
-		_ = saveDeck(s.deckPath, s.deck)
+		if err := saveDeck(s.deckPath, s.deck); err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("save presentation: %w", err)
+		}
 	}
 	s.mu.Unlock()
 	if changed && companion != nil {

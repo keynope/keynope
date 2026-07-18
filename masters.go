@@ -253,7 +253,7 @@ func encodeMasterDeckMetadataForPath(masters MasterDeck, deckPath string) (strin
 
 func resolveMasterDeckImagePaths(masters *MasterDeck, base string) {
 	visitMasterImages(masters, func(path string) string {
-		if path == "" || filepath.IsAbs(path) {
+		if path == "" || filepath.IsAbs(path) || isExternalImageSource(path) {
 			return path
 		}
 		return filepath.Clean(filepath.Join(base, path))
@@ -874,7 +874,7 @@ func encodeQueryStable(values url.Values) string {
 
 func isMasterOverrideQueryKey(key string) bool {
 	switch key {
-	case "top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "link", "slide":
+	case "top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "link", "slide":
 		return true
 	default:
 		return false
