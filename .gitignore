@@ -19,3 +19,4 @@
 *.zip
 xcuserdata/
 DerivedData/
+terraform/

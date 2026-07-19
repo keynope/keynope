@@ -38,7 +38,7 @@ func playLayoutPicker(deck *Deck, currentLayout string, width, height int) (stri
 	renderer := &liveSlideRenderer{}
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			preview := masterLayoutPreview(deck.Masters, deck.Masters.Layouts[selected].ID)
 			renderer.draw(preview, width, height, 0, frame, func(lines []Line) {
 				drawLayoutPickerPanel(deck.Masters, selected, width, height)
@@ -147,7 +147,7 @@ func playPlaceholderRolePicker(slide Slide, page, width, height int, current str
 	renderer := &liveSlideRenderer{}
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			renderer.draw(slide, width, height, page, frame, func(lines []Line) {
 				drawSimpleChoicePanel("Placeholder role", titles, selected, width, height, "arrows select  enter confirm  esc cancel")
 			})
@@ -244,7 +244,7 @@ func playMasterView(deck *Deck, deckPath string, width, height int, undoState *E
 	renderer := &liveSlideRenderer{}
 	frame := 0
 	for {
-		width, height = terminalAuthoredSize()
+		width, height = terminalSize()
 		preview := masterViewPreview(deck.Masters, selected)
 		renderer.draw(preview, width, height, 0, frame, func(lines []Line) {
 			drawMasterNavigator(deck.Masters, selected, width, height)

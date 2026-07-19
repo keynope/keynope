@@ -40,7 +40,7 @@ func playVisualProperties(source Slide, allowInherit bool, resolve func(Slide) S
 	renderer := &liveSlideRenderer{}
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			preview := resolve(working)
 			renderer.draw(preview, width, height, 0, frame, func(lines []Line) {
 				drawVisualPropertiesPanel(working, allowInherit, selected, width, height)
@@ -94,7 +94,7 @@ func playVisualSaveConfirmation(preview Slide, width, height int) (bool, bool) {
 	renderer := &liveSlideRenderer{}
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			renderer.draw(preview, width, height, 0, frame, func(lines []Line) {
 				drawSimpleChoicePanel("Save visual changes? [Y/n]", []string{"Yes", "No"}, selected, width, height, "enter/y save  n discard  esc return")
 			})
@@ -218,7 +218,7 @@ func playVisualPropertyMode(source Slide, property visualProperty, allowInherit 
 	renderer := &liveSlideRenderer{}
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			renderer.draw(preview, width, height, 0, frame, func(lines []Line) {
 				drawSimpleChoicePanel(visualPropertyName(property), choices, selected, width, height, "arrows select  enter confirm  esc cancel")
 			})

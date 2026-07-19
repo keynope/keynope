@@ -4,6 +4,15 @@ Keynope is a terminal-native presentation tool. This repository is the source di
 
 ![Keynope main presentation screen](https://raw.githubusercontent.com/keynope/keynope/main/screenshots/kn1-keynope-main-screen.jpg)
 
+## Quick install
+
+```sh
+curl -fsSL https://keynope.sh/install | sh &&
+export PATH="$HOME/.keynope/bin:$PATH"
+```
+
+The installer supports Intel and Apple silicon Macs running macOS 14 or later. It downloads the signed and notarized release, verifies its SHA-256 checksum, and installs both Keynope and the presenter helper under `~/.keynope/bin`. It adds that directory to `PATH` in `~/.zshrc` or `~/.bash_profile`, based on your shell. No `sudo` is needed.
+
 ## Install with Homebrew
 
 ```sh

@@ -33,6 +33,21 @@ var masterDeckMetaRE = regexp.MustCompile(`(?m)^<!--\s*keynope-masters\s+version
 type Deck struct {
 	Slides  []Slide
 	Masters MasterDeck
+	Assets  map[string]DeckAsset
+}
+
+type DeckAsset struct {
+	MIME      string           `json:"mime"`
+	Width     int              `json:"width"`
+	Height    int              `json:"height"`
+	Data      []byte           `json:"data,omitempty"`
+	Frames    []DeckAssetFrame `json:"frames,omitempty"`
+	LoopCount int              `json:"loopCount,omitempty"`
+}
+
+type DeckAssetFrame struct {
+	Data    []byte `json:"data"`
+	DelayMS int64  `json:"delayMs"`
 }
 
 type MasterDeck struct {
@@ -253,7 +268,7 @@ func encodeMasterDeckMetadataForPath(masters MasterDeck, deckPath string) (strin
 
 func resolveMasterDeckImagePaths(masters *MasterDeck, base string) {
 	visitMasterImages(masters, func(path string) string {
-		if path == "" || filepath.IsAbs(path) {
+		if path == "" || filepath.IsAbs(path) || isExternalImageSource(path) {
 			return path
 		}
 		return filepath.Clean(filepath.Join(base, path))
@@ -331,7 +346,21 @@ func (masters MasterDeck) Clone() MasterDeck {
 }
 
 func cloneDeck(deck Deck) Deck {
-	return Deck{Slides: cloneSlides(deck.Slides), Masters: deck.Masters.Clone()}
+	out := Deck{Slides: cloneSlides(deck.Slides), Masters: deck.Masters.Clone()}
+	if len(deck.Assets) > 0 {
+		out.Assets = make(map[string]DeckAsset, len(deck.Assets))
+		for id, asset := range deck.Assets {
+			asset.Data = append([]byte(nil), asset.Data...)
+			if len(asset.Frames) > 0 {
+				asset.Frames = append([]DeckAssetFrame(nil), asset.Frames...)
+				for index := range asset.Frames {
+					asset.Frames[index].Data = append([]byte(nil), asset.Frames[index].Data...)
+				}
+			}
+			out.Assets[id] = asset
+		}
+	}
+	return out
 }
 
 func (deck Deck) ResolvedSlides() []Slide {
@@ -874,7 +903,7 @@ func encodeQueryStable(values url.Values) string {
 
 func isMasterOverrideQueryKey(key string) bool {
 	switch key {
-	case "top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "link", "slide":
+	case "top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "link", "slide":
 		return true
 	default:
 		return false

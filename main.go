@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -13,7 +15,7 @@ import (
 	"image/draw"
 	"image/gif"
 	_ "image/jpeg"
-	_ "image/png"
+	"image/png"
 	"io"
 	"math"
 	"math/rand"
@@ -34,6 +36,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	xdraw "golang.org/x/image/draw"
+
 	"golang.org/x/image/webp"
 )
 
@@ -42,6 +46,7 @@ type Element struct {
 	Level           int    `json:"level,omitempty"`
 	Text            string `json:"text,omitempty"`
 	Path            string `json:"path,omitempty"`
+	AssetID         string `json:"assetId,omitempty"`
 	Query           string `json:"query,omitempty"`
 	Placeholder     bool   `json:"placeholder,omitempty"`
 	ID              string `json:"id,omitempty"`
@@ -190,6 +195,9 @@ type exportPart struct {
 type appArgs struct {
 	ExportOnly bool
 	Classic    bool
+	AppMode    bool
+	Untitled   bool
+	Licenses   bool
 	DeckPath   string
 	Startup    bool
 }
@@ -211,6 +219,7 @@ type presenterTerminalFrame struct {
 	Cols    int          `json:"cols"`
 	Rows    int          `json:"rows"`
 	Lines   []exportLine `json:"lines"`
+	ANSI    string       `json:"ansi,omitempty"`
 }
 
 type presenterCompanion struct {
@@ -226,10 +235,44 @@ type presenterCompanion struct {
 	helper  bool
 	seq     int64
 	fullSeq int64
+	frames  map[chan presenterTerminalFrame]<-chan struct{}
+	token   string
 }
 
 var activePresenter *presenterCompanion
 var presenterModeActive bool
+var nativeAppModeActive bool
+var nativeInputMu sync.Mutex
+var nativeInputBuffer bytes.Buffer
+
+func inputRead(buffer []byte) (int, error) {
+	if nativeAppModeActive {
+		nativeInputMu.Lock()
+		defer nativeInputMu.Unlock()
+		return nativeInputBuffer.Read(buffer)
+	}
+	return os.Stdin.Read(buffer)
+}
+
+func startNativeInputReader(reader io.Reader) <-chan struct{} {
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		buffer := make([]byte, 64*1024)
+		for {
+			n, err := reader.Read(buffer)
+			if n > 0 {
+				nativeInputMu.Lock()
+				_, _ = nativeInputBuffer.Write(buffer[:n])
+				nativeInputMu.Unlock()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return closed
+}
 
 var queuedEditEvent *KeyEvent
 var queuedMainMouseEvent *KeyEvent
@@ -239,19 +282,33 @@ var activeUINotice uiNotice
 var uiNoticeMu sync.Mutex
 var exportImageAnimationPosition *time.Duration
 var exportImageAnimationMu sync.Mutex
+
+const (
+	defaultAuthoredTerminalWidth  = 245
+	defaultAuthoredTerminalHeight = 56
+)
+
 var authoredTerminalWidth int
 var authoredTerminalHeight int
+var parsedDeckElementOrderChanged bool
+var viewportWarning viewportFitWarning
+
+type viewportFitWarning struct {
+	Key       string
+	Text      string
+	ExpiresAt time.Time
+}
 
 func init() {
 	c64QuadFont['·'] = []string{"", " ▗▖", " ▝▘", ""}
 	c64FullFont['·'] = []string{
 		"        ",
-		"        ",
-		"  ████  ",
-		"  ████  ",
-		"  ████  ",
-		"  ████  ",
-		"        ",
+		"  ███   ",
+		" █████  ",
+		" █████  ",
+		" █████  ",
+		" █████  ",
+		"  ███   ",
 		"        ",
 	}
 }
@@ -259,9 +316,18 @@ func init() {
 func main() {
 	args, ok := parseArgs(os.Args[1:])
 	if !ok {
-		fmt.Fprintln(os.Stderr, "usage: keynope [--export] [--classic] [deck.md]")
+		fmt.Fprintln(os.Stderr, "usage: keynope [--export] [--classic] [--app] [deck.md] | keynope --licenses")
 		os.Exit(2)
 	}
+	if args.Licenses {
+		fmt.Print(bundledLicenseText())
+		return
+	}
+	if err := startSandboxAccessFromEnvironment(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer stopSandboxAccess()
 	if args.Startup {
 		path, err := startupDeckPath()
 		if errors.Is(err, errStartupCancelled) {
@@ -279,6 +345,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	if args.AppMode {
+		ensureDefaultAuthoredSize()
+	}
 	if len(deck.Slides) == 0 {
 		fmt.Fprintln(os.Stderr, "deck has no slides")
 		os.Exit(1)
@@ -286,16 +355,16 @@ func main() {
 	resolvedSlides := deck.ResolvedSlides()
 	cleanUnusedImageCache(resolvedSlides)
 	width, height := terminalSize()
+	presenterWidth, presenterHeight := authoredRenderSize(width, height)
 	presenterMode := !args.ExportOnly && !args.Classic
 	presenterModeActive = presenterMode
+	nativeAppModeActive = args.AppMode
+	var nativeInputClosed <-chan struct{}
+	if args.AppMode {
+		nativeInputClosed = startNativeInputReader(os.Stdin)
+	}
 	if args.ExportOnly {
-		if terminalWidth, terminalHeight, ok := terminalSizeOK(); ok {
-			width, height = terminalWidth, terminalHeight
-		} else {
-			width, height = inferExportSize(resolvedSlides)
-		}
-	} else if presenterMode {
-		width, height = authoredRenderSize(width, height)
+		width, height = exportRenderSize(resolvedSlides)
 	}
 	prewarmImageCache(resolvedSlides, width, height)
 	if args.ExportOnly {
@@ -307,8 +376,14 @@ func main() {
 	}
 
 	var presenter *presenterCompanion
+	var nativeEditor *nativeEditorSession
+	if args.AppMode {
+		nativeEditor = newNativeEditorSession(args.DeckPath, deck, args.Untitled, parsedDeckElementOrderChanged)
+		activeNativeEditor = nativeEditor
+		defer func() { activeNativeEditor = nil }()
+	}
 	if presenterMode {
-		presenter, err = startPresenterCompanion(args.DeckPath, resolvedSlides, width, height)
+		presenter, err = startPresenterCompanion(args.DeckPath, resolvedSlides, presenterWidth, presenterHeight, !args.AppMode)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "presenter companion unavailable: %v\n", err)
 		} else {
@@ -317,15 +392,32 @@ func main() {
 			defer presenter.Close()
 		}
 	}
+	if nativeEditor != nil {
+		if presenter == nil {
+			fmt.Fprintln(os.Stderr, "native editor server unavailable")
+			os.Exit(1)
+		}
+		nativeEditor.mu.Lock()
+		nativeEditor.companion = presenter
+		nativeEditor.mu.Unlock()
+		presenter.Update(0, 0, false, nil)
+		<-nativeInputClosed
+		return
+	}
 
-	restore, err := rawTerminal()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	restore := func() {}
+	if !args.AppMode {
+		restore, err = rawTerminal()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	}
 	defer restore()
-	termPrint("\033[?25l\033[?1049h\033[?1000h\033[?1002h\033[?1006h\033[?2004h")
-	defer termPrint("\033[0m\033[?2004l\033[?1006l\033[?1002l\033[?1000l\033[?25h\033[?1049l")
+	if !args.AppMode {
+		termPrint("\033[?25l\033[?1049h\033[?1000h\033[?1002h\033[?1006h\033[?2004h")
+		defer termPrint("\033[0m\033[?2004l\033[?1006l\033[?1002l\033[?1000l\033[?25h\033[?1049l")
+	}
 
 	current := 0
 	page := 0
@@ -339,9 +431,7 @@ func main() {
 			displaySlides = deck.ResolvedSlidesForEditing()
 		}
 		width, height := terminalSize()
-		if presenterMode {
-			width, height = authoredRenderSize(width, height)
-		}
+		updateViewportFitWarning(width, height)
 		if current < 0 {
 			current = 0
 		}
@@ -430,6 +520,12 @@ func parseArgs(raw []string) (appArgs, bool) {
 			args.ExportOnly = true
 		case "--classic":
 			args.Classic = true
+		case "--app":
+			args.AppMode = true
+		case "--untitled":
+			args.Untitled = true
+		case "--licenses":
+			args.Licenses = true
 		default:
 			if strings.HasPrefix(value, "-") || args.DeckPath != "" {
 				return appArgs{}, false
@@ -437,7 +533,10 @@ func parseArgs(raw []string) (appArgs, bool) {
 			args.DeckPath = value
 		}
 	}
-	if args.DeckPath == "" || (args.ExportOnly && args.Classic) {
+	if args.Licenses {
+		return args, args.DeckPath == "" && !args.ExportOnly && !args.Classic && !args.AppMode
+	}
+	if args.DeckPath == "" || (args.ExportOnly && args.Classic) || (args.AppMode && (args.ExportOnly || args.Classic)) || (args.Untitled && !args.AppMode) {
 		return appArgs{}, false
 	}
 	return args, true
@@ -729,7 +828,7 @@ func drawStartupBox(x, y, w, h int) {
 func readStartupKeyEvent() KeyEvent {
 	var buf [64]byte
 	for {
-		n, _ := os.Stdin.Read(buf[:])
+		n, _ := inputRead(buf[:])
 		if n == 0 {
 			time.Sleep(10 * time.Millisecond)
 			continue
@@ -1413,12 +1512,222 @@ func handleAction(action string, deck *Deck, current, page, width, height int, d
 	}
 }
 
+func decodeDeckAssets(text string) (map[string]DeckAsset, string, error) {
+	match := keynopeAssetsRE.FindStringSubmatch(text)
+	if match == nil {
+		return nil, text, nil
+	}
+	compressed, err := base64.StdEncoding.DecodeString(match[1])
+	if err != nil {
+		return nil, text, fmt.Errorf("decode embedded assets: %w", err)
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		return nil, text, fmt.Errorf("open embedded assets: %w", err)
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, 100<<20))
+	closeErr := reader.Close()
+	if err != nil || closeErr != nil {
+		return nil, text, fmt.Errorf("read embedded assets: %w", errors.Join(err, closeErr))
+	}
+	assets := map[string]DeckAsset{}
+	if err := json.Unmarshal(data, &assets); err != nil {
+		return nil, text, fmt.Errorf("parse embedded assets: %w", err)
+	}
+	return assets, keynopeAssetsRE.ReplaceAllString(text, ""), nil
+}
+
+func encodeDeckAssets(assets map[string]DeckAsset) (string, error) {
+	if len(assets) == 0 {
+		return "", nil
+	}
+	data, err := json.Marshal(assets)
+	if err != nil {
+		return "", err
+	}
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(data); err != nil {
+		return "", err
+	}
+	if err := writer.Close(); err != nil {
+		return "", err
+	}
+	return "<!-- keynope-assets version=1 base64:" + base64.StdEncoding.EncodeToString(compressed.Bytes()) + " -->", nil
+}
+
+func embeddedAssetPath(id string, asset DeckAsset) string {
+	if len(asset.Frames) > 0 {
+		return "keynope-asset:" + id + ".gif"
+	}
+	ext := ".png"
+	if asset.MIME == "image/gif" {
+		ext = ".gif"
+	}
+	return filepath.Join(imageCacheDirectory(), "embedded", id+ext)
+}
+
+func embeddedImageAsset(data []byte) (string, DeckAsset, string, error) {
+	if len(data) == 0 || len(data) > 50<<20 {
+		return "", DeckAsset{}, "", errors.New("image is empty or too large")
+	}
+	if animation, err := gif.DecodeAll(bytes.NewReader(data)); err == nil && len(animation.Image) > 1 {
+		width, height := animation.Config.Width, animation.Config.Height
+		targetW, targetH := boundedImageSize(width, height, 384)
+		decoded := decodeGIFAnimation(animation)
+		asset := DeckAsset{MIME: "image/gif", Width: targetW, Height: targetH, LoopCount: animation.LoopCount}
+		for _, frame := range decoded {
+			frameImage := frame.image
+			if targetW != width || targetH != height {
+				resized := image.NewNRGBA(image.Rect(0, 0, targetW, targetH))
+				xdraw.CatmullRom.Scale(resized, resized.Bounds(), frame.image, frame.image.Bounds(), draw.Src, nil)
+				frameImage = resized
+			}
+			var output bytes.Buffer
+			if err := png.Encode(&output, frameImage); err != nil {
+				return "", DeckAsset{}, "", err
+			}
+			delay := frame.delay
+			if delay <= 0 {
+				delay = 100 * time.Millisecond
+			}
+			asset.Frames = append(asset.Frames, DeckAssetFrame{Data: output.Bytes(), DelayMS: delay.Milliseconds()})
+		}
+		return makeAnimatedDeckAsset(asset)
+	}
+	decoded, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return "", DeckAsset{}, "", fmt.Errorf("decode image: %w", err)
+	}
+	width, height := decoded.Bounds().Dx(), decoded.Bounds().Dy()
+	targetW, targetH := boundedImageSize(width, height, 384)
+	outputImage := image.Image(decoded)
+	if targetW != width || targetH != height {
+		resized := image.NewNRGBA(image.Rect(0, 0, targetW, targetH))
+		xdraw.CatmullRom.Scale(resized, resized.Bounds(), decoded, decoded.Bounds(), draw.Src, nil)
+		outputImage = resized
+	}
+	var output bytes.Buffer
+	if err := png.Encode(&output, outputImage); err != nil {
+		return "", DeckAsset{}, "", err
+	}
+	return makeDeckAsset(output.Bytes(), "image/png", targetW, targetH)
+}
+
+func makeAnimatedDeckAsset(asset DeckAsset) (string, DeckAsset, string, error) {
+	if len(asset.Frames) < 2 {
+		return "", DeckAsset{}, "", errors.New("animated image has fewer than two frames")
+	}
+	hash := sha256.New()
+	fmt.Fprintf(hash, "%s:%dx%d:%d:", asset.MIME, asset.Width, asset.Height, asset.LoopCount)
+	for _, frame := range asset.Frames {
+		fmt.Fprintf(hash, "%d:", frame.DelayMS)
+		_, _ = hash.Write(frame.Data)
+	}
+	id := hex.EncodeToString(hash.Sum(nil))
+	registerEmbeddedAnimatedAsset(id, asset)
+	return id, asset, embeddedAssetPath(id, asset), nil
+}
+
+func boundedImageSize(width, height, maximum int) (int, int) {
+	if width <= 0 || height <= 0 || maximum <= 0 || (width <= maximum && height <= maximum) {
+		return width, height
+	}
+	scale := math.Min(float64(maximum)/float64(width), float64(maximum)/float64(height))
+	return max(1, int(math.Round(float64(width)*scale))), max(1, int(math.Round(float64(height)*scale)))
+}
+
+func makeDeckAsset(data []byte, mime string, width, height int) (string, DeckAsset, string, error) {
+	hash := sha256.Sum256(data)
+	id := hex.EncodeToString(hash[:])
+	asset := DeckAsset{MIME: mime, Width: width, Height: height, Data: append([]byte(nil), data...)}
+	path := embeddedAssetPath(id, asset)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", DeckAsset{}, "", err
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return "", DeckAsset{}, "", err
+	}
+	return id, asset, path, nil
+}
+
+func materializeDeckAssets(deck *Deck) {
+	if deck == nil || len(deck.Assets) == 0 {
+		return
+	}
+	for id, asset := range deck.Assets {
+		path := embeddedAssetPath(id, asset)
+		if len(asset.Frames) > 0 {
+			registerEmbeddedAnimatedAsset(id, asset)
+			visitDeckImages(deck, func(element *Element) {
+				if element.AssetID == id {
+					element.Path = path
+				}
+			})
+			continue
+		}
+		if _, err := os.Stat(path); err != nil {
+			if os.MkdirAll(filepath.Dir(path), 0o755) == nil {
+				_ = os.WriteFile(path, asset.Data, 0o644)
+			}
+		}
+		visitDeckImages(deck, func(element *Element) {
+			if element.AssetID == id {
+				element.Path = path
+			}
+		})
+	}
+}
+
+func visitDeckImages(deck *Deck, visit func(*Element)) {
+	if deck == nil || visit == nil {
+		return
+	}
+	visitSlide := func(slide *Slide) {
+		for index := range slide.Elements {
+			if slide.Elements[index].Kind == "image" {
+				visit(&slide.Elements[index])
+			}
+		}
+	}
+	for index := range deck.Slides {
+		visitSlide(&deck.Slides[index])
+	}
+	visitSlide(&deck.Masters.Base.Slide)
+	for index := range deck.Masters.Layouts {
+		visitSlide(&deck.Masters.Layouts[index].Slide)
+	}
+}
+
+func pruneUnusedDeckAssets(deck *Deck) {
+	if deck == nil || len(deck.Assets) == 0 {
+		return
+	}
+	used := map[string]bool{}
+	visitDeckImages(deck, func(element *Element) {
+		if element.AssetID != "" {
+			used[element.AssetID] = true
+		}
+	})
+	for id := range deck.Assets {
+		if !used[id] {
+			delete(deck.Assets, id)
+		}
+	}
+}
+
 func parseDeck(path string) (Deck, error) {
+	parsedDeckElementOrderChanged = false
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Deck{}, err
 	}
 	text := string(data)
+	assets, remainingAssets, err := decodeDeckAssets(text)
+	if err != nil {
+		return Deck{}, err
+	}
+	text = remainingAssets
 	authoredTerminalWidth = 0
 	authoredTerminalHeight = 0
 	if match := keynopeMetaRE.FindStringSubmatch(text); match != nil {
@@ -1433,28 +1742,62 @@ func parseDeck(path string) (Deck, error) {
 	text = remaining
 	base := filepath.Dir(path)
 	resolveMasterDeckImagePaths(&masters, base)
+	parsedDeckElementOrderChanged = elementOrderMappingChanged(canonicalizeSlideElementOrder(&masters.Base.Slide, authoredTerminalWidth, authoredTerminalHeight))
+	for index := range masters.Layouts {
+		parsedDeckElementOrderChanged = elementOrderMappingChanged(canonicalizeSlideElementOrder(&masters.Layouts[index].Slide, authoredTerminalWidth, authoredTerminalHeight)) || parsedDeckElementOrderChanged
+	}
 	var slides []Slide
 	for _, part := range splitSlides(text) {
 		slide := parseSlide(part, base)
 		if len(slide.Elements) > 0 || slide.EffectSet || slide.BackgroundSet || slide.FGSet || slide.BGSet || slide.HeaderFGSet || slide.Effect != "" || slide.Background != "" || slide.FG != "" || slide.BG != "" || slide.HeaderFG != "" || slide.Notes != "" || slide.LayoutID != "" || slide.PageNumber != "" {
+			parsedDeckElementOrderChanged = elementOrderMappingChanged(canonicalizeSlideElementOrder(&slide, authoredTerminalWidth, authoredTerminalHeight)) || parsedDeckElementOrderChanged
 			slides = append(slides, slide)
 		}
 	}
-	return Deck{Slides: slides, Masters: masters}, nil
+	deck := Deck{Slides: slides, Masters: masters, Assets: assets}
+	materializeDeckAssets(&deck)
+	return deck, nil
 }
 
-func saveDeck(path string, deck Deck) error {
+func ensureDefaultAuthoredSize() {
+	if authoredTerminalWidth <= 0 || authoredTerminalHeight <= 0 {
+		authoredTerminalWidth = defaultAuthoredTerminalWidth
+		authoredTerminalHeight = defaultAuthoredTerminalHeight
+	}
+}
+
+func serializeDeck(path string, deck Deck) ([]byte, error) {
 	if authoredTerminalWidth <= 0 || authoredTerminalHeight <= 0 {
 		authoredTerminalWidth, authoredTerminalHeight = terminalSize()
+	}
+	deck = cloneDeck(deck)
+	pruneUnusedDeckAssets(&deck)
+	visitDeckImages(&deck, func(element *Element) {
+		if element.AssetID != "" {
+			element.Path = "keynope-asset:" + element.AssetID
+		}
+	})
+	for index := range deck.Slides {
+		canonicalizeSlideElementOrder(&deck.Slides[index], authoredTerminalWidth, authoredTerminalHeight)
+	}
+	canonicalizeSlideElementOrder(&deck.Masters.Base.Slide, authoredTerminalWidth, authoredTerminalHeight)
+	for index := range deck.Masters.Layouts {
+		canonicalizeSlideElementOrder(&deck.Masters.Layouts[index].Slide, authoredTerminalWidth, authoredTerminalHeight)
 	}
 	var out strings.Builder
 	if authoredTerminalWidth > 0 && authoredTerminalHeight > 0 {
 		fmt.Fprintf(&out, "<!-- keynope width=%d height=%d -->\n\n", authoredTerminalWidth, authoredTerminalHeight)
 	}
+	if metadata, err := encodeDeckAssets(deck.Assets); err != nil {
+		return nil, err
+	} else if metadata != "" {
+		out.WriteString(metadata)
+		out.WriteString("\n\n")
+	}
 	if deckHasMasterData(deck.Masters) {
 		metadata, err := encodeMasterDeckMetadataForPath(deck.Masters, path)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		out.WriteString(metadata)
 		out.WriteString("\n\n")
@@ -1524,7 +1867,12 @@ func saveDeck(path string, deck Deck) error {
 					fmt.Fprintf(&out, "## %s\n", element.Text)
 				}
 			case "bullet":
-				fmt.Fprintf(&out, "- %s\n", element.Text)
+				for _, item := range splitBulletListItems(normalizeBulletText(element.Text), false) {
+					fmt.Fprintf(&out, "- %s\n", item.Text)
+					for _, continuation := range item.Continuations {
+						fmt.Fprintf(&out, "  %s\n", continuation)
+					}
+				}
 			case "code":
 				out.WriteString("```\n")
 				out.WriteString(element.Text)
@@ -1534,8 +1882,13 @@ func saveDeck(path string, deck Deck) error {
 				out.WriteString("```\n")
 			case "image":
 				src := element.Path
-				if rel, err := filepath.Rel(filepath.Dir(path), element.Path); err == nil && !strings.HasPrefix(rel, "..") {
-					src = rel
+				if element.AssetID != "" {
+					src = "keynope-asset:" + element.AssetID
+				}
+				if !isExternalImageSource(element.Path) {
+					if rel, err := filepath.Rel(filepath.Dir(path), element.Path); err == nil && !strings.HasPrefix(rel, "..") {
+						src = rel
+					}
 				}
 				if element.Query != "" {
 					src += "?" + element.Query
@@ -1553,7 +1906,15 @@ func saveDeck(path string, deck Deck) error {
 			}
 		}
 	}
-	if err := os.WriteFile(path, []byte(out.String()), 0o644); err != nil {
+	return []byte(out.String()), nil
+}
+
+func saveDeck(path string, deck Deck) error {
+	data, err := serializeDeck(path, deck)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return err
 	}
 	if activePresenter != nil {
@@ -1561,6 +1922,119 @@ func saveDeck(path string, deck Deck) error {
 		activePresenter.RefreshActiveSlideAsync(deck.ResolvedSlides(), width, height)
 	}
 	return nil
+}
+
+func canonicalizeSlideElementOrder(slide *Slide, width, height int) []int {
+	if slide == nil || len(slide.Elements) < 2 {
+		return nil
+	}
+	width, height = authoredRenderSize(width, height)
+	if width <= 0 {
+		width = defaultAuthoredTerminalWidth
+	}
+	if height <= 0 {
+		height = defaultAuthoredTerminalHeight
+	}
+	type position struct {
+		element Element
+		old     int
+		top     int
+		left    int
+		name    string
+	}
+	positions := make([]position, len(slide.Elements))
+	for index, element := range slide.Elements {
+		positions[index] = position{element: element, old: index, top: int(^uint(0) >> 1), left: int(^uint(0) >> 1), name: elementSortName(element)}
+	}
+	for _, line := range layout(*slide, width, height) {
+		if line.Element < 0 || line.Element >= len(positions) || line.Role == "outline" {
+			continue
+		}
+		item := &positions[line.Element]
+		if line.Row < item.top || line.Row == item.top && line.Col < item.left {
+			item.top, item.left = line.Row, line.Col
+		}
+	}
+	sort.SliceStable(positions, func(i, j int) bool {
+		if positions[i].top != positions[j].top {
+			return positions[i].top < positions[j].top
+		}
+		if positions[i].left != positions[j].left {
+			return positions[i].left < positions[j].left
+		}
+		if positions[i].name != positions[j].name {
+			return positions[i].name < positions[j].name
+		}
+		return false
+	})
+	oldToNew := make([]int, len(positions))
+	for newIndex, item := range positions {
+		slide.Elements[newIndex] = item.element
+		oldToNew[item.old] = newIndex
+	}
+	return oldToNew
+}
+
+func elementSortName(element Element) string {
+	name := strings.TrimSpace(element.Text)
+	if name == "" {
+		name = strings.TrimSpace(element.Path)
+	}
+	if name == "" && element.Kind == "shape" {
+		name = shapeName(element)
+	}
+	return strings.ToLower(name)
+}
+
+func elementOrderMappingChanged(oldToNew []int) bool {
+	for oldIndex, newIndex := range oldToNew {
+		if oldIndex != newIndex {
+			return true
+		}
+	}
+	return false
+}
+
+type bulletListItem struct {
+	Text          string
+	Continuations []string
+}
+
+func splitBulletListItems(text string, keepEmpty bool) []bulletListItem {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	items := make([]bulletListItem, 0, len(lines))
+	for _, line := range lines {
+		continuation := len(line) > 0 && (line[0] == ' ' || line[0] == '\t')
+		value := strings.TrimSpace(line)
+		if continuation && len(items) > 0 {
+			if value != "" || keepEmpty {
+				items[len(items)-1].Continuations = append(items[len(items)-1].Continuations, value)
+			}
+			continue
+		}
+		if value == "" && !keepEmpty {
+			continue
+		}
+		items = append(items, bulletListItem{Text: value})
+	}
+	return items
+}
+
+func normalizeBulletText(text string) string {
+	items := splitBulletListItems(text, false)
+	lines := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Text == "" {
+			continue
+		}
+		lines = append(lines, item.Text)
+		for _, continuation := range item.Continuations {
+			if continuation != "" {
+				lines = append(lines, "  "+continuation)
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func setUINotice(message string) {
@@ -1665,11 +2139,22 @@ func exportHTMLDocument(deckPath string, slides []Slide, cols, rows int, preserv
 }
 
 func exportSlidePages(slide Slide, slideIndex, slideCount, cols, rows int) []exportPage {
+	return exportSlidePagesMode(slide, slideIndex, slideCount, cols, rows, false)
+}
+
+func exportSlidePagesFrozen(slide Slide, slideIndex, slideCount, cols, rows int) []exportPage {
+	return exportSlidePagesMode(slide, slideIndex, slideCount, cols, rows, true)
+}
+
+func exportSlidePagesMode(slide Slide, slideIndex, slideCount, cols, rows int, frozenImages bool) []exportPage {
 	pageCount := slidePageCount(slide, cols, rows)
 	pages := make([]exportPage, 0, pageCount)
 	for page := 0; page < pageCount; page++ {
 		lines := displayLines(slide, cols, rows, page)
-		contentFrames := exportContentFrames(slide, page, cols, rows, slideCount)
+		var contentFrames []exportContentFrame
+		if !frozenImages {
+			contentFrames = exportContentFrames(slide, page, cols, rows, slideCount)
+		}
 		pages = append(pages, exportPage{
 			Slide:                slideIndex,
 			Page:                 page,
@@ -1690,12 +2175,19 @@ func exportSlidePages(slide Slide, slideIndex, slideCount, cols, rows int) []exp
 	return pages
 }
 
-func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*presenterCompanion, error) {
+func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int, launchHelper bool) (*presenterCompanion, error) {
 	html, err := exportHTMLDocument(deckPath, slides, cols, rows, readPreservedExportHead(strings.TrimSuffix(deckPath, filepath.Ext(deckPath))+".html"), true)
 	if err != nil {
 		return nil, err
 	}
-	companion := &presenterCompanion{html: html, pages: map[int][]exportPage{}}
+	tokenBytes := make([]byte, 32)
+	if _, err := cryptorand.Read(tokenBytes); err != nil {
+		return nil, fmt.Errorf("create companion token: %w", err)
+	}
+	companion := &presenterCompanion{
+		html: html, pages: map[int][]exportPage{}, frames: map[chan presenterTerminalFrame]<-chan struct{}{},
+		token: hex.EncodeToString(tokenBytes),
+	}
 	for slideIndex, slide := range slides {
 		companion.pages[slideIndex] = exportSlidePages(slide, slideIndex, len(slides), cols, rows)
 	}
@@ -1746,6 +2238,7 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(frame)
 	})
+	mux.HandleFunc("/terminal-events", companion.handleTerminalEvents)
 	mux.HandleFunc("/key", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1768,17 +2261,37 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 		}
 	})
 	mux.HandleFunc("/presenter-status", companion.handlePresenterStatus)
+	if activeNativeEditor != nil {
+		mux.HandleFunc("/api/editor/state", activeNativeEditor.handleState)
+		mux.HandleFunc("/api/editor/action", activeNativeEditor.handleAction)
+		mux.HandleFunc("/api/editor/preview", activeNativeEditor.handlePreview)
+		mux.HandleFunc("/api/editor/fit-text", activeNativeEditor.handleFitText)
+		mux.HandleFunc("/api/editor/normalize-text-kind", activeNativeEditor.handleNormalizeTextKind)
+		mux.HandleFunc("/api/editor/emojis", activeNativeEditor.handleEmojiCatalog)
+		mux.HandleFunc("/api/editor/workspace", activeNativeEditor.handleWorkspace)
+		mux.HandleFunc("/api/editor/upload", activeNativeEditor.handleUpload)
+		mux.HandleFunc("/api/editor/document", activeNativeEditor.handleDocument)
+		mux.HandleFunc("/api/editor/export-document", activeNativeEditor.handleExportDocument)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
-	companion.url = "http://" + listener.Addr().String() + "/"
-	companion.server = &http.Server{Handler: mux}
+	companion.url = "http://" + listener.Addr().String() + "/?token=" + url.QueryEscape(companion.token)
+	companion.server = &http.Server{Handler: companion.authorized(mux)}
 	go func() {
 		if err := companion.server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			fmt.Fprintf(os.Stderr, "presenter companion stopped: %v\n", err)
 		}
 	}()
+	if !launchHelper {
+		companion.mu.Lock()
+		companion.helper = true
+		companion.target = "none"
+		companion.mu.Unlock()
+		fmt.Println("KEYNOPE_URL=" + companion.url)
+		return companion, nil
+	}
 	cmd, err := launchPresenterSurface(companion.url)
 	if err != nil {
 		_ = companion.server.Close()
@@ -1799,6 +2312,37 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 	return companion, nil
 }
 
+func (p *presenterCompanion) authorized(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorized := false
+		if token := r.URL.Query().Get("token"); token != "" && token == p.token {
+			authorized = true
+			http.SetCookie(w, &http.Cookie{
+				Name: "keynope_session", Value: p.token, Path: "/", HttpOnly: true,
+				SameSite: http.SameSiteStrictMode,
+			})
+		}
+		if cookie, err := r.Cookie("keynope_session"); err == nil && cookie.Value == p.token {
+			authorized = true
+		}
+		if !authorized {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			origin := r.Header.Get("Origin")
+			if origin != "" {
+				parsed, err := url.Parse(origin)
+				if err != nil || parsed.Host != r.Host {
+					http.Error(w, "invalid origin", http.StatusForbidden)
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (p *presenterCompanion) Status() (available bool, target string, live bool) {
 	if p == nil {
 		return false, "none", false
@@ -1808,13 +2352,23 @@ func (p *presenterCompanion) Status() (available bool, target string, live bool)
 	return p.helper, p.target, p.state.Presenting
 }
 
+func (p *presenterCompanion) Position() (slide, page int) {
+	if p == nil {
+		return 0, 0
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.state.Slide, p.state.Page
+}
+
 func (p *presenterCompanion) handlePresenterStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	var status struct {
-		Mode string `json:"mode"`
+		Mode   string `json:"mode"`
+		Paused bool   `json:"paused"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&status); err != nil {
 		http.Error(w, "invalid presenter status", http.StatusBadRequest)
@@ -1827,8 +2381,60 @@ func (p *presenterCompanion) handlePresenterStatus(w http.ResponseWriter, r *htt
 	p.mu.Lock()
 	p.target = status.Mode
 	p.helper = true
+	if nativeAppModeActive {
+		presenting := status.Mode != "none" && !status.Paused
+		if p.state.Presenting != presenting {
+			p.state.Presenting = presenting
+			p.state.Version++
+		}
+	}
 	p.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (p *presenterCompanion) handleTerminalEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unavailable", http.StatusInternalServerError)
+		return
+	}
+	updates := make(chan presenterTerminalFrame, 64)
+	p.mu.Lock()
+	p.frames[updates] = r.Context().Done()
+	initial := p.frame
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		delete(p.frames, updates)
+		p.mu.Unlock()
+	}()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Connection", "keep-alive")
+	writeFrame := func(frame presenterTerminalFrame) bool {
+		payload, err := json.Marshal(frame)
+		if err != nil {
+			return false
+		}
+		if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", frame.Version, payload); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	if !writeFrame(initial) {
+		return
+	}
+	for {
+		select {
+		case frame := <-updates:
+			if !writeFrame(frame) {
+				return
+			}
+		case <-r.Context().Done():
+			return
+		}
+	}
 }
 
 func (p *presenterCompanion) Refresh(deckPath string, slides []Slide, cols, rows int) error {
@@ -1930,7 +2536,7 @@ func (p *presenterCompanion) Update(slide, page int, presenting bool, deckState 
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	timerMode, timerInput, timerEndMS := "", "", int64(0)
+	timerMode, timerInput, timerEndMS := p.state.TimerMode, p.state.TimerInput, p.state.TimerEndMS
 	if deckState != nil {
 		timerMode = deckState.TimerMode
 		timerInput = deckState.TimerInput
@@ -1950,17 +2556,52 @@ func (p *presenterCompanion) Update(slide, page int, presenting bool, deckState 
 	p.state.Version++
 }
 
+func (p *presenterCompanion) StartTimer(duration time.Duration) {
+	if p == nil || duration <= 0 {
+		return
+	}
+	p.mu.Lock()
+	p.state.TimerMode = "running"
+	p.state.TimerInput = ""
+	p.state.TimerEndMS = time.Now().Add(duration).UnixMilli()
+	p.state.Version++
+	p.mu.Unlock()
+}
+
+func (p *presenterCompanion) StopTimer() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.state.TimerMode = ""
+	p.state.TimerInput = ""
+	p.state.TimerEndMS = 0
+	p.state.Version++
+	p.mu.Unlock()
+}
+
 func (p *presenterCompanion) PublishTerminalFrame(frame string, cols, rows int) {
 	if p == nil || cols <= 0 || rows <= 0 || frame == "" {
 		return
 	}
-	lines := ansiFrameToExportLines(frame, cols, rows, ansiCSSColour("37"))
 	p.mu.Lock()
 	p.frame.Version++
 	p.frame.Cols = cols
 	p.frame.Rows = rows
-	p.frame.Lines = lines
+	p.frame.Lines = nil
+	p.frame.ANSI = frame
+	update := p.frame
+	subscribers := make(map[chan presenterTerminalFrame]<-chan struct{}, len(p.frames))
+	for subscriber, done := range p.frames {
+		subscribers[subscriber] = done
+	}
 	p.mu.Unlock()
+	for subscriber, done := range subscribers {
+		select {
+		case subscriber <- update:
+		case <-done:
+		}
+	}
 }
 
 func (p *presenterCompanion) Close() {
@@ -2547,8 +3188,17 @@ func exportLines(lines []Line, slide Slide, width, height, slideCount int) []exp
 		if line.Row < 0 || line.Row >= height || line.Col >= width || line.Text == "" {
 			continue
 		}
-		if line.Role == "shape" && line.Element >= 0 && line.Element < len(slide.Elements) && elementTransparent(slide.Elements[line.Element]) {
+		transparentMask := transparencyMaskLine(line, slide)
+		if transparentMask && line.Role == "shape" {
 			continue
+		}
+		exportRole := line.Role
+		if transparentMask {
+			if line.Role == "image" {
+				exportRole = "transparent-image"
+			} else if line.Role != "code" {
+				exportRole = "transparent-text"
+			}
 		}
 		color := ansiCSSColour(slideFG(slide))
 		if line.Role == "heading" {
@@ -2564,6 +3214,11 @@ func exportLines(lines []Line, slide Slide, width, height, slideCount int) []exp
 				background = ansiCSSColour(bg)
 			}
 			parts = exportSolidTextParts(line.Text, line.Col, color, background, width)
+			if transparentMask {
+				for index := range parts {
+					parts[index].Background = ""
+				}
+			}
 		} else {
 			parts = exportANSITextParts(line.Text, line.Col, color, width)
 		}
@@ -2581,7 +3236,7 @@ func exportLines(lines []Line, slide Slide, width, height, slideCount int) []exp
 				link = target.Value
 			}
 		}
-		out = append(out, exportLine{Row: line.Row, Col: line.Col, Element: line.Element, Role: line.Role, Link: link, Parts: parts})
+		out = append(out, exportLine{Row: line.Row, Col: line.Col, Element: line.Element, Role: exportRole, Link: link, Parts: parts})
 	}
 	return out
 }
@@ -2590,6 +3245,28 @@ func transparentShapeExportLines(lines []Line, width, height int, slide Slide) [
 	cells := transparentShapeCells(lines, width, height, slide)
 	if len(cells) == 0 {
 		return nil
+	}
+	// Keep the rendered block glyph for transparent text and images.  A colour
+	// cell alone describes a full rectangle and loses the quarter-block mask at
+	// curved/antialiased edges (particularly visible on colour emoji).
+	glyphs := map[int]map[int]rune{}
+	for _, line := range lines {
+		if !transparencyMaskLine(line, slide) || line.Role == "shape" || line.Role == "code" {
+			continue
+		}
+		parts := exportANSITextParts(line.Text, line.Col, ansiCSSColour(slideFG(slide)), width)
+		for _, part := range parts {
+			for offset, r := range []rune(part.Text) {
+				col := part.Col + offset
+				if r == ' ' || col < 0 || col >= width || cells[line.Row] == nil || cells[line.Row][col] == "" {
+					continue
+				}
+				if glyphs[line.Row] == nil {
+					glyphs[line.Row] = map[int]rune{}
+				}
+				glyphs[line.Row][col] = r
+			}
+		}
 	}
 	rows := make([]int, 0, len(cells))
 	for row := range cells {
@@ -2611,9 +3288,17 @@ func transparentShapeExportLines(lines []Line, width, height int, slide Slide) [
 		prev := cols[0]
 		bg := cells[row][start]
 		flush := func(end int, runBG string) {
+			var text strings.Builder
+			for col := start; col <= end; col++ {
+				if glyph := glyphs[row][col]; glyph != 0 {
+					text.WriteRune(glyph)
+				} else {
+					text.WriteByte(' ')
+				}
+			}
 			parts = append(parts, exportPart{
 				Col:        start,
-				Text:       strings.Repeat(" ", end-start+1),
+				Text:       text.String(),
 				Color:      ansiCSSColour(slideFG(slide)),
 				Background: ansiCSSColour(runBG),
 			})
@@ -2667,7 +3352,7 @@ func applyExportTransparencyToParts(parts []exportPart, row int, transparency ma
 			cellColor := color
 			if cellBG != "" {
 				bg = ansiCSSColour(cellBG)
-				cellColor = darkenCSSForTransparency(color)
+				cellColor = blendCSSForTransparency(color, bg)
 			}
 			appendPart(col, string(r), cellColor, bg)
 		}
@@ -2675,8 +3360,8 @@ func applyExportTransparencyToParts(parts []exportPart, row int, transparency ma
 	return out
 }
 
-func darkenCSSForTransparency(css string) string {
-	return ansiCSSColour(darkenFGForTransparency(cssColourToFG(css, "37")))
+func blendCSSForTransparency(css, overlay string) string {
+	return ansiCSSColour(blendFGForTransparency(cssColourToFG(css, "37"), cssColourToFG(overlay, "30")))
 }
 
 func exportSolidTextParts(text string, baseCol int, color, background string, width int) []exportPart {
@@ -2698,6 +3383,7 @@ func exportANSITextParts(text string, baseCol int, defaultColor string, width in
 	var parts []exportPart
 	normalColor := defaultColor
 	color := defaultColor
+	background := ""
 	bold := false
 	col := baseCol
 	var run []rune
@@ -2706,7 +3392,7 @@ func exportANSITextParts(text string, baseCol int, defaultColor string, width in
 		if len(run) == 0 {
 			return
 		}
-		parts = append(parts, exportPart{Col: runCol, Text: string(run), Color: color})
+		parts = append(parts, exportPart{Col: runCol, Text: string(run), Color: color, Background: background})
 		run = nil
 	}
 	for i := 0; i < len(text) && col < width; {
@@ -2718,6 +3404,13 @@ func exportANSITextParts(text string, baseCol int, defaultColor string, width in
 			}
 			if end < len(text) {
 				sequence := text[i : end+1]
+				if ansiParamsContain(sequence, "0") || ansiParamsContain(sequence, "39") {
+					normalColor = defaultColor
+					color = defaultColor
+				}
+				if ansiParamsContain(sequence, "0") || ansiParamsContain(sequence, "49") {
+					background = ""
+				}
 				if ansiSequenceBoldOff(sequence) {
 					bold = false
 					color = normalColor
@@ -2733,6 +3426,9 @@ func exportANSITextParts(text string, baseCol int, defaultColor string, width in
 						color = lightenCSSColour(normalColor)
 					}
 				}
+				if css := ansiSequenceCSSBackground(sequence); css != "" {
+					background = css
+				}
 				i = end + 1
 				continue
 			}
@@ -2741,7 +3437,7 @@ func exportANSITextParts(text string, baseCol int, defaultColor string, width in
 		if r == utf8.RuneError && size == 0 {
 			break
 		}
-		if r == ' ' {
+		if r == ' ' && background == "" {
 			flush()
 			col++
 			i += size
@@ -2756,6 +3452,13 @@ func exportANSITextParts(text string, baseCol int, defaultColor string, width in
 	}
 	flush()
 	return parts
+}
+
+func ansiSequenceCSSBackground(sequence string) string {
+	if background := ansiSequenceBG(sequence); background != "" {
+		return ansiCSSColour(background)
+	}
+	return ""
 }
 
 func ansiSequenceBoldOn(sequence string) bool {
@@ -2830,7 +3533,11 @@ func readPreservedExportHead(path string) preservedExportHead {
 	if err != nil {
 		return preservedExportHead{}
 	}
-	head, ok := extractHTMLHead(string(data))
+	return preservedExportHeadFromHTML(string(data))
+}
+
+func preservedExportHeadFromHTML(existing string) preservedExportHead {
+	head, ok := extractHTMLHead(existing)
 	if !ok {
 		return preservedExportHead{}
 	}
@@ -2913,6 +3620,185 @@ body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Libe
 #stage { position: fixed; inset: 0; background: #000; overflow: hidden; }
 .terminal-layer { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: calc(var(--cols) * 1ch); height: calc(var(--rows) * 1em); font-size: var(--cell); line-height: 1; color: #f3efe0; }
 #presenter-canvas { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 2; display: none; image-rendering: auto; }
+#link-layer { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 4; display: none; pointer-events: none; }
+.canvas-link-hit { position: absolute; pointer-events: auto; cursor: pointer; background: transparent; }
+.keynope-app-toolbar { position: fixed; left: 210px; right: 0; bottom: 0; height: 52px; z-index: 20; display: none; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 12px; box-sizing: border-box; color: #e8e8e8; background: rgba(18, 18, 18, 0.96); border-top: 1px solid #444; font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-app-toolbar button { color: inherit; background: #292929; border: 1px solid #555; border-radius: 6px; padding: 6px 12px; font: inherit; cursor: default; }
+.keynope-app-toolbar button:active { background: #444; }
+.keynope-app-toolbar button.active { border-color: #70b7ff; background: #244766; }
+.keynope-app-toolbar button:disabled { opacity: .38; filter: grayscale(1); }
+.keynope-app-toolbar button.keynope-app-icon-button { display: inline-grid; width: 42px; min-width: 42px; height: 36px; place-items: center; padding: 3px; }
+.keynope-app-icon-button svg { display: block; width: 34px; height: 26px; }
+.keynope-app-toolbar button.keynope-app-tag-button { position: relative; overflow: visible; }
+.keynope-app-tag-button svg { transform: translateY(-2px); }
+.keynope-app-button-tag { position: absolute; left: 50%; bottom: 1px; transform: translateX(-50%); padding: 0 3px; border: 1px solid #59616a; border-radius: 3px; color: #d8dee5; background: #151719; font: 700 6px/8px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .05em; box-shadow: 0 1px 2px rgba(0,0,0,.7); }
+.keynope-app-toolbar button[hidden] { display: none; }
+.keynope-presentation-control { position: relative; }
+.keynope-presentation-control > svg { opacity: .62; }
+.keynope-presentation-glyph { position: absolute; left: 50%; top: 50%; display: grid; width: 21px; height: 21px; place-items: center; transform: translate(-50%, -50%); border-radius: 50%; background: rgba(16,18,22,.84); font: 700 18px/21px "Apple Symbols", "SF Pro", -apple-system, sans-serif; font-variant-emoji: text; text-shadow: 0 1px 2px #000; }
+.keynope-presentation-glyph.pause { color: #ffd166; }
+.keynope-presentation-glyph.resume { color: #72df94; }
+.keynope-presentation-glyph.stop { color: #ff6868; }
+.keynope-timer-input { width: 72px; box-sizing: border-box; color: #eee; background: #111; border: 1px solid #70b7ff; border-radius: 5px; padding: 6px; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.keynope-editor-status { margin-right: auto; color: #aeb4bb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+html[data-keynope-app="true"] .keynope-app-toolbar { display: flex; }
+html[data-keynope-app="true"] #stage { left: 210px; right: 0; }
+html[data-keynope-app="true"] button { transition: border-color 90ms ease, background-color 90ms ease, box-shadow 90ms ease, transform 70ms ease; }
+html[data-keynope-app="true"] button:hover:not(:disabled),
+html[data-keynope-app="true"] button:focus-visible:not(:disabled) { border-color: #70b7ff !important; box-shadow: 0 0 0 1px rgba(112,183,255,.28); outline: none; }
+html[data-keynope-app="true"] button:active:not(:disabled) { background-color: #202c36; box-shadow: inset 0 2px 5px rgba(0,0,0,.72), 0 0 0 1px rgba(112,183,255,.22); transform: translateY(1px); }
+html[data-keynope-app="true"] button:active:not(:disabled) > svg,
+html[data-keynope-app="true"] button:active:not(:disabled) > span { translate: 0 1px; }
+.keynope-editor-topbar { position: fixed; left: 210px; right: 0; top: 0; height: 52px; z-index: 21; display: none; align-items: center; gap: 6px; padding: 0 10px; box-sizing: border-box; overflow-x: auto; background: #181818; border-bottom: 1px solid #444; font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-editor-topbar > .keynope-save-button { display: grid; flex: 0 0 auto; width: 36px; min-width: 36px; height: 32px; place-items: center; padding: 4px; }
+.keynope-editor-topbar > .keynope-save-button svg { display: block; width: 22px; height: 22px; }
+.keynope-topbar-mode { display: flex; min-width: max-content; flex: 1 0 max-content; align-items: center; gap: 6px; }
+.keynope-topbar-mode[hidden] { display: none; }
+.keynope-topbar-mode button { padding: 4px 7px; }
+.keynope-topbar-label { max-width: 180px; overflow: hidden; color: #bfc7cf; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.keynope-topbar-link { width: 180px; min-width: 120px !important; box-sizing: border-box; color: #eee; background: #111; border: 1px solid #555; border-radius: 5px; padding: 5px 7px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.keynope-visual-panel { position: fixed; z-index: 90; display: grid; grid-template-columns: max-content 150px; gap: 7px 9px; width: 270px; padding: 10px; box-sizing: border-box; border: 1px solid #5b6168; border-radius: 8px; color: #ddd; background: #202124; box-shadow: 0 12px 32px rgba(0,0,0,.55); }
+.keynope-visual-panel[hidden] { display: none; }
+.keynope-visual-panel label { align-self: center; color: #aeb4bb; font-size: 11px; }
+.keynope-visual-panel select, .keynope-visual-panel input { width: 100%; min-width: 0; box-sizing: border-box; }
+.keynope-emoji-picker { position: fixed; z-index: 110; width: 430px; max-height: 430px; padding: 10px; box-sizing: border-box; border: 1px solid #67717b; border-radius: 9px; color: #ddd; background: #202124; box-shadow: 0 16px 42px rgba(0,0,0,.65); font: 12px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-emoji-picker[hidden] { display: none; }
+.keynope-emoji-picker-controls { display: grid; grid-template-columns: 1fr 150px; gap: 7px; margin-bottom: 8px; }
+.keynope-emoji-picker input, .keynope-emoji-picker select { min-width: 0; box-sizing: border-box; padding: 6px 7px; color: #eee; background: #111; border: 1px solid #555; border-radius: 5px; font: inherit; }
+.keynope-emoji-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; max-height: 330px; overflow: auto; padding: 2px; }
+.keynope-emoji-grid button { display: grid; min-width: 0; height: 96px; place-items: center; padding: 4px; color: #eee; background: #292929; border: 1px solid #555; border-radius: 6px; }
+.keynope-emoji-preview { position: relative; width: 86px; height: 86px; overflow: hidden; background: #101010; }
+.keynope-emoji-preview .line { position: absolute; left: calc(var(--x) * 5.25px); top: calc(var(--y) * 10.5px); color: #f3efe0; font: 7px/7px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre; transform: scaleY(1.5); transform-origin: top left; }
+.keynope-emoji-more { display: block; width: 100%; margin-top: 8px; padding: 6px; color: #ddd; background: #292929; border: 1px solid #555; border-radius: 5px; }
+.keynope-emoji-tool { display: inline-grid; width: 30px; min-width: 30px; height: 30px; place-items: center; padding: 3px !important; }
+.keynope-emoji-tool svg { display: block; width: 20px; height: 20px; }
+.keynope-link-dialog { position: fixed; z-index: 100; width: 360px; padding: 12px; box-sizing: border-box; border: 1px solid #67717b; border-radius: 8px; color: #ddd; background: #202124; box-shadow: 0 14px 38px rgba(0,0,0,.6); font: 12px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-link-dialog h3 { margin: 0 0 10px; color: #fff; font-size: 13px; }
+.keynope-discard-dialog p { margin: 0 0 12px; color: #bfc7cf; line-height: 1.45; }
+.keynope-modal-blocker { position: fixed; inset: 0; z-index: 119; display: grid; place-items: start center; padding-top: max(60px, 18vh); box-sizing: border-box; background: rgba(0,0,0,.42); }
+.keynope-modal-blocker .keynope-discard-dialog { position: relative; z-index: 120; }
+.keynope-link-dialog label { display: block; margin: 0 0 8px; color: #aeb4bb; }
+.keynope-link-dialog [hidden] { display: none; }
+.keynope-link-dialog input, .keynope-link-dialog select { display: block; width: 100%; margin-top: 4px; box-sizing: border-box; padding: 6px; color: #eee; background: #111; border: 1px solid #555; border-radius: 4px; }
+.keynope-link-dialog .keynope-editor-actions { margin: 10px 0 0; }
+.keynope-input-blocker { position: fixed; inset: 0 0 52px 0; z-index: 55; background: transparent; }
+html[data-keynope-timer-active="true"] .keynope-editor-topbar,
+html[data-keynope-timer-active="true"] .keynope-editor-slides,
+html[data-keynope-timer-active="true"] .keynope-speaker-notes { opacity: .42; filter: grayscale(1); }
+html[data-keynope-timer-active="true"] .keynope-canvas-overlay { display: none; }
+.keynope-editor-topbar button, .keynope-editor-panel button { color: #eee; background: #292929; border: 1px solid #555; border-radius: 5px; padding: 5px 9px; font: inherit; }
+.keynope-editor-topbar button.keynope-icon-button { width: 30px; min-width: 30px; height: 30px; padding: 3px; font-size: 18px; line-height: 1.1; }
+.keynope-editor-topbar button.keynope-rotate-button { position: relative; display: inline-grid; place-items: center; padding: 0; overflow: visible; line-height: 1; }
+.keynope-rotate-icon { font-size: 27px; line-height: 27px; transform: translateY(-1px); }
+.keynope-rotate-label { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); padding: 0 2px; border: 1px solid #59616a; border-radius: 3px; color: #d8dee5; background: #151719; font: 700 5px/8px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .03em; box-shadow: 0 1px 2px rgba(0,0,0,.7); }
+.keynope-editor-topbar button.keynope-monochrome-icon { display: inline-grid; place-items: center; padding: 0; color: #fff; font-family: "Apple Symbols", "SF Pro", -apple-system, sans-serif; font-variant-emoji: text; line-height: 1; }
+.keynope-monochrome-glyph { display: block; line-height: 1; transform: translateY(1px); }
+.keynope-editor-topbar button.keynope-export-button { position: relative; overflow: visible; }
+.keynope-export-button svg { width: 22px; height: 22px; transform: translateY(-2px); }
+.keynope-export-label { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); padding: 0 3px; border: 1px solid #59616a; border-radius: 3px; color: #d8dee5; background: #151719; font: 700 6px/8px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .05em; box-shadow: 0 1px 2px rgba(0,0,0,.7); }
+.keynope-monochrome-icon svg { display: block; width: 20px; height: 20px; fill: currentColor; }
+.keynope-editor-topbar button.keynope-history-button { position: relative; display: inline-grid; width: 30px; min-width: 30px; height: 30px; place-items: center; padding: 0; overflow: visible; line-height: 1; }
+.keynope-history-icon { font-size: 27px; line-height: 27px; transform: translateY(-1px); }
+.keynope-history-label { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); padding: 0 3px; border: 1px solid #59616a; border-radius: 3px; color: #d8dee5; background: #151719; font: 700 6px/8px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .06em; box-shadow: 0 1px 2px rgba(0,0,0,.7); }
+.keynope-toolbar-delete { margin-left: auto; }
+.keynope-delete-button { display: inline-grid; place-items: center; padding: 3px !important; }
+.keynope-delete-button svg { display: block; width: 21px; height: 21px; }
+.keynope-clone-button { display: inline-grid; place-items: center; padding: 3px !important; }
+.keynope-clone-button svg { display: block; width: 21px; height: 21px; }
+.keynope-see-through-button { display: inline-grid; width: 30px; min-width: 30px; height: 30px; margin-left: auto; place-items: center; padding: 3px !important; }
+.keynope-see-through-button + .keynope-toolbar-delete { margin-left: 0; }
+.keynope-see-through-button svg { display: block; width: 20px; height: 20px; }
+.keynope-adjust-image-button, .keynope-image-outline-button { display: inline-grid; width: 30px; min-width: 30px; height: 30px; place-items: center; padding: 3px !important; color: #fff; }
+.keynope-adjust-image-button svg { display: block; width: 22px; height: 22px; }
+.keynope-image-outline-button svg { display: block; width: 21px; height: 21px; }
+.keynope-layer-button { display: inline-grid; width: 30px; min-width: 30px; height: 30px; place-items: center; padding: 3px !important; }
+.keynope-layer-button svg { display: block; width: 22px; height: 19px; }
+.keynope-layer-button svg rect, .keynope-layer-button svg path, .keynope-layer-button svg g { fill: none !important; }
+.keynope-link-button { display: inline-grid; place-items: center; padding: 3px !important; }
+.keynope-link-button svg { display: block; width: 21px; height: 21px; }
+.keynope-text-kind-code { display: inline-grid; width: 30px; min-width: 30px; height: 30px; place-items: center; padding: 3px !important; }
+.keynope-text-kind-code svg { display: block; width: 20px; height: 20px; }
+.keynope-vertical-align-button { display: inline-grid; width: 30px; min-width: 30px; height: 30px; place-items: center; padding: 3px !important; }
+.keynope-vertical-align-button svg { display: block; width: 21px; height: 21px; }
+.keynope-editor-topbar button.keynope-svg-button { display: inline-grid; width: 30px; height: 30px; place-items: center; padding: 4px; }
+.keynope-editor-topbar button[hidden] { display: none; }
+.keynope-svg-button svg { display: block; width: 19px; height: 19px; }
+.keynope-editor-topbar button.keynope-page-number-button { position: relative; }
+.keynope-page-number-button svg { transform: translateY(-2px); }
+.keynope-page-number-tag { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); padding: 0 3px; border: 1px solid #59616a; border-radius: 3px; color: #d8dee5; background: #151719; font: 700 6px/8px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .05em; box-shadow: 0 1px 2px rgba(0,0,0,.7); }
+.keynope-editor-topbar button.keynope-page-number-button.inherited { border-color: #62d98b; box-shadow: 0 0 0 1px rgba(98,217,139,.3); }
+html[data-keynope-app="true"] .keynope-editor-topbar button.keynope-page-number-button.off:hover:not(:disabled) { border-color: #555 !important; box-shadow: 0 0 0 1px rgba(120,120,120,.25); }
+html[data-keynope-app="true"] .keynope-editor-topbar button.keynope-page-number-button.inherited:hover:not(:disabled) { border-color: #62d98b !important; box-shadow: 0 0 0 1px rgba(98,217,139,.3); }
+html[data-keynope-app="true"] .keynope-editor-topbar button.keynope-page-number-button.active:hover:not(:disabled) { border-color: #70b7ff !important; box-shadow: 0 0 0 1px rgba(112,183,255,.28); }
+.keynope-canvas-shape-kind svg { display: block; width: 18px; height: 18px; }
+.keynope-add-shape-menu { position: fixed; z-index: 95; display: grid; grid-template-columns: repeat(2, 54px); gap: 7px; padding: 8px; color: #eee; background: #202124; border: 1px solid #5b6168; border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.55); }
+.keynope-add-shape-menu[hidden] { display: none; }
+.keynope-add-shape-menu button { display: grid; width: 54px; height: 48px; place-items: center; padding: 5px; color: inherit; background: #292929; border: 1px solid #555; border-radius: 6px; }
+.keynope-add-shape-menu button:hover { border-color: #70b7ff; background: #244766; }
+.keynope-add-shape-menu svg { width: 36px; height: 32px; }
+.keynope-editor-topbar button.active { border-color: #70b7ff; background: #244766; }
+.keynope-editor-topbar select { min-width: 132px; color: #eee; background: #292929; border: 1px solid #555; border-radius: 5px; padding: 5px 9px; font: inherit; }
+.keynope-editor-separator { width: 1px; height: 24px; flex: 0 0 auto; margin: 0 3px; background: #444; }
+.keynope-editor-panel { position: fixed; top: 0; bottom: 0; z-index: 21; display: none; overflow: auto; box-sizing: border-box; color: #ddd; background: #1d1d1d; font: 12px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-editor-slides { left: 0; width: 210px; border-right: 1px solid #444; padding: 8px; }
+.keynope-slides-header { display: flex; min-height: 30px; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 8px; }
+.keynope-slides-header h3 { margin: 0; }
+.keynope-slides-header button { min-width: 30px; padding: 3px 7px; font-size: 18px; line-height: 1.1; }
+.keynope-slides-header button.active { border-color: #70b7ff; background: #244766; box-shadow: 0 0 0 1px rgba(112,183,255,.28); }
+.keynope-speaker-notes { position: fixed; left: 210px; right: 0; top: var(--editor-notes-top, 100%); bottom: 52px; z-index: 19; display: none; flex-direction: column; gap: 5px; padding: 7px 10px; box-sizing: border-box; color: #ddd; background: #171717; border-top: 1px solid #444; font: 12px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-slide-context { position: fixed; z-index: 60; display: none; width: 270px; max-height: calc(100vh - 20px); overflow: auto; box-sizing: border-box; padding: 10px; color: #ddd; background: #202124; border: 1px solid #5b6168; border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.55); font: 12px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-slide-context.open { display: block; }
+.keynope-slide-context h3 { margin: 0 0 9px; color: #fff; font-size: 13px; }
+.keynope-slide-context button { color: #eee; background: #292929; border: 1px solid #555; border-radius: 5px; padding: 5px 9px; font: inherit; }
+.keynope-slide-context select { color: #eee; background: #292929; border: 1px solid #555; border-radius: 5px; padding: 5px 7px; font: inherit; }
+.keynope-context-visual { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 7px 9px; margin: 2px 0 10px; padding: 9px 0; border-top: 1px solid #41464b; border-bottom: 1px solid #41464b; }
+.keynope-context-visual h4 { grid-column: 1 / -1; margin: 0 0 2px; color: #fff; font-size: 12px; }
+.keynope-context-visual label { align-self: center; color: #aeb4bb; font-size: 11px; }
+.keynope-context-visual select, .keynope-context-visual input { width: 100%; min-width: 0; box-sizing: border-box; }
+.keynope-slide-context .keynope-editor-field input, .keynope-slide-context .keynope-editor-field select { width: 100%; box-sizing: border-box; color: #eee; background: #111; border: 1px solid #555; border-radius: 4px; padding: 5px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.keynope-speaker-notes label { color: #aeb4bb; font-weight: 600; }
+.keynope-speaker-notes textarea { min-height: 0; flex: 1; resize: none; box-sizing: border-box; padding: 7px; color: #eee; background: #0e0e0e; border: 1px solid #555; border-radius: 5px; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+html[data-keynope-app="true"][data-keynope-notes="true"] .keynope-speaker-notes { display: flex; }
+.keynope-slide-item { display: block; width: 100%; margin: 0 0 6px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.keynope-slide-item.active { border-color: #70b7ff; background: #244766; }
+.keynope-slide-item.master-reorderable { cursor: grab; }
+.keynope-slide-item.master-drag-outline { border-color: #b9ddff !important; box-shadow: 0 0 0 2px rgba(112,183,255,.5); }
+.keynope-slide-item.master-dragging { height: 0 !important; min-height: 0 !important; margin: 0; padding-top: 0; padding-bottom: 0; overflow: hidden; border-width: 0; opacity: 0; pointer-events: none; }
+.keynope-master-drop-placeholder { width: 100%; min-height: 30px; margin: 0 0 6px; box-sizing: border-box; border: 2px dashed #70b7ff; border-radius: 6px; background: rgba(112,183,255,.1); box-shadow: inset 0 0 12px rgba(112,183,255,.08); }
+.keynope-master-drag-image { position: fixed; top: -1000px; left: -1000px; z-index: 9999; box-sizing: border-box; color: #fff; background: #244766; border: 2px solid #b9ddff !important; border-radius: 6px; box-shadow: 0 0 0 2px rgba(112,183,255,.5), 0 8px 20px rgba(0,0,0,.5); opacity: 1 !important; pointer-events: none; }
+.keynope-editor-section { margin: 0 0 14px; padding: 0 0 12px; border-bottom: 1px solid #3c3c3c; }
+.keynope-editor-section h3 { margin: 0 0 7px; color: #fff; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.keynope-editor-actions { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 10px; }
+.keynope-editor-actions button.danger { color: #ffb0aa; border-color: #8d4741; }
+button.keynope-outline-large { min-width: 34px; padding-top: 1px; padding-bottom: 1px; font-size: 26px; line-height: 1; }
+button.keynope-shape-outline-button { display: inline-flex; align-items: center; justify-content: center; text-indent: 0; }
+.keynope-shape-outline-symbol { display: inline-block; transform: translateX(0); }
+.keynope-shape-outline-circle { transform: translateX(-4px); }
+.keynope-shape-outline-diamond { transform: translateX(4px); }
+.keynope-editor-help { margin: 0 0 10px; color: #949ba3; line-height: 1.45; }
+.keynope-editor-subheading { margin: 10px 0 6px; color: #aeb4bb; font-weight: 600; }
+.keynope-editor-field { display: block; margin: 0 0 7px; }
+.keynope-editor-field span { display: block; margin-bottom: 3px; color: #aaa; }
+.keynope-editor-field input, .keynope-editor-field textarea, .keynope-editor-field select { width: 100%; box-sizing: border-box; color: #eee; background: #111; border: 1px solid #555; border-radius: 4px; padding: 5px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.keynope-editor-field textarea { min-height: 70px; resize: vertical; }
+.keynope-element-item { display: flex; width: 100%; justify-content: space-between; margin-bottom: 4px; }
+.keynope-element-item.active { border-color: #70b7ff; background: #244766; }
+.keynope-canvas-overlay { position: absolute; left: 50%; top: 50%; z-index: 12; transform: translate(-50%, -50%); pointer-events: none; }
+.keynope-canvas-element { position: absolute; min-width: 22px; min-height: 22px; box-sizing: border-box; border: 1px solid transparent; background: transparent; pointer-events: auto; cursor: move; }
+.keynope-canvas-element:hover { border-color: rgba(112,183,255,.65); }
+.keynope-canvas-element.active { border: 2px solid #ffd166; box-shadow: 0 0 0 1px #111; }
+.keynope-resize-handle { position: absolute; z-index: 2; width: 9px; height: 9px; border: 1px solid #111; background: #ffd166; }
+.keynope-resize-handle.nw { left: -6px; top: -6px; cursor: nwse-resize; }
+.keynope-resize-handle.ne { right: -6px; top: -6px; cursor: nesw-resize; }
+.keynope-resize-handle.sw { left: -6px; bottom: -6px; cursor: nesw-resize; }
+.keynope-resize-handle.se { right: -6px; bottom: -6px; cursor: nwse-resize; }
+.keynope-colour-tool { position: relative; overflow: hidden; display: grid; width: 28px; min-width: 28px; place-items: center; padding: 4px 0; box-sizing: border-box; border-radius: 4px; color: #e9edf1; background: #343940; font: 11px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-colour-tool::after { content: ''; position: absolute; left: 7px; right: 7px; bottom: 4px; height: 3px; border-radius: 2px; background: var(--keynope-tool-colour, #fff); pointer-events: none; }
+.keynope-colour-tool input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.keynope-inline-capture { position: absolute; left: 0; top: 0; z-index: 30; width: 1px; height: 1px; margin: 0; padding: 0; opacity: 0; border: 0; resize: none; pointer-events: none; }
+html[data-keynope-app="true"] .keynope-editor-topbar, html[data-keynope-app="true"] .keynope-editor-panel { display: flex; }
+html[data-keynope-app="true"] .keynope-editor-panel { display: block; }
+html[data-keynope-app="true"] #presenter-canvas, html[data-keynope-app="true"] #link-layer, html[data-keynope-app="true"] .keynope-canvas-overlay { top: var(--editor-canvas-top, 50%); transform: translateX(-50%); }
 html[data-keynope-presenter="true"] .terminal-layer { visibility: hidden; pointer-events: none; }
 html[data-keynope-presenter="true"] #presenter-canvas { display: block; }
 #effect-layer { z-index: 1; pointer-events: none; }
@@ -2925,7 +3811,7 @@ html[data-keynope-presenter="true"] #presenter-canvas { display: block; }
 </style>
 </head>
 <body>
-<div id="stage"><canvas id="presenter-canvas"></canvas><div id="effect-layer" class="terminal-layer"></div><div id="content-layer" class="terminal-layer"></div><div id="chrome-layer" class="terminal-layer"></div></div>
+<div id="stage"><canvas id="presenter-canvas"></canvas><div id="link-layer"></div><div id="effect-layer" class="terminal-layer"></div><div id="content-layer" class="terminal-layer"></div><div id="chrome-layer" class="terminal-layer"></div></div>
 `
 	if presenter {
 		html = strings.Replace(html, `<html lang="en">`, `<html lang="en" data-keynope-presenter="true">`, 1)
@@ -2955,44 +3841,94 @@ let pageIndex = 0;
 const stage = document.getElementById('stage');
 const presenterCanvas = document.getElementById('presenter-canvas');
 const presenterContext = presenterCanvas.getContext('2d');
+const linkLayer = document.getElementById('link-layer');
 const presenterTestCardBuffer = document.createElement('canvas');
 const presenterTestCardBufferContext = presenterTestCardBuffer.getContext('2d');
 const effectLayer = document.getElementById('effect-layer');
-const contentLayer = document.getElementById('content-layer');
+let contentLayer = document.getElementById('content-layer');
 const chromeLayer = document.getElementById('chrome-layer');
 const presenterSurface = new URLSearchParams(location.search).get('keynopeSurface') || 'external';
 const presenterMainSurface = presenterSurface === 'main';
+const keynopeAppSurface = presenterSurface === 'app';
+// Standalone HTML and live presentation share this renderer. Presenter state
+// synchronization remains separately gated by KEYNOPE_PRESENTER.
+const keynopeCanvasRenderer = true;
+let renderEditorCanvasOverlay = () => {};
+let editorSpeakerNotesVisible = false;
+let refreshEditorPresenterControls = () => {};
+let editorCanvasCaret = null;
+let editorExportConfirmation = null;
+let keynopeEditorMasterMode = false;
+let keynopeEditorSelectionActive = false;
+let keynopeEditorVisualResizeActive = false;
+if (keynopeAppSurface) {
+  document.documentElement.setAttribute('data-keynope-app', 'true');
+  document.documentElement.setAttribute('data-keynope-notes', 'true');
+  document.title = 'Keynope';
+}
 let frame = 0;
+let contentAnimationFrame = 0;
 let contentAnimationCache = new Map();
 let canvasCell = 1;
 let canvasCharWidth = 1;
 let canvasFont = '';
+const canvasFontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
+function fitCanvasFontToGrid() {
+  let fontSize = canvasCell;
+  canvasFont = fontSize + 'px ' + canvasFontFamily;
+  presenterContext.font = canvasFont;
+  const measuredWidth = Math.max(1, presenterContext.measureText('M').width);
+  const safeCellWidth = Math.max(1, canvasCharWidth * 0.98);
+  if (measuredWidth > safeCellWidth) {
+    fontSize *= safeCellWidth / measuredWidth;
+    canvasFont = fontSize + 'px ' + canvasFontFamily;
+    presenterContext.font = canvasFont;
+  }
+}
+function sizeCanvasToAspect(availableWidth, availableHeight, targetAspect) {
+  let cssWidth = Math.max(1, availableWidth);
+  let cssHeight = cssWidth / targetAspect;
+  if (cssHeight > availableHeight) {
+    cssHeight = Math.max(1, availableHeight);
+    cssWidth = cssHeight * targetAspect;
+  }
+  cssWidth = Math.max(1, Math.floor(cssWidth));
+  cssHeight = Math.max(1, Math.floor(cssHeight));
+  const ratio = Math.max(1, window.devicePixelRatio || 1);
+  presenterCanvas.width = Math.max(1, Math.round(cssWidth * ratio));
+  presenterCanvas.height = Math.max(1, Math.round(cssHeight * ratio));
+  presenterCanvas.style.width = cssWidth + 'px';
+  presenterCanvas.style.height = cssHeight + 'px';
+  linkLayer.style.width = presenterCanvas.style.width;
+  linkLayer.style.height = presenterCanvas.style.height;
+  canvasCell = presenterCanvas.height / Math.max(1, deck.rows);
+  canvasCharWidth = presenterCanvas.width / Math.max(1, deck.cols);
+  fitCanvasFontToGrid();
+  document.documentElement.style.setProperty('--cell', canvasCell + 'px');
+  return {width: cssWidth, height: cssHeight};
+}
+function sizeEditorCanvas(stageRect) {
+  const targetAspect = 16 / 9;
+  const topChromeHeight = 52;
+  const bottomChromeHeight = 52;
+  const notesHeight = editorSpeakerNotesVisible ? 132 : 0;
+  const notesGap = editorSpeakerNotesVisible ? 8 : 0;
+  const availableHeight = Math.max(1, stageRect.height - topChromeHeight - bottomChromeHeight - notesHeight - notesGap);
+  const canvasSize = sizeCanvasToAspect(stageRect.width, availableHeight, targetAspect);
+  const canvasTop = topChromeHeight + Math.max(0, (availableHeight - canvasSize.height) / 2);
+  document.documentElement.style.setProperty('--editor-canvas-top', canvasTop + 'px');
+  document.documentElement.style.setProperty('--editor-notes-top', (canvasTop + canvasSize.height + notesGap) + 'px');
+}
 function resize() {
   document.documentElement.style.setProperty('--cols', deck.cols);
   document.documentElement.style.setProperty('--rows', deck.rows);
-  if (window.KEYNOPE_PRESENTER) {
-    const probeCell = 100;
-    presenterContext.font = probeCell + 'px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
-    const charRatio = Math.max(0.1, presenterContext.measureText('M').width / probeCell);
-    const opticalAspect = (Math.max(1, deck.cols) * charRatio) / Math.max(1, deck.rows);
-    let cssW = innerWidth;
-    let cssH = cssW / opticalAspect;
-    if (cssH > innerHeight) {
-      cssH = innerHeight;
-      cssW = cssH * opticalAspect;
-    }
-    cssW = Math.max(1, Math.floor(cssW));
-    cssH = Math.max(1, Math.floor(cssH));
-    const ratio = Math.max(1, window.devicePixelRatio || 1);
-    presenterCanvas.width = Math.max(1, Math.round(cssW * ratio));
-    presenterCanvas.height = Math.max(1, Math.round(cssH * ratio));
-    presenterCanvas.style.width = 'calc(100vw * ' + Math.max(1, deck.cols - 2) + ' / ' + Math.max(1, deck.cols) + ')';
-    presenterCanvas.style.height = 'calc(100vh * ' + Math.max(1, deck.rows - 5) + ' / ' + Math.max(1, deck.rows) + ')';
-    canvasCell = presenterCanvas.height / Math.max(1, deck.rows);
-    canvasCharWidth = presenterCanvas.width / Math.max(1, deck.cols);
-    canvasFont = canvasCell + 'px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
-    presenterContext.font = canvasFont;
-    document.documentElement.style.setProperty('--cell', canvasCell + 'px');
+  if (keynopeAppSurface) {
+    const stageRect = stage.getBoundingClientRect();
+    sizeEditorCanvas(stageRect);
+    return;
+  }
+  if (keynopeCanvasRenderer) {
+    sizeCanvasToAspect(innerWidth, innerHeight, 16 / 9);
     return;
   }
   let low = 1, high = Math.max(8, innerHeight);
@@ -3012,7 +3948,9 @@ function resize() {
     if (width <= innerWidth && height <= innerHeight) low = mid;
     else high = mid;
   }
-  const cell = Math.max(1, Math.floor(low));
+  // Keep the fractional fit found above. Rounding down to a whole CSS pixel
+  // leaves as much as one row-height of unused space in embedded web views.
+  const cell = Math.max(1, low);
   document.documentElement.style.setProperty('--cell', cell + 'px');
   canvasCell = cell;
   canvasFont = cell + 'px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
@@ -3034,6 +3972,7 @@ function label(page) {
 function renderLines(lines) {
   let html = '';
   for (const line of lines || []) {
+    if (line.role === 'transparent-text' || line.role === 'transparent-image') continue;
     for (const part of line.parts) {
       const bg = part.background ? ';background-color:' + part.background : '';
       html += '<span class="line" style="--x:' + part.col + ';--y:' + line.row + ';color:' + part.color + bg + '">' + esc(part.text) + '</span>';
@@ -3044,10 +3983,12 @@ function renderLines(lines) {
 function drawCanvasLines(lines) {
   presenterContext.font = canvasFont;
   presenterContext.textBaseline = 'top';
+  drawEditorCanvasSelection();
   const textOutlineElements = textOutlineElementMap(lines);
   const textOutlineMasks = canvasTextPixelOutlineMasks(lines, textOutlineElements);
   const drawnTextOutlines = new Set();
   for (const line of lines || []) {
+    if (line.role === 'transparent-text' || line.role === 'transparent-image') continue;
     if (line.role === 'outline') {
       if (textOutlineElements.has(line.element)) continue;
       drawCanvasOutlineLine(line);
@@ -3072,6 +4013,56 @@ function drawCanvasLines(lines) {
       }
     }
   }
+  drawEditorCanvasCaret(lines);
+}
+function drawEditorCanvasSelection() {
+  if (!keynopeAppSurface || !editorCanvasCaret || !editorCanvasCaret.selection) return;
+  presenterContext.fillStyle = 'rgba(85, 170, 255, .58)';
+  for (const row of editorCanvasCaret.selection) {
+    drawCanvasCellRun(row.col, row.row, row.cells);
+  }
+}
+function drawEditorCanvasCaret(lines) {
+  if (!keynopeAppSurface || !editorCanvasCaret || (performance.now() - editorCanvasCaret.started) % 900 >= 650) return;
+  if (editorCanvasCaret.exact) {
+    const caret = editorCanvasCaret.exact;
+    const x = Math.floor(Math.max(0, caret.col || 0) * canvasCharWidth);
+    const y = Math.max(0, Math.ceil((Math.max(0, caret.row || 0) + 1) * canvasCell) - Math.max(2, Math.round(window.devicePixelRatio || 1)));
+    presenterContext.fillStyle = '#70b7ff';
+    presenterContext.fillRect(x, y, Math.max(2, Math.ceil(Math.max(1, caret.cells || 1) * canvasCharWidth)), Math.max(2, Math.round(window.devicePixelRatio || 1)));
+    return;
+  }
+  const matching = (lines || []).filter(line => line.element === editorCanvasCaret.element);
+  if (!matching.length) return;
+  let minX = deck.cols, minY = deck.rows, maxX = 0, maxY = 0;
+  for (const line of matching) {
+    for (const part of line.parts || []) {
+      const width = [...(part.text || '')].length;
+      minX = Math.min(minX, part.col || 0);
+      maxX = Math.max(maxX, (part.col || 0) + width);
+      minY = Math.min(minY, line.row || 0);
+      maxY = Math.max(maxY, (line.row || 0) + 1);
+    }
+  }
+  if (minX >= deck.cols || minY >= deck.rows) return;
+  const text = editorCanvasCaret.text || '';
+  const cursor = Math.max(0, Math.min(text.length, editorCanvasCaret.cursor || 0));
+  const before = text.slice(0, cursor).split('\n');
+  const rawLines = text.split('\n');
+  const lineIndex = Math.max(0, before.length - 1);
+  const column = [...(before[before.length - 1] || '')].length;
+  const rawLineLength = Math.max(1, [...(rawLines[lineIndex] || '')].length);
+  const renderedWidth = Math.max(1, maxX - minX);
+  const renderedHeight = Math.max(1, maxY - minY);
+  const caretCol = Math.min(deck.cols - 1, maxX, minX + column / rawLineLength * renderedWidth);
+  const caretRow = Math.min(maxY - 1, minY + Math.ceil((lineIndex + 1) / Math.max(1, rawLines.length) * renderedHeight) - 1);
+  const caretQuery = new URLSearchParams(editorCanvasCaret.query || '');
+  const caretScale = Math.max(.1, Number.parseFloat(caretQuery.get('scale') || '1') || 1);
+  const caretCells = Math.max(1, Math.round(4 * caretScale));
+  const x = Math.floor(caretCol * canvasCharWidth);
+  const y = Math.max(0, Math.ceil((caretRow + 1) * canvasCell) - Math.max(2, Math.round(window.devicePixelRatio || 1)));
+  presenterContext.fillStyle = '#70b7ff';
+  presenterContext.fillRect(x, y, Math.max(2, Math.ceil(caretCells * canvasCharWidth)), Math.max(2, Math.round(window.devicePixelRatio || 1)));
 }
 function textOutlineElementMap(lines) {
   const outlines = new Map();
@@ -3152,11 +4143,11 @@ function addBlockGlyphMaskPixels(out, col, row, mask) {
 function drawCanvasQuarterPixel(qx, qy) {
   if (qx < 0 || qy < 0 || qx >= deck.cols * 2 || qy >= deck.rows * 2) return;
   const col = Math.floor(qx / 2), row = Math.floor(qy / 2);
-  const x1 = Math.floor((col + (qx % 2) * 0.5) * canvasCharWidth);
-  const y1 = Math.floor((row + (qy % 2) * 0.5) * canvasCell);
-  const x2 = Math.ceil((col + (qx % 2 ? 1 : 0.5)) * canvasCharWidth);
-  const y2 = Math.ceil((row + (qy % 2 ? 1 : 0.5)) * canvasCell);
-  presenterContext.fillRect(x1, y1, Math.max(1, x2 - x1 + 1), Math.max(1, y2 - y1 + 1));
+  const x1 = Math.round((col + (qx % 2) * 0.5) * canvasCharWidth);
+  const y1 = Math.round((row + (qy % 2) * 0.5) * canvasCell);
+  const x2 = Math.round((col + (qx % 2 ? 1 : 0.5)) * canvasCharWidth);
+  const y2 = Math.round((row + (qy % 2 ? 1 : 0.5)) * canvasCell);
+  presenterContext.fillRect(x1, y1, Math.max(1, x2 - x1), Math.max(1, y2 - y1));
 }
 function drawCanvasBlockGlyphs(text, col, row, color) {
   const chars = [...text];
@@ -3214,16 +4205,16 @@ function drawCanvasBlockGlyph(col, row, mask) {
     drawCanvasCellRun(col, row, 1);
     return;
   }
-  const x1 = Math.floor(col * canvasCharWidth);
-  const y1 = Math.floor(row * canvasCell);
-  const xMid = Math.floor((col + 0.5) * canvasCharWidth);
-  const yMid = Math.floor((row + 0.5) * canvasCell);
-  const x2 = Math.ceil((col + 1) * canvasCharWidth);
-  const y2 = Math.ceil((row + 1) * canvasCell);
-  if (mask & 1) presenterContext.fillRect(x1, y1, Math.max(1, xMid - x1 + 1), Math.max(1, yMid - y1 + 1));
-  if (mask & 2) presenterContext.fillRect(xMid, y1, Math.max(1, x2 - xMid + 1), Math.max(1, yMid - y1 + 1));
-  if (mask & 4) presenterContext.fillRect(x1, yMid, Math.max(1, xMid - x1 + 1), Math.max(1, y2 - yMid + 1));
-  if (mask & 8) presenterContext.fillRect(xMid, yMid, Math.max(1, x2 - xMid + 1), Math.max(1, y2 - yMid + 1));
+  const x1 = Math.round(col * canvasCharWidth);
+  const y1 = Math.round(row * canvasCell);
+  const xMid = Math.round((col + 0.5) * canvasCharWidth);
+  const yMid = Math.round((row + 0.5) * canvasCell);
+  const x2 = Math.round((col + 1) * canvasCharWidth);
+  const y2 = Math.round((row + 1) * canvasCell);
+  if (mask & 1) presenterContext.fillRect(x1, y1, Math.max(1, xMid - x1), Math.max(1, yMid - y1));
+  if (mask & 2) presenterContext.fillRect(xMid, y1, Math.max(1, x2 - xMid), Math.max(1, yMid - y1));
+  if (mask & 4) presenterContext.fillRect(x1, yMid, Math.max(1, xMid - x1), Math.max(1, y2 - yMid));
+  if (mask & 8) presenterContext.fillRect(xMid, yMid, Math.max(1, x2 - xMid), Math.max(1, y2 - yMid));
 }
 function drawCanvasOutlineLine(line) {
   for (const part of line.parts || []) {
@@ -3238,11 +4229,11 @@ function drawCanvasOutlineLine(line) {
   }
 }
 function drawCanvasCellRun(col, row, len) {
-  const x1 = Math.floor(col * canvasCharWidth);
-  const y1 = Math.floor(row * canvasCell);
-  const x2 = Math.ceil((col + len) * canvasCharWidth);
-  const y2 = Math.ceil((row + 1) * canvasCell);
-  presenterContext.fillRect(x1, y1, Math.max(1, x2 - x1 + 1), Math.max(1, y2 - y1 + 1));
+  const x1 = Math.round(col * canvasCharWidth);
+  const y1 = Math.round(row * canvasCell);
+  const x2 = Math.round((col + len) * canvasCharWidth);
+  const y2 = Math.round((row + 1) * canvasCell);
+  presenterContext.fillRect(x1, y1, Math.max(1, x2 - x1), Math.max(1, y2 - y1));
 }
 function transparencyCellMap(lines) {
   const cells = new Map();
@@ -3250,18 +4241,21 @@ function transparencyCellMap(lines) {
     for (const part of line.parts || []) {
       const text = part.text || '';
       for (let i = 0; i < text.length; i++) {
-        cells.set(line.row + ':' + (part.col + i), part.background || '#000');
+        cells.set(line.row + ':' + (part.col + i), {
+          background: part.background || '#000',
+          glyph: text[i] || ' '
+        });
       }
     }
   }
   return cells;
 }
-function darkenCSSForTransparency(color) {
+function blendCSSForTransparency(color, overlay) {
   const rgb = parseCSSColor(color || '#f3efe0');
   if (!rgb) return color || '#f3efe0';
-  const luma = (299 * rgb[0] + 587 * rgb[1] + 114 * rgb[2]) / 255000;
-  const factor = 0.8 - Math.pow(Math.max(0, Math.min(1, luma)), 3) * 0.6;
-  return 'rgb(' + rgb.map(v => Math.max(0, Math.min(255, Math.round(v * factor)))).join(',') + ')';
+  const overlayRGB = parseCSSColor(overlay || '#000000');
+  if (!overlayRGB) return color || '#f3efe0';
+  return 'rgb(' + rgb.map((v, i) => Math.round((v + overlayRGB[i]) / 2)).join(',') + ')';
 }
 function parseCSSColor(color) {
   const hex = /^#([0-9a-f]{6})$/i.exec(color || '');
@@ -3294,10 +4288,15 @@ function applyBackdropTransparency(lines, transparency) {
       for (let i = 0; i < text.length; i++) {
         const col = part.col + i;
         const key = line.row + ':' + col;
-        const bg = cells.get(key);
-        if (bg) {
+        const transparentCell = cells.get(key);
+        if (transparentCell) {
+          const bg = transparentCell.background;
           occupied.add(key);
-          pushPart(parts, col, text[i], darkenCSSForTransparency(part.color), bg);
+          if (blockGlyphMask(transparentCell.glyph) >= 0 && transparentCell.glyph !== ' ') {
+            pushPart(parts, col, transparentCell.glyph, blendCSSForTransparency(part.color, bg), '');
+          } else {
+            pushPart(parts, col, text[i], blendCSSForTransparency(part.color, bg), bg);
+          }
         } else {
           pushPart(parts, col, text[i], part.color, part.background || '');
         }
@@ -3306,12 +4305,17 @@ function applyBackdropTransparency(lines, transparency) {
     if (parts.length) out.push({...line, parts});
   }
   const fillerRows = new Map();
-  for (const [key, bg] of cells.entries()) {
+  for (const [key, transparentCell] of cells.entries()) {
     if (occupied.has(key)) continue;
     const [rowText, colText] = key.split(':');
     const row = Number(rowText), col = Number(colText);
     if (!fillerRows.has(row)) fillerRows.set(row, []);
-    pushPart(fillerRows.get(row), col, ' ', '#000000', bg);
+    const bg = transparentCell.background;
+    if (blockGlyphMask(transparentCell.glyph) >= 0 && transparentCell.glyph !== ' ') {
+      pushPart(fillerRows.get(row), col, transparentCell.glyph, bg, '');
+    } else {
+      pushPart(fillerRows.get(row), col, ' ', '#000000', bg);
+    }
   }
   for (const [row, parts] of fillerRows.entries()) {
     if (parts.length) out.push({row, role: 'transparent', parts});
@@ -3322,7 +4326,7 @@ function drawCanvasBackdropTransparency(lines, transparency) {
   drawCanvasLines(applyBackdropTransparency(lines, transparency));
 }
 function drawCanvasPageLabel(page) {
-	if (page.hideChromePageNumber) return;
+  if (!keynopeAppSurface || page.hideChromePageNumber) return;
   const text = label(page);
   presenterContext.font = canvasFont;
   presenterContext.textBaseline = 'top';
@@ -3410,6 +4414,102 @@ function drawPresenterTimerBlock(ch, x, y, cell) {
     const x2 = Math.ceil(x + (qx + 1) * half), y2 = Math.ceil(y + (qy + 1) * half);
     presenterContext.fillRect(x1, y1, Math.max(1, x2 - x1), Math.max(1, y2 - y1));
   }
+}
+const editorExportGlyphs = {
+	S:['01111','10000','10000','01110','00001','00001','11110'],
+	A:['01110','10001','10001','11111','10001','10001','10001'],
+	V:['10001','10001','10001','10001','10001','01010','00100'],
+	N:['10001','11001','10101','10011','10001','10001','10001'],
+	I:['11111','00100','00100','00100','00100','00100','11111'],
+	G:['01110','10001','10000','10111','10001','10001','01110'],
+  E:['11111','10000','10000','11110','10000','10000','11111'],
+  X:['10001','10001','01010','00100','01010','10001','10001'],
+  P:['11110','10001','10001','11110','10000','10000','10000'],
+  O:['01110','10001','10001','10001','10001','10001','01110'],
+  R:['11110','10001','10001','11110','10100','10010','10001'],
+  T:['11111','00100','00100','00100','00100','00100','00100'],
+  D:['11110','10001','10001','10001','10001','10001','11110']
+};
+function showEditorConfirmation(text) {
+	if (!keynopeAppSurface) return;
+	const confirmation = {started: performance.now(), duration: 1500, text, progress: false};
+	editorExportConfirmation = confirmation;
+	const animate = () => {
+		if (editorExportConfirmation !== confirmation) return;
+		if (performance.now() - confirmation.started >= confirmation.duration) editorExportConfirmation = null;
+		drawFrame();
+		if (editorExportConfirmation === confirmation) requestAnimationFrame(animate);
+	};
+	requestAnimationFrame(animate);
+}
+function showEditorExportConfirmation() { showEditorConfirmation('EXPORTED'); }
+function showEditorSavedConfirmation() { showEditorConfirmation('SAVED'); }
+function showEditorRenderingProgress() {
+	if (!keynopeAppSurface) return;
+	const confirmation = {started: performance.now(), duration: Infinity, text:'RENDERING', progress:true};
+	editorExportConfirmation = confirmation;
+	const animate = () => {
+		if (editorExportConfirmation !== confirmation) return;
+		drawFrame();
+		requestAnimationFrame(animate);
+	};
+	requestAnimationFrame(animate);
+}
+function hideEditorRenderingProgress() {
+	if (!editorExportConfirmation || !editorExportConfirmation.progress) return;
+	editorExportConfirmation = null;
+	drawFrame();
+}
+function drawEditorExportConfirmation() {
+  if (!keynopeAppSurface || !editorExportConfirmation) return;
+  const elapsed = performance.now() - editorExportConfirmation.started;
+	const rendering = !!editorExportConfirmation.progress;
+	const progress = rendering ? 0 : Math.max(0, Math.min(1, elapsed / editorExportConfirmation.duration));
+	const fade = rendering ? 1 : progress < .48 ? 1 : Math.pow(1 - (progress - .48) / .52, 2);
+  const text = editorExportConfirmation.text || 'EXPORTED';
+  const block = Math.max(2, Math.floor(Math.min(presenterCanvas.width / 66, presenterCanvas.height / 24)));
+  const glyphWidth = 5 * block, glyphGap = 2 * block;
+  const textWidth = text.length * glyphWidth + (text.length - 1) * glyphGap;
+  const textHeight = 7 * block;
+	const padX = 3 * block, padY = 2 * block;
+	const progressHeight = rendering ? block * 2 : 0;
+	const scale = rendering ? 1 + Math.sin(elapsed / 260) * .008 : 1 + progress * .035;
+	const x = (presenterCanvas.width - textWidth) / 2;
+	const y = (presenterCanvas.height - textHeight - progressHeight) / 2 - progress * 12;
+  presenterContext.save();
+  presenterContext.globalAlpha = fade;
+  presenterContext.translate(presenterCanvas.width / 2, presenterCanvas.height / 2);
+  presenterContext.scale(scale, scale);
+  presenterContext.translate(-presenterCanvas.width / 2, -presenterCanvas.height / 2);
+  presenterContext.fillStyle = 'rgba(3,18,9,.92)';
+  presenterContext.strokeStyle = '#22cc66';
+  presenterContext.lineWidth = Math.max(2, block * .45);
+	presenterContext.fillRect(x - padX, y - padY, textWidth + padX * 2, textHeight + padY * 2 + progressHeight);
+	presenterContext.strokeRect(x - padX, y - padY, textWidth + padX * 2, textHeight + padY * 2 + progressHeight);
+  let cursor = x;
+  presenterContext.lineWidth = Math.max(1, block * .38);
+  for (const ch of text) {
+    const glyph = editorExportGlyphs[ch];
+    for (let row = 0; row < glyph.length; row++) for (let col = 0; col < glyph[row].length; col++) {
+      if (glyph[row][col] !== '1') continue;
+      const px = cursor + col * block, py = y + row * block;
+      presenterContext.fillStyle = '#00aa55';
+      presenterContext.strokeStyle = '#77ff99';
+      presenterContext.fillRect(px, py, block, block);
+      presenterContext.strokeRect(px, py, block, block);
+    }
+		cursor += glyphWidth + glyphGap;
+	}
+	if (rendering) {
+		const slots = 12, slotGap = block * .65;
+		const slotWidth = (textWidth - slotGap * (slots - 1)) / slots;
+		const active = Math.floor(elapsed / 90) % slots;
+		for (let index = 0; index < slots; index++) {
+			presenterContext.fillStyle = index === active ? '#77ff99' : index < active ? '#00aa55' : '#174d2a';
+			presenterContext.fillRect(x + index * (slotWidth + slotGap), y + textHeight + block, slotWidth, block * .7);
+		}
+	}
+	presenterContext.restore();
 }
 function drawPresenterTestCard() {
   presenterCanvas.style.display = 'block';
@@ -3703,7 +4803,7 @@ function linkGroups(lines, includeImages) {
   const groups = new Map();
   for (const line of lines || []) {
     if (!line.link || !line.parts || !line.parts.length) continue;
-    if (!includeImages && line.role === 'image') continue;
+    if (!includeImages && (line.role === 'image' || line.role === 'transparent-image')) continue;
     const element = line.element == null ? 'row-' + line.row + '-' + line.link : line.element;
     const key = line.link + '|' + element;
     let group = groups.get(key);
@@ -3738,13 +4838,39 @@ function renderLinkHitAreas(lines) {
   }
   return html;
 }
+function renderCanvasLinkHitAreas(lines) {
+  let html = '';
+  for (const group of linkGroups(lines, true)) {
+    if (group.maxCol <= group.minCol) continue;
+    const left = group.minCol / Math.max(1, deck.cols) * 100;
+    const top = group.minRow / Math.max(1, deck.rows) * 100;
+    const width = (group.maxCol - group.minCol) / Math.max(1, deck.cols) * 100;
+    const height = (group.maxRow - group.minRow + 1) / Math.max(1, deck.rows) * 100;
+    html += '<span class="canvas-link-hit" data-link="' + esc(group.link) + '" style="left:' + left + '%;top:' + top + '%;width:' + width + '%;height:' + height + '%" aria-label="link"></span>';
+  }
+  return html;
+}
+function drawCanvasLinkUnderlines(lines) {
+  presenterContext.save();
+  presenterContext.lineWidth = Math.max(1, canvasCell * 0.055);
+  for (const group of linkGroups(lines, false)) {
+    const y = Math.min(presenterCanvas.height - 1, (group.maxRow + 1) * canvasCell + presenterContext.lineWidth);
+    presenterContext.strokeStyle = group.color || '#f3efe0';
+    presenterContext.beginPath();
+    presenterContext.moveTo(group.minCol * canvasCharWidth, y);
+    presenterContext.lineTo(group.maxCol * canvasCharWidth, y);
+    presenterContext.stroke();
+  }
+  presenterContext.restore();
+}
 function render() {
   const page = deck.pages[pageIndex];
   stage.style.background = page.bg;
   effectLayer.style.color = page.fg;
   contentLayer.style.color = page.fg;
-  chromeLayer.innerHTML = page.hideChromePageNumber ? '' : '<span class="page-no">' + esc(label(page)) + '</span>';
+  chromeLayer.innerHTML = keynopeAppSurface && !page.hideChromePageNumber ? '<span class="page-no">' + esc(label(page)) + '</span>' : '';
   drawFrame();
+  if (keynopeAppSurface) requestAnimationFrame(renderEditorCanvasOverlay);
 }
 function lineKey(line) {
   const col = line.parts && line.parts.length ? line.parts[0].col : (line.col || 0);
@@ -4235,26 +5361,29 @@ function effectLines(page, frame) {
 function drawFrame() {
   const page = presenterPageAt(pageIndex);
   if (!page) return;
-  if (window.KEYNOPE_PRESENTER && !presenterPresenting && !presenterMainSurface) {
+  if (window.KEYNOPE_PRESENTER && !presenterPresenting && !presenterMainSurface && !keynopeAppSurface) {
     drawPresenterSnow();
     return;
   }
-  if (window.KEYNOPE_PRESENTER && presenterTransitionUntil && performance.now() < presenterTransitionUntil) {
+  if (keynopeCanvasRenderer && presenterTransitionUntil && performance.now() < presenterTransitionUntil) {
     drawChannelFlipTransition();
     if (presenterTimerMode === 'running') drawPresenterTestCard();
     drawPresenterTimer();
+    drawEditorExportConfirmation();
     return;
   }
   presenterTransitionUntil = 0;
   const contentLines = presenterContentLinesFor(pageIndex, page);
-  if (window.KEYNOPE_PRESENTER) {
+  if (keynopeCanvasRenderer) {
     drawPresenterPage(page, frame, contentLines);
     if (presenterTimerMode === 'running') drawPresenterTestCard();
     drawPresenterTimer();
+    drawEditorExportConfirmation();
     return;
   }
   const effectLinesWithBackground = (page.backgroundLines || []).concat(effectLines(page, frame));
   presenterCanvas.style.display = 'none';
+  linkLayer.style.display = 'none';
   effectLayer.style.display = 'block';
   contentLayer.style.display = 'block';
   chromeLayer.style.display = 'block';
@@ -4264,6 +5393,8 @@ function drawFrame() {
 function drawPresenterPage(page, frameValue, contentLines) {
   const effectLinesWithBackground = (page.backgroundLines || []).concat(effectLines(page, frameValue));
   presenterCanvas.style.display = 'block';
+  linkLayer.style.display = 'block';
+  linkLayer.innerHTML = renderCanvasLinkHitAreas(contentLines);
   effectLayer.style.display = 'none';
   contentLayer.style.display = 'none';
   chromeLayer.style.display = 'none';
@@ -4273,8 +5404,9 @@ function drawPresenterPage(page, frameValue, contentLines) {
   presenterContext.fillRect(0, 0, presenterCanvas.width, presenterCanvas.height);
   drawCanvasBackdropTransparency(effectLinesWithBackground, page.transparency || []);
   drawCanvasLines(contentLines);
+  drawCanvasLinkUnderlines(contentLines);
   drawCanvasPageLabel(page);
-  drawPresenterPhosphor(presenterCanvas.width, presenterCanvas.height);
+  if (!keynopeAppSurface) drawPresenterPhosphor(presenterCanvas.width, presenterCanvas.height);
 }
 function drawPresenterPageFallback() {
   const page = presenterPageAt(pageIndex);
@@ -4288,8 +5420,9 @@ function drawPresenterPageFallback() {
   presenterContext.fillStyle = page.bg || '#000';
   presenterContext.fillRect(0, 0, presenterCanvas.width, presenterCanvas.height);
   drawCanvasLines(page.lines || []);
+  drawCanvasLinkUnderlines(page.lines || []);
   drawCanvasPageLabel(page);
-  drawPresenterPhosphor(presenterCanvas.width, presenterCanvas.height);
+  if (!keynopeAppSurface) drawPresenterPhosphor(presenterCanvas.width, presenterCanvas.height);
 }
 function presenterPageAt(index) {
   if (!deck.pages || !deck.pages.length) return null;
@@ -4300,7 +5433,7 @@ function presenterContentLinesFor(index, page) {
   if (!page) return [];
   if (index === pageIndex) {
     const contentFrames = decodedContentFrames(page);
-    if (contentFrames && contentFrames.length) return contentFrames[frame % contentFrames.length].lines;
+    if (contentFrames && contentFrames.length) return contentFrames[contentAnimationFrame % contentFrames.length].lines;
   }
   return page.lines || [];
 }
@@ -4315,7 +5448,11 @@ function tick() {
     } catch (_fallbackErr) {
     }
   }
-  setTimeout(() => { frame++; tick(); }, 70);
+  setTimeout(() => {
+    frame++;
+    if (!keynopeEditorSelectionActive) contentAnimationFrame++;
+    tick();
+  }, 70);
 }
 addEventListener('resize', () => { resize(); render(); });
 function activateLink(target) {
@@ -4323,7 +5460,11 @@ function activateLink(target) {
   if (/^#?\d+$/.test(target)) {
     const slide = Math.max(1, parseInt(target.replace('#', ''), 10));
     const index = deck.pages.findIndex(page => page.slide === slide - 1 && page.page === 0);
-    if (index >= 0) pageIndex = index;
+    if (index >= 0) {
+      const previousPageIndex = pageIndex;
+      pageIndex = index;
+      startPageTransition(previousPageIndex, pageIndex);
+    }
     frame = 0;
     render();
     return true;
@@ -4343,7 +5484,30 @@ addEventListener('pointerdown', e => {
     e.stopPropagation();
   }
 }, true);
+function publishPresenterPage(index) {
+  if (!window.KEYNOPE_PRESENTER || !deck.pages || index < 0 || index >= deck.pages.length) return;
+  const page = deck.pages[index];
+  if (!page || !Number.isInteger(page.slide) || !Number.isInteger(page.page)) return;
+  fetch('/api/editor/action', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'navigate-presentation', slide: page.slide, page: page.page})
+  }).catch(() => {});
+}
+function publishPresenterTimer(seconds) {
+  if (!window.KEYNOPE_PRESENTER) return;
+  fetch('/api/editor/action', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(seconds > 0 ? {action: 'start-timer', value: seconds} : {action: 'stop-timer'})
+  }).catch(() => {});
+}
+function keynopeFormControlTarget(target) {
+  return !!target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
+}
 addEventListener('keydown', e => {
+  if (keynopeFormControlTarget(e.target)) return;
+  if (keynopeAppSurface && keynopeEditorMasterMode) return;
   if (window.KEYNOPE_PRESENTER && presenterMainSurface) {
     if (presenterTimerMode === 'config') {
       if (/^\d$/.test(e.key) && String(presenterTimerInput || '').length < 4) {
@@ -4357,6 +5521,7 @@ addEventListener('keydown', e => {
         const total = Math.max(0, minutes * 60 + seconds);
         presenterTimerMode = total > 0 ? 'running' : '';
         presenterTimerEndMS = total > 0 ? Date.now() + total * 1000 : 0;
+        publishPresenterTimer(total);
       } else if (e.key === 'Escape') {
         presenterTimerMode = '';
         presenterTimerInput = '';
@@ -4383,6 +5548,7 @@ addEventListener('keydown', e => {
       presenterTimerMode = '';
       presenterTimerInput = '';
       presenterTimerEndMS = 0;
+      publishPresenterTimer(0);
     }
     else if (e.key === 'q') {
       e.preventDefault();
@@ -4394,16 +5560,13 @@ addEventListener('keydown', e => {
     } else return;
     e.preventDefault();
     e.stopPropagation();
-    if (pageIndex !== previousPageIndex) {
-      presenterTransitionStarted = performance.now();
-      presenterTransitionUntil = presenterTransitionStarted + 180;
-      presenterTransitionFromIndex = previousPageIndex;
-      presenterTransitionToIndex = pageIndex;
-    }
+    startPageTransition(previousPageIndex, pageIndex);
     frame = 0;
     render();
+    publishPresenterPage(pageIndex);
     return;
   }
+  const previousPageIndex = pageIndex;
   if (['ArrowRight', ' ', 'n', 'PageDown'].includes(e.key)) pageIndex = Math.min(deck.pages.length - 1, pageIndex + 1);
   else if (['ArrowLeft', 'PageUp'].includes(e.key)) pageIndex = Math.max(0, pageIndex - 1);
   else if (e.key === 'Home') pageIndex = 0;
@@ -4412,7 +5575,9 @@ addEventListener('keydown', e => {
   e.preventDefault();
   e.stopPropagation();
   frame = 0;
+  startPageTransition(previousPageIndex, pageIndex);
   render();
+  publishPresenterPage(pageIndex);
 });
 let presenterVersion = -1;
 let presenterDeckVersion = -1;
@@ -4424,6 +5589,13 @@ let presenterTransitionStarted = 0;
 let presenterTransitionUntil = 0;
 let presenterTransitionFromIndex = 0;
 let presenterTransitionToIndex = 0;
+function startPageTransition(fromIndex, toIndex) {
+  if (fromIndex === toIndex || keynopeAppSurface) return;
+  presenterTransitionStarted = performance.now();
+  presenterTransitionUntil = presenterTransitionStarted + 180;
+  presenterTransitionFromIndex = fromIndex;
+  presenterTransitionToIndex = toIndex;
+}
 async function refreshPresenterSlide(slideIndex) {
   if (!Number.isInteger(slideIndex) || slideIndex < 0) {
     location.reload();
@@ -4456,12 +5628,14 @@ async function syncPresenterState() {
     const response = await fetch('/state', {cache: 'no-store'});
     if (!response.ok) return;
     const state = await response.json();
+    if (keynopeAppSurface && keynopeEditorMasterMode) return;
     const initialSync = presenterVersion < 0;
     let slideRefreshed = false;
     if (initialSync) {
       presenterDeckVersion = state.deckVersion || 0;
-    } else if ((state.deckVersion || 0) !== presenterDeckVersion) {
-      presenterDeckVersion = state.deckVersion || 0;
+	} else if ((state.deckVersion || 0) !== presenterDeckVersion) {
+		if (keynopeAppSurface && keynopeEditorVisualResizeActive) return;
+		presenterDeckVersion = state.deckVersion || 0;
       slideRefreshed = await refreshPresenterSlide(Number.isInteger(state.deckSlide) ? state.deckSlide : -1);
       if (!slideRefreshed) return;
     }
@@ -4469,17 +5643,14 @@ async function syncPresenterState() {
     presenterVersion = state.version;
     const wasPresenting = presenterPresenting;
     presenterPresenting = !!state.presenting;
-    presenterTimerMode = state.timerMode || '';
-    presenterTimerInput = state.timerInput || '';
-    presenterTimerEndMS = Number(state.timerEndMs || 0);
+    if (!presenterMainSurface) {
+      presenterTimerMode = state.timerMode || '';
+      presenterTimerInput = state.timerInput || '';
+      presenterTimerEndMS = Number(state.timerEndMs || 0);
+    }
     const index = deck.pages.findIndex(page => page.slide === state.slide && page.page === state.page);
     if (index >= 0 && index !== pageIndex) {
-      if (presenterPresenting && wasPresenting) {
-        presenterTransitionStarted = performance.now();
-        presenterTransitionUntil = presenterTransitionStarted + 180;
-        presenterTransitionFromIndex = pageIndex;
-        presenterTransitionToIndex = index;
-      }
+      if (presenterPresenting && wasPresenting) startPageTransition(pageIndex, index);
       pageIndex = index;
       frame = 0;
       render();
@@ -4487,14 +5658,3117 @@ async function syncPresenterState() {
       frame = 0;
       render();
     }
+    refreshEditorPresenterControls();
   } catch (_err) {
   }
 }
-if (window.KEYNOPE_PRESENTER) {
-  if (!presenterMainSurface) {
-    setInterval(syncPresenterState, 120);
-    syncPresenterState();
+let keynopeAppFrameVersion = -1;
+let keynopeTerminalCols = 0;
+let keynopeTerminalRows = 0;
+let keynopeTerminalChars = [];
+let keynopeTerminalColors = [];
+let keynopeTerminalRow = 0;
+let keynopeTerminalCol = 0;
+let keynopeTerminalColor = '#f3efe0';
+let keynopeTerminalDrawPending = false;
+const keynopeANSIColors = ['#000000', '#aa0000', '#00aa00', '#aa5500', '#0000aa', '#aa00aa', '#00aaaa', '#aaaaaa'];
+const keynopeANSIBrightColors = ['#555555', '#ff5555', '#55ff55', '#ffff55', '#5555ff', '#ff55ff', '#55ffff', '#ffffff'];
+function resetKeynopeTerminal(cols, rows) {
+  keynopeTerminalCols = cols;
+  keynopeTerminalRows = rows;
+  keynopeTerminalChars = new Array(cols * rows).fill(' ');
+  keynopeTerminalColors = new Array(cols * rows).fill('#f3efe0');
+  keynopeTerminalRow = 0;
+  keynopeTerminalCol = 0;
+  keynopeTerminalColor = '#f3efe0';
+}
+function applyKeynopeSGR(raw) {
+  const values = (raw === '' ? [0] : raw.split(';').map(value => Number(value || 0)));
+  for (let i = 0; i < values.length; i++) {
+    const value = values[i];
+    if (value === 0 || value === 39) keynopeTerminalColor = '#f3efe0';
+    else if (value >= 30 && value <= 37) keynopeTerminalColor = keynopeANSIColors[value - 30];
+    else if (value >= 90 && value <= 97) keynopeTerminalColor = keynopeANSIBrightColors[value - 90];
+    else if (value === 38 && values[i + 1] === 2 && i + 4 < values.length) {
+      const component = index => Math.max(0, Math.min(255, values[index] || 0)).toString(16).padStart(2, '0');
+      keynopeTerminalColor = '#' + component(i + 2) + component(i + 3) + component(i + 4);
+      i += 4;
+    } else if (value === 38 && values[i + 1] === 5 && i + 2 < values.length) {
+      const index = Math.max(0, Math.min(255, values[i + 2] || 0));
+      if (index < 8) keynopeTerminalColor = keynopeANSIColors[index];
+      else if (index < 16) keynopeTerminalColor = keynopeANSIBrightColors[index - 8];
+      i += 2;
+    }
   }
+}
+function applyKeynopeANSI(value) {
+  for (let i = 0; i < value.length;) {
+    if (value.charCodeAt(i) === 27 && value[i + 1] === '[') {
+      let end = i + 2;
+      while (end < value.length && !/[A-Za-z]/.test(value[end])) end++;
+      if (end >= value.length) break;
+      const params = value.slice(i + 2, end);
+      const command = value[end];
+      if (command === 'H' || command === 'f') {
+        const fields = params.split(';');
+        keynopeTerminalRow = Math.max(0, Math.min(keynopeTerminalRows - 1, Number(fields[0] || 1) - 1));
+        keynopeTerminalCol = Math.max(0, Math.min(keynopeTerminalCols - 1, Number(fields[1] || 1) - 1));
+      } else if (command === 'J' && (params === '' || params === '2')) {
+        keynopeTerminalChars.fill(' ');
+        keynopeTerminalColors.fill('#f3efe0');
+        keynopeTerminalRow = 0;
+        keynopeTerminalCol = 0;
+      } else if (command === 'm') {
+        applyKeynopeSGR(params);
+      }
+      i = end + 1;
+      continue;
+    }
+    const codePoint = value.codePointAt(i);
+    const character = String.fromCodePoint(codePoint);
+    i += character.length;
+    if (character === '\n') {
+      keynopeTerminalRow++;
+      keynopeTerminalCol = 0;
+      continue;
+    }
+    if (character === '\r') {
+      keynopeTerminalCol = 0;
+      continue;
+    }
+    if (keynopeTerminalRow >= 0 && keynopeTerminalRow < keynopeTerminalRows && keynopeTerminalCol >= 0 && keynopeTerminalCol < keynopeTerminalCols) {
+      const index = keynopeTerminalRow * keynopeTerminalCols + keynopeTerminalCol;
+      keynopeTerminalChars[index] = character;
+      keynopeTerminalColors[index] = keynopeTerminalColor;
+    }
+    keynopeTerminalCol++;
+    if (keynopeTerminalCol >= keynopeTerminalCols) {
+      keynopeTerminalCol = 0;
+      keynopeTerminalRow++;
+    }
+  }
+}
+function drawKeynopeTerminal() {
+  keynopeTerminalDrawPending = false;
+  presenterCanvas.style.display = 'block';
+  effectLayer.style.display = 'none';
+  contentLayer.style.display = 'none';
+  chromeLayer.style.display = 'none';
+  presenterContext.clearRect(0, 0, presenterCanvas.width, presenterCanvas.height);
+  presenterContext.fillStyle = '#000000';
+  presenterContext.fillRect(0, 0, presenterCanvas.width, presenterCanvas.height);
+  presenterContext.font = canvasFont;
+  presenterContext.textBaseline = 'top';
+  for (let row = 0; row < keynopeTerminalRows; row++) {
+    let col = 0;
+    while (col < keynopeTerminalCols) {
+      const start = row * keynopeTerminalCols + col;
+      const color = keynopeTerminalColors[start];
+      let text = keynopeTerminalChars[start];
+      let end = col + 1;
+      while (end < keynopeTerminalCols && keynopeTerminalColors[row * keynopeTerminalCols + end] === color) {
+        text += keynopeTerminalChars[row * keynopeTerminalCols + end];
+        end++;
+      }
+      if (text.trim() !== '') {
+        presenterContext.fillStyle = color;
+        presenterContext.fillText(text, col * canvasCharWidth, row * canvasCell);
+      }
+      col = end;
+    }
+  }
+}
+function renderKeynopeAppFrame(next) {
+  if (!next || !Number.isInteger(next.version) || next.version <= keynopeAppFrameVersion) return;
+  keynopeAppFrameVersion = next.version;
+  if (next.cols > 0 && next.rows > 0 && (deck.cols !== next.cols || deck.rows !== next.rows)) {
+    deck.cols = next.cols;
+    deck.rows = next.rows;
+    resize();
+  }
+  if (keynopeTerminalCols !== next.cols || keynopeTerminalRows !== next.rows) {
+    resetKeynopeTerminal(next.cols, next.rows);
+  }
+  applyKeynopeANSI(next.ansi || '');
+  if (!keynopeTerminalDrawPending) {
+    keynopeTerminalDrawPending = true;
+    requestAnimationFrame(drawKeynopeTerminal);
+  }
+}
+function startKeynopeAppFrames() {
+  const events = new EventSource('/terminal-events');
+  events.onmessage = event => {
+    try { renderKeynopeAppFrame(JSON.parse(event.data)); } catch (_err) {}
+  };
+}
+function sendKeynopeAppInput(value) {
+  let input = value;
+  if (value instanceof Uint8Array) input = Array.from(value, byte => String.fromCharCode(byte)).join('');
+  if (!input || typeof input !== 'string') return;
+  const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopeInput;
+  if (handler) handler.postMessage(input);
+}
+function keynopeTerminalSequence(e) {
+  if (e.metaKey) {
+    const key = e.key.toLowerCase();
+    if (key === 'c') return new Uint8Array([3]);
+    if (key === 'x') return new Uint8Array([24]);
+    if (key === 'v') return new Uint8Array([22]);
+    if (key === 'z') return new Uint8Array([e.shiftKey ? 25 : 26]);
+    return null;
+  }
+  if (e.ctrlKey && e.key.length === 1) {
+    const code = e.key.toUpperCase().charCodeAt(0);
+    if (code >= 64 && code <= 95) return new Uint8Array([code - 64]);
+  }
+  const special = {
+    ArrowUp: e.shiftKey ? '\x1b[1;2A' : '\x1b[A',
+    ArrowDown: e.shiftKey ? '\x1b[1;2B' : '\x1b[B',
+    ArrowRight: e.shiftKey ? '\x1b[1;2C' : '\x1b[C',
+    ArrowLeft: e.shiftKey ? '\x1b[1;2D' : '\x1b[D',
+    Enter: e.shiftKey ? '\x1b[13;2u' : '\r',
+    Backspace: '\x7f', Escape: '\x1b', Tab: e.shiftKey ? '\x1b[Z' : '\t',
+    PageUp: '\x1b[5~', PageDown: '\x1b[6~', Home: '\x1b[H', End: '\x1b[F', Delete: '\x1b[3~'
+  };
+  if (special[e.key]) return special[e.key];
+  if (e.key.length === 1 && !e.altKey) return e.key;
+  return null;
+}
+if (keynopeAppSurface) {
+  let editorState = null;
+  let editorStateVersion = -1;
+  let activeInlineEditor = null;
+  let inlineEditCompletion = Promise.resolve();
+  let inlineEditTransitionSequence = 0;
+  let suppressSelectionTopbar = false;
+  let pendingCanvasSelection = null;
+  let editorStatus = null;
+  let editorNormalPages = null;
+  let editorWorkspaceSequence = 0;
+  let editorMutationPreviewSequence = 0;
+  let editorTransparencyIconSequence = 0;
+  let editorElementClipboard = [];
+  let activeCanvasVisualMenu = null;
+  let activeCanvasLinkDialog = null;
+  let emojiPickerPanel = null;
+  let emojiPickerTarget = null;
+  let lastPublishedEditorDirty = null;
+  function publishEditorDirtyState() {
+    const dirty = !!(editorState && editorState.dirty);
+    saveButton.disabled = !dirty;
+    if (dirty === lastPublishedEditorDirty) return;
+    lastPublishedEditorDirty = dirty;
+    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+    if (handler) handler.postMessage({action: 'editor-dirty-state', dirty});
+  }
+  async function editorAction(action) {
+    const enteringMasters = action.action === 'toggle-master-mode' && editorState && !editorState.masterMode;
+    if (enteringMasters) editorNormalPages = (deck.pages || []).slice();
+    const response = await fetch('/api/editor/action', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(action)
+    });
+    if (!response.ok) {
+      const message = (await response.text()).trim() || 'Editor action failed';
+      if (editorStatus) editorStatus.textContent = message;
+      throw new Error(message);
+    }
+    editorState = await response.json();
+    keynopeEditorMasterMode = !!editorState.masterMode;
+    editorStateVersion = editorState.version;
+    renderEditorPanels();
+    await syncEditorWorkspace();
+  }
+  const editorClipboardPrefix = 'keynope-elements:';
+  function editorClipboardTextTarget(target) {
+    return !!target && (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable);
+  }
+  function selectedEditorElements() {
+    if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return [];
+    const elements = editorState.slides[editorState.current].elements || [];
+    const indices = (editorState.selection || []).filter(index => index >= 0 && index < elements.length);
+    if (!indices.length && editorState.selected >= 0 && editorState.selected < elements.length) indices.push(editorState.selected);
+    return indices.map(index => JSON.parse(JSON.stringify(elements[index])));
+  }
+  async function editorClipboardCommand(command) {
+    if (command === 'copy' || command === 'cut') {
+      const elements = selectedEditorElements();
+      if (!elements.length) return;
+      editorElementClipboard = elements;
+      try { await navigator.clipboard.writeText(editorClipboardPrefix + JSON.stringify(elements)); } catch (_err) {}
+      if (command === 'cut') {
+        const action = (editorState.selection || []).length > 1
+          ? {action: 'delete-selection'}
+          : {action: 'delete-element', element: editorState.selected};
+        await editorAction(action);
+      }
+      return;
+    }
+    let elements = editorElementClipboard;
+    try {
+      const value = await navigator.clipboard.readText();
+      if (value.startsWith(editorClipboardPrefix)) {
+        const parsed = JSON.parse(value.slice(editorClipboardPrefix.length));
+        if (Array.isArray(parsed)) elements = parsed;
+      }
+    } catch (_err) {}
+    if (elements && elements.length) await editorAction({action: 'paste-elements', elementsData: elements});
+  }
+  window.keynopeClipboardCommand = editorClipboardCommand;
+  function editorButton(label, action, parent) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.addEventListener('click', () => editorAction(action).catch(() => {}));
+    parent.appendChild(button);
+    return button;
+  }
+  function editorField(parent, label, value, multiline, changed) {
+    const wrapper = document.createElement('label');
+    wrapper.className = 'keynope-editor-field';
+    const caption = document.createElement('span');
+    caption.textContent = label;
+    const input = multiline ? document.createElement('textarea') : document.createElement('input');
+    input.value = value == null ? '' : String(value);
+    input.addEventListener('change', () => changed(input.value));
+    wrapper.append(caption, input);
+    parent.appendChild(wrapper);
+    return input;
+  }
+  function editorNumber(parent, label, value, options, changed) {
+    const input = editorField(parent, label, value, false, changed);
+    input.type = 'number';
+    if (options && options.min != null) input.min = String(options.min);
+    if (options && options.max != null) input.max = String(options.max);
+    if (options && options.step != null) input.step = String(options.step);
+    return input;
+  }
+  function editorSelect(parent, label, value, options, changed) {
+    const wrapper = document.createElement('label');
+    wrapper.className = 'keynope-editor-field';
+    const caption = document.createElement('span');
+    caption.textContent = label;
+    const select = document.createElement('select');
+    for (const optionValue of options) {
+      const option = document.createElement('option');
+      option.value = optionValue === 'none' ? '' : optionValue;
+      option.textContent = optionValue;
+      option.selected = option.value === (value || '');
+      select.appendChild(option);
+    }
+    select.addEventListener('change', () => changed(select.value));
+    wrapper.append(caption, select);
+    parent.appendChild(wrapper);
+  }
+  function editorColor(parent, label, value, fallback, changed) {
+    const wrapper = document.createElement('label');
+    wrapper.className = 'keynope-editor-field';
+    const caption = document.createElement('span');
+    caption.textContent = label;
+    const input = document.createElement('input');
+    input.type = 'color';
+    const rgb = /^(?:38|48);2;(\d+);(\d+);(\d+)$/.exec(value || '');
+    input.value = /^#[0-9a-f]{6}$/i.test(value || '') ? value : rgb
+      ? '#' + rgb.slice(1).map(part => Math.max(0, Math.min(255, Number(part))).toString(16).padStart(2, '0')).join('')
+      : fallback;
+    input.addEventListener('input', () => changed(input.value));
+    wrapper.append(caption, input);
+    parent.appendChild(wrapper);
+  }
+  const topbar = document.createElement('div');
+  topbar.className = 'keynope-editor-topbar';
+  const saveButton = document.createElement('button');
+  saveButton.type = 'button';
+  saveButton.className = 'keynope-save-button keynope-svg-button';
+  saveButton.innerHTML = '<svg viewBox="0 0 800 800" aria-hidden="true"><g transform="translate(0 800) scale(1 -1)"><path d="M120 85h450l110 110v520H120Z" fill="none" stroke="#fff" stroke-width="34" stroke-linejoin="round"/><path d="M225 140v170h320V140M455 175v95" fill="none" stroke="#9b9b9b" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/><rect x="220" y="430" width="360" height="285" rx="28" fill="none" stroke="#fff" stroke-width="32"/><path d="M285 515h230M285 590h230" fill="none" stroke="#9b9b9b" stroke-width="28" stroke-linecap="round"/></g></svg>';
+  saveButton.title = 'Save presentation';
+  saveButton.disabled = true;
+  saveButton.addEventListener('click', () => {
+    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+    if (handler && editorState && editorState.dirty) handler.postMessage({action: 'save-presentation'});
+  });
+  const mainTopbar = document.createElement('div');
+  mainTopbar.className = 'keynope-topbar-mode';
+  const selectionTopbar = document.createElement('div');
+  selectionTopbar.className = 'keynope-topbar-mode';
+  selectionTopbar.hidden = true;
+  topbar.append(saveButton, mainTopbar, selectionTopbar);
+  function svgToolbarButton(title, drawing, action) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'keynope-svg-button';
+    button.title = title;
+    button.setAttribute('aria-label', title);
+    button.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' + drawing + '</svg>';
+    button.addEventListener('click', action);
+    mainTopbar.appendChild(button);
+    return button;
+  }
+  const addSlideButton = svgToolbarButton('Add slide', '<g transform="scale(.025)" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M680 445V152Q680 120 648 120H112Q80 120 80 152V548Q80 580 112 580H450" stroke="#fff" stroke-width="30"/><circle cx="250" cy="290" r="68" stroke="#fff" stroke-width="28"/><path d="M380 255h190M380 325h190M175 445h335" stroke="#fff" stroke-width="28"/><circle cx="620" cy="600" r="150" stroke="#fff" stroke-width="30"/><path d="M620 495v210M515 600h210" stroke="#9b9b9b" stroke-width="62"/><path d="M620 495v210M515 600h210" stroke="#fff" stroke-width="36"/></g>', () => editorAction({action: 'add-slide'}).catch(() => {}));
+  const cloneIconSVG = '<svg viewBox="0 0 800 800" aria-hidden="true"><path d="M540 225V170Q540 130 500 130H170Q130 130 130 170V500Q130 540 170 540h55" fill="none" stroke="#9b9b9b" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/><rect x="245" y="245" width="425" height="425" rx="42" fill="none" stroke="#fff" stroke-width="34"/></svg>';
+  const cloneSlideButton = editorButton('', {action: 'clone-slide'}, mainTopbar);
+  cloneSlideButton.classList.add('keynope-icon-button', 'keynope-clone-button');
+  cloneSlideButton.innerHTML = cloneIconSVG;
+  cloneSlideButton.title = 'Clone slide';
+  cloneSlideButton.setAttribute('aria-label', 'Clone slide');
+  const deleteIconSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><path d="M245 205h310l-25 300c-2 25-23 44-48 44H318c-25 0-46-19-48-44Z" fill="none" stroke="#fff" stroke-width="28" stroke-linejoin="round"/><path d="M205 190h390" fill="none" stroke="#fff" stroke-width="34" stroke-linecap="round"/><path d="M330 180v-48c0-18 14-32 32-32h76c18 0 32 14 32 32v48" fill="none" stroke="#fff" stroke-width="30" stroke-linejoin="round"/><path d="M330 280v170M400 280v170M470 280v170" fill="none" stroke="#fff" stroke-width="25" stroke-linecap="round"/></svg>';
+  const deleteSlideButton = editorButton('', {action: 'delete-slide'}, mainTopbar);
+  deleteSlideButton.classList.add('keynope-icon-button', 'keynope-delete-button');
+  deleteSlideButton.innerHTML = deleteIconSVG;
+  deleteSlideButton.title = 'Delete slide';
+  deleteSlideButton.setAttribute('aria-label', 'Delete slide');
+  const appearanceButton = svgToolbarButton('Appearance', '<path d="M4 4h12M4 10h12M4 16h12"/><circle cx="8" cy="4" r="2" fill="currentColor"/><circle cx="13" cy="10" r="2" fill="currentColor"/><circle cx="7" cy="16" r="2" fill="currentColor"/>', () => {
+    const rect = appearanceButton.getBoundingClientRect();
+    showSlideContextMenu(editorState ? editorState.current : -1, rect.left, rect.bottom + 5);
+  });
+  const slideSeparator = document.createElement('span');
+  slideSeparator.className = 'keynope-editor-separator';
+  mainTopbar.appendChild(slideSeparator);
+  function addElementIconButton(title, kind, drawing, level, activate) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'keynope-svg-button';
+    button.title = title;
+    button.setAttribute('aria-label', title);
+    button.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' + drawing + '</svg>';
+    button.addEventListener('click', () => {
+      if (activate) activate(button);
+      else editorAction({action: 'add-element', kind, level:level || 0}).catch(() => {});
+    });
+    mainTopbar.appendChild(button);
+    return button;
+  }
+  addElementIconButton('Add title', 'heading', '<path d="M3 4v12M11 4v12M3 10h8"/><path d="M14 7h3v9M14 16h5"/>', 1);
+  addElementIconButton('Add subtitle', 'heading', '<path d="M3 4v12M11 4v12M3 10h8"/><text x="13" y="17" fill="currentColor" stroke="none" font-size="11" font-family="-apple-system, sans-serif" font-weight="700">2</text>', 2);
+  addElementIconButton('Add text', 'text', '<path d="M3 4h14M10 4v12M7 16h6"/>');
+  addElementIconButton('Add bullet point', 'bullet', '<circle cx="4" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="4" cy="14" r="1" fill="currentColor" stroke="none"/><path d="M8 6h9M8 14h9"/>');
+  addElementIconButton('Add code', 'code', '<path d="M7 5 3 10l4 5M13 5l4 5-4 5M11 3 9 17"/>');
+  addElementIconButton('Add emoji', 'text', '<circle cx="10" cy="10" r="7"/><circle cx="7.5" cy="8" r=".8" fill="currentColor" stroke="none"/><circle cx="12.5" cy="8" r=".8" fill="currentColor" stroke="none"/><path d="M6.5 11.5c1.5 2.5 5.5 2.5 7 0"/>', 0, button => openEmojiPicker(button, -1, 'add'));
+  const addPageNumberButton = addElementIconButton('Show slide number', 'page-number', '<g transform="scale(.025)" fill="none" stroke-linejoin="round"><path d="M145 65h350l160 160v510H145Z" stroke="#fff" stroke-width="32"/><path d="M495 65v160h160" stroke="#fff" stroke-width="32"/><path d="M230 300h340M230 385h340M230 470h250" stroke="#9b9b9b" stroke-width="28" stroke-linecap="round"/><path d="M205 560h390" stroke="#fff" stroke-width="26" stroke-linecap="round"/><path d="m370 630 34-25v85M365 690h90" stroke="#fff" stroke-width="30" stroke-linecap="round"/></g>', 0, () => editorAction({action: 'toggle-page-number'}).catch(() => {}));
+  addPageNumberButton.classList.add('keynope-page-number-button');
+  const addPageNumberTag = document.createElement('span');
+  addPageNumberTag.className = 'keynope-page-number-tag';
+  addPageNumberButton.appendChild(addPageNumberTag);
+  addPageNumberButton.hidden = true;
+  const addShapeMenu = document.createElement('div');
+  addShapeMenu.className = 'keynope-add-shape-menu';
+  addShapeMenu.hidden = true;
+  document.body.appendChild(addShapeMenu);
+  function closeAddShapeMenu() {
+    addShapeMenu.hidden = true;
+  }
+  function toggleAddShapeMenu(anchor) {
+    if (!addShapeMenu.hidden) { closeAddShapeMenu(); return; }
+    addShapeMenu.hidden = false;
+    const rect = anchor.getBoundingClientRect();
+    const menuRect = addShapeMenu.getBoundingClientRect();
+    addShapeMenu.style.left = Math.max(8, Math.min(innerWidth - menuRect.width - 8, rect.left)) + 'px';
+    addShapeMenu.style.top = Math.max(8, Math.min(innerHeight - menuRect.height - 8, rect.bottom + 6)) + 'px';
+  }
+  const addShapeButton = addElementIconButton('Add shape', 'shape', '<circle cx="7" cy="8" r="4"/><path d="m13 7 4 8H9z"/>', 0, toggleAddShapeMenu);
+  for (const [shape, label, drawing] of [
+    ['circle','Circle','<circle cx="20" cy="18" r="13"/>'],
+    ['square','Square','<rect x="7" y="5" width="26" height="26" rx="1"/>'],
+    ['triangle','Triangle','<path d="M20 4 35 31H5z"/>'],
+    ['diamond','Diamond','<path d="m20 3 16 15-16 15L4 18z"/>']
+  ]) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.title = 'Add ' + label.toLowerCase();
+    button.setAttribute('aria-label', button.title);
+    button.innerHTML = '<svg viewBox="0 0 40 36" aria-hidden="true" fill="currentColor" stroke="currentColor" stroke-width="1.5">' + drawing + '</svg>';
+    button.addEventListener('click', () => {
+      closeAddShapeMenu();
+      editorAction({action: 'add-element', kind:'shape', name:shape}).catch(() => {});
+    });
+    addShapeMenu.appendChild(button);
+  }
+  document.addEventListener('pointerdown', event => {
+    if (!addShapeMenu.contains(event.target) && event.target !== addShapeButton) closeAddShapeMenu();
+  }, true);
+  const imageInput = document.createElement('input');
+  imageInput.type = 'file';
+  imageInput.accept = 'image/*';
+  imageInput.hidden = true;
+	imageInput.addEventListener('change', async () => {
+		if (!imageInput.files || !imageInput.files[0]) return;
+		const selectedFile = imageInput.files[0];
+		const animatedGIF = selectedFile.type === 'image/gif' || /\.gif$/i.test(selectedFile.name || '');
+		if (animatedGIF) showEditorRenderingProgress();
+		try {
+			const body = new FormData();
+			body.append('image', selectedFile);
+			const response = await fetch('/api/editor/upload', {method: 'POST', body});
+      if (!response.ok) throw new Error((await response.text()).trim() || 'Image upload failed');
+      editorState = await response.json();
+			editorStateVersion = editorState.version;
+			renderEditorPanels();
+			const inserted = editorState && editorState.slides && editorState.slides[editorState.current]
+				? (editorState.slides[editorState.current].elements || [])[editorState.selected]
+				: null;
+			if (inserted) await previewCanvasMutation(editorState.selected, inserted, true, animatedGIF);
+		} catch (error) {
+      window.alert('Could not import image\n\n' + (error && error.message ? error.message : String(error)));
+		} finally {
+			if (animatedGIF) hideEditorRenderingProgress();
+			imageInput.value = '';
+		}
+  });
+  const importButton = document.createElement('button');
+  importButton.innerHTML = '<svg viewBox="-13 80 1050 1040" aria-hidden="true"><path d="M-13 1120V80h1050v1040Zm292-428q-18 0-27.5-17t-9.5-35.5 8-28q-4-10-4-23 0-12 4-23.75t13.5-15.25q-4.5-9-4.5-22 0-20.5 6-38.5t12.5-18 12.5 17.75 6 38.75q0 13-4.5 22 10 3.5 13.75 15t3.75 23q0 7.5-1.25 13.75T305 611.5q8.5 10 8.5 30.5 0 17.5-8.5 33.75T279 692m130.5 32.5q-15 0-33.5-4.75t-32-14.25-13.5-24q0-13.5 6.5-22.75T353 648q-3.5-6.5-3.5-13.5 0-10.5 7.5-18.25t18.5-9.75q-1-3-1-6 0-11 5.75-18.5t13.75-7.5q7.5 0 12.5 7t5 17q0 4.5-1.5 10 13 12 13 28 0 9-5 15.5 11 9 16.75 20t5.75 22.5q0 16-7 23t-24 7m266 97.5q-81.5 0-151.25-23T378.5 742q-54-24.5-99-38.25T191 684l6-40q46 6.5 93.75 21.5T394.5 706q74.5 34 139.75 55t140.25 21q34 0 70.75-5t79.25-15.5l10 39q-44.5 11-84 16.25t-75 5.25M27 1080h970V120H27Zm147-145.5v-669h676v669Zm40-40h596v-589H214ZM404.5 750v-40q40 0 73.5-2t64-7q24.5-4 47.75-11.25A1586 1586 0 0 0 637.5 674q40-14.5 86-26.5T829 633l2 40q-56 2-98.75 13.5t-82.25 25q-24.5 8.5-49.25 16T549 740q-32 6-67.25 8t-77.25 2m84-193q-29.5 0-46-24-17.5 1.5-30-9.25T400 497q0-15.5 10.5-26.25t26-12.25Q434 447 434 437q0-28 20.5-48t48.5-20q23.5 0 43 14.5t24.5 36.5q27.5-1.5 41.75 9.75T625 464.5q17.5-1.5 30.25 9.5T668 499t-13.75 24.25T621 533.5q-11.5 0-23.5-4-13 17-39 17-16 0-28.5-8-17.5 18.5-41.5 18.5m129 130q0-17 10.5-30.5t25-20 26.5-3q2.5-16 17-24.5t28.5-8.5q17.5 0 22.5 10.5 5-16.5 24.75-30t44.25-13.5V642q-50.5 0-104.75 14.75T617.5 687"/></svg>';
+  importButton.className = 'keynope-icon-button keynope-monochrome-icon';
+  importButton.title = 'Import image';
+  importButton.setAttribute('aria-label', 'Import image');
+  importButton.addEventListener('click', () => imageInput.click());
+  mainTopbar.append(importButton, imageInput);
+  const editSeparator = document.createElement('span');
+  editSeparator.className = 'keynope-editor-separator';
+  mainTopbar.appendChild(editSeparator);
+  const undoButton = editorButton('⟲', {action: 'undo'}, mainTopbar);
+  undoButton.classList.add('keynope-icon-button', 'keynope-history-button');
+  undoButton.innerHTML = '<span class="keynope-history-icon" aria-hidden="true">⟲</span><span class="keynope-history-label">UNDO</span>';
+  undoButton.title = 'Undo';
+  undoButton.setAttribute('aria-label', 'Undo');
+  const redoButton = editorButton('⟳', {action: 'redo'}, mainTopbar);
+  redoButton.classList.add('keynope-icon-button', 'keynope-history-button');
+  redoButton.innerHTML = '<span class="keynope-history-icon" aria-hidden="true">⟳</span><span class="keynope-history-label">REDO</span>';
+  redoButton.title = 'Redo';
+  redoButton.setAttribute('aria-label', 'Redo');
+  const exportButton = document.createElement('button');
+  exportButton.type = 'button';
+  exportButton.innerHTML = '<svg viewBox="0 0 800 600" aria-hidden="true"><path d="M120 55h290l130 130v350H120Z" fill="none" stroke="#fff" stroke-width="28" stroke-linejoin="round"/><path d="M410 55v130h130" fill="none" stroke="#fff" stroke-width="28" stroke-linejoin="round"/><path d="m250 245-65 55 65 55M405 245l65 55-65 55M350 220l-55 160" fill="none" stroke="#9b9b9b" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/><path d="M350 445h330M610 375l70 70-70 70" fill="none" stroke="#fff" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="keynope-export-label">HTML</span>';
+  exportButton.addEventListener('click', () => {
+    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+    if (handler) handler.postMessage({action: 'export-html'});
+  });
+  mainTopbar.appendChild(exportButton);
+  exportButton.classList.add('keynope-icon-button', 'keynope-monochrome-icon', 'keynope-export-button');
+  exportButton.title = 'Export to HTML';
+  exportButton.setAttribute('aria-label', 'Export to HTML');
+  deleteSlideButton.classList.add('keynope-toolbar-delete');
+  mainTopbar.appendChild(deleteSlideButton);
+  document.body.appendChild(topbar);
+
+  const slidesPanel = document.createElement('aside');
+  slidesPanel.className = 'keynope-editor-panel keynope-editor-slides';
+  document.body.appendChild(slidesPanel);
+  let draggedMasterIndex = -1;
+  let draggedMasterButton = null;
+  let masterDropDestination = -1;
+  let masterDropPlaceholder = null;
+  let masterDragImage = null;
+  function finishMasterDrag() {
+    if (draggedMasterButton) {
+      draggedMasterButton.classList.remove('master-dragging', 'master-drag-outline');
+    }
+    if (masterDropPlaceholder) masterDropPlaceholder.remove();
+    if (masterDragImage) masterDragImage.remove();
+    draggedMasterIndex = -1;
+    draggedMasterButton = null;
+    masterDropDestination = -1;
+    masterDropPlaceholder = null;
+    masterDragImage = null;
+  }
+  function updateMasterDropPlaceholder(clientY) {
+    if (draggedMasterIndex <= 0 || !draggedMasterButton) return;
+    const remaining = Array.from(slidesPanel.querySelectorAll('.keynope-slide-item[data-master-index]'))
+      .filter(item => Number(item.dataset.masterIndex) > 0 && Number(item.dataset.masterIndex) !== draggedMasterIndex);
+    const reference = remaining.find(item => clientY < item.getBoundingClientRect().top + item.getBoundingClientRect().height / 2) || null;
+    masterDropDestination = reference ? remaining.indexOf(reference) + 1 : remaining.length + 1;
+    if (!masterDropPlaceholder) {
+      masterDropPlaceholder = document.createElement('div');
+      masterDropPlaceholder.className = 'keynope-master-drop-placeholder';
+      masterDropPlaceholder.setAttribute('aria-hidden', 'true');
+      masterDropPlaceholder.style.height = Math.max(30, draggedMasterButton.getBoundingClientRect().height) + 'px';
+    }
+    if (reference) slidesPanel.insertBefore(masterDropPlaceholder, reference);
+    else slidesPanel.appendChild(masterDropPlaceholder);
+  }
+  slidesPanel.addEventListener('dragover', event => {
+    if (draggedMasterIndex <= 0) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    updateMasterDropPlaceholder(event.clientY);
+    const panelRect = slidesPanel.getBoundingClientRect();
+    if (event.clientY < panelRect.top + 36) slidesPanel.scrollBy({top: -18});
+    else if (event.clientY > panelRect.bottom - 36) slidesPanel.scrollBy({top: 18});
+  });
+  slidesPanel.addEventListener('drop', event => {
+    if (draggedMasterIndex <= 0) return;
+    event.preventDefault();
+    updateMasterDropPlaceholder(event.clientY);
+    const source = draggedMasterIndex;
+    const destination = masterDropDestination;
+    finishMasterDrag();
+    if (destination > 0 && destination !== source) {
+      editorAction({action: 'reorder-master', slide: source, value: destination}).catch(() => {});
+    }
+  });
+  const masterModeButton = document.createElement('button');
+  masterModeButton.type = 'button';
+  masterModeButton.textContent = 'M';
+  masterModeButton.title = 'Master slides';
+  masterModeButton.setAttribute('aria-label', 'Master slides');
+  masterModeButton.addEventListener('click', () => editorAction({action: 'toggle-master-mode'}).catch(() => {}));
+  const inspector = document.createElement('div');
+  const slideContextMenu = document.createElement('div');
+  slideContextMenu.className = 'keynope-slide-context';
+  document.body.appendChild(slideContextMenu);
+  const canvasOverlay = document.createElement('div');
+  canvasOverlay.className = 'keynope-canvas-overlay';
+  stage.appendChild(canvasOverlay);
+  const speakerNotesPanel = document.createElement('section');
+  speakerNotesPanel.className = 'keynope-speaker-notes';
+  const speakerNotesLabel = document.createElement('label');
+  speakerNotesLabel.textContent = 'Speaker notes';
+  const speakerNotesInput = document.createElement('textarea');
+  speakerNotesInput.setAttribute('aria-label', 'Speaker notes');
+  speakerNotesInput.placeholder = 'Add notes for this slide…';
+  speakerNotesPanel.append(speakerNotesLabel, speakerNotesInput);
+  document.body.appendChild(speakerNotesPanel);
+  let speakerNotesSlide = -1;
+  let speakerNotesSaveTimer = null;
+  let speakerNotesDirty = false;
+  let speakerNotesDirtySlide = -1;
+  let speakerNotesDirtyValue = '';
+  let speakerNotesSavingSlide = -1;
+  let notesToggleButton = null;
+  function setSpeakerNotesVisible(visible, focusNotes) {
+    editorSpeakerNotesVisible = !!visible;
+    document.documentElement.setAttribute('data-keynope-notes', editorSpeakerNotesVisible ? 'true' : 'false');
+    if (notesToggleButton) {
+      notesToggleButton.classList.toggle('active', editorSpeakerNotesVisible);
+      notesToggleButton.setAttribute('aria-pressed', editorSpeakerNotesVisible ? 'true' : 'false');
+    }
+    resize();
+    requestAnimationFrame(renderEditorCanvasOverlay);
+    if (editorSpeakerNotesVisible && focusNotes) requestAnimationFrame(() => speakerNotesInput.focus());
+  }
+  function renderSpeakerNotes(slide) {
+    if (!slide) return;
+    const changedSlide = speakerNotesSlide !== editorState.current;
+    if (changedSlide || (document.activeElement !== speakerNotesInput && speakerNotesSavingSlide !== editorState.current && !speakerNotesDirty)) {
+      speakerNotesInput.value = slide.notes || '';
+      speakerNotesSlide = editorState.current;
+    }
+  }
+  function flushSpeakerNotes() {
+    if (!speakerNotesDirty || speakerNotesDirtySlide < 0) return;
+    if (speakerNotesSaveTimer) {
+      clearTimeout(speakerNotesSaveTimer);
+      speakerNotesSaveTimer = null;
+    }
+    const slide = speakerNotesDirtySlide;
+    const notes = speakerNotesDirtyValue;
+    speakerNotesDirty = false;
+    speakerNotesSavingSlide = slide;
+    editorAction({action: 'update-slide-notes', slide, notes}).then(() => {
+      if (speakerNotesSavingSlide === slide) speakerNotesSavingSlide = -1;
+    }).catch(() => {
+      speakerNotesSavingSlide = -1;
+      speakerNotesDirty = true;
+      speakerNotesDirtySlide = slide;
+      speakerNotesDirtyValue = notes;
+    });
+  }
+  speakerNotesInput.addEventListener('input', () => {
+    speakerNotesDirty = true;
+    speakerNotesDirtySlide = editorState ? editorState.current : -1;
+    speakerNotesDirtyValue = speakerNotesInput.value;
+    if (speakerNotesSaveTimer) clearTimeout(speakerNotesSaveTimer);
+    speakerNotesSaveTimer = setTimeout(flushSpeakerNotes, 2000);
+  });
+  speakerNotesInput.addEventListener('keydown', async event => {
+    event.stopPropagation();
+    if (!(event.ctrlKey || event.metaKey) || !['c','x','v'].includes(event.key.toLowerCase())) return;
+    event.preventDefault();
+    const command = event.key.toLowerCase();
+    const start = speakerNotesInput.selectionStart || 0;
+    const end = speakerNotesInput.selectionEnd || 0;
+    try {
+      if (command === 'c' || command === 'x') {
+        if (start === end) return;
+        await navigator.clipboard.writeText(speakerNotesInput.value.slice(start, end));
+        if (command === 'x') {
+          speakerNotesInput.setRangeText('', start, end, 'start');
+          speakerNotesInput.dispatchEvent(new Event('input', {bubbles:true}));
+        }
+      } else {
+        const pasted = await navigator.clipboard.readText();
+        speakerNotesInput.setRangeText(pasted, start, end, 'end');
+        speakerNotesInput.dispatchEvent(new Event('input', {bubbles:true}));
+      }
+    } catch (_err) {
+      document.execCommand(command === 'c' ? 'copy' : command === 'x' ? 'cut' : 'paste');
+    }
+  });
+  speakerNotesInput.addEventListener('keyup', event => event.stopPropagation());
+  speakerNotesInput.addEventListener('blur', flushSpeakerNotes);
+  document.addEventListener('pointerdown', event => {
+    if (!speakerNotesPanel.contains(event.target)) flushSpeakerNotes();
+  }, true);
+
+  let editorPreviewOriginal = null;
+  let editorPreviewSequence = 0;
+	function replaceEditorPreviewPages(slide, pages) {
+    const first = deck.pages.findIndex(page => page.slide === slide);
+    if (first < 0 || !Array.isArray(pages) || !pages.length) return;
+    let end = first;
+    while (end < deck.pages.length && deck.pages[end].slide === slide) end++;
+    const currentPage = deck.pages[pageIndex] && deck.pages[pageIndex].slide === slide ? deck.pages[pageIndex].page : 0;
+		deck.pages.splice(first, end - first, ...pages);
+		contentAnimationCache.clear();
+    const next = deck.pages.findIndex(page => page.slide === slide && page.page === currentPage);
+    pageIndex = next >= 0 ? next : first;
+  }
+  function restoreEditorPreview() {
+    if (!editorPreviewOriginal) return;
+    replaceEditorPreviewPages(editorPreviewOriginal.slide, editorPreviewOriginal.pages);
+    editorPreviewOriginal = null;
+  }
+  async function previewEditorText(index, element, cursor, selectionStart, selectionEnd, sequence) {
+    try {
+      const response = await fetch('/api/editor/preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name:'inline-edit', element: index, elementData: element, cursor, selectionStart, selectionEnd,
+          page: deck.pages && deck.pages[pageIndex] ? (deck.pages[pageIndex].page || 0) : 0,
+          cols: deck.cols, rows: deck.rows})
+      });
+      if (!response.ok) return;
+      const payload = await response.json();
+      const pages = Array.isArray(payload) ? payload : payload.pages;
+      if (!activeInlineEditor || activeInlineEditor.element !== index || sequence !== editorPreviewSequence) return;
+      replaceEditorPreviewPages(editorState.current, pages);
+      if (payload && payload.caret && editorCanvasCaret) {
+        editorCanvasCaret.exact = payload.caret;
+        editorCanvasCaret.selection = Array.isArray(payload.selectionRows) && payload.selectionRows.length
+          ? payload.selectionRows : null;
+      }
+      drawFrame();
+    } catch (_err) {}
+  }
+  function editorElementSignature(element) {
+    if (!element) return '';
+    return [element.kind || '', element.level || 0, element.text || '', element.path || '', element.query || '', element.id || '', element.slotId || ''].join('\u001f');
+  }
+  function editorElementIndexMaps() {
+    const raw = editorState && editorState.slides && editorState.slides[editorState.current] ? (editorState.slides[editorState.current].elements || []) : [];
+    const resolved = editorState && editorState.resolved && editorState.resolved[editorState.current] ? (editorState.resolved[editorState.current].elements || []) : raw;
+    const rawToResolved = new Map();
+    const resolvedToRaw = new Map();
+    const used = new Set();
+    raw.forEach((element, rawIndex) => {
+      const signature = editorElementSignature(element);
+      let resolvedIndex = resolved.findIndex((candidate, index) => !used.has(index) && editorElementSignature(candidate) === signature);
+      if (resolvedIndex < 0 && rawIndex < resolved.length && !used.has(rawIndex)) resolvedIndex = rawIndex;
+      if (resolvedIndex < 0) return;
+      used.add(resolvedIndex);
+      rawToResolved.set(rawIndex, resolvedIndex);
+      resolvedToRaw.set(resolvedIndex, rawIndex);
+    });
+    return {rawToResolved, resolvedToRaw};
+  }
+  function inlineEditorVerticalCursor(value, cursor, direction, kind) {
+    const starts = [0];
+    for (let index = 0; index < value.length; index++) if (value[index] === '\n') starts.push(index + 1);
+    let lineIndex = 0;
+    while (lineIndex + 1 < starts.length && starts[lineIndex + 1] <= cursor) lineIndex++;
+    const targetIndex = lineIndex + direction;
+    if (targetIndex < 0 || targetIndex >= starts.length) return null;
+    const lineEnd = lineIndex + 1 < starts.length ? starts[lineIndex + 1] - 1 : value.length;
+    const targetEnd = targetIndex + 1 < starts.length ? starts[targetIndex + 1] - 1 : value.length;
+    const currentLine = value.slice(starts[lineIndex], lineEnd);
+    const targetLine = value.slice(starts[targetIndex], targetEnd);
+    const bulletIndent = line => kind === 'bullet' && /^\s/.test(line) ? (line.match(/^\s*/) || [''])[0].length : 0;
+    const currentIndent = bulletIndent(currentLine);
+    const targetIndent = bulletIndent(targetLine);
+    const visibleColumn = Math.max(0, Math.min(currentLine.length, cursor - starts[lineIndex]) - currentIndent);
+    const targetLength = Math.max(0, targetLine.length - targetIndent);
+    return starts[targetIndex] + targetIndent + Math.min(visibleColumn, targetLength);
+  }
+  function inlineEditorFormattingJump(value, cursor, direction) {
+    const expression = /\[color=#[0-9a-f]{6}\]|\[\/color\]/ig;
+    let match;
+    while ((match = expression.exec(value)) !== null) {
+      const start = match.index;
+      const end = start + match[0].length;
+      if (direction < 0 && cursor > start && cursor <= end) return start;
+      if (direction > 0 && cursor >= start && cursor < end) return end;
+    }
+    return null;
+  }
+  function moveInlineEditorAcrossFormatting(editor, direction, extend) {
+    if (!extend && editor.selectionStart !== editor.selectionEnd) return false;
+    const active = editor.selectionDirection === 'backward' ? editor.selectionStart : editor.selectionEnd;
+    let target = inlineEditorFormattingJump(editor.value, active, direction);
+    if (target == null) return false;
+    if (!extend) {
+      editor.setSelectionRange(target, target);
+      return true;
+    }
+    while (true) {
+      const nextTagBoundary = inlineEditorFormattingJump(editor.value, target, direction);
+      if (nextTagBoundary == null) break;
+      target = nextTagBoundary;
+    }
+    target = direction < 0
+      ? inlineEditorPreviousTextBoundary(editor.value, target)
+      : inlineEditorNextTextBoundary(editor.value, target);
+    const anchor = editor.selectionDirection === 'backward' ? editor.selectionEnd : editor.selectionStart;
+    editor.setSelectionRange(Math.min(anchor, target), Math.max(anchor, target), target < anchor ? 'backward' : 'forward');
+    return true;
+  }
+  const inlineEditorGraphemeSegmenter = typeof Intl !== 'undefined' && Intl.Segmenter
+    ? new Intl.Segmenter(undefined, {granularity:'grapheme'}) : null;
+  function inlineEditorPreviousTextBoundary(value, cursor) {
+    if (cursor <= 0) return 0;
+    if (!inlineEditorGraphemeSegmenter) return cursor - ([...value.slice(0, cursor)].pop() || '').length;
+    let previous = 0;
+    for (const segment of inlineEditorGraphemeSegmenter.segment(value.slice(0, cursor))) previous = segment.index;
+    return previous;
+  }
+  function inlineEditorNextTextBoundary(value, cursor) {
+    if (cursor >= value.length) return value.length;
+    if (!inlineEditorGraphemeSegmenter) return cursor + ([...value.slice(cursor)][0] || '').length;
+    for (const segment of inlineEditorGraphemeSegmenter.segment(value)) {
+      if (segment.index >= cursor) return segment.index + segment.segment.length;
+    }
+    return value.length;
+  }
+  function cleanupInlineEditorEmptyColorTags(editor) {
+    const pattern = /\[color=#[0-9a-f]{6}\]\[\/color\]/ig;
+    let value = editor.value;
+    let selectionStart = editor.selectionStart || 0;
+    let selectionEnd = editor.selectionEnd || 0;
+    let changed = false;
+    let match;
+    while ((match = pattern.exec(value)) !== null) {
+      const start = match.index;
+      const end = start + match[0].length;
+      const removed = end - start;
+      const adjust = position => position <= start ? position : position < end ? start : position - removed;
+      selectionStart = adjust(selectionStart);
+      selectionEnd = adjust(selectionEnd);
+      value = value.slice(0, start) + value.slice(end);
+      pattern.lastIndex = 0;
+      changed = true;
+    }
+    if (!changed) return false;
+    editor.value = value;
+    editor.setSelectionRange(selectionStart, selectionEnd, editor.selectionDirection || 'none');
+    return true;
+  }
+  function deleteInlineEditorColorContent(editor, direction) {
+    if (editor.selectionStart !== editor.selectionEnd) return false;
+    const cursor = editor.selectionStart || 0;
+    if (direction < 0) {
+      const closing = /\[\/color\]$/i.exec(editor.value.slice(0, cursor));
+      if (closing) {
+        const closeStart = cursor - closing[0].length;
+        const prefix = editor.value.slice(0, closeStart);
+        const openings = [...prefix.matchAll(/\[color=#[0-9a-f]{6}\]/ig)];
+        const opening = openings[openings.length - 1];
+        if (opening) {
+          const contentStart = opening.index + opening[0].length;
+          const removeStart = inlineEditorPreviousTextBoundary(editor.value, closeStart);
+          if (removeStart >= contentStart) {
+            editor.setRangeText('', removeStart, closeStart, 'end');
+            const nextCursor = cursor - (closeStart - removeStart);
+            editor.setSelectionRange(nextCursor, nextCursor);
+            editor.dispatchEvent(new Event('input', {bubbles:true}));
+            return true;
+          }
+        }
+      }
+    } else {
+      const opening = /^\[color=#[0-9a-f]{6}\]/i.exec(editor.value.slice(cursor));
+      if (opening) {
+        const contentStart = cursor + opening[0].length;
+        const closeOffset = editor.value.slice(contentStart).search(/\[\/color\]/i);
+        if (closeOffset >= 0) {
+          const closeStart = contentStart + closeOffset;
+          const removeEnd = inlineEditorNextTextBoundary(editor.value, contentStart);
+          if (removeEnd <= closeStart && removeEnd > contentStart) {
+            editor.setRangeText('', contentStart, removeEnd, 'start');
+            editor.setSelectionRange(cursor, cursor);
+            editor.dispatchEvent(new Event('input', {bubbles:true}));
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+  function deleteInlineEditorAcrossFormatting(editor, direction) {
+    if (editor.selectionStart !== editor.selectionEnd) return false;
+    const cursor = editor.selectionStart || 0;
+    const boundary = inlineEditorFormattingJump(editor.value, cursor, direction);
+    if (boundary == null) return false;
+    if (direction < 0) {
+      const removeStart = inlineEditorPreviousTextBoundary(editor.value, boundary);
+      if (removeStart < boundary) editor.setRangeText('', removeStart, boundary, 'end');
+    } else {
+      const removeEnd = inlineEditorNextTextBoundary(editor.value, boundary);
+      if (removeEnd > boundary) editor.setRangeText('', boundary, removeEnd, 'start');
+      editor.setSelectionRange(cursor, cursor);
+    }
+    editor.dispatchEvent(new Event('input', {bubbles:true}));
+    return true;
+  }
+  function deleteInlineEditorSelectionPreservingFormatting(editor) {
+    const start = editor.selectionStart || 0;
+    const end = editor.selectionEnd || 0;
+    if (start === end) return false;
+    const tags = [...editor.value.matchAll(/\[color=#[0-9a-f]{6}\]|\[\/color\]/ig)]
+      .filter(match => match.index >= start && match.index + match[0].length <= end);
+    if (!tags.length) return false;
+    const preserved = tags.map(match => match[0]).join('');
+    editor.value = editor.value.slice(0, start) + preserved + editor.value.slice(end);
+    const cursor = start + preserved.length;
+    editor.setSelectionRange(cursor, cursor);
+    editor.dispatchEvent(new Event('input', {bubbles:true}));
+    return true;
+  }
+  function inlineEditorInitialCursor(value) {
+    if (/^\[color=#[0-9a-f]{6}\][\s\S]*\[\/color\]$/i.test(value)) return value.length - '[/color]'.length;
+    for (const marker of ['***', '**', '*']) {
+      if (value.length >= marker.length * 2 && value.startsWith(marker) && value.endsWith(marker)) {
+        return value.length - marker.length;
+      }
+    }
+    return value.length;
+  }
+  function applyInlineSelectionWrapper(marker) {
+    const active = activeInlineEditor;
+    if (!active) return;
+    const editor = active.editor;
+    const start = editor.selectionStart || 0;
+    const end = editor.selectionEnd || 0;
+    if (start === end) return;
+    const selected = editor.value.slice(start, end);
+    const wrapped = selected.length >= marker.length * 2 && selected.startsWith(marker) && selected.endsWith(marker);
+    const replacement = wrapped ? selected.slice(marker.length, -marker.length) : marker + selected + marker;
+    editor.setRangeText(replacement, start, end, 'select');
+    const innerStart = start + (wrapped ? 0 : marker.length);
+    editor.setSelectionRange(innerStart, innerStart + (wrapped ? replacement.length : selected.length));
+    editor.dispatchEvent(new Event('input', {bubbles:true}));
+  }
+  function applyInlineSelectionColour(color, savedSelection) {
+    const active = activeInlineEditor;
+    if (!active || !/^#[0-9a-f]{6}$/i.test(color || '')) return;
+    const editor = active.editor;
+    const start = savedSelection ? savedSelection.start : (editor.selectionStart || 0);
+    const end = savedSelection ? savedSelection.end : (editor.selectionEnd || 0);
+    if (start === end) return;
+    const selected = editor.value.slice(start, end);
+    const replacement = '[color=' + color.toLowerCase() + ']' + selected + '[/color]';
+    editor.setRangeText(replacement, start, end, 'select');
+    const innerStart = start + color.length + 8;
+    editor.setSelectionRange(innerStart, innerStart + selected.length);
+    editor.dispatchEvent(new Event('input', {bubbles:true}));
+  }
+  function inlineSelectionColourTool() {
+    const label = document.createElement('label');
+    label.className = 'keynope-colour-tool';
+    label.textContent = 'A';
+    label.title = 'Colour selected text';
+    label.setAttribute('aria-label', label.title);
+    label.style.setProperty('--keynope-tool-colour', '#55aaff');
+    const input = document.createElement('input');
+    input.type = 'color';
+    input.value = '#55aaff';
+    input.setAttribute('aria-label', 'Choose selection colour');
+    input.addEventListener('pointerdown', event => {
+      event.stopPropagation();
+      if (!activeInlineEditor) return;
+      activeInlineEditor.savedSelection = {start:activeInlineEditor.editor.selectionStart || 0, end:activeInlineEditor.editor.selectionEnd || 0};
+      activeInlineEditor.suspendBlur = true;
+    });
+    input.addEventListener('change', event => {
+      event.stopPropagation();
+      const active = activeInlineEditor;
+      if (!active) return;
+      applyInlineSelectionColour(input.value, active.savedSelection);
+      active.suspendBlur = false;
+      active.editor.focus();
+    });
+    input.addEventListener('blur', () => {
+      const active = activeInlineEditor;
+      if (!active || !active.suspendBlur) return;
+      active.suspendBlur = false;
+      active.editor.focus();
+    });
+    label.appendChild(input);
+    return label;
+  }
+  async function beginInlineEdit(index, hit) {
+    const transition = ++inlineEditTransitionSequence;
+    if (activeInlineEditor && activeInlineEditor.element === index && activeInlineEditor.editor.isConnected) {
+      activeInlineEditor.editor.focus();
+      return;
+    }
+    const pendingEdit = activeInlineEditor ? activeInlineEditor.finish(true) : inlineEditCompletion;
+    await pendingEdit;
+    if (transition !== inlineEditTransitionSequence || !editorState || !editorState.slides || !editorState.slides[editorState.current]) return;
+    const original = editorState.slides[editorState.current].elements[index];
+    if (!original || !['heading','text','bullet','code'].includes(original.kind)) {
+      if (editorStatus) editorStatus.textContent = 'Select a text element to edit its content';
+      return;
+    }
+    if (!hit) hit = canvasOverlay.querySelector('[data-element="' + index + '"]');
+    if (!hit) return;
+    if (pendingCanvasSelection) {
+      clearTimeout(pendingCanvasSelection);
+      pendingCanvasSelection = null;
+    }
+    const element = {...original};
+    const originalText = element.text || '';
+    const resolvedElement = editorElementIndexMaps().rawToResolved.get(index);
+    const editor = document.createElement('textarea');
+    editor.className = 'keynope-inline-capture';
+    editor.setAttribute('aria-label', 'Edit element text');
+    editor.spellcheck = false;
+    editor.value = element.text || '';
+    const slide = editorState.current;
+    const first = deck.pages.findIndex(page => page.slide === slide);
+    let end = first;
+    while (end >= 0 && end < deck.pages.length && deck.pages[end].slide === slide) end++;
+    editorPreviewOriginal = first >= 0 ? {slide, pages: deck.pages.slice(first, end)} : null;
+    let finished = false;
+    let finishPromise = null;
+    let discardDialog = null;
+    const normalizedText = value => {
+      if (element.kind !== 'bullet') return value;
+      const lines = [];
+      for (const raw of value.split(/\r?\n/)) {
+        const text = raw.trim();
+        if (!text) continue;
+        const continuation = /^\s/.test(raw) && lines.length > 0;
+        lines.push(continuation ? '  ' + text : text);
+      }
+      return lines.join('\n');
+    };
+    const finish = save => {
+      if (finished) return finishPromise || Promise.resolve();
+      finished = true;
+      if (discardDialog) {
+        discardDialog.remove();
+        discardDialog = null;
+      }
+      activeInlineEditor = null;
+      suppressSelectionTopbar = true;
+      const text = save ? normalizedText(editor.value) : editor.value;
+      editor.remove();
+      editorCanvasCaret = null;
+      mainTopbar.hidden = false;
+      selectionTopbar.hidden = true;
+      selectionTopbar.replaceChildren();
+      drawFrame();
+      renderEditorTopbar();
+      let completion = Promise.resolve();
+      if (save && element.kind === 'bullet' && !text) {
+        const originalPreview = editorPreviewOriginal;
+        editorPreviewOriginal = null;
+        completion = editorAction({action: 'delete-element', element: index}).catch(() => {
+          editorPreviewOriginal = originalPreview;
+          restoreEditorPreview();
+          drawFrame();
+        });
+      } else if (save && text !== originalText) {
+        const originalPreview = editorPreviewOriginal;
+        editorPreviewOriginal = null;
+        element.text = text;
+        completion = editorAction({action: 'update-element', element: index, elementData: element}).catch(() => {
+          editorPreviewOriginal = originalPreview;
+          restoreEditorPreview();
+          drawFrame();
+        });
+      } else {
+        restoreEditorPreview();
+        drawFrame();
+      }
+      finishPromise = completion.then(() => editorAction({action: 'select-element', element: -1}).catch(() => {})).finally(() => {
+          suppressSelectionTopbar = false;
+          renderEditorTopbar();
+      });
+      inlineEditCompletion = finishPromise;
+      if (editorStatus) editorStatus.textContent = save ? 'Text saved' : 'Editing cancelled';
+      return finishPromise;
+    };
+    const confirmEscape = () => {
+      if (editor.value === originalText) {
+        finish(false);
+        return;
+      }
+      if (discardDialog) return;
+      activeInlineEditor.suspendBlur = true;
+      const blocker = document.createElement('div');
+      blocker.className = 'keynope-modal-blocker';
+      blocker.setAttribute('role', 'presentation');
+      const dialog = document.createElement('form');
+      dialog.className = 'keynope-link-dialog keynope-discard-dialog';
+      dialog.setAttribute('role', 'alertdialog');
+      dialog.setAttribute('aria-modal', 'true');
+      const heading = document.createElement('h3');
+      heading.textContent = 'Keep text changes?';
+      const message = document.createElement('p');
+      message.textContent = 'The text was modified. Keep the changes or revert to the text from before editing?';
+      const actions = document.createElement('div');
+      actions.className = 'keynope-editor-actions';
+      const keep = canvasTool('Yes', '', () => {
+        activeInlineEditor.suspendBlur = false;
+        finish(true);
+      });
+      const revert = canvasTool('No, revert', '', () => {
+        activeInlineEditor.suspendBlur = false;
+        finish(false);
+      });
+      actions.append(keep, revert);
+      dialog.append(heading, message, actions);
+      dialog.addEventListener('submit', event => {
+        event.preventDefault();
+        activeInlineEditor.suspendBlur = false;
+        finish(true);
+      });
+      dialog.addEventListener('keydown', event => {
+        event.stopPropagation();
+        if (event.key === 'Tab') {
+          event.preventDefault();
+          (document.activeElement === keep ? revert : keep).focus();
+          return;
+        }
+        if (event.key === 'Escape') event.preventDefault();
+      });
+      blocker.addEventListener('pointerdown', event => {
+        if (event.target !== blocker) return;
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      blocker.addEventListener('contextmenu', event => event.preventDefault());
+      blocker.addEventListener('wheel', event => event.preventDefault(), {passive:false});
+      blocker.appendChild(dialog);
+      document.body.appendChild(blocker);
+      discardDialog = blocker;
+      requestAnimationFrame(() => keep.focus());
+    };
+    const updateCaret = () => {
+      if (finished) return;
+      const selectionStart = [...editor.value.slice(0, editor.selectionStart || 0)].length;
+      const selectionEnd = [...editor.value.slice(0, editor.selectionEnd || 0)].length;
+      const cursor = editor.selectionDirection === 'backward' ? selectionStart : selectionEnd;
+      editorCanvasCaret = {element: resolvedElement == null ? index : resolvedElement, text: editor.value, cursor,
+        kind: element.kind, query: element.query || '', started: performance.now()};
+      drawFrame();
+      const sequence = ++editorPreviewSequence;
+      previewEditorText(index, {...element, text:editor.value}, cursor, selectionStart, selectionEnd, sequence);
+    };
+    activeInlineEditor = {element: index, finish, editor};
+    renderEditorTopbar();
+    editor.addEventListener('input', () => {
+      cleanupInlineEditorEmptyColorTags(editor);
+      element.text = editor.value;
+      updateCaret();
+    });
+    editor.addEventListener('select', updateCaret);
+    editor.addEventListener('click', updateCaret);
+    editor.addEventListener('keyup', updateCaret);
+    editor.addEventListener('keydown', keyEvent => {
+      if ((keyEvent.key === 'Backspace' || keyEvent.key === 'Delete') && deleteInlineEditorSelectionPreservingFormatting(editor)) {
+        keyEvent.preventDefault();
+      } else if (keyEvent.key === 'Backspace' && deleteInlineEditorColorContent(editor, -1)) {
+        keyEvent.preventDefault();
+      } else if (keyEvent.key === 'Delete' && deleteInlineEditorColorContent(editor, 1)) {
+        keyEvent.preventDefault();
+      } else if (keyEvent.key === 'Backspace' && deleteInlineEditorAcrossFormatting(editor, -1)) {
+        keyEvent.preventDefault();
+      } else if (keyEvent.key === 'Delete' && deleteInlineEditorAcrossFormatting(editor, 1)) {
+        keyEvent.preventDefault();
+      } else if (keyEvent.key === 'Backspace' && editor.selectionStart === editor.selectionEnd && (editor.selectionStart || 0) <= 1 && editor.value.startsWith(String.fromCharCode(96))) {
+        keyEvent.preventDefault();
+        editor.setRangeText('', 0, 1, 'start');
+        editor.dispatchEvent(new Event('input', {bubbles:true}));
+      } else if ((keyEvent.key === 'ArrowLeft' || keyEvent.key === 'ArrowRight') && !keyEvent.metaKey && !keyEvent.ctrlKey && !keyEvent.altKey &&
+          moveInlineEditorAcrossFormatting(editor, keyEvent.key === 'ArrowLeft' ? -1 : 1, keyEvent.shiftKey)) {
+        keyEvent.preventDefault();
+        updateCaret();
+      } else if ((keyEvent.key === 'ArrowUp' || keyEvent.key === 'ArrowDown') && !keyEvent.shiftKey && !keyEvent.metaKey && !keyEvent.ctrlKey && !keyEvent.altKey) {
+        const nextCursor = inlineEditorVerticalCursor(editor.value, editor.selectionStart || 0, keyEvent.key === 'ArrowUp' ? -1 : 1, element.kind);
+        keyEvent.preventDefault();
+        if (nextCursor != null) {
+          editor.setSelectionRange(nextCursor, nextCursor);
+          updateCaret();
+        }
+      } else if (keyEvent.key === 'Enter') {
+        keyEvent.preventDefault();
+        if (element.kind === 'bullet' || element.kind === 'code' || element.kind === 'text') {
+          const start = editor.selectionStart || 0;
+          const lineStart = editor.value.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+          const lineEnd = editor.value.indexOf('\n', start);
+          const currentLine = editor.value.slice(lineStart, lineEnd < 0 ? editor.value.length : lineEnd);
+          if (!keyEvent.shiftKey && !currentLine.trim()) {
+            if (element.kind === 'code' || element.kind === 'text') {
+              const removeStart = lineStart > 0 ? lineStart - 1 : 0;
+              const removeEnd = lineStart > 0 ? (lineEnd < 0 ? editor.value.length : lineEnd) : (lineEnd < 0 ? 0 : lineEnd + 1);
+              editor.setRangeText('', removeStart, removeEnd, 'start');
+              element.text = editor.value;
+            }
+            finish(true);
+          } else {
+            const newline = element.kind === 'bullet' && keyEvent.shiftKey ? '\n  ' : '\n';
+            editor.setRangeText(newline, editor.selectionStart || 0, editor.selectionEnd || 0, 'end');
+            editor.dispatchEvent(new Event('input', {bubbles:true}));
+          }
+        } else {
+          finish(true);
+        }
+      } else if (keyEvent.key === 'Escape') {
+        keyEvent.preventDefault();
+        confirmEscape();
+      } else if ((keyEvent.metaKey || keyEvent.ctrlKey) && keyEvent.key.toLowerCase() === 'b') {
+        keyEvent.preventDefault();
+        applyInlineSelectionWrapper('**');
+      }
+      keyEvent.stopPropagation();
+    });
+    editor.addEventListener('blur', event => {
+      if (activeInlineEditor && activeInlineEditor.suspendBlur) return;
+      if (emojiPickerPanel && emojiPickerPanel.contains(event.relatedTarget)) return;
+      finish(true);
+    });
+    canvasOverlay.appendChild(editor);
+    editor.focus();
+    const initialCursor = inlineEditorInitialCursor(editor.value);
+    editor.setSelectionRange(initialCursor, initialCursor);
+    updateCaret();
+    if (editorStatus) editorStatus.textContent = element.kind === 'bullet'
+      ? 'Editing bullet list · Enter new bullet · Shift+Enter continuation · Enter on empty bullet save · Esc cancel'
+      : element.kind === 'code'
+        ? 'Editing code · Enter newline · Enter on empty line save · Shift+Enter newline · Esc cancel'
+        : element.kind === 'text'
+          ? 'Editing text block · Enter newline · Enter on empty line save · Shift+Enter newline · Esc cancel'
+          : 'Editing text · Enter save · Esc cancel';
+  }
+
+  function canvasTool(label, className, action) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    if (className) button.className = className;
+    button.addEventListener('pointerdown', event => { event.preventDefault(); event.stopPropagation(); });
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      action();
+    });
+    return button;
+  }
+
+  function ensureEmojiPicker() {
+    if (emojiPickerPanel) return emojiPickerPanel;
+    const panel = document.createElement('div');
+    panel.className = 'keynope-emoji-picker';
+    panel.hidden = true;
+    const controls = document.createElement('div');
+    controls.className = 'keynope-emoji-picker-controls';
+    const search = document.createElement('input');
+    search.type = 'search';
+    search.placeholder = 'Search all emoji';
+    search.setAttribute('aria-label', 'Search emoji');
+    const group = document.createElement('select');
+    group.setAttribute('aria-label', 'Emoji category');
+    group.appendChild(new Option('All categories', ''));
+    controls.append(search, group);
+    const grid = document.createElement('div');
+    grid.className = 'keynope-emoji-grid';
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'keynope-emoji-more';
+    more.textContent = 'More';
+    panel.append(controls, grid, more);
+    document.body.appendChild(panel);
+    panel._search = search;
+    panel._group = group;
+    panel._grid = grid;
+    panel._more = more;
+    panel._offset = 0;
+    panel._request = 0;
+    let searchTimer = 0;
+    const restart = () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => loadEmojiPicker(true), 120);
+    };
+    search.addEventListener('input', restart);
+    group.addEventListener('change', () => loadEmojiPicker(true));
+    more.addEventListener('click', event => { event.preventDefault(); loadEmojiPicker(false); });
+    emojiPickerPanel = panel;
+    return panel;
+  }
+
+  function emojiPickerPreview(lines) {
+    const preview = document.createElement('span');
+    preview.className = 'keynope-emoji-preview';
+    for (const line of lines || []) {
+      for (const part of line.parts || []) {
+        const span = document.createElement('span');
+        span.className = 'line';
+        span.style.setProperty('--x', part.col || 0);
+        span.style.setProperty('--y', line.row || 0);
+        span.style.color = part.color || '#f3efe0';
+        if (part.background) span.style.backgroundColor = part.background;
+        span.textContent = part.text || '';
+        preview.appendChild(span);
+      }
+    }
+    return preview;
+  }
+
+  async function loadEmojiPicker(reset) {
+    const panel = ensureEmojiPicker();
+    if (reset) {
+      panel._offset = 0;
+      panel._grid.replaceChildren();
+    }
+    const request = ++panel._request;
+    const params = new URLSearchParams({q:panel._search.value || '', group:panel._group.value || '', offset:String(panel._offset), limit:'72', size:'10'});
+    try {
+      const response = await fetch('/api/editor/emojis?' + params.toString());
+      if (!response.ok) throw new Error('Could not load emoji');
+      const payload = await response.json();
+      if (request !== panel._request) return;
+      if (panel._group.options.length === 1) {
+        for (const name of payload.groups || []) panel._group.appendChild(new Option(name, name));
+      }
+      for (const item of payload.items || []) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.title = item.name;
+        button.setAttribute('aria-label', item.name);
+        button.appendChild(emojiPickerPreview(item.lines));
+        button.addEventListener('pointerdown', event => event.preventDefault());
+        button.addEventListener('click', event => {
+          event.preventDefault();
+          chooseEmoji(item.emoji);
+        });
+        panel._grid.appendChild(button);
+      }
+      panel._offset += (payload.items || []).length;
+      panel._more.hidden = (payload.items || []).length < 72;
+    } catch (_err) {
+      panel._more.textContent = 'Could not load emoji';
+      panel._more.disabled = true;
+    }
+  }
+
+  async function chooseEmoji(emoji) {
+    const target = emojiPickerTarget;
+    if (!target) return;
+    if (target.mode === 'add') {
+      await editorAction({action:'add-element', kind:'text', elementData:{kind:'text', text:emoji, query:'render=text-image&source=bitmap&scale=5.00&text-size=25'}}).catch(() => {});
+    } else {
+      if (!activeInlineEditor || activeInlineEditor.element !== target.index) await beginInlineEdit(target.index);
+      if (activeInlineEditor && activeInlineEditor.element === target.index) {
+        const editor = activeInlineEditor.editor;
+        editor.setRangeText(emoji, editor.selectionStart || 0, editor.selectionEnd || 0, 'end');
+        editor.dispatchEvent(new Event('input', {bubbles:true}));
+        editor.focus();
+      }
+    }
+    ensureEmojiPicker().hidden = true;
+  }
+
+  function openEmojiPicker(anchor, index, mode) {
+    const panel = ensureEmojiPicker();
+    emojiPickerTarget = {index, mode};
+    panel.hidden = false;
+    panel._more.textContent = 'More';
+    panel._more.disabled = false;
+    const rect = anchor.getBoundingClientRect();
+    const panelRect = panel.getBoundingClientRect();
+    panel.style.left = Math.max(8, Math.min(innerWidth-panelRect.width-8, rect.left)) + 'px';
+    panel.style.top = Math.max(8, Math.min(innerHeight-panelRect.height-8, rect.bottom+6)) + 'px';
+    loadEmojiPicker(true);
+  }
+
+  function canvasEmojiTool(index) {
+    const button = canvasTool('', 'keynope-emoji-tool', () => openEmojiPicker(button, index, 'insert'));
+    button.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7"/><circle cx="7.5" cy="8" r=".8" fill="currentColor" stroke="none"/><circle cx="12.5" cy="8" r=".8" fill="currentColor" stroke="none"/><path d="M6.5 11.5c1.5 2.5 5.5 2.5 7 0"/></svg>';
+    button.title = 'Insert emoji';
+    button.setAttribute('aria-label', 'Insert emoji');
+    return button;
+  }
+  document.addEventListener('pointerdown', event => {
+    if (emojiPickerPanel && !emojiPickerPanel.hidden && !emojiPickerPanel.contains(event.target) && !event.target.closest('.keynope-emoji-tool')) {
+      emojiPickerPanel.hidden = true;
+    }
+  }, true);
+
+  function canvasElementAt(index) {
+    if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return null;
+    const element = editorState.slides[editorState.current].elements[index];
+    return element ? {...element} : null;
+  }
+  function canvasSelectedIndices(index, compatible) {
+    if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return [];
+    const elements = editorState.slides[editorState.current].elements || [];
+    let indices = (editorState.selection || []).length > 1 ? [...editorState.selection] : [index];
+    return indices.filter(candidate => candidate >= 0 && candidate < elements.length && (!compatible || compatible(elements[candidate])));
+  }
+  function updateCanvasElements(index, compatible, mutate) {
+    const indices = canvasSelectedIndices(index, compatible);
+    if (!indices.length) return;
+    const elements = editorState.slides[editorState.current].elements || [];
+    const updates = indices.map(candidate => {
+      const element = JSON.parse(JSON.stringify(elements[candidate]));
+      mutate(element, candidate);
+      return element;
+    });
+    editorAction({action:'update-elements', elementIndices:indices, elementsData:updates}).catch(() => {});
+  }
+  function updateCanvasElement(index, mutate) {
+    const element = canvasElementAt(index);
+    if (!element) return;
+    mutate(element);
+    previewCanvasMutation(index, element);
+    editorAction({action: 'update-element', element: index, elementData: element}).catch(() => {});
+  }
+  async function normalizeCanvasTextKind(index, element) {
+    const page = deck.pages && deck.pages[pageIndex] ? deck.pages[pageIndex].page || 0 : 0;
+    const response = await fetch('/api/editor/normalize-text-kind', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({element: index, elementData: element, page, cols: deck.cols, rows: deck.rows})
+    });
+    if (!response.ok) throw new Error('Could not normalize text kind');
+    return response.json();
+  }
+  async function setCanvasTextKind(index, kind, level) {
+    const element = canvasElementAt(index);
+    if (!element) return;
+    if (canvasSelectedIndices(index, candidate => ['heading','text','text-image','bullet','code'].includes(candidate.kind)).length > 1) {
+      try {
+        await editorAction({action:'convert-selected-text-kind', kind, level:level || 0, cols:deck.cols, rows:deck.rows});
+      } catch (_err) {}
+      return;
+    }
+    if (element.kind === 'bullet' || element.kind === 'code' || kind === 'bullet' || kind === 'code') {
+      try {
+        await editorAction({action: 'convert-text-kind', element: index, kind, level: level || 0, cols: deck.cols, rows: deck.rows});
+      } catch (_err) {}
+      return;
+    }
+    const query = new URLSearchParams(element.query || '');
+    const wasHeading = element.kind === 'heading';
+    const colour = query.get(wasHeading ? 'header' : 'fg') || query.get(wasHeading ? 'fg' : 'header');
+    for (const key of ['render','source','scale','text-size']) query.delete(key);
+    if (kind === 'heading') {
+      query.delete('fg');
+      if (colour) query.set('header', colour); else query.delete('header');
+    } else {
+      query.delete('header');
+      if (colour) query.set('fg', colour); else query.delete('fg');
+    }
+    element.kind = kind;
+    element.level = kind === 'heading' ? level : 0;
+    element.query = query.toString();
+    try {
+      const result = await normalizeCanvasTextKind(index, element);
+      replaceEditorPreviewPages(editorState.current, result.pages);
+      drawFrame();
+      await editorAction({action: 'update-element', element: index, elementData: result.element});
+    } catch (_err) {
+      previewCanvasMutation(index, element);
+      editorAction({action: 'update-element', element: index, elementData: element}).catch(() => {});
+    }
+  }
+  function appendCanvasTextKindTools(container, index, element) {
+    const choices = [
+      ['H1', 'heading', 1, element.kind === 'heading' && element.level !== 2, false],
+      ['H2', 'heading', 2, element.kind === 'heading' && element.level === 2, false],
+      ['T', 'text', 0, element.kind === 'text' || element.kind === 'text-image', false],
+      ['⏺', 'bullet', 0, element.kind === 'bullet', false],
+      ['', 'code', 0, element.kind === 'code', true]
+    ];
+    for (const [label, kind, level, active, codeIcon] of choices) {
+      const button = canvasTool(label, (active ? 'active ' : '') + (codeIcon ? 'keynope-text-kind-code' : ''), () => setCanvasTextKind(index, kind, level));
+      if (codeIcon) button.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5 3 10l4 5M13 5l4 5-4 5M11 3 9 17"/></svg>';
+      button.title = kind === 'heading' ? 'Convert to heading ' + level : kind === 'bullet' ? (active ? 'Convert bullets to text' : 'Convert to bullet points') : kind === 'code' ? (active ? 'Convert code block to text' : 'Convert to code block') : 'Convert to plain text';
+      button.setAttribute('aria-label', button.title);
+      container.appendChild(button);
+    }
+  }
+	async function previewCanvasMutation(index, element, refreshOverlay = true, frozenImage = false) {
+    const sequence = ++editorMutationPreviewSequence;
+    const slide = editorState ? editorState.current : -1;
+    try {
+      const response = await fetch('/api/editor/preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+		body: JSON.stringify({name:frozenImage ? 'frozen-image' : '', element: index, elementData: element, cols: deck.cols, rows: deck.rows})
+      });
+      if (!response.ok) return;
+      const pages = await response.json();
+      if (sequence !== editorMutationPreviewSequence || !editorState || editorState.current !== slide) return;
+      replaceEditorPreviewPages(slide, pages);
+      drawFrame();
+      if (refreshOverlay) requestAnimationFrame(renderEditorCanvasOverlay);
+    } catch (_err) {}
+  }
+  async function fitCanvasTextElement(index, element, boxWidth, boxHeight) {
+    const response = await fetch('/api/editor/fit-text', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({element: index, elementData: element, boxWidth, boxHeight, cols: deck.cols, rows: deck.rows})
+    });
+    if (!response.ok) throw new Error('Could not fit text');
+    return response.json();
+  }
+  function canvasTextNativeSize(element) {
+    if (element.kind === 'heading') return Number(element.level || 1) === 1 ? 20 : 10;
+    return 0;
+  }
+  function canvasTextSize(element) {
+    const query = new URLSearchParams(element.query || '');
+    const explicit = Number.parseInt(query.get('text-size'), 10);
+    if (Number.isInteger(explicit)) return Math.max(-1, Math.min(25, explicit));
+    const scale = Number.parseFloat(query.get('scale') || '1');
+    if (query.get('render') === 'text-image' && Number.isFinite(scale)) {
+      const source = query.get('source') || '';
+      if (source === 'bitmap') {
+        if (scale < 1) return Math.max(-1, Math.min(-1, Math.round((scale - 1) / .1)));
+        if (scale < 2) return Math.max(1, Math.min(9, Math.round((scale - 1) * 10)));
+        if (scale < 4) return Math.max(11, Math.min(19, 10 + Math.round((scale - 2) / .2)));
+        return Math.max(21, Math.min(25, 20 + Math.round((scale - 4) / .2)));
+      }
+    }
+    return canvasTextNativeSize(element);
+  }
+  function applyCanvasTextSize(element, size) {
+    size = Math.max(-1, Math.min(25, size));
+    const query = new URLSearchParams(element.query || '');
+    if (size === canvasTextNativeSize(element)) {
+      for (const key of ['render','source','scale','text-size']) query.delete(key);
+    } else {
+      let scale = 1;
+      if (size < 0) scale = 1 + size * .1;
+      else if (size < 10) scale = 1 + size / 10;
+      else if (size < 20) scale = 2 + (size - 10) * .2;
+      else scale = 4 + (size - 20) * .2;
+      query.set('render', 'text-image');
+      query.set('source', 'bitmap');
+      query.set('scale', scale.toFixed(2));
+      query.set('text-size', String(size));
+    }
+    element.query = query.toString();
+  }
+  function changeCanvasTextSize(index, delta) {
+    updateCanvasElements(index, element => ['heading','text','text-image','bullet','code'].includes(element.kind), element => applyCanvasTextSize(element, canvasTextSize(element) + delta));
+  }
+  function cycleCanvasOutline(index) {
+    updateCanvasElement(index, element => {
+      const query = new URLSearchParams(element.query || '');
+      const outline = query.get('outline') || '';
+      if (!outline) query.set('outline', '1');
+      else if (outline === '1') query.set('outline', 'dark');
+      else query.delete('outline');
+      element.query = query.toString();
+    });
+  }
+  function canvasOutlineTool(index, element, query) {
+    const selectedText = ['heading','text','text-image','bullet','code'].includes(element.kind);
+    let label = selectedText ? '『』' : 'Outline';
+    let large = false;
+    let shapeIcon = '';
+    if (element.kind === 'shape') {
+      const shape = query.get('shape') || 'circle';
+      shapeIcon = shape;
+      if (shape === 'circle') label = '⃣⃣⃣⃣⃣';
+      else if (shape === 'square') label = '𓉘𓉝';
+      else if (shape === 'triangle') { label = '△'; large = true; }
+      else if (shape === 'diamond') { label = '\u00a0⃟'; large = true; }
+    }
+    const outline = query.get('outline') || '';
+    const button = canvasTool(label, outline ? 'active' : '', () => cycleCanvasOutline(index));
+    if (element.kind === 'image') {
+      button.innerHTML = '<svg viewBox="0 0 800 600" aria-hidden="true"><path d="M391 74 C468 70 499 124 550 151 C609 182 667 191 680 250 C694 314 646 348 614 393 C580 441 572 503 511 520 C451 537 414 493 360 484 C297 473 245 518 196 477 C145 434 174 376 143 327 C114 279 119 217 169 188 C220 158 270 181 312 130 C335 102 356 78 391 74Z" fill="#9b9b9b" stroke="#fff" stroke-width="32" stroke-linejoin="round"/></svg>';
+      button.classList.add('keynope-image-outline-button');
+    }
+    if (large) button.classList.add('keynope-outline-large');
+    if (shapeIcon) {
+      const symbol = document.createElement('span');
+      symbol.className = 'keynope-shape-outline-symbol keynope-shape-outline-' + shapeIcon;
+      symbol.textContent = label;
+      button.replaceChildren(symbol);
+      button.classList.add('keynope-shape-outline-button');
+    }
+    button.title = outline === 'dark' ? 'Remove dark outline' : outline ? 'Switch to dark outline' : 'Add outline';
+    button.setAttribute('aria-label', button.title);
+    return button;
+  }
+  function canvasDuplicateTool(index) {
+    const button = canvasTool('', 'keynope-icon-button keynope-clone-button', () => editorAction({action: 'duplicate-element', element: index}).catch(() => {}));
+    button.innerHTML = cloneIconSVG;
+    button.title = 'Clone element';
+    button.setAttribute('aria-label', 'Clone element');
+    return button;
+  }
+  function canvasLayerTool(index, direction) {
+    const backward = direction === 'backward';
+    const button = canvasTool('', 'keynope-icon-button keynope-layer-button', () => editorAction({action: 'move-element', element: index, kind: direction}).catch(() => {}));
+    button.innerHTML = backward
+      ? '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="180" y="180" width="300" height="300" rx="28" fill="none" stroke="#fff" stroke-width="28"/><rect x="290" y="70" width="300" height="300" rx="28" fill="none" stroke="#9b9b9b" stroke-width="28"/><g fill="none" stroke="#fff" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"><path d="M655 135v265"/><path d="m598 343 57 57 57-57"/></g></svg>'
+      : '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="210" y="180" width="300" height="300" rx="28" fill="none" stroke="#9b9b9b" stroke-width="28"/><rect x="320" y="70" width="300" height="300" rx="28" fill="none" stroke="#fff" stroke-width="28"/><g fill="none" stroke="#fff" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"><path d="M145 430V165"/><path d="m88 222 57-57 57 57"/></g></svg>';
+    button.title = backward ? 'Send backward' : 'Bring forward';
+    button.setAttribute('aria-label', button.title);
+    return button;
+  }
+  function rotateCanvasText(index) {
+    updateCanvasElements(index, element => ['heading','text','text-image','bullet'].includes(element.kind), element => {
+      const query = new URLSearchParams(element.query || '');
+      const orientation = query.get('orientation') || '';
+      if (!orientation) query.set('orientation', 'cw');
+      else if (orientation === 'cw') query.set('orientation', 'down');
+      else if (orientation === 'down') query.set('orientation', 'ccw');
+      else query.delete('orientation');
+      element.query = query.toString();
+    });
+  }
+  function canvasStyleSelect(index, element) {
+    const query = new URLSearchParams(element.query || '');
+    const select = document.createElement('select');
+    select.title = 'Text rendering style';
+    select.setAttribute('aria-label', 'Text rendering style');
+    for (const [value, label] of [['','Style: Default'],['blocks','Style: Blocks'],['braille','Style: Braille'],['ascii','Style: ASCII'],['dense','Style: Dense']]) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      option.selected = query.get('glyph') === value;
+      select.appendChild(option);
+    }
+    select.addEventListener('pointerdown', event => event.stopPropagation());
+    select.addEventListener('change', event => {
+      event.stopPropagation();
+      updateCanvasElements(index, updated => ['heading','text','text-image','bullet'].includes(updated.kind), updated => {
+        const values = new URLSearchParams(updated.query || '');
+        if (select.value) {
+          values.set('glyph', select.value);
+          if (values.get('render') !== 'text-image') {
+            const size = canvasTextSize(updated);
+            let scale = size < 0 ? 1 + size * .1 : size < 10 ? 1 + size / 10 : size < 20 ? 2 + (size - 10) * .2 : 4 + (size - 20) * .2;
+            values.set('render', 'text-image');
+            values.set('source', 'bitmap');
+            values.set('scale', scale.toFixed(2));
+            values.set('text-size', String(size));
+          }
+        } else {
+          values.delete('glyph');
+        }
+        updated.query = values.toString();
+      });
+    });
+    return select;
+  }
+  function canvasColourTool(index, element, renderedColour) {
+    const query = new URLSearchParams(element.query || '');
+    const colourKey = element.kind === 'heading' ? 'header' : 'fg';
+    const colour = /^#[0-9a-f]{6}$/i.test(query.get(colourKey) || '') ? query.get(colourKey) : (/^#[0-9a-f]{6}$/i.test(renderedColour || '') ? renderedColour : '#ffffff');
+    const label = document.createElement('span');
+    label.className = 'keynope-colour-tool';
+    label.title = 'Text colour';
+    label.setAttribute('aria-label', 'Text colour');
+    label.textContent = 'A';
+    label.style.setProperty('--keynope-tool-colour', colour);
+    const input = document.createElement('input');
+    input.type = 'color';
+    input.value = colour;
+    input.setAttribute('aria-label', 'Choose text colour');
+    input.addEventListener('pointerdown', event => event.stopPropagation());
+    input.addEventListener('input', event => {
+      event.stopPropagation();
+      label.style.setProperty('--keynope-tool-colour', input.value);
+    });
+    input.addEventListener('change', event => {
+      event.stopPropagation();
+      updateCanvasElements(index, updated => ['heading','text','text-image','bullet','code','shape','page-number'].includes(updated.kind), updated => {
+        const values = new URLSearchParams(updated.query || '');
+        const key = updated.kind === 'heading' ? 'header' : 'fg';
+        values.set(key, input.value);
+        if (key === 'header') values.delete('fg');
+        updated.query = values.toString();
+      });
+    });
+    label.appendChild(input);
+    return label;
+  }
+  function setCanvasAlignment(index, alignment) {
+    updateCanvasElements(index, element => ['heading','text','text-image','bullet','code','shape','image','page-number'].includes(element.kind), element => {
+      const query = new URLSearchParams(element.query || '');
+      query.set('align', alignment);
+      for (const key of ['left','right','left_pct','right_pct']) query.delete(key);
+      element.query = query.toString();
+    });
+  }
+  function setCanvasVerticalAlignment(index, alignment) {
+    updateCanvasElements(index, element => ['heading','text','text-image','bullet','code','shape','image','page-number'].includes(element.kind), element => {
+      const query = new URLSearchParams(element.query || '');
+      query.set('valign', alignment);
+      for (const key of ['top','bottom','row_delta']) query.delete(key);
+      element.query = query.toString();
+    });
+  }
+  function canvasVerticalAlignmentTool(index, alignment, active) {
+    const arrows = {
+      top: 'M5 15V5M2.5 7.5 5 5l2.5 2.5',
+      middle: 'M5 5v10M2.5 7.5 5 5l2.5 2.5M2.5 12.5 5 15l2.5-2.5',
+      bottom: 'M5 5v10M2.5 12.5 5 15l2.5-2.5'
+    };
+    const titles = {top:'Align top', middle:'Align middle', bottom:'Align bottom'};
+    const button = canvasTool('', (active ? 'active ' : '') + 'keynope-vertical-align-button', () => setCanvasVerticalAlignment(index, alignment));
+    button.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="' + arrows[alignment] + '"/><path d="M11 6v8M14 6v8M17 6v8"/></svg>';
+    button.title = titles[alignment];
+    button.setAttribute('aria-label', button.title);
+    return button;
+  }
+  function toggleCanvasMarkdownStyle(index, marker) {
+    updateCanvasElements(index, element => ['heading','text','text-image','bullet'].includes(element.kind), element => {
+      const text = element.text || '';
+      if (!text) return;
+      element.text = text.startsWith(marker) && text.endsWith(marker) && text.length >= marker.length * 2
+        ? text.slice(marker.length, -marker.length)
+        : marker + text + marker;
+    });
+  }
+  function canvasElementIsGIF(element) {
+    return !!element && element.kind === 'image' && /\.gif(?:$|[?#])/i.test(element.path || '');
+  }
+  function canvasElementSupportsTransparency(element) {
+    if (!element || canvasElementIsGIF(element) || !['heading','text','text-image','bullet','code','shape','image'].includes(element.kind)) return false;
+    const glyph = (new URLSearchParams(element.query || '').get('glyph') || '').toLowerCase();
+    return glyph === '' || glyph === 'blocks' || glyph === 'block';
+  }
+  function toggleCanvasTransparency(index) {
+    const current = canvasElementAt(index);
+    if (!canvasElementSupportsTransparency(current)) return;
+    updateCanvasElement(index, element => {
+      const query = new URLSearchParams(element.query || '');
+      if (query.get('transparent') === '1') query.delete('transparent'); else query.set('transparent', '1');
+      element.query = query.toString();
+    });
+  }
+  function canvasTransparencyTool(index, query) {
+    const enabled = query.get('transparent') === '1';
+    const patternID = 'keynope-checkerboard-' + (++editorTransparencyIconSequence);
+    const button = canvasTool('', (enabled ? 'active ' : '') + 'keynope-icon-button keynope-see-through-button', () => toggleCanvasTransparency(index));
+    button.innerHTML = '<svg viewBox="157 57 486 486" aria-hidden="true"><defs><pattern id="' + patternID + '" x="183" y="83" width="217" height="217" patternUnits="userSpaceOnUse"><rect width="217" height="217" fill="#fff"/><rect width="108.5" height="108.5" fill="#9b9b9b"/><rect x="108.5" y="108.5" width="108.5" height="108.5" fill="#9b9b9b"/></pattern></defs><rect x="183" y="83" width="434" height="434" rx="15" fill="url(#' + patternID + ')"/><rect x="170" y="70" width="460" height="460" rx="28" fill="none" stroke="#fff" stroke-width="26"/></svg>';
+    button.title = enabled ? 'Disable see through' : 'Enable see through';
+    button.setAttribute('aria-label', button.title);
+    return button;
+  }
+  function appendCanvasShapeKindTools(container, index, query) {
+    const current = query.get('shape') || 'circle';
+    for (const [shape, drawing] of [
+      ['circle','<circle cx="10" cy="10" r="7"/>'],
+      ['square','<rect x="3" y="3" width="14" height="14" rx="1"/>'],
+      ['triangle','<path d="M10 2 18 17H2z"/>'],
+      ['diamond','<path d="m10 2 8 8-8 8-8-8z"/>']
+    ]) {
+      const button = canvasTool('', current === shape ? 'active keynope-icon-button keynope-canvas-shape-kind' : 'keynope-icon-button keynope-canvas-shape-kind', () => {
+        updateCanvasElement(index, element => {
+          const values = new URLSearchParams(element.query || '');
+          values.set('shape', shape);
+          element.query = values.toString();
+        });
+      });
+      button.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" fill="currentColor" stroke="currentColor" stroke-width="1.5">' + drawing + '</svg>';
+      button.title = 'Change to ' + shape;
+      button.setAttribute('aria-label', button.title);
+      container.appendChild(button);
+    }
+  }
+  function canvasDeleteTool(index) {
+    const button = canvasTool('', 'danger keynope-icon-button keynope-delete-button keynope-toolbar-delete', () => editorAction((editorState.selection || []).length > 1 ? {action:'delete-selection'} : {action:'delete-element', element:index}).catch(() => {}));
+    button.innerHTML = deleteIconSVG;
+    button.title = 'Delete element';
+    button.setAttribute('aria-label', 'Delete element');
+    return button;
+  }
+  function visualQueryControl(panel, index, labelText, key, value, options) {
+    const label = document.createElement('label');
+    label.textContent = labelText;
+    let input;
+    if (options.values) {
+      input = document.createElement('select');
+      for (const [optionValue, optionLabel] of options.values) {
+        const option = document.createElement('option');
+        option.value = optionValue;
+        option.textContent = optionLabel;
+        option.selected = optionValue === value;
+        input.appendChild(option);
+      }
+    } else {
+      input = document.createElement('input');
+      input.type = 'range';
+      input.min = String(options.min);
+      input.max = String(options.max);
+      input.step = String(options.step);
+      input.value = value || String(options.fallback);
+      input.title = labelText + ': ' + input.value;
+      input.addEventListener('input', () => { input.title = labelText + ': ' + input.value; });
+    }
+    input.setAttribute('aria-label', labelText);
+    input.addEventListener('pointerdown', event => event.stopPropagation());
+    input.addEventListener('change', () => {
+      updateCanvasElement(index, element => {
+        const query = new URLSearchParams(element.query || '');
+        if (input.value === '' || input.value === String(options.fallback)) query.delete(key); else query.set(key, input.value);
+        element.query = query.toString();
+      });
+    });
+    panel.append(label, input);
+  }
+  function canvasVisualMenu(index, element) {
+    const button = canvasTool('', 'keynope-icon-button keynope-adjust-image-button', () => {
+      if (activeCanvasVisualMenu && activeCanvasVisualMenu.button === button) {
+        closeCanvasVisualMenu();
+        return;
+      }
+      closeCanvasVisualMenu();
+      document.body.appendChild(panel);
+      panel.hidden = false;
+      const anchor = button.getBoundingClientRect();
+      const panelRect = panel.getBoundingClientRect();
+      panel.style.left = Math.max(8, Math.min(innerWidth - panelRect.width - 8, anchor.left)) + 'px';
+      panel.style.top = Math.max(8, Math.min(innerHeight - panelRect.height - 8, anchor.bottom + 7)) + 'px';
+      const dismiss = event => {
+        if (!panel.contains(event.target) && event.target !== button) closeCanvasVisualMenu();
+      };
+      activeCanvasVisualMenu = {index, button, panel, dismiss};
+      document.addEventListener('pointerdown', dismiss, true);
+    });
+    const uploadSVG = importButton.querySelector('svg');
+    button.innerHTML = '<svg viewBox="-13 80 1050 1040" aria-hidden="true" fill="currentColor">' +
+      (uploadSVG ? uploadSVG.innerHTML : '') +
+      '<g transform="translate(805 330)" fill="currentColor">' +
+        '<rect x="-28" y="-225" width="56" height="112" rx="14"/><rect x="-28" y="-225" width="56" height="112" rx="14" transform="rotate(45)"/><rect x="-28" y="-225" width="56" height="112" rx="14" transform="rotate(90)"/><rect x="-28" y="-225" width="56" height="112" rx="14" transform="rotate(135)"/><rect x="-28" y="-225" width="56" height="112" rx="14" transform="rotate(180)"/><rect x="-28" y="-225" width="56" height="112" rx="14" transform="rotate(225)"/><rect x="-28" y="-225" width="56" height="112" rx="14" transform="rotate(270)"/><rect x="-28" y="-225" width="56" height="112" rx="14" transform="rotate(315)"/>' +
+        '<circle r="155" fill="#181818" stroke="currentColor" stroke-width="42"/><circle r="58" fill="none" stroke="currentColor" stroke-width="42"/>' +
+      '</g></svg>';
+    button.title = 'Adjust image';
+    button.setAttribute('aria-label', 'Adjust image');
+    const panel = document.createElement('div');
+    panel.className = 'keynope-visual-panel';
+    panel.hidden = true;
+    panel.addEventListener('pointerdown', event => event.stopPropagation());
+    appendCanvasVisualControls(panel, index, element);
+    return button;
+  }
+  function appendCanvasVisualControls(panel, index, element) {
+    const query = new URLSearchParams(element.query || '');
+    if (element.kind === 'image') {
+      visualQueryControl(panel, index, 'Glyph', 'glyph', query.get('glyph') || 'blocks', {values: [['blocks','Blocks'],['braille','Braille'],['ascii','ASCII'],['dense','Dense']]});
+      visualQueryControl(panel, index, 'Sampling', 'shape', query.get('shape') || 'subject', {values: [['subject','Subject'],['contrast','Contrast'],['saturation','Saturation'],['luma','Luma'],['alpha','Alpha']]});
+      visualQueryControl(panel, index, 'Brightness', 'brightness', query.get('brightness'), {min:.2,max:2,step:.1,fallback:1});
+      visualQueryControl(panel, index, 'Contrast', 'contrast', query.get('contrast'), {min:.2,max:2,step:.1,fallback:1});
+      visualQueryControl(panel, index, 'Saturation', 'saturation', query.get('saturation'), {min:0,max:2,step:.1,fallback:1});
+      visualQueryControl(panel, index, 'Sharpness', 'sharpness', query.get('sharpness'), {min:.2,max:2,step:.1,fallback:1});
+      visualQueryControl(panel, index, 'Alpha', 'alpha', query.get('alpha'), {min:0,max:255,step:16,fallback:96});
+    }
+  }
+  function closeCanvasVisualMenu() {
+    if (!activeCanvasVisualMenu) return;
+    document.removeEventListener('pointerdown', activeCanvasVisualMenu.dismiss, true);
+    activeCanvasVisualMenu.panel.remove();
+    activeCanvasVisualMenu = null;
+  }
+  function canvasShapeSelectionBounds(element, pageNumber) {
+    const query = new URLSearchParams(element.query || '');
+    const width = Math.max(1, Number.parseInt(query.get('width') || '12', 10));
+    const height = Math.max(1, Number.parseInt(query.get('height') || '6', 10));
+    let left = 0;
+    if (query.has('left_pct')) left = Math.round(Number(query.get('left_pct')) * Math.max(0, deck.cols - 1));
+    else if (query.has('left')) left = Number.parseInt(query.get('left'), 10) || 0;
+    else if (query.get('align') === 'center') left = Math.floor((deck.cols - width) / 2);
+    else if (query.get('align') === 'right') left = deck.cols - width;
+    let top = Number.parseInt(query.get('top') || '0', 10) - Math.max(0, pageNumber || 0) * deck.rows;
+    if (query.has('bottom')) top = deck.rows - height - (Number.parseInt(query.get('bottom'), 10) || 0);
+    else if (query.get('valign') === 'middle') top = Math.floor((deck.rows - height) / 2);
+    else if (query.get('valign') === 'bottom') top = deck.rows - height;
+    else if (query.get('valign') === 'top') top = 0;
+    if (top >= deck.rows || top + height <= 0) return null;
+    left = Math.max(0, Math.min(deck.cols - 1, left));
+    top = Math.max(0, Math.min(deck.rows - 1, top));
+    return {minX:left, minY:top, maxX:Math.min(deck.cols, left + width), maxY:Math.min(deck.rows, top + height), color:query.get('fg') || ''};
+  }
+  function applyCanvasLink(index, input, value) {
+    value = value.trim();
+    const internal = /^#([1-9][0-9]*)$/.exec(value);
+    let external = false;
+    if (value && !internal) {
+      try { const parsed = new URL(value); external = parsed.protocol === 'http:' || parsed.protocol === 'https:'; } catch (_err) {}
+    }
+    if (value && !internal && !external) {
+      input.setCustomValidity('Use an https:// URL or #slide number');
+      input.reportValidity();
+      return false;
+    }
+    updateCanvasElement(index, element => {
+      const query = new URLSearchParams(element.query || '');
+      query.delete('link');
+      query.delete('slide');
+      if (internal) query.set('slide', internal[1]);
+      else if (external) query.set('link', value);
+      element.query = query.toString();
+    });
+    return true;
+  }
+  function closeCanvasLinkDialog() {
+    if (!activeCanvasLinkDialog) return;
+    activeCanvasLinkDialog.remove();
+    activeCanvasLinkDialog = null;
+  }
+  function openCanvasLinkDialog(index) {
+    closeCanvasLinkDialog();
+    const element = canvasElementAt(index);
+    if (!element) return;
+    const query = new URLSearchParams(element.query || '');
+    const dialog = document.createElement('form');
+    dialog.className = 'keynope-link-dialog';
+    const heading = document.createElement('h3');
+    heading.textContent = 'Link text';
+    const modeLabel = document.createElement('label');
+    modeLabel.textContent = 'Link to';
+    const mode = document.createElement('select');
+    for (const [value, label] of [['url','URL'],['slide','Slide']]) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      option.selected = query.has('slide') ? value === 'slide' : value === 'url';
+      mode.appendChild(option);
+    }
+    modeLabel.appendChild(mode);
+    const urlLabel = document.createElement('label');
+    urlLabel.textContent = 'URL';
+    const urlInput = document.createElement('input');
+    urlInput.type = 'url';
+    urlInput.placeholder = 'https://example.com';
+    urlInput.value = query.get('link') || '';
+    urlLabel.appendChild(urlInput);
+    const slideLabel = document.createElement('label');
+    slideLabel.textContent = 'Slide';
+    const slideSelect = document.createElement('select');
+    (editorState.slides || []).forEach((_slide, slideIndex) => {
+      const option = document.createElement('option');
+      option.value = String(slideIndex + 1);
+      option.textContent = slideTitle(editorState.slides[slideIndex], slideIndex);
+      option.selected = query.get('slide') === option.value;
+      slideSelect.appendChild(option);
+    });
+    slideLabel.appendChild(slideSelect);
+    const refreshMode = focus => {
+      urlLabel.hidden = mode.value !== 'url';
+      slideLabel.hidden = mode.value !== 'slide';
+      if (focus) requestAnimationFrame(() => (mode.value === 'url' ? urlInput : slideSelect).focus());
+    };
+    mode.addEventListener('change', () => refreshMode(true));
+    refreshMode(false);
+    const actions = document.createElement('div');
+    actions.className = 'keynope-editor-actions';
+    const apply = canvasTool('Apply', '', () => {
+      const value = mode.value === 'slide' ? '#' + slideSelect.value : urlInput.value;
+      if (applyCanvasLink(index, urlInput, value)) closeCanvasLinkDialog();
+    });
+    apply.type = 'button';
+    const clear = canvasTool('Clear', '', () => { applyCanvasLink(index, urlInput, ''); closeCanvasLinkDialog(); });
+    const cancel = canvasTool('Cancel', '', closeCanvasLinkDialog);
+    actions.append(apply, clear, cancel);
+    dialog.append(heading, modeLabel, urlLabel, slideLabel, actions);
+    dialog.addEventListener('submit', event => {
+      event.preventDefault();
+      const value = mode.value === 'slide' ? '#' + slideSelect.value : urlInput.value;
+      if (applyCanvasLink(index, urlInput, value)) closeCanvasLinkDialog();
+    });
+    dialog.addEventListener('keydown', event => { event.stopPropagation(); if (event.key === 'Escape') closeCanvasLinkDialog(); });
+    document.body.appendChild(dialog);
+    const rect = dialog.getBoundingClientRect();
+    dialog.style.left = Math.max(8, Math.floor((innerWidth - rect.width) / 2)) + 'px';
+    dialog.style.top = Math.max(60, Math.floor((innerHeight - rect.height) / 3)) + 'px';
+    activeCanvasLinkDialog = dialog;
+    requestAnimationFrame(() => (mode.value === 'url' ? urlInput : slideSelect).focus());
+  }
+  function canvasLinkTool(index, query) {
+    const linked = query.has('slide') || query.has('link');
+    const button = canvasTool('', (linked ? 'active ' : '') + 'keynope-icon-button keynope-link-button', () => openCanvasLinkDialog(index));
+    button.innerHTML = '<svg viewBox="0 0 800 600" aria-hidden="true"><g transform="translate(100 0) scale(25)" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></g></svg>';
+    button.title = linked ? 'Edit link' : 'Add link';
+    button.setAttribute('aria-label', button.title);
+    return button;
+  }
+  function renderEditorTopbar() {
+    publishEditorDirtyState();
+    const slide = editorState && editorState.slides && editorState.slides[editorState.current];
+    const masterPageNumberMode = slide ? (slide.pageNumber || '') : '';
+    const baseMaster = !!(editorState && editorState.masterMode && editorState.current === 0);
+    const pageNumberState = baseMaster
+      ? (masterPageNumberMode === 'show' ? 'on' : 'off')
+      : (masterPageNumberMode === 'show' ? 'on' : masterPageNumberMode === 'hide' ? 'off' : 'inherited');
+    addPageNumberButton.hidden = !(editorState && editorState.masterMode);
+    addPageNumberButton.classList.toggle('active', pageNumberState === 'on');
+    addPageNumberButton.classList.toggle('inherited', pageNumberState === 'inherited');
+    addPageNumberButton.classList.toggle('off', pageNumberState === 'off');
+    addPageNumberTag.textContent = pageNumberState === 'inherited' ? 'INH.' : pageNumberState.toUpperCase();
+    addPageNumberButton.title = baseMaster
+      ? (pageNumberState === 'on' ? 'Turn slide number off' : 'Turn slide number on')
+      : (pageNumberState === 'off' ? 'Inherit slide number' : pageNumberState === 'inherited' ? 'Add local slide number' : 'Turn slide number off');
+    addPageNumberButton.setAttribute('aria-label', addPageNumberButton.title);
+    const index = editorState ? editorState.selected : -1;
+    keynopeEditorSelectionActive = index >= 0;
+    const element = slide && index >= 0 ? slide.elements[index] : null;
+    const selectedIndices = slide && (editorState.selection || []).length > 1 ? [...editorState.selection] : (element ? [index] : []);
+    const selectedElements = slide ? selectedIndices.map(candidate => slide.elements[candidate]).filter(Boolean) : [];
+    const textIndex = selectedIndices.find(candidate => ['heading','text','text-image','bullet','code'].includes(slide.elements[candidate].kind));
+    const textElement = textIndex == null ? null : slide.elements[textIndex];
+    const shapeIndex = selectedIndices.find(candidate => slide.elements[candidate].kind === 'shape');
+    const shapeElement = shapeIndex == null ? null : slide.elements[shapeIndex];
+    if (activeCanvasVisualMenu && (!element || activeCanvasVisualMenu.index !== index)) closeCanvasVisualMenu();
+    const contextual = !suppressSelectionTopbar && (!!activeInlineEditor || !!element);
+    mainTopbar.hidden = contextual;
+    selectionTopbar.hidden = !contextual;
+    selectionTopbar.replaceChildren();
+    if (!contextual) return;
+    if (activeInlineEditor) {
+      const boldSelection = canvasTool('B', '', () => applyInlineSelectionWrapper('**'));
+      boldSelection.title = 'Bold selected text';
+      boldSelection.setAttribute('aria-label', boldSelection.title);
+      const highlightSelection = canvasTool('H', '', () => applyInlineSelectionWrapper('*'));
+      highlightSelection.title = 'Highlight selected text';
+      highlightSelection.setAttribute('aria-label', highlightSelection.title);
+      selectionTopbar.append(boldSelection, highlightSelection, inlineSelectionColourTool());
+      selectionTopbar.appendChild(canvasEmojiTool(index));
+      selectionTopbar.appendChild(canvasTool('Commit', '', () => activeInlineEditor && activeInlineEditor.finish(true)));
+      selectionTopbar.appendChild(canvasTool('Cancel', '', () => activeInlineEditor && activeInlineEditor.finish(false)));
+      return;
+    }
+    const done = canvasTool('✓', '', () => editorAction({action: 'select-element', element: -1}).catch(() => {}));
+    done.title = 'Done';
+    done.setAttribute('aria-label', 'Done');
+    selectionTopbar.appendChild(done);
+    const query = new URLSearchParams(element.query || '');
+    const selectedText = !!textElement;
+    const rotatableText = selectedElements.some(candidate => ['heading','text','text-image','bullet'].includes(candidate.kind));
+    const positionable = selectedElements.some(candidate => ['heading','text','text-image','bullet','code','shape','image','page-number'].includes(candidate.kind));
+    if (selectedText) {
+      if (selectedElements.length === 1) {
+        const edit = canvasTool('✎', '', () => beginInlineEdit(textIndex));
+        edit.title = 'Edit text';
+        edit.setAttribute('aria-label', 'Edit text');
+        selectionTopbar.appendChild(edit);
+      }
+      appendCanvasTextKindTools(selectionTopbar, textIndex, textElement);
+      if (selectedElements.length === 1) selectionTopbar.appendChild(canvasEmojiTool(textIndex));
+      selectionTopbar.appendChild(canvasTool('−', '', () => changeCanvasTextSize(textIndex, -1)));
+      selectionTopbar.appendChild(canvasTool('+', '', () => changeCanvasTextSize(textIndex, 1)));
+      if (selectedElements.some(candidate => ['heading','text','text-image','bullet'].includes(candidate.kind))) {
+        const bold = canvasTool('B', (textElement.text || '').startsWith('**') && (textElement.text || '').endsWith('**') ? 'active' : '', () => toggleCanvasMarkdownStyle(textIndex, '**'));
+        bold.title = 'Bold';
+        bold.setAttribute('aria-label', 'Bold');
+        const highlight = canvasTool('H', (textElement.text || '').startsWith('*') && (textElement.text || '').endsWith('*') ? 'active' : '', () => toggleCanvasMarkdownStyle(textIndex, '*'));
+        highlight.title = 'Highlight';
+        highlight.setAttribute('aria-label', 'Highlight');
+        selectionTopbar.append(bold, highlight);
+      }
+    }
+    if (positionable) {
+      for (const [alignment, symbol, title] of [['left','≡←','Align left'],['center','≡','Align centre'],['right','→≡','Align right']]) {
+        const button = canvasTool(symbol, query.get('align') === alignment ? 'active' : '', () => setCanvasAlignment(index, alignment));
+        button.title = title;
+        button.setAttribute('aria-label', title);
+        selectionTopbar.appendChild(button);
+      }
+      for (const alignment of ['top','middle','bottom']) selectionTopbar.appendChild(canvasVerticalAlignmentTool(index, alignment, query.get('valign') === alignment));
+    }
+    if (selectedText) {
+      if (rotatableText) {
+        const rotate = canvasTool('⟳', 'keynope-icon-button keynope-rotate-button', () => rotateCanvasText(textIndex));
+        rotate.innerHTML = '<span class="keynope-rotate-icon" aria-hidden="true">⟳</span><span class="keynope-rotate-label">ROTATE</span>';
+        rotate.title = 'Rotate';
+        rotate.setAttribute('aria-label', 'Rotate');
+        selectionTopbar.appendChild(rotate);
+      }
+      if (selectedElements.some(candidate => ['heading','text','text-image','bullet'].includes(candidate.kind))) selectionTopbar.appendChild(canvasStyleSelect(textIndex, textElement));
+      selectionTopbar.appendChild(canvasColourTool(textIndex, textElement, ''));
+      if (selectedElements.length === 1) selectionTopbar.appendChild(canvasLinkTool(textIndex, query));
+    }
+    if (!selectedText && shapeElement) selectionTopbar.appendChild(canvasColourTool(shapeIndex, shapeElement, ''));
+    if (selectedElements.length === 1 && element.kind === 'shape') appendCanvasShapeKindTools(selectionTopbar, index, query);
+    if (selectedElements.length === 1 && element.kind === 'image') selectionTopbar.appendChild(canvasVisualMenu(index, element));
+    if (selectedElements.length === 1) selectionTopbar.appendChild(canvasOutlineTool(index, element, query));
+    if (selectedElements.length === 1) selectionTopbar.appendChild(canvasDuplicateTool(index));
+    if (selectedElements.length === 1) selectionTopbar.appendChild(canvasLayerTool(index, 'backward'));
+    if (selectedElements.length === 1) selectionTopbar.appendChild(canvasLayerTool(index, 'forward'));
+    if (selectedElements.length === 1 && canvasElementSupportsTransparency(element)) selectionTopbar.appendChild(canvasTransparencyTool(index, query));
+    selectionTopbar.appendChild(canvasDeleteTool(index));
+  }
+
+  renderEditorCanvasOverlay = () => {
+    if (!editorState || !deck.pages || !deck.pages.length) return;
+    const page = deck.pages[pageIndex];
+    if (!page || page.slide !== editorState.current) return;
+    canvasOverlay.style.width = presenterCanvas.style.width;
+    canvasOverlay.style.height = presenterCanvas.style.height;
+    canvasOverlay.replaceChildren();
+    const groups = new Map();
+    const resolvedToRaw = editorElementIndexMaps().resolvedToRaw;
+    for (const line of page.lines || []) {
+      if (!Number.isInteger(line.element) || line.element < 0) continue;
+      const rawElement = resolvedToRaw.get(line.element);
+      if (rawElement == null) continue;
+      let group = groups.get(rawElement);
+      if (!group) group = {minX: deck.cols, minY: deck.rows, maxX: 0, maxY: 0, color: ''};
+      for (const part of line.parts || []) {
+        const width = [...(part.text || '')].length;
+        group.minX = Math.min(group.minX, part.col || 0);
+        group.maxX = Math.max(group.maxX, (part.col || 0) + width);
+        group.minY = Math.min(group.minY, line.row || 0);
+        group.maxY = Math.max(group.maxY, (line.row || 0) + 1);
+        if (!group.color && part.color) group.color = part.color;
+      }
+      groups.set(rawElement, group);
+    }
+    const authoredElements = editorState.slides[editorState.current].elements || [];
+    authoredElements.forEach((element, index) => {
+      const query = new URLSearchParams(element.query || '');
+      if (element.kind === 'shape' && query.get('transparent') === '1') {
+        const bounds = canvasShapeSelectionBounds(element, page.page);
+        if (bounds) groups.set(index, bounds);
+      }
+    });
+    for (const [index, bounds] of groups) {
+      if (index >= (editorState.slides[editorState.current].elements || []).length) continue;
+      const hit = document.createElement('div');
+      hit.className = 'keynope-canvas-element' + ((index === editorState.selected || (editorState.selection || []).includes(index)) ? ' active' : '');
+      hit.dataset.element = String(index);
+      hit.dataset.color = bounds.color || '';
+      hit.style.left = (bounds.minX / deck.cols * 100) + '%';
+      hit.style.top = (bounds.minY / deck.rows * 100) + '%';
+      hit.style.width = (Math.max(1, bounds.maxX - bounds.minX) / deck.cols * 100) + '%';
+      hit.style.height = (Math.max(1, bounds.maxY - bounds.minY) / deck.rows * 100) + '%';
+      hit.title = 'Element ' + (index + 1);
+      hit.addEventListener('dblclick', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        beginInlineEdit(index, hit);
+      });
+      hit.addEventListener('contextmenu', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const open = () => showElementContextMenu(index, event.clientX, event.clientY);
+        if (editorState.selected === index) open();
+        else editorAction({action: 'select-element', element: index}).then(open).catch(() => {});
+      });
+      hit.addEventListener('pointerdown', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (activeInlineEditor) {
+          activeInlineEditor.finish(true).then(() => editorAction({action: 'select-element', element: index, name: event.shiftKey ? 'toggle' : ''}).catch(() => {}));
+          return;
+        }
+        const originX = event.clientX;
+        const originY = event.clientY;
+        const start = {...bounds};
+        const resizeHandle = event.target.closest && event.target.closest('.keynope-resize-handle');
+        const resizeCorner = resizeHandle ? resizeHandle.dataset.corner : '';
+        const resizing = resizeCorner !== '';
+        const sourceElement = {...editorState.slides[editorState.current].elements[index]};
+        const fittingText = resizing && ['heading','text','text-image','bullet','code'].includes(sourceElement.kind);
+		const resizingVisual = resizing && (sourceElement.kind === 'shape' || sourceElement.kind === 'image');
+		if (resizingVisual) keynopeEditorVisualResizeActive = true;
+        let pendingFit = null;
+        let fitting = false;
+        let lastFit = null;
+        let fitWaiters = [];
+		let pendingVisualPreview = null;
+		let visualPreviewFrame = 0;
+		let visualPreviewing = false;
+        hit.setPointerCapture(event.pointerId);
+        const resizedBounds = (dx, dy) => {
+          let minX = start.minX, minY = start.minY, maxX = start.maxX, maxY = start.maxY;
+          if (resizeCorner.includes('w')) minX = Math.min(maxX - 1, minX + dx);
+          if (resizeCorner.includes('e')) maxX = Math.max(minX + 1, maxX + dx);
+          if (resizeCorner.includes('n')) minY = Math.min(maxY - 1, minY + dy);
+          if (resizeCorner.includes('s')) maxY = Math.max(minY + 1, maxY + dy);
+          minX = Math.max(0, minX); minY = Math.max(0, minY);
+          maxX = Math.min(deck.cols, maxX); maxY = Math.min(deck.rows, maxY);
+          return {minX, minY, maxX, maxY};
+        };
+        const fitElementForBounds = next => {
+          const element = {...sourceElement};
+          const query = new URLSearchParams(element.query || '');
+          for (const key of ['right','right_pct','bottom','row_delta','valign','align','left','width','height']) query.delete(key);
+          query.set('left_pct', Math.max(0, Math.min(1, next.minX / deck.cols)).toFixed(6));
+          query.set('top', String(next.minY));
+          element.query = query.toString();
+          return element;
+        };
+		const resizedElementForBounds = next => {
+			const element = {...sourceElement};
+			const query = new URLSearchParams(element.query || '');
+			for (const key of ['right','right_pct','bottom','row_delta','valign','align','left']) query.delete(key);
+			if (element.kind === 'image') query.delete('scale');
+          query.set('left_pct', Math.max(0, Math.min(1, next.minX / deck.cols)).toFixed(6));
+          query.set('top', String(next.minY));
+          query.set('width', String(Math.max(1, next.maxX - next.minX)));
+          query.set('height', String(Math.max(1, next.maxY - next.minY)));
+          element.query = query.toString();
+          return element;
+        };
+		const pumpVisualPreview = async () => {
+			if (visualPreviewing) return;
+			visualPreviewing = true;
+			while (pendingVisualPreview) {
+				const bounds = pendingVisualPreview;
+				pendingVisualPreview = null;
+				await previewCanvasMutation(index, resizedElementForBounds(bounds), false, sourceElement.kind === 'image');
+			}
+			visualPreviewing = false;
+		};
+		const queueVisualPreview = next => {
+			pendingVisualPreview = next;
+			if (visualPreviewFrame) return;
+			visualPreviewFrame = requestAnimationFrame(() => {
+				visualPreviewFrame = 0;
+				pumpVisualPreview();
+			});
+		};
+        const pumpTextFit = async () => {
+          if (fitting) return;
+          fitting = true;
+          while (pendingFit) {
+            const task = pendingFit;
+            pendingFit = null;
+            try {
+              const result = await fitCanvasTextElement(index, fitElementForBounds(task.bounds), task.bounds.maxX - task.bounds.minX, task.bounds.maxY - task.bounds.minY);
+              lastFit = {key: task.key, element: result.element};
+              replaceEditorPreviewPages(editorState.current, result.pages);
+              drawFrame();
+            } catch (_err) {}
+          }
+          fitting = false;
+          const waiters = fitWaiters;
+          fitWaiters = [];
+          waiters.forEach(resolve => resolve());
+        };
+        const queueTextFit = next => {
+          const key = [next.minX,next.minY,next.maxX,next.maxY].join(':');
+          if (pendingFit && pendingFit.key === key || lastFit && lastFit.key === key && !fitting) return key;
+          pendingFit = {key, bounds: next};
+          pumpTextFit();
+          return key;
+        };
+        const finishTextFit = async next => {
+          const key = queueTextFit(next);
+          while (fitting || pendingFit) await new Promise(resolve => fitWaiters.push(resolve));
+          return lastFit && lastFit.key === key ? lastFit.element : null;
+        };
+        const move = moveEvent => {
+          const rect = canvasOverlay.getBoundingClientRect();
+          const dx = Math.round((moveEvent.clientX - originX) * deck.cols / Math.max(1, rect.width));
+          const dy = Math.round((moveEvent.clientY - originY) * deck.rows / Math.max(1, rect.height));
+          if (resizing) {
+            const next = resizedBounds(dx, dy);
+            hit.style.left = (next.minX / deck.cols * 100) + '%';
+            hit.style.top = (next.minY / deck.rows * 100) + '%';
+            hit.style.width = ((next.maxX - next.minX) / deck.cols * 100) + '%';
+            hit.style.height = ((next.maxY - next.minY) / deck.rows * 100) + '%';
+            if (fittingText) queueTextFit(next);
+            else if (resizingVisual) queueVisualPreview(next);
+          } else {
+            hit.style.left = ((start.minX + dx) / deck.cols * 100) + '%';
+            hit.style.top = ((start.minY + dy) / deck.rows * 100) + '%';
+          }
+        };
+		const up = async upEvent => {
+			if (resizingVisual) keynopeEditorVisualResizeActive = false;
+          hit.removeEventListener('pointermove', move);
+          hit.removeEventListener('pointerup', up);
+          if (visualPreviewFrame) cancelAnimationFrame(visualPreviewFrame);
+          visualPreviewFrame = 0;
+          pendingVisualPreview = null;
+          const rect = canvasOverlay.getBoundingClientRect();
+          const dx = Math.round((upEvent.clientX - originX) * deck.cols / Math.max(1, rect.width));
+          const dy = Math.round((upEvent.clientY - originY) * deck.rows / Math.max(1, rect.height));
+          if (!dx && !dy) {
+            if (resizing) return;
+            if (pendingCanvasSelection) clearTimeout(pendingCanvasSelection);
+            pendingCanvasSelection = setTimeout(() => {
+              pendingCanvasSelection = null;
+              editorAction({action: 'select-element', element: index, name: event.shiftKey ? 'toggle' : ''}).catch(() => {});
+            }, 240);
+            return;
+          }
+          if (fittingText) {
+            const fitted = await finishTextFit(resizedBounds(dx, dy));
+            if (fitted) editorAction({action: 'update-element', element: index, elementData: fitted}).catch(() => {});
+            return;
+          }
+          const element = {...editorState.slides[editorState.current].elements[index]};
+          const query = new URLSearchParams(element.query || '');
+		if (resizing) {
+			const next = resizedBounds(dx, dy);
+			query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('valign'); query.delete('align'); query.delete('left');
+			if (element.kind === 'image') query.delete('scale');
+            query.set('left_pct', Math.max(0, Math.min(1, next.minX / deck.cols)).toFixed(6));
+            query.set('top', String(next.minY));
+            query.set('width', String(Math.max(1, next.maxX - next.minX)));
+            query.set('height', String(Math.max(1, next.maxY - next.minY)));
+          } else {
+            query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('valign'); query.delete('align'); query.delete('left');
+            query.set('left_pct', Math.max(0, Math.min(1, (start.minX + dx) / deck.cols)).toFixed(6));
+            query.set('top', String(Math.max(0, start.minY + dy)));
+          }
+          element.query = query.toString();
+		  previewCanvasMutation(index, element, true, canvasElementIsGIF(element));
+          editorAction({action: 'update-element', element: index, elementData: element}).catch(() => {});
+        };
+		hit.addEventListener('pointermove', move);
+		hit.addEventListener('pointerup', up);
+		hit.addEventListener('pointercancel', () => { if (resizingVisual) keynopeEditorVisualResizeActive = false; }, {once:true});
+      });
+      if (index === editorState.selected) {
+        for (const corner of ['nw','ne','sw','se']) {
+          const handle = document.createElement('span');
+          handle.className = 'keynope-resize-handle ' + corner;
+          handle.dataset.corner = corner;
+          handle.setAttribute('aria-label', 'Resize from ' + corner);
+          hit.appendChild(handle);
+        }
+      }
+      canvasOverlay.appendChild(hit);
+    }
+  };
+
+  canvasOverlay.addEventListener('pointerdown', event => {
+    if (!activeInlineEditor || activeInlineEditor.editor.contains(event.target)) return;
+    if (event.target.closest && event.target.closest('.keynope-canvas-element')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    activeInlineEditor.finish(true);
+  });
+
+  function slideTitle(slide, index) {
+    const element = (slide.elements || []).find(item => item.text && (item.kind === 'heading' || item.kind === 'text'));
+    return (index + 1) + '. ' + (element ? element.text.split('\n')[0] : 'Untitled slide');
+  }
+  function closeSlideContextMenu() {
+    slideContextMenu.classList.remove('open');
+    slideContextMenu.replaceChildren();
+  }
+  function showSlideContextMenu(index, clientX, clientY) {
+    if (!editorState || index < 0 || index >= editorState.slides.length) return;
+    const slide = editorState.slides[index];
+    slideContextMenu.replaceChildren();
+    const heading = document.createElement('h3');
+    heading.textContent = 'Slide ' + (index + 1) + ' settings';
+    slideContextMenu.appendChild(heading);
+    const updateSlide = () => editorAction({action: 'update-slide', slideData: slide}).catch(() => {});
+    if (editorState.masterMode) {
+      const currentName = index === 0 ? (editorState.masters.base.name || 'Base Master') : ((editorState.masters.layouts[index - 1] && editorState.masters.layouts[index - 1].name) || ('Master ' + index));
+      heading.textContent = currentName + ' settings';
+      editorField(slideContextMenu, 'Name', currentName, false, value => {
+        editorAction({action: 'rename-master', name: value}).catch(() => {});
+      });
+    }
+    if (!editorState.masterMode && editorState.masters && Array.isArray(editorState.masters.layouts)) {
+      const layoutField = document.createElement('label');
+      layoutField.className = 'keynope-editor-field';
+      const caption = document.createElement('span');
+      caption.textContent = 'Layout';
+      const select = document.createElement('select');
+      for (const layout of editorState.masters.layouts) {
+        const option = document.createElement('option');
+        option.value = layout.id;
+        option.textContent = layout.name || layout.id;
+        option.selected = layout.id === (slide.layoutId || '');
+        select.appendChild(option);
+      }
+      select.addEventListener('change', () => {
+        closeSlideContextMenu();
+        editorAction({action: 'set-layout', kind: select.value}).catch(() => {});
+      });
+      layoutField.append(caption, select);
+      slideContextMenu.appendChild(layoutField);
+    }
+    editorSelect(slideContextMenu, 'Effect', slide.effect || '', ['none','matrix','stars','plasma','glitch','digital-snow','radar','neural','circuit','data-storm','flame','warp','scanline','fireworks','explosion'], value => { slide.effect = value; slide.effectSet = true; updateSlide(); });
+    editorSelect(slideContextMenu, 'Background', slide.background || '', ['none','soft-plasma','aurora','topography','waves','mesh','constellation','ribbons','diagonal-flow','blueprint'], value => { slide.background = value; slide.backgroundSet = true; updateSlide(); });
+    editorColor(slideContextMenu, 'Foreground', slide.fg || '', '#f3efe0', value => { slide.fg = value; slide.fgSet = true; updateSlide(); });
+    editorColor(slideContextMenu, 'Background colour', slide.bg || '', '#000000', value => { slide.bg = value; slide.bgSet = true; updateSlide(); });
+    editorColor(slideContextMenu, 'Header colour', slide.headerFg || '', '#ffffff', value => { slide.headerFg = value; slide.headerFgSet = true; updateSlide(); });
+    if (!editorState.masterMode) {
+      const reset = document.createElement('button');
+      reset.type = 'button';
+      reset.textContent = 'Use master appearance';
+      reset.addEventListener('click', () => {
+        slide.effect = ''; slide.effectSet = false;
+        slide.background = ''; slide.backgroundSet = false;
+        slide.fg = ''; slide.fgSet = false;
+        slide.bg = ''; slide.bgSet = false;
+        slide.headerFg = ''; slide.headerFgSet = false;
+        closeSlideContextMenu();
+        updateSlide();
+      });
+      slideContextMenu.appendChild(reset);
+    }
+    slideContextMenu.classList.add('open');
+    const rect = slideContextMenu.getBoundingClientRect();
+    slideContextMenu.style.left = Math.max(8, Math.min(innerWidth - rect.width - 8, clientX)) + 'px';
+    slideContextMenu.style.top = Math.max(8, Math.min(innerHeight - rect.height - 8, clientY)) + 'px';
+  }
+  function showElementContextMenu(index, clientX, clientY) {
+    const slide = editorState && editorState.slides && editorState.slides[editorState.current];
+    const element = slide && slide.elements[index];
+    if (!element) return;
+    slideContextMenu.replaceChildren();
+    const heading = document.createElement('h3');
+    heading.textContent = (element.kind || 'Element') + ' actions';
+    slideContextMenu.appendChild(heading);
+    const actions = document.createElement('div');
+    actions.className = 'keynope-editor-actions';
+    const query = new URLSearchParams(element.query || '');
+    const selectedText = ['heading','text','text-image','bullet','code'].includes(element.kind);
+    const rotatableText = ['heading','text','text-image','bullet'].includes(element.kind);
+    const positionable = selectedText || element.kind === 'shape' || element.kind === 'image' || element.kind === 'page-number';
+    if (selectedText) {
+      actions.appendChild(canvasTool('✎', '', () => beginInlineEdit(index)));
+      appendCanvasTextKindTools(actions, index, element);
+      actions.appendChild(canvasEmojiTool(index));
+      actions.appendChild(canvasTool('−', '', () => changeCanvasTextSize(index, -1)));
+      actions.appendChild(canvasTool('+', '', () => changeCanvasTextSize(index, 1)));
+      if (element.kind !== 'code') {
+        actions.appendChild(canvasTool('Bold', '', () => toggleCanvasMarkdownStyle(index, '**')));
+        actions.appendChild(canvasTool('Highlight', '', () => toggleCanvasMarkdownStyle(index, '*')));
+      }
+    }
+    if (positionable) {
+      actions.appendChild(canvasTool('Left', '', () => setCanvasAlignment(index, 'left')));
+      actions.appendChild(canvasTool('Centre', '', () => setCanvasAlignment(index, 'center')));
+      actions.appendChild(canvasTool('Right', '', () => setCanvasAlignment(index, 'right')));
+      for (const alignment of ['top','middle','bottom']) actions.appendChild(canvasVerticalAlignmentTool(index, alignment, query.get('valign') === alignment));
+    }
+    if (rotatableText) actions.appendChild(canvasTool('⟳', '', () => rotateCanvasText(index)));
+    if (selectedText && element.kind !== 'code') actions.appendChild(canvasStyleSelect(index, element));
+    if (selectedText || element.kind === 'shape') actions.appendChild(canvasColourTool(index, element, ''));
+    if (selectedText) actions.appendChild(canvasLinkTool(index, query));
+    if (element.kind === 'shape') appendCanvasShapeKindTools(actions, index, query);
+    actions.appendChild(canvasOutlineTool(index, element, query));
+    actions.appendChild(canvasDuplicateTool(index));
+    actions.appendChild(canvasLayerTool(index, 'backward'));
+    actions.appendChild(canvasLayerTool(index, 'forward'));
+    if (canvasElementSupportsTransparency(element)) actions.appendChild(canvasTransparencyTool(index, query));
+    actions.appendChild(canvasDeleteTool(index));
+    slideContextMenu.appendChild(actions);
+    if (element.kind === 'image') {
+      const visualControls = document.createElement('div');
+      visualControls.className = 'keynope-context-visual';
+      const visualHeading = document.createElement('h4');
+      visualHeading.textContent = 'Adjust Image';
+      visualControls.appendChild(visualHeading);
+      appendCanvasVisualControls(visualControls, index, element);
+      slideContextMenu.appendChild(visualControls);
+    }
+    slideContextMenu.classList.add('open');
+    const rect = slideContextMenu.getBoundingClientRect();
+    slideContextMenu.style.left = Math.max(8, Math.min(innerWidth - rect.width - 8, clientX)) + 'px';
+    slideContextMenu.style.top = Math.max(8, Math.min(innerHeight - rect.height - 8, clientY)) + 'px';
+  }
+  document.addEventListener('pointerdown', event => {
+    if (!slideContextMenu.contains(event.target)) closeSlideContextMenu();
+  }, true);
+  stage.addEventListener('contextmenu', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (activeInlineEditor) activeInlineEditor.finish(true);
+    showSlideContextMenu(editorState ? editorState.current : -1, event.clientX, event.clientY);
+  });
+  function renderEditorPanels() {
+    if (!editorState || !editorState.slides || !editorState.slides.length) return;
+    slidesPanel.replaceChildren();
+    const slidesHeader = document.createElement('div');
+    slidesHeader.className = 'keynope-slides-header';
+    const slidesHeading = document.createElement('h3');
+    slidesHeading.textContent = editorState.masterMode ? 'Master Slides' : 'Slides';
+    slidesHeader.append(slidesHeading, masterModeButton);
+    slidesPanel.appendChild(slidesHeader);
+    addSlideButton.title = editorState.masterMode ? 'Add master' : 'Add slide';
+    addSlideButton.setAttribute('aria-label', addSlideButton.title);
+    cloneSlideButton.title = editorState.masterMode ? 'Clone master' : 'Clone slide';
+    cloneSlideButton.setAttribute('aria-label', cloneSlideButton.title);
+    deleteSlideButton.title = editorState.masterMode ? 'Delete master' : 'Delete slide';
+    deleteSlideButton.setAttribute('aria-label', deleteSlideButton.title);
+    deleteSlideButton.disabled = !!editorState.masterMode && editorState.current === 0;
+    masterModeButton.textContent = 'M';
+    masterModeButton.title = editorState.masterMode ? 'Exit master slides' : 'Master slides';
+    masterModeButton.setAttribute('aria-label', masterModeButton.title);
+    masterModeButton.classList.toggle('active', !!editorState.masterMode);
+    refreshEditorBottomToolbarVisibility();
+    editorState.slides.forEach((slide, index) => {
+      const button = document.createElement('button');
+      button.className = 'keynope-slide-item' + (index === editorState.current ? ' active' : '');
+      button.textContent = editorState.masterMode
+        ? (index === 0 ? 'Base Master' : ((editorState.masters.layouts[index - 1] && editorState.masters.layouts[index - 1].name) || ('Master ' + index)))
+        : slideTitle(slide, index);
+      button.addEventListener('click', () => editorAction({action: 'select-slide', slide: index}).catch(() => {}));
+      button.addEventListener('contextmenu', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const open = () => showSlideContextMenu(index, event.clientX, event.clientY);
+        if (editorState.current === index) open();
+        else editorAction({action: 'select-slide', slide: index}).then(open).catch(() => {});
+      });
+      if (editorState.masterMode) {
+        button.dataset.masterIndex = String(index);
+        if (index > 0) {
+          button.draggable = true;
+          button.classList.add('master-reorderable');
+          button.title = 'Drag to reorder master slide';
+          button.addEventListener('dragstart', event => {
+            draggedMasterIndex = index;
+            draggedMasterButton = button;
+            button.classList.add('master-drag-outline');
+            if (event.dataTransfer) {
+              event.dataTransfer.effectAllowed = 'move';
+              event.dataTransfer.setData('text/plain', String(index));
+              const rect = button.getBoundingClientRect();
+              masterDragImage = button.cloneNode(true);
+              masterDragImage.removeAttribute('data-master-index');
+              masterDragImage.classList.remove('master-reorderable', 'master-dragging');
+              masterDragImage.classList.add('keynope-master-drag-image');
+              masterDragImage.style.width = rect.width + 'px';
+              masterDragImage.style.height = rect.height + 'px';
+              masterDragImage.style.margin = '0';
+              document.body.appendChild(masterDragImage);
+              event.dataTransfer.setDragImage(
+                masterDragImage,
+                Math.max(0, Math.min(rect.width, event.clientX - rect.left)),
+                Math.max(0, Math.min(rect.height, event.clientY - rect.top))
+              );
+            }
+            requestAnimationFrame(() => {
+              if (draggedMasterButton === button) button.classList.add('master-dragging');
+            });
+          });
+          button.addEventListener('dragend', finishMasterDrag);
+        }
+      }
+      slidesPanel.appendChild(button);
+    });
+
+    inspector.replaceChildren();
+    const inspectorHeading = document.createElement('h2');
+    inspectorHeading.textContent = 'Inspector';
+    inspector.appendChild(inspectorHeading);
+    const slide = editorState.slides[editorState.current];
+    if (!slide) {
+      renderEditorTopbar();
+      return;
+    }
+    renderEditorTopbar();
+    renderSpeakerNotes(slide);
+    const slideSection = document.createElement('section');
+    slideSection.className = 'keynope-editor-section';
+    const slideHeading = document.createElement('h3');
+    slideHeading.textContent = 'Slide';
+    slideSection.appendChild(slideHeading);
+    const updateSlide = () => editorAction({action: 'update-slide', slideData: slide}).catch(() => {});
+    if (editorState.masters && Array.isArray(editorState.masters.layouts)) {
+      const layoutField = document.createElement('label');
+      layoutField.className = 'keynope-editor-field';
+      const layoutCaption = document.createElement('span');
+      layoutCaption.textContent = 'Layout';
+      const layoutSelect = document.createElement('select');
+      for (const layout of editorState.masters.layouts) {
+        const option = document.createElement('option');
+        option.value = layout.id;
+        option.textContent = layout.name;
+        option.selected = layout.id === (slide.layoutId || '');
+        layoutSelect.appendChild(option);
+      }
+      layoutSelect.addEventListener('change', () => editorAction({action: 'set-layout', kind: layoutSelect.value}).catch(() => {}));
+      layoutField.append(layoutCaption, layoutSelect);
+      slideSection.appendChild(layoutField);
+    }
+    editorSelect(slideSection, 'Effect', slide.effect || '', ['none','matrix','stars','plasma','glitch','digital-snow','radar','neural','circuit','data-storm','flame','warp','scanline','fireworks','explosion'], value => { slide.effect = value; slide.effectSet = true; updateSlide(); });
+    editorSelect(slideSection, 'Background', slide.background || '', ['none','soft-plasma','aurora','topography','waves','mesh','constellation','ribbons','diagonal-flow','blueprint'], value => { slide.background = value; slide.backgroundSet = true; updateSlide(); });
+    editorColor(slideSection, 'Foreground', slide.fg || '', '#f3efe0', value => { slide.fg = value; slide.fgSet = true; updateSlide(); });
+    editorColor(slideSection, 'Background colour', slide.bg || '', '#000000', value => { slide.bg = value; slide.bgSet = true; updateSlide(); });
+    editorColor(slideSection, 'Header colour', slide.headerFg || '', '#ffffff', value => { slide.headerFg = value; slide.headerFgSet = true; updateSlide(); });
+    const elementsSection = document.createElement('section');
+    elementsSection.className = 'keynope-editor-section';
+    const elementsHeading = document.createElement('h3');
+    elementsHeading.textContent = 'Elements';
+    elementsSection.appendChild(elementsHeading);
+    (slide.elements || []).forEach((element, index) => {
+      const button = document.createElement('button');
+      button.className = 'keynope-element-item' + ((index === editorState.selected || (editorState.selection || []).includes(index)) ? ' active' : '');
+      button.textContent = (index + 1) + '. ' + element.kind + (element.text ? ' — ' + element.text.split('\n')[0] : '');
+      button.addEventListener('click', event => editorAction({action: 'select-element', element: index, name: event.shiftKey ? 'toggle' : ''}).catch(() => {}));
+      elementsSection.appendChild(button);
+    });
+    if ((editorState.selection || []).length > 1) {
+      editorButton('Delete selected', {action: 'delete-selection'}, elementsSection);
+    }
+
+    const selected = editorState.selected;
+    if (selected >= 0 && selected < (slide.elements || []).length) {
+      const element = slide.elements[selected];
+      const elementSection = document.createElement('section');
+      elementSection.className = 'keynope-editor-section';
+      const heading = document.createElement('h3');
+      heading.textContent = 'Selected ' + element.kind;
+      elementSection.appendChild(heading);
+      const updateElement = () => editorAction({action: 'update-element', element: selected, elementData: element}).catch(() => {});
+      const help = document.createElement('p');
+      help.className = 'keynope-editor-help';
+      help.textContent = 'Drag on the canvas to move. Drag any blue corner to resize in that direction. Double-click or press Enter to edit text.';
+      elementSection.appendChild(help);
+      const actions = document.createElement('div');
+      actions.className = 'keynope-editor-actions';
+      if (['heading','text','bullet','code'].includes(element.kind)) {
+        actions.appendChild(canvasTool('Edit text', '', () => beginInlineEdit(selected)));
+      }
+      actions.appendChild(canvasDuplicateTool(selected));
+      const remove = canvasDeleteTool(selected);
+      actions.appendChild(remove);
+      elementSection.appendChild(actions);
+      if (['heading','text','bullet','code'].includes(element.kind)) {
+        editorField(elementSection, 'Text', element.text || '', true, value => { element.text = value; updateElement(); });
+      }
+      editorSelect(elementSection, 'Type', element.kind || 'text', ['heading','text','bullet','code','shape','image'], value => { element.kind = value; updateElement(); });
+      if (element.kind === 'heading') {
+        editorNumber(elementSection, 'Heading level', element.level || 1, {min: 1, max: 6, step: 1}, value => { element.level = Number(value || 1); updateElement(); });
+      }
+      if (element.kind === 'image') {
+        editorField(elementSection, 'Image path', element.path || '', false, value => { element.path = value; updateElement(); });
+      }
+      const query = new URLSearchParams(element.query || '');
+      const setQuery = (name, value) => {
+        if (value === '' || value == null) query.delete(name); else query.set(name, String(value));
+        element.query = query.toString();
+        updateElement();
+      };
+      const positionHeading = document.createElement('p');
+      positionHeading.className = 'keynope-editor-subheading';
+      positionHeading.textContent = 'Position & size';
+      elementSection.appendChild(positionHeading);
+      const leftValue = query.has('left_pct') ? (Number(query.get('left_pct')) * 100).toFixed(1) : '';
+      editorNumber(elementSection, 'Left (%)', leftValue, {min: 0, max: 100, step: .5}, value => setQuery('left_pct', value === '' ? '' : Math.max(0, Math.min(100, Number(value))) / 100));
+      editorNumber(elementSection, 'Top (rows)', query.get('top') || '', {min: 0, step: 1}, value => setQuery('top', value));
+      editorNumber(elementSection, 'Width (columns)', query.get('width') || '', {min: 1, step: 1}, value => setQuery('width', value));
+      editorNumber(elementSection, 'Height (rows)', query.get('height') || '', {min: 1, step: 1}, value => setQuery('height', value));
+      editorNumber(elementSection, 'Scale', query.get('scale') || '1', {min: .1, max: 10, step: .1}, value => setQuery('scale', value));
+      if (element.kind === 'shape') {
+        editorSelect(elementSection, 'Shape', query.get('shape') || 'rectangle', ['rectangle','square','circle','triangle','diamond'], value => setQuery('shape', value));
+      }
+      const appearanceHeading = document.createElement('p');
+      appearanceHeading.className = 'keynope-editor-subheading';
+      appearanceHeading.textContent = 'Appearance';
+      elementSection.appendChild(appearanceHeading);
+      editorColor(elementSection, 'Colour', query.get('fg') || '', '#f3efe0', value => setQuery('fg', value));
+      const advanced = document.createElement('details');
+      const advancedSummary = document.createElement('summary');
+      advancedSummary.textContent = 'Advanced properties';
+      advanced.appendChild(advancedSummary);
+      editorField(advanced, 'Query', element.query || '', true, value => { element.query = value; updateElement(); });
+      elementSection.appendChild(advanced);
+      const layersHeading = document.createElement('p');
+      layersHeading.className = 'keynope-editor-subheading';
+      layersHeading.textContent = 'Layer';
+      elementSection.appendChild(layersHeading);
+      const layers = document.createElement('div');
+      layers.className = 'keynope-editor-actions';
+      for (const [label, direction] of [['To back','back'],['Backward','backward'],['Forward','forward'],['To front','front']]) {
+        editorButton(label, {action: 'move-element', element: selected, kind: direction}, layers);
+      }
+      elementSection.appendChild(layers);
+      inspector.appendChild(elementSection);
+    }
+    inspector.appendChild(elementsSection);
+    inspector.appendChild(slideSection);
+    if (editorState.masters) {
+      const mastersSection = document.createElement('section');
+      mastersSection.className = 'keynope-editor-section';
+      const heading = document.createElement('h3');
+      heading.textContent = 'Masters & Layouts';
+      mastersSection.appendChild(heading);
+      editorButton('+ Layout', {action: 'add-layout', name: 'New Layout'}, mastersSection);
+      const layouts = [editorState.masters.base].concat(editorState.masters.layouts || []);
+      for (const layout of layouts) {
+        if (!layout) continue;
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = layout.name || layout.id;
+        details.appendChild(summary);
+        let name = layout.name || '';
+        const masterSlide = layout.slide || {elements: []};
+        if (!Array.isArray(masterSlide.elements)) masterSlide.elements = [];
+        editorField(details, 'Name', name, false, value => { name = value; });
+        editorSelect(details, 'Effect', masterSlide.effect || '', ['none','matrix','stars','plasma','glitch','digital-snow','radar','neural','circuit','data-storm','flame','warp','scanline','fireworks','explosion'], value => { masterSlide.effect = value; masterSlide.effectSet = true; });
+        editorSelect(details, 'Background', masterSlide.background || '', ['none','soft-plasma','aurora','topography','waves','mesh','constellation','ribbons','diagonal-flow','blueprint'], value => { masterSlide.background = value; masterSlide.backgroundSet = true; });
+        editorColor(details, 'Foreground', masterSlide.fg || '', '#f3efe0', value => { masterSlide.fg = value; masterSlide.fgSet = true; });
+        editorColor(details, 'Background colour', masterSlide.bg || '', '#000000', value => { masterSlide.bg = value; masterSlide.bgSet = true; });
+        editorColor(details, 'Header colour', masterSlide.headerFg || '', '#ffffff', value => { masterSlide.headerFg = value; masterSlide.headerFgSet = true; });
+        const masterElementsHeading = document.createElement('h3');
+        masterElementsHeading.textContent = 'Elements';
+        details.appendChild(masterElementsHeading);
+        masterSlide.elements.forEach((element, elementIndex) => {
+          const elementDetails = document.createElement('details');
+          const elementSummary = document.createElement('summary');
+          elementSummary.textContent = (elementIndex + 1) + '. ' + (element.kind || 'element') + (element.text ? ' — ' + element.text.split('\n')[0] : '');
+          elementDetails.appendChild(elementSummary);
+          editorField(elementDetails, 'Text', element.text || '', true, value => { element.text = value; });
+          editorField(elementDetails, 'Kind', element.kind || '', false, value => { element.kind = value; });
+          editorField(elementDetails, 'Level', element.level || 0, false, value => { element.level = Number(value || 0); });
+          editorField(elementDetails, 'Image path', element.path || '', false, value => { element.path = value; });
+          editorField(elementDetails, 'Properties', element.query || '', true, value => { element.query = value; });
+          const remove = document.createElement('button');
+          remove.textContent = 'Remove element';
+          remove.addEventListener('click', () => { masterSlide.elements.splice(elementIndex, 1); renderEditorPanels(); });
+          elementDetails.appendChild(remove);
+          details.appendChild(elementDetails);
+        });
+        const addMasterElement = document.createElement('button');
+        addMasterElement.textContent = '+ Element';
+        addMasterElement.addEventListener('click', () => {
+          masterSlide.elements.push({kind: 'text', text: 'Text', id: '', query: ''});
+          renderEditorPanels();
+        });
+        details.appendChild(addMasterElement);
+        const save = document.createElement('button');
+        save.textContent = 'Save layout';
+        save.addEventListener('click', () => {
+          editorAction({action: 'update-layout', kind: layout.id, name, slideData: masterSlide}).catch(() => {});
+        });
+        details.appendChild(save);
+        if (layout.id !== 'base') editorButton('Delete', {action: 'delete-layout', kind: layout.id}, details);
+        mastersSection.appendChild(details);
+      }
+      inspector.appendChild(mastersSection);
+    }
+    if (editorStatus) {
+      if (selected >= 0 && selected < (slide.elements || []).length) {
+        const selectedElement = slide.elements[selected];
+        editorStatus.textContent = selectedElement.kind + ' selected · Enter commit · Esc deselect · arrows move · ⌘D duplicate · Delete remove';
+      } else {
+        editorStatus.textContent = 'Select an element · double-click text to edit · drag to move';
+      }
+    }
+    requestAnimationFrame(renderEditorCanvasOverlay);
+  }
+  async function syncEditorState() {
+    try {
+      const response = await fetch('/api/editor/state', {cache: 'no-store'});
+      if (!response.ok) return;
+      const next = await response.json();
+      if (next.version === editorStateVersion) return;
+      editorState = next;
+      keynopeEditorMasterMode = !!editorState.masterMode;
+      editorStateVersion = next.version;
+      renderEditorPanels();
+      await syncEditorWorkspace();
+    } catch (_err) {}
+  }
+  async function syncEditorWorkspace() {
+    const sequence = ++editorWorkspaceSequence;
+    if (!editorState || !editorState.masterMode) {
+      if (editorNormalPages) {
+        deck.pages = editorNormalPages;
+        editorNormalPages = null;
+        const next = deck.pages.findIndex(page => page.slide === editorState.current && page.page === 0);
+        pageIndex = next >= 0 ? next : 0;
+        render();
+        requestAnimationFrame(renderEditorCanvasOverlay);
+      }
+      return;
+    }
+    if (!editorNormalPages) editorNormalPages = (deck.pages || []).slice();
+    try {
+      const response = await fetch('/api/editor/workspace?cols=' + encodeURIComponent(deck.cols) + '&rows=' + encodeURIComponent(deck.rows), {cache: 'no-store'});
+      if (!response.ok) return;
+      const pages = await response.json();
+      if (sequence !== editorWorkspaceSequence || !editorState.masterMode || !Array.isArray(pages) || !pages.length) return;
+      deck.pages = pages;
+      pageIndex = Math.max(0, deck.pages.findIndex(page => page.slide === editorState.current && page.page === 0));
+      render();
+      requestAnimationFrame(renderEditorCanvasOverlay);
+    } catch (_err) {}
+  }
+  window.keynopeDidSave = () => {
+    lastPublishedEditorDirty = null;
+    showEditorSavedConfirmation();
+    syncEditorState();
+  };
+  window.keynopeDidExport = showEditorExportConfirmation;
+  const toolbar = document.createElement('div');
+  toolbar.className = 'keynope-app-toolbar';
+  const timerInputBlocker = document.createElement('div');
+  timerInputBlocker.className = 'keynope-input-blocker';
+  timerInputBlocker.hidden = true;
+  timerInputBlocker.addEventListener('pointerdown', event => { event.preventDefault(); event.stopPropagation(); });
+  timerInputBlocker.addEventListener('contextmenu', event => { event.preventDefault(); event.stopPropagation(); });
+  document.body.appendChild(timerInputBlocker);
+  notesToggleButton = document.createElement('button');
+  notesToggleButton.type = 'button';
+  notesToggleButton.className = 'keynope-app-icon-button keynope-app-tag-button';
+  notesToggleButton.title = 'Speaker notes';
+  notesToggleButton.setAttribute('aria-label', 'Speaker notes');
+  notesToggleButton.innerHTML = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="135" y="55" width="530" height="490" rx="30" fill="none" stroke="#fff" stroke-width="28"/><rect x="185" y="105" width="430" height="235" rx="20" fill="#9b9b9b"/><circle cx="300" cy="220" r="55" fill="#fff"/><path d="M390 190h150M390 245h150" fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round"/><path d="M200 400h400M200 465h300" fill="none" stroke="#fff" stroke-width="26" stroke-linecap="round"/></svg><span class="keynope-app-button-tag">NOTES</span>';
+  notesToggleButton.addEventListener('click', () => setSpeakerNotesVisible(!editorSpeakerNotesVisible, !editorSpeakerNotesVisible));
+  toolbar.appendChild(notesToggleButton);
+  setSpeakerNotesVisible(false, false);
+  const timerButton = document.createElement('button');
+  timerButton.type = 'button';
+  timerButton.className = 'keynope-app-icon-button';
+  timerButton.title = 'Timer';
+  timerButton.setAttribute('aria-label', 'Timer');
+  timerButton.innerHTML = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="345" y="45" width="110" height="65" rx="18" fill="#fff"/><path d="M400 105v45" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round"/><path d="m555 145 44 44" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round"/><circle cx="400" cy="340" r="195" fill="none" stroke="#fff" stroke-width="30"/><path d="M400 190v35M400 455v35M250 340h35M515 340h35" fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round"/><path d="M400 340V235M400 340l92 52" fill="none" stroke="#fff" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/><circle cx="400" cy="340" r="22" fill="#fff"/></svg>';
+  let externalDisplayAvailable = false;
+  let editorPresentationMode = 'none';
+  let editorPresentationPaused = false;
+  function openEditorTimer() {
+    presenterTimerMode = 'config';
+    presenterTimerInput = '';
+    presenterTimerEndMS = 0;
+    refreshEditorPresenterControls();
+    drawFrame();
+  }
+  function startEditorTimer() {
+    const digits = String(presenterTimerInput || '').replace(/\D/g, '').slice(-4).padStart(4, '0');
+    const seconds = Number(digits.slice(0, 2)) * 60 + Number(digits.slice(2));
+    if (seconds <= 0) return;
+    editorAction({action: 'start-timer', value: seconds}).catch(() => {});
+  }
+  function cancelEditorTimerInput() {
+    presenterTimerMode = '';
+    presenterTimerInput = '';
+    presenterTimerEndMS = 0;
+    refreshEditorPresenterControls();
+    drawFrame();
+  }
+  timerButton.addEventListener('click', () => {
+    if (presenterTimerMode === 'running') editorAction({action: 'stop-timer'}).catch(() => {});
+    else if (presenterTimerMode === 'config') cancelEditorTimerInput();
+    else openEditorTimer();
+  });
+  refreshEditorPresenterControls = () => {
+    const running = presenterTimerMode === 'running';
+    const active = presenterTimerMode === 'config' || running;
+    timerButton.title = active ? 'Stop timer' : 'Timer';
+    timerButton.setAttribute('aria-label', timerButton.title);
+    timerButton.classList.toggle('active', active);
+    timerButton.setAttribute('aria-pressed', active ? 'true' : 'false');
+    timerInputBlocker.hidden = !active;
+    canvasOverlay.hidden = active;
+    document.documentElement.setAttribute('data-keynope-timer-active', active ? 'true' : 'false');
+    for (const button of toolbar.querySelectorAll('button')) {
+      button.disabled = active && button !== timerButton && button !== stopPresentationButton && button !== pauseButton;
+    }
+    externalButton.disabled = !!(editorState && editorState.masterMode) || active || !externalDisplayAvailable;
+    for (const button of slidesPanel.querySelectorAll('button')) button.disabled = active;
+    speakerNotesInput.disabled = active;
+  };
+  toolbar.append(timerButton);
+  function appToolbarIconButton(label, svg, action) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'keynope-app-icon-button';
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    button.innerHTML = svg;
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      action();
+    });
+    toolbar.appendChild(button);
+    return button;
+  }
+
+  async function navigateEditorPage(delta) {
+    if (!deck.pages || !deck.pages.length || !editorState || editorState.masterMode) return;
+    if (activeInlineEditor) await activeInlineEditor.finish(true);
+    const targetIndex = Math.max(0, Math.min(deck.pages.length - 1, pageIndex + delta));
+    if (targetIndex === pageIndex) return;
+    const target = deck.pages[targetIndex];
+    pageIndex = targetIndex;
+    frame = 0;
+    render();
+    requestAnimationFrame(renderEditorCanvasOverlay);
+    await editorAction({action:'navigate-presentation', slide:target.slide, page:target.page || 0});
+  }
+
+  const previousSlideSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="220" y="95" width="430" height="390" rx="28" fill="none" stroke="#fff" stroke-width="26"/><circle cx="410" cy="230" r="54" fill="#fff"/><path d="M500 210h85M500 260h85M340 360h245" fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round"/><path d="M185 215 65 300l120 85M80 300h310" fill="none" stroke="#30343a" stroke-width="62" stroke-linecap="round" stroke-linejoin="round"/><path d="M185 215 65 300l120 85M80 300h310" fill="none" stroke="#c8ccd2" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const nextSlideSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><g transform="translate(800 0) scale(-1 1)"><rect x="220" y="95" width="430" height="390" rx="28" fill="none" stroke="#fff" stroke-width="26"/><circle cx="410" cy="230" r="54" fill="#fff"/><path d="M500 210h85M500 260h85M340 360h245" fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round"/><path d="M185 215 65 300l120 85M80 300h310" fill="none" stroke="#30343a" stroke-width="62" stroke-linecap="round" stroke-linejoin="round"/><path d="M185 215 65 300l120 85M80 300h310" fill="none" stroke="#c8ccd2" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/></g></svg>';
+  const presentMainSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="165" y="70" width="470" height="355" rx="30" fill="none" stroke="#fff" stroke-width="28"/><path d="m350 175 150 72-150 72Z" fill="#fff" stroke="#fff" stroke-width="12" stroke-linejoin="round"/><path d="M145 445h510l67 62c13 12 4 33-14 33H92c-18 0-27-21-14-33Z" fill="#fff"/><rect x="332" y="465" width="136" height="18" rx="9" fill="none" stroke="#fff" stroke-width="10"/></svg>';
+  const presentExternalSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="55" y="300" width="270" height="190" rx="22" fill="none" stroke="#fff" stroke-width="24"/><path d="M38 505h304l35 34c9 9 3 24-10 24H13c-13 0-19-15-10-24Z" fill="#fff"/><path d="M315 265h80M350 220l45 45-45 45" fill="none" stroke="#fff" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/><rect x="430" y="55" width="330" height="330" rx="28" fill="none" stroke="#fff" stroke-width="28"/><path d="m555 145 100 75-100 75Z" fill="#fff" stroke="#fff" stroke-width="8" stroke-linejoin="round"/><path d="M595 385v100M515 500h160" fill="none" stroke="#fff" stroke-width="28" stroke-linecap="round"/></svg>';
+
+  const previousButton = appToolbarIconButton('Previous', previousSlideSVG, () => navigateEditorPage(-1).catch(() => {}));
+  const nextButton = appToolbarIconButton('Next', nextSlideSVG, () => navigateEditorPage(1).catch(() => {}));
+  const presentButton = appToolbarIconButton('Present on this computer', presentMainSVG, () => {
+    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+    if (handler) handler.postMessage({action: 'show-main'});
+  });
+  const externalButton = appToolbarIconButton('Present on external screen', presentExternalSVG, () => {
+    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+    if (handler) handler.postMessage({action: 'show-external'});
+  });
+  const pauseButton = appToolbarIconButton('Pause presentation', presentExternalSVG, () => {
+    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+    if (handler) handler.postMessage({action: editorPresentationPaused ? 'resume' : 'pause'});
+  });
+  pauseButton.classList.add('keynope-presentation-control');
+  pauseButton.hidden = true;
+  const stopPresentationButton = appToolbarIconButton('Stop presentation', presentExternalSVG, () => {
+    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+    if (handler) handler.postMessage({action: 'stop'});
+  });
+  stopPresentationButton.classList.add('keynope-presentation-control');
+  stopPresentationButton.hidden = true;
+  toolbar.insertBefore(stopPresentationButton, pauseButton);
+  const aboutSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><circle cx="400" cy="300" r="220" fill="none" stroke="#fff" stroke-width="30"/><circle cx="400" cy="190" r="28" fill="#fff"/><path d="M400 270v165" fill="none" stroke="#fff" stroke-width="42" stroke-linecap="round"/></svg>';
+  const aboutButton = appToolbarIconButton('About Keynope', aboutSVG, () => {
+    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+    if (handler) handler.postMessage({action: 'show-about'});
+  });
+  function refreshEditorBottomToolbarVisibility() {
+    const masterMode = !!(editorState && editorState.masterMode);
+    const presenting = editorPresentationMode !== 'none';
+    if (masterMode && editorSpeakerNotesVisible) setSpeakerNotesVisible(false, false);
+    notesToggleButton.hidden = masterMode;
+    timerButton.hidden = masterMode;
+    previousButton.hidden = masterMode;
+    nextButton.hidden = masterMode;
+    presentButton.hidden = masterMode || presenting;
+    externalButton.hidden = masterMode || presenting;
+    pauseButton.hidden = masterMode || !presenting;
+    stopPresentationButton.hidden = masterMode || !presenting;
+    aboutButton.hidden = false;
+  }
+  externalButton.disabled = true;
+  window.keynopeSetExternalDisplayAvailable = available => {
+    externalDisplayAvailable = !!available;
+    externalButton.disabled = !!(editorState && editorState.masterMode) || presenterTimerMode === 'config' || presenterTimerMode === 'running' || !externalDisplayAvailable;
+  };
+  window.keynopeSetPresentationState = (mode, paused) => {
+    editorPresentationMode = mode === 'main' || mode === 'external' ? mode : 'none';
+    editorPresentationPaused = !!paused && editorPresentationMode !== 'none';
+    const active = editorPresentationMode !== 'none';
+    const baseSVG = editorPresentationMode === 'main' ? presentMainSVG : presentExternalSVG;
+    if (active) {
+      const pauseGlyph = editorPresentationPaused ? '▶︎' : '⏸︎';
+      const pauseKind = editorPresentationPaused ? 'resume' : 'pause';
+      pauseButton.innerHTML = baseSVG + '<span class="keynope-presentation-glyph ' + pauseKind + '">' + pauseGlyph + '</span>';
+      pauseButton.title = editorPresentationPaused ? 'Resume presentation' : 'Pause presentation';
+      pauseButton.setAttribute('aria-label', pauseButton.title);
+      stopPresentationButton.innerHTML = baseSVG + '<span class="keynope-presentation-glyph stop">⏹︎</span>';
+    }
+    document.documentElement.setAttribute('data-keynope-presentation-mode', editorPresentationMode);
+    refreshEditorBottomToolbarVisibility();
+  };
+  const presenterHandler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+  if (presenterHandler) presenterHandler.postMessage({action: 'query-display-state'});
+  refreshEditorBottomToolbarVisibility();
+  document.body.appendChild(toolbar);
+  function nudgeSelected(dx, dy) {
+    if (!editorState || editorState.selected < 0) return false;
+    const index = editorState.selected;
+    const slide = editorState.slides[editorState.current];
+    const element = slide && slide.elements[index];
+    const hit = canvasOverlay.querySelector('[data-element="' + index + '"]');
+    if (!element || !hit) return false;
+    const updated = {...element};
+    const query = new URLSearchParams(updated.query || '');
+    const renderedLeft = parseFloat(hit.style.left || '0') / 100;
+    const renderedTop = Math.round(parseFloat(hit.style.top || '0') * deck.rows / 100);
+    query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('valign'); query.delete('align'); query.delete('left');
+    query.set('left_pct', Math.max(0, Math.min(1, Number(query.get('left_pct') || renderedLeft) + dx / deck.cols)).toFixed(6));
+    query.set('top', String(Math.max(0, Number(query.get('top') || renderedTop) + dy)));
+    updated.query = query.toString();
+    previewCanvasMutation(index, updated);
+    editorAction({action: 'update-element', element: index, elementData: updated}).catch(() => {});
+    return true;
+  }
+  function cycleCanvasSelection(reverse) {
+    if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return false;
+    const selectableKinds = new Set(['heading','text','text-image','bullet','code','shape','image','page-number']);
+    const indices = (editorState.slides[editorState.current].elements || [])
+      .map((element, index) => selectableKinds.has(element.kind) ? index : -1)
+      .filter(index => index >= 0);
+    if (!indices.length) return false;
+    const position = indices.indexOf(editorState.selected);
+    const next = position < 0
+      ? (reverse ? indices[indices.length - 1] : indices[0])
+      : indices[(position + (reverse ? -1 : 1) + indices.length) % indices.length];
+    editorAction({action: 'select-element', element: next}).catch(() => {});
+    return true;
+  }
+  addEventListener('keydown', e => {
+    if (presenterTimerMode === 'config' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (/^[0-9]$/.test(e.key) && presenterTimerInput.length < 4) {
+        presenterTimerInput += e.key;
+        drawFrame();
+      } else if (e.key === 'Backspace') {
+        presenterTimerInput = presenterTimerInput.slice(0, -1);
+        drawFrame();
+      } else if (e.key === 'Enter') {
+        startEditorTimer();
+      } else if (e.key === 'Escape' || e.key.toLowerCase() === 'q') {
+        cancelEditorTimerInput();
+      }
+      return;
+    }
+    if (presenterTimerMode === 'running' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (e.key === 'Escape' || e.key.toLowerCase() === 'q') editorAction({action: 'stop-timer'}).catch(() => {});
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const save = async () => {
+        if (activeInlineEditor) await activeInlineEditor.finish(true);
+        await flushSpeakerNotes();
+        const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+        if (handler && editorState && editorState.dirty) handler.postMessage({action: 'save-presentation'});
+      };
+      save().catch(() => {});
+      return;
+    }
+    if (keynopeFormControlTarget(e.target)) return;
+    if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'Tab') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      cycleCanvasSelection(e.shiftKey);
+      return;
+    }
+    if (e.key === 'Escape' && slideContextMenu.classList.contains('open')) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      closeSlideContextMenu();
+      return;
+    }
+    if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'm') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      editorAction({action: 'toggle-master-mode'}).catch(() => {});
+      return;
+    }
+    if (!e.metaKey && !e.ctrlKey && !e.altKey && editorState && editorState.masterMode) {
+      const navigationKey = [' ', 'PageUp', 'PageDown'].includes(e.key) ||
+        ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && editorState.selected < 0);
+      if (navigationKey || ['0', '2', 'p', 'P'].includes(e.key)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
+    }
+    if ((e.metaKey || e.ctrlKey) && ['c','x','v'].includes(e.key.toLowerCase())) {
+      if (editorClipboardTextTarget(e.target)) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const command = e.key.toLowerCase() === 'c' ? 'copy' : e.key.toLowerCase() === 'x' ? 'cut' : 'paste';
+      editorClipboardCommand(command).catch(() => {});
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && (e.key.toLowerCase() === 'z' || e.key.toLowerCase() === 'y')) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const redo = e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey);
+      editorAction({action: redo ? 'redo' : 'undo'}).catch(() => {});
+      return;
+    }
+    if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === '2') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      setSpeakerNotesVisible(!editorSpeakerNotesVisible, false);
+      return;
+    }
+    if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === '0') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (presenterTimerMode === 'running') editorAction({action: 'stop-timer'}).catch(() => {});
+      else openEditorTimer();
+      return;
+    }
+    if (!e.metaKey && !e.ctrlKey && !e.altKey && editorState && editorState.selected >= 0) {
+      if (e.key === '<' || e.key === '=' || e.key === '>') {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setCanvasAlignment(editorState.selected, e.key === '<' ? 'left' : e.key === '>' ? 'right' : 'center');
+        return;
+      }
+      if (e.key.toLowerCase() === 'o') {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        cycleCanvasOutline(editorState.selected);
+        return;
+      }
+    }
+    if (e.key === 'Escape' && editorState && editorState.selected >= 0) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (pendingCanvasSelection) {
+        clearTimeout(pendingCanvasSelection);
+        pendingCanvasSelection = null;
+      }
+      editorAction({action: 'select-element', element: -1}).catch(() => {});
+      return;
+    }
+    if (e.key === 'Enter' && editorState && editorState.selected >= 0) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      editorAction({action: 'select-element', element: -1}).catch(() => {});
+      return;
+    }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && editorState && editorState.selected >= 0) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const action = (editorState.selection || []).length > 1 ? {action: 'delete-selection'} : {action: 'delete-element', element: editorState.selected};
+      editorAction(action).catch(() => {});
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'd' && editorState && editorState.selected >= 0) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      editorAction({action: 'duplicate-element', element: editorState.selected}).catch(() => {});
+      return;
+    }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (!nudgeSelected((e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 5 : 1), 0)) {
+        navigateEditorPage(e.key === 'ArrowLeft' ? -1 : 1).catch(() => {});
+      }
+      return;
+    }
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      if (!editorState || editorState.selected < 0) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      nudgeSelected(0, (e.key === 'ArrowUp' ? -1 : 1) * (e.shiftKey ? 5 : 1));
+      return;
+    }
+    const sequence = keynopeTerminalSequence(e);
+    if (sequence == null) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    sendKeynopeAppInput(sequence);
+  }, true);
+  setInterval(syncPresenterState, 60);
+  syncPresenterState();
+  setInterval(syncEditorState, 150);
+  syncEditorState();
+} else if (window.KEYNOPE_PRESENTER) {
+  setInterval(syncPresenterState, 120);
+  syncPresenterState();
 }
 resize();
 render();
@@ -4578,6 +8852,7 @@ var layoutRE = regexp.MustCompile(`<!--\s*layout=([a-zA-Z0-9_-]+)\s*-->`)
 var pageNumberRE = regexp.MustCompile(`<!--\s*page-number=(show|hide)\s*-->`)
 var masterSlotRE = regexp.MustCompile(`<!--\s*master-slot=([a-zA-Z0-9_-]+)(?:\s+placeholder=(true))?\s*-->`)
 var keynopeMetaRE = regexp.MustCompile(`<!--\s*keynope\s+width=([0-9]+)\s+height=([0-9]+)\s*-->`)
+var keynopeAssetsRE = regexp.MustCompile(`<!--\s*keynope-assets\s+version=1\s+base64:([A-Za-z0-9+/=]+)\s*-->\s*`)
 var commentRE = regexp.MustCompile(`<!--\s*(.*?)\s*-->`)
 var imageRE = regexp.MustCompile(`!\[[^\]]*\]\(([^)]+)\)`)
 var shapeRE = regexp.MustCompile(`^\[shape(?::([a-zA-Z0-9_-]+))?\]$`)
@@ -4591,6 +8866,7 @@ func parseSlide(text, base string) Slide {
 	pendingQuery := ""
 	pendingMasterSlot := ""
 	pendingPlaceholder := false
+	bulletBlock := -1
 
 	flushParagraph := func() {
 		if len(paragraph) > 0 {
@@ -4614,6 +8890,11 @@ func parseSlide(text, base string) Slide {
 	for lineIndex, raw := range lines {
 		line := strings.TrimRight(raw, "\r")
 		trimmed := strings.TrimSpace(line)
+		bulletLine := strings.HasPrefix(trimmed, "- ")
+		bulletContinuation := bulletBlock >= 0 && len(line) > 0 && (line[0] == ' ' || line[0] == '\t') && trimmed != "" && !strings.HasPrefix(trimmed, "<!--")
+		if !bulletLine && !bulletContinuation {
+			bulletBlock = -1
+		}
 		if match := effectRE.FindStringSubmatch(trimmed); match != nil {
 			slide.EffectSet = true
 			if match[1] != "none" {
@@ -4674,14 +8955,23 @@ func parseSlide(text, base string) Slide {
 			flushParagraph()
 			continue
 		}
+		if bulletContinuation {
+			slide.Elements[bulletBlock].Text += "\n  " + trimmed
+			continue
+		}
 		if match := imageRE.FindStringSubmatch(trimmed); match != nil {
 			flushParagraph()
 			src, query := splitImageSource(os.ExpandEnv(match[1]))
-			if !filepath.IsAbs(src) {
-				src = filepath.Join(base, src)
+			assetID := ""
+			if strings.HasPrefix(src, "keynope-asset:") {
+				assetID = strings.TrimPrefix(src, "keynope-asset:")
+			} else if !isExternalImageSource(src) {
+				if !filepath.IsAbs(src) {
+					src = filepath.Join(base, src)
+				}
+				src = filepath.Clean(src)
 			}
-			src = filepath.Clean(src)
-			slide.Elements = append(slide.Elements, Element{Kind: "image", Path: src, Query: query, MasterSlotID: pendingMasterSlot, Placeholder: pendingPlaceholder})
+			slide.Elements = append(slide.Elements, Element{Kind: "image", Path: src, AssetID: assetID, Query: query, MasterSlotID: pendingMasterSlot, Placeholder: pendingPlaceholder})
 			pendingQuery = ""
 			pendingMasterSlot = ""
 			pendingPlaceholder = false
@@ -4717,7 +9007,13 @@ func parseSlide(text, base string) Slide {
 		}
 		if strings.HasPrefix(trimmed, "- ") {
 			flushParagraph()
-			slide.Elements = append(slide.Elements, Element{Kind: "bullet", Text: strings.TrimSpace(trimmed[2:]), Query: pendingQuery, MasterSlotID: pendingMasterSlot, Placeholder: pendingPlaceholder})
+			item := strings.TrimSpace(trimmed[2:])
+			if bulletBlock >= 0 && pendingQuery == "" && pendingMasterSlot == "" && !pendingPlaceholder {
+				slide.Elements[bulletBlock].Text += "\n" + item
+			} else {
+				slide.Elements = append(slide.Elements, Element{Kind: "bullet", Text: item, Query: pendingQuery, MasterSlotID: pendingMasterSlot, Placeholder: pendingPlaceholder})
+				bulletBlock = len(slide.Elements) - 1
+			}
 			pendingQuery = ""
 			pendingMasterSlot = ""
 			pendingPlaceholder = false
@@ -4813,7 +9109,7 @@ func textPlacementComment(line string) (string, bool) {
 	}
 	values := url.Values{}
 	if parsed, err := url.ParseQuery(match[1]); err == nil {
-		for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "link", "slide", "master-clear"} {
+		for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "link", "slide", "master-clear"} {
 			for _, value := range parsed[key] {
 				addPlacementValue(values, key, value)
 			}
@@ -4879,6 +9175,10 @@ func addPlacementValue(values url.Values, key, value string) {
 		if value == "left" || value == "center" || value == "right" {
 			values.Set(key, value)
 		}
+	case "valign":
+		if value == "top" || value == "middle" || value == "bottom" {
+			values.Set(key, value)
+		}
 	case "render":
 		if value == "text-image" {
 			values.Set(key, value)
@@ -4912,7 +9212,7 @@ func addPlacementValue(values url.Values, key, value string) {
 		switch strings.ToLower(value) {
 		case "blocks", "block":
 			values.Set("glyph", "blocks")
-		case "braille", "half", "vertical", "shade", "ascii", "dense":
+		case "braille", "ascii", "dense":
 			values.Set("glyph", strings.ToLower(value))
 		}
 	case "shape":
@@ -4957,7 +9257,7 @@ func placementCommentText(query string) string {
 		return query
 	}
 	var fields []string
-	for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "fg", "bg", "header", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "slide", "link", "master-clear"} {
+	for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "fg", "bg", "header", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "slide", "link", "master-clear"} {
 		if value := values.Get(key); value != "" {
 			if key == "link" {
 				fields = append(fields, key+"="+url.QueryEscape(value))
@@ -5193,6 +9493,11 @@ func splitImageSource(src string) (string, string) {
 	return before, after
 }
 
+func isExternalImageSource(src string) bool {
+	parsed, err := url.Parse(src)
+	return err == nil && parsed.Scheme != "" && parsed.Scheme != "file"
+}
+
 func authoredRenderSize(width, height int) (int, int) {
 	if authoredTerminalWidth > 0 && authoredTerminalHeight > 0 {
 		return authoredTerminalWidth, authoredTerminalHeight
@@ -5200,12 +9505,110 @@ func authoredRenderSize(width, height int) (int, int) {
 	return width, height
 }
 
+type terminalContentGeometry struct {
+	Width   int
+	Height  int
+	OffsetX int
+	OffsetY int
+	Scale   float64
+	Fitted  bool
+}
+
+func fittedTerminalContentGeometry(width, height int) terminalContentGeometry {
+	geometry := terminalContentGeometry{Width: max(1, width), Height: max(1, height), Scale: 1}
+	authorWidth, authorHeight := authoredRenderSize(width, height)
+	if width <= 0 || height <= 0 || authorWidth <= 0 || authorHeight <= 0 {
+		return geometry
+	}
+	if authorWidth <= width && authorHeight <= height {
+		geometry.Width = authorWidth
+		geometry.Height = authorHeight
+		return geometry
+	}
+	geometry.Scale = math.Min(float64(width)/float64(authorWidth), float64(height)/float64(authorHeight))
+	geometry.Scale = clampFloat(geometry.Scale, 0.01, 1)
+	geometry.Width = max(1, min(width, int(math.Floor(float64(authorWidth)*geometry.Scale))))
+	geometry.Height = max(1, min(height, int(math.Floor(float64(authorHeight)*geometry.Scale))))
+	geometry.OffsetX = max(0, (width-geometry.Width)/2)
+	geometry.OffsetY = max(0, (height-geometry.Height)/2)
+	geometry.Fitted = true
+	return geometry
+}
+
+func updateViewportFitWarning(width, height int) {
+	geometry := fittedTerminalContentGeometry(width, height)
+	if !geometry.Fitted {
+		viewportWarning = viewportFitWarning{}
+		return
+	}
+	authorWidth, authorHeight := authoredRenderSize(width, height)
+	key := fmt.Sprintf("%dx%d:%dx%d", width, height, authorWidth, authorHeight)
+	if viewportWarning.Key == key {
+		return
+	}
+	viewportWarning = viewportFitWarning{
+		Key: key,
+		Text: fmt.Sprintf(
+			"Viewport %dx%d; deck %dx%d — scaled %.0f%%. Decrease font or enlarge window for full fidelity.",
+			width, height, authorWidth, authorHeight, geometry.Scale*100,
+		),
+		ExpiresAt: time.Now().Add(8 * time.Second),
+	}
+}
+
+func offsetTerminalLines(lines []Line, offsetX, offsetY int) []Line {
+	if offsetX == 0 && offsetY == 0 {
+		return lines
+	}
+	out := append([]Line(nil), lines...)
+	for index := range out {
+		out[index].Col += offsetX
+		out[index].Row += offsetY
+	}
+	return out
+}
+
+var ansiCursorPositionRE = regexp.MustCompile("\\x1b\\[(?:(\\d+);(\\d+))?([Hf])")
+
+func offsetTerminalFrame(frame string, offsetX, offsetY int) string {
+	if frame == "" || offsetX == 0 && offsetY == 0 {
+		return frame
+	}
+	return ansiCursorPositionRE.ReplaceAllStringFunc(frame, func(sequence string) string {
+		match := ansiCursorPositionRE.FindStringSubmatch(sequence)
+		row, col := 1, 1
+		if match[1] != "" {
+			row, _ = strconv.Atoi(match[1])
+			col, _ = strconv.Atoi(match[2])
+		}
+		return fmt.Sprintf("\033[%d;%d%s", row+offsetY, col+offsetX, match[3])
+	})
+}
+
+func clearPhysicalTerminalViewport() {
+	termPrint("\033[0;40m\033[2J\033[H")
+}
+
+func drawTerminalSlideCanvas(slide Slide, width, height int, drawLocal func(terminalContentGeometry)) (string, terminalContentGeometry) {
+	geometry := fittedTerminalContentGeometry(width, height)
+	localFrame := captureTerminalOutput(func() {
+		repaintFrameBackground(slideBG(slide), geometry.Width, geometry.Height)
+		drawStaticBackground(slide.Background, geometry.Width, geometry.Height, slideBG(slide))
+		if drawLocal != nil {
+			drawLocal(geometry)
+		}
+	})
+	frame := offsetTerminalFrame(localFrame, geometry.OffsetX, geometry.OffsetY)
+	termPrint(frame)
+	return frame, geometry
+}
+
 func terminalScaleX(width, height int) float64 {
 	authorWidth, _ := authoredRenderSize(width, height)
 	if authorWidth <= 0 || width <= 0 {
 		return 1
 	}
-	return float64(width) / float64(authorWidth)
+	return float64(fittedTerminalContentGeometry(width, height).Width) / float64(authorWidth)
 }
 
 func terminalScaleY(width, height int) float64 {
@@ -5213,7 +9616,7 @@ func terminalScaleY(width, height int) float64 {
 	if authorHeight <= 0 || height <= 0 {
 		return 1
 	}
-	return float64(height) / float64(authorHeight)
+	return float64(fittedTerminalContentGeometry(width, height).Height) / float64(authorHeight)
 }
 
 func displayLines(slide Slide, width, height, page int) []Line {
@@ -5225,7 +9628,8 @@ func displayLines(slide Slide, width, height, page int) []Line {
 }
 
 func displayPages(slide Slide, width, height int) [][]Line {
-	lines := displayLayout(slide, width, height)
+	geometry := fittedTerminalContentGeometry(width, height)
+	lines := layout(scaleSlideForTerminal(slide, geometry.Width, geometry.Height), geometry.Width, geometry.Height)
 	var repeatedPageNumber []Line
 	var content []Line
 	for _, line := range lines {
@@ -5235,13 +9639,15 @@ func displayPages(slide Slide, width, height int) [][]Line {
 		}
 		content = append(content, line)
 	}
-	pages := paginateLayout(content, height)
-	if len(repeatedPageNumber) == 0 {
-		return pages
+	pages := paginateLayout(content, geometry.Height)
+	if len(repeatedPageNumber) > 0 {
+		for index := range pages {
+			pageNumber := append([]Line(nil), repeatedPageNumber...)
+			pages[index] = append(pageNumber, pages[index]...)
+		}
 	}
 	for index := range pages {
-		pageNumber := append([]Line(nil), repeatedPageNumber...)
-		pages[index] = append(pageNumber, pages[index]...)
+		pages[index] = offsetTerminalLines(pages[index], geometry.OffsetX, geometry.OffsetY)
 	}
 	return pages
 }
@@ -5264,7 +9670,9 @@ func authoredStep(direction string, step, width, height, authorWidth, authorHeig
 }
 
 func displayLayout(slide Slide, width, height int) []Line {
-	return layout(scaleSlideForTerminal(slide, width, height), width, height)
+	geometry := fittedTerminalContentGeometry(width, height)
+	lines := layout(scaleSlideForTerminal(slide, geometry.Width, geometry.Height), geometry.Width, geometry.Height)
+	return offsetTerminalLines(lines, geometry.OffsetX, geometry.OffsetY)
 }
 
 func scaleSlideForTerminal(slide Slide, width, height int) Slide {
@@ -5368,11 +9776,8 @@ func scaleQueryIntForTerminal(query, key string, defaultValue int, factor float6
 
 func renderSlide(slide Slide, width, height, page int, view ViewState) {
 	flushTerminalFrame(func() {
-		termPrintf("\033[%sm\033[2J\033[H", slideBG(slide))
-		backgroundFrame := captureTerminalOutput(func() {
-			drawStaticBackground(slide.Background, width, height, slideBG(slide))
-		})
-		termPrint(backgroundFrame)
+		clearPhysicalTerminalViewport()
+		backgroundFrame, _ := drawTerminalSlideCanvas(slide, width, height, nil)
 		lines := displayLines(slide, width, height, page)
 		backgroundLines := ansiFrameToExportLines(backgroundFrame, width, height, ansiCSSColour(slideFG(slide)))
 		drawTransparentShapeBackdrop(lines, backgroundLines, width, height, slide)
@@ -5406,7 +9811,9 @@ func flushTerminalFrame(draw func()) {
 		width, height := terminalAuthoredSize()
 		activePresenter.PublishTerminalFrame(buffer.String(), width, height)
 	}
-	fmt.Print("\033[?2026h" + buffer.String() + "\033[?2026l")
+	if !nativeAppModeActive {
+		fmt.Print("\033[?2026h" + buffer.String() + "\033[?2026l")
+	}
 }
 
 func captureTerminalOutput(draw func()) string {
@@ -5447,13 +9854,17 @@ func playAnimatedSlide(slide Slide, width, height, page int, view ViewState) str
 }
 
 func playStaticSlide(slide Slide, width, height, page int, view ViewState) string {
-	if view.TimerMode == "" {
+	if view.TimerMode == "" && !viewportFitWarningActive() {
 		renderSlide(slide, width, height, page, view)
 		return waitKey()
 	}
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for {
+		if view.TimerMode == "" && !viewportFitWarningActive() {
+			renderSlide(slide, width, height, page, view)
+			return waitKey()
+		}
 		if action := pollKey(); action != "" {
 			return action
 		}
@@ -5501,7 +9912,7 @@ func drawOverlayLineSet(lines []Line, width, height int, slide Slide, rows map[i
 		if line.Text == "" {
 			continue
 		}
-		if line.Role == "shape" && line.Element >= 0 && line.Element < len(slide.Elements) && elementTransparent(slide.Elements[line.Element]) {
+		if transparencyMaskLine(line, slide) {
 			continue
 		}
 		transparency := transparentShapeCellsFrom(lines, index+1, width, height, slide)
@@ -5572,7 +9983,7 @@ func drawTransparentShapeBackdrop(lines []Line, backdrop []exportLine, width, he
 				if bg == "" {
 					continue
 				}
-				termPrintf("\033[0;%s;%sm\033[%d;%dH%s", darkenFGForTransparency(fg), bg, line.Row+1, col+1, string(r))
+				termPrintf("\033[0;%s;%sm\033[%d;%dH%s", blendFGForTransparency(fg, bg), bg, line.Row+1, col+1, string(r))
 			}
 		}
 	}
@@ -5582,12 +9993,13 @@ func drawOverlayRows(lines []Line, width, height int, slide Slide, rows map[int]
 	if len(rows) == 0 {
 		return
 	}
-	blank := strings.Repeat(" ", max(0, width))
+	geometry := fittedTerminalContentGeometry(width, height)
+	blank := strings.Repeat(" ", geometry.Width)
 	for row := range rows {
-		if row < 0 || row >= height {
+		if row < geometry.OffsetY || row >= geometry.OffsetY+geometry.Height {
 			continue
 		}
-		termPrintf("\033[%sm\033[%d;1H%s", slideBG(slide), row+1, blank)
+		termPrintf("\033[%sm\033[%d;%dH%s", slideBG(slide), row+1, geometry.OffsetX+1, blank)
 	}
 	drawOverlayLineSet(lines, width, height, slide, rows)
 }
@@ -5655,14 +10067,53 @@ func transparentShapeCellsFrom(lines []Line, start int, width, height int, slide
 		return cells
 	}
 	for _, line := range lines[start:] {
-		if line.Role != "shape" || line.Element < 0 || line.Element >= len(slide.Elements) || line.Row < 0 || line.Row >= height {
+		if !transparencyMaskLine(line, slide) || line.Row < 0 || line.Row >= height {
 			continue
 		}
 		element := slide.Elements[line.Element]
-		if !elementTransparent(element) {
+		if line.Role == "code" {
+			bg := codeLineBG(line)
+			for offset := 0; offset < displayWidth(stripANSI(line.Text)); offset++ {
+				col := line.Col + offset
+				if col < 0 || col >= width {
+					continue
+				}
+				if cells[line.Row] == nil {
+					cells[line.Row] = map[int]string{}
+				}
+				cells[line.Row][col] = bg
+			}
 			continue
 		}
-		bg := transparentShapeBG(slide, element)
+		if line.Role == "image" || strings.Contains(line.Text, "\033[38;2;") {
+			defaultFG := slideFG(slide)
+			if fg := elementFG(element.Query, false); fg != "" {
+				defaultFG = fg
+			}
+			parts := exportANSITextParts(line.Text, line.Col, ansiCSSColour(defaultFG), width)
+			for _, part := range parts {
+				fg := cssColourToFG(part.Color, defaultFG)
+				bg, ok := fgCodeToBG(fg)
+				if !ok {
+					bg = slideBG(slide)
+				}
+				for offset, r := range []rune(part.Text) {
+					if r == ' ' {
+						continue
+					}
+					col := part.Col + offset
+					if col < 0 || col >= width {
+						continue
+					}
+					if cells[line.Row] == nil {
+						cells[line.Row] = map[int]string{}
+					}
+					cells[line.Row][col] = bg
+				}
+			}
+			continue
+		}
+		bg := transparentElementBG(slide, element, line.Role)
 		plain := []rune(stripANSI(line.Text))
 		for offset, r := range plain {
 			if r == ' ' {
@@ -5681,10 +10132,27 @@ func transparentShapeCellsFrom(lines []Line, start int, width, height int, slide
 	return cells
 }
 
-func transparentShapeBG(slide Slide, element Element) string {
-	fg := elementFG(element.Query, false)
+func transparencyMaskLine(line Line, slide Slide) bool {
+	if line.Element < 0 || line.Element >= len(slide.Elements) {
+		return false
+	}
+	switch line.Role {
+	case "shape", "heading", "body", "code", "image":
+		return elementTransparent(slide.Elements[line.Element])
+	default:
+		return false
+	}
+}
+
+func transparentElementBG(slide Slide, element Element, role string) string {
+	heading := role == "heading"
+	fg := elementFG(element.Query, heading)
 	if fg == "" {
-		fg = slideFG(slide)
+		if heading {
+			fg = slideHeaderFG(slide)
+		} else {
+			fg = slideFG(slide)
+		}
 	}
 	if bg, ok := fgCodeToBG(fg); ok {
 		return bg
@@ -5705,6 +10173,7 @@ func drawStyledLine(row, startCol int, text string, width int, baseFG, baseBG st
 	col := startCol
 	normalFG := baseFG
 	fg := baseFG
+	bg := baseBG
 	bold := false
 	for i := 0; i < len(text) && col <= width; {
 		if text[i] == 0x1b {
@@ -5714,6 +10183,13 @@ func drawStyledLine(row, startCol int, text string, width int, baseFG, baseBG st
 			}
 			if end < len(text) {
 				sequence := text[i : end+1]
+				if ansiParamsContain(sequence, "0") || ansiParamsContain(sequence, "39") {
+					normalFG = baseFG
+					fg = baseFG
+				}
+				if ansiParamsContain(sequence, "0") || ansiParamsContain(sequence, "49") {
+					bg = baseBG
+				}
 				if ansiSequenceBoldOff(sequence) {
 					bold = false
 					fg = normalFG
@@ -5729,6 +10205,9 @@ func drawStyledLine(row, startCol int, text string, width int, baseFG, baseBG st
 						fg = lightenFG(normalFG)
 					}
 				}
+				if parsed := ansiSequenceBG(sequence); parsed != "" {
+					bg = parsed
+				}
 				i = end + 1
 				continue
 			}
@@ -5737,12 +10216,12 @@ func drawStyledLine(row, startCol int, text string, width int, baseFG, baseBG st
 		if r == utf8.RuneError && size == 0 {
 			break
 		}
-		if r != ' ' || solid {
-			cellFG, cellBG := fg, baseBG
+		if r != ' ' || solid || bg != baseBG {
+			cellFG, cellBG := fg, bg
 			if rowCells := transparency[row-1]; rowCells != nil {
 				if bg := rowCells[col-1]; bg != "" {
 					cellBG = bg
-					cellFG = darkenFGForTransparency(cellFG)
+					cellFG = blendFGForTransparency(cellFG, bg)
 				}
 			}
 			termPrintf("\033[0;%s;%sm\033[%d;%dH%s", cellFG, cellBG, row, col, string(r))
@@ -5757,8 +10236,18 @@ func ansiSequenceFG(sequence string) string {
 	sequence = strings.TrimSuffix(sequence, "m")
 	fields := strings.Split(sequence, ";")
 	for i := 0; i < len(fields); i++ {
-		if (fields[i] == "38") && i+4 < len(fields) && fields[i+1] == "2" {
-			return strings.Join(fields[i:i+5], ";")
+		if (fields[i] == "38" || fields[i] == "48") && i+1 < len(fields) {
+			if fields[i+1] == "2" && i+4 < len(fields) {
+				if fields[i] == "38" {
+					return strings.Join(fields[i:i+5], ";")
+				}
+				i += 4
+				continue
+			}
+			if fields[i+1] == "5" && i+2 < len(fields) {
+				i += 2
+				continue
+			}
 		}
 		if parsed, err := strconv.Atoi(fields[i]); err == nil && (parsed >= 30 && parsed <= 37 || parsed >= 90 && parsed <= 97) {
 			return strconv.Itoa(parsed)
@@ -5767,15 +10256,29 @@ func ansiSequenceFG(sequence string) string {
 	return ""
 }
 
-func darkenFG(code string, factor float64) string {
-	r, g, b, ok := ansiCodeRGB(code)
-	if !ok {
-		return code
+func ansiSequenceBG(sequence string) string {
+	sequence = strings.TrimPrefix(sequence, "\033[")
+	sequence = strings.TrimSuffix(sequence, "m")
+	fields := strings.Split(sequence, ";")
+	for i := 0; i < len(fields); i++ {
+		if (fields[i] == "38" || fields[i] == "48") && i+1 < len(fields) {
+			if fields[i+1] == "2" && i+4 < len(fields) {
+				if fields[i] == "48" {
+					return strings.Join(fields[i:i+5], ";")
+				}
+				i += 4
+				continue
+			}
+			if fields[i+1] == "5" && i+2 < len(fields) {
+				i += 2
+				continue
+			}
+		}
+		if parsed, err := strconv.Atoi(fields[i]); err == nil && (parsed >= 40 && parsed <= 47 || parsed >= 100 && parsed <= 107) {
+			return strconv.Itoa(parsed)
+		}
 	}
-	r = int(math.Round(float64(r) * factor))
-	g = int(math.Round(float64(g) * factor))
-	b = int(math.Round(float64(b) * factor))
-	return fmt.Sprintf("38;2;%d;%d;%d", max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
+	return ""
 }
 
 func lightenFG(code string) string {
@@ -5789,14 +10292,19 @@ func lightenFG(code string) string {
 	return fmt.Sprintf("38;2;%d;%d;%d", max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
 }
 
-func darkenFGForTransparency(code string) string {
+func blendFGForTransparency(code, overlay string) string {
 	r, g, b, ok := ansiCodeRGB(code)
 	if !ok {
 		return code
 	}
-	luma := float64(299*r+587*g+114*b) / 255000.0
-	factor := 0.8 - math.Pow(clampFloat(luma, 0, 1), 3.0)*0.6
-	return darkenFG(code, factor)
+	overlayR, overlayG, overlayB, overlayOK := ansiCodeRGB(overlay)
+	if !overlayOK {
+		return code
+	}
+	return fmt.Sprintf("38;2;%d;%d;%d",
+		int(math.Round(float64(r+overlayR)/2)),
+		int(math.Round(float64(g+overlayG)/2)),
+		int(math.Round(float64(b+overlayB)/2)))
 }
 
 func fgCodeToBG(code string) (string, bool) {
@@ -5827,6 +10335,9 @@ func ansiCodeRGB(code string) (int, int, int, bool) {
 		}
 	}
 	if parsed, err := strconv.Atoi(code); err == nil {
+		if parsed >= 40 && parsed <= 47 || parsed >= 100 && parsed <= 107 {
+			parsed -= 10
+		}
 		colours := map[int][3]int{
 			30: {0, 0, 0}, 31: {170, 0, 0}, 32: {0, 170, 0}, 33: {170, 170, 0},
 			34: {0, 0, 170}, 35: {170, 0, 170}, 36: {0, 170, 170}, 37: {243, 239, 224},
@@ -6256,13 +10767,13 @@ func playEditMode(deck *Deck, current int, width, height, page int, deckPath str
 	var editStars *starsEffect
 	var editBursts *burstEffect
 	for {
-		width, height = terminalAuthoredSize()
+		width, height = terminalSize()
 		if width != lastEditWidth || height != lastEditHeight {
 			lastEditWidth, lastEditHeight = width, height
 			fullEditRedraw = true
 			editDirty = true
 		}
-		if (slideListOpen || notesOpen || state.TimerMode != "" || slideHasAnimatedImage(*slide) || slide.Effect != "") && time.Since(lastAnimationFrame) >= 70*time.Millisecond {
+		if (slideListOpen || notesOpen || state.TimerMode != "" || selected < 0 && slideHasAnimatedImage(*slide) || slide.Effect != "") && time.Since(lastAnimationFrame) >= 70*time.Millisecond {
 			lastAnimationFrame = time.Now()
 			animationFrame++
 			editDirty = true
@@ -6282,17 +10793,23 @@ func playEditMode(deck *Deck, current int, width, height, page int, deckPath str
 					fastImageRender = true
 					defer func() { fastImageRender = false }()
 					currentLines = displayLines(*slide, width, height, page)
-					if fullEditRedraw || len(prevLines) == 0 {
-						repaintFrameBackground(slideBG(*slide), width, height)
-						drawStaticBackground(slide.Background, width, height, slideBG(*slide))
-						if slide.Effect != "" {
-							if editMatrix == nil || editMatrix.width != width || editMatrix.height != height {
-								editMatrix = newMatrix(width, height)
-								editStars = newStars(width, height)
-								editBursts = newBursts(slide.Effect, width, height)
-							}
-							drawEffectFrame(slide.Effect, width, height, animationFrame, editMatrix, editStars, editBursts, slideBG(*slide))
+					transparentSelection := selected >= 0 && selected < len(slide.Elements) && elementTransparent(slide.Elements[selected])
+					previousTransparentSelection := prevSelected >= 0 && prevSelected < len(slide.Elements) && elementTransparent(slide.Elements[prevSelected])
+					if fullEditRedraw || len(prevLines) == 0 || transparentSelection || previousTransparentSelection {
+						clearPhysicalTerminalViewport()
+						geometry := fittedTerminalContentGeometry(width, height)
+						if slide.Effect != "" && (editMatrix == nil || editMatrix.width != geometry.Width || editMatrix.height != geometry.Height) {
+							editMatrix = newMatrix(geometry.Width, geometry.Height)
+							editStars = newStars(geometry.Width, geometry.Height)
+							editBursts = newBursts(slide.Effect, geometry.Width, geometry.Height)
 						}
+						canvasFrame, _ := drawTerminalSlideCanvas(*slide, width, height, func(canvas terminalContentGeometry) {
+							if slide.Effect != "" {
+								drawEffectFrame(slide.Effect, canvas.Width, canvas.Height, animationFrame, editMatrix, editStars, editBursts, slideBG(*slide))
+							}
+						})
+						backdropLines := ansiFrameToExportLines(canvasFrame, width, height, ansiCSSColour(slideFG(*slide)))
+						drawTransparentShapeBackdrop(currentLines, backdropLines, width, height, *slide)
 						drawOverlayLines(currentLines, width, height, *slide)
 						drawLinkUnderlines(currentLines, width, height, *slide)
 					} else {
@@ -6974,10 +11491,10 @@ func playEditMode(deck *Deck, current int, width, height, page int, deckPath str
 				insertTextAtCursor(slide, selected, cursor, "/")
 				break
 			}
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) && status == "shape selected" {
+			if mode == "select" && selected >= 0 && selected < len(slide.Elements) && elementSupportsTransparency(slide.Elements[selected]) && (status == "text selected" || status == "code text selected" || status == "image selected" || status == "shape selected") {
 				commitPendingSelectionMove()
 				before := cloneSlide(*slide)
-				toggleShapeTransparency(&slide.Elements[selected])
+				toggleElementTransparency(&slide.Elements[selected])
 				commit(before)
 				status = selectionStatus(*slide, selected, multiSelected)
 				fullEditRedraw = true
@@ -7129,8 +11646,13 @@ func playEditMode(deck *Deck, current int, width, height, page int, deckPath str
 				selected = editBackspace(slide, selected, cursor)
 			}
 		case "insert-newline":
-			if mode == "text" && selected >= 0 && selected < len(slide.Elements) && slide.Elements[selected].Kind == "code" {
-				insertTextAtCursor(slide, selected, cursor, "\n")
+			if mode == "text" && selected >= 0 && selected < len(slide.Elements) {
+				switch slide.Elements[selected].Kind {
+				case "code":
+					insertTextAtCursor(slide, selected, cursor, "\n")
+				case "bullet":
+					insertTextAtCursor(slide, selected, cursor, "\n  ")
+				}
 			}
 		case "enter":
 			if mode == "move" || mode == "resize" {
@@ -7188,6 +11710,24 @@ func playEditMode(deck *Deck, current int, width, height, page int, deckPath str
 					return ""
 				}
 			} else if mode == "text" && selected >= 0 && selected < len(slide.Elements) {
+				insertedLine := false
+				switch slide.Elements[selected].Kind {
+				case "bullet":
+					if !bulletItemAtCursorEmpty(slide.Elements[selected].Text, cursor[selected]) {
+						insertTextAtCursor(slide, selected, cursor, "\n")
+						insertedLine = true
+					}
+				case "code":
+					if !bulletItemAtCursorEmpty(slide.Elements[selected].Text, cursor[selected]) {
+						insertTextAtCursor(slide, selected, cursor, "\n")
+						insertedLine = true
+					} else {
+						cursor[selected] = removeEmptyTextLineAtCursor(&slide.Elements[selected], cursor[selected])
+					}
+				}
+				if insertedLine {
+					break
+				}
 				selected = finalizeTextEdit(slide, selected, cursor)
 				commit(modeOriginal)
 				mode = "select"
@@ -7327,10 +11867,11 @@ func drawEditCursor(lines []Line, selected, cursor, width, height int, slide Sli
 	if startRow == -1 {
 		return
 	}
-	if selected >= 0 && selected < len(slide.Elements) && slide.Elements[selected].Kind == "code" && !rendersAsTextImage(slide.Elements[selected]) {
-		visualLine, col := codeCursorVisualLineCol(slide.Elements[selected].Text, codeCharsPerVisualLine(width-startCol), cursor)
+	if selected >= 0 && selected < len(slide.Elements) && slide.Elements[selected].Kind == "code" {
+		visualLine, col := codeCursorVisualLineCol(slide.Elements[selected].Text, codeCharsPerVisualLineForElement(slide.Elements[selected], width-startCol), cursor)
 		glyphWidth := editGlyphWidth(slide.Elements[selected])
-		row := startRow + codeBlockPadY + visualLine*4 + 3
+		glyphHeight := codeGlyphHeight(slide.Elements[selected])
+		row := startRow + codeBlockPadY + visualLine*glyphHeight + glyphHeight - 1
 		if row < 0 || row >= height {
 			return
 		}
@@ -7848,9 +12389,9 @@ func cursorForClick(element Element, x, y int, lines []Line, elementIndex, width
 	case "heading":
 		return max(0, min(len([]rune(element.Text)), x/max(1, editGlyphWidth(element))))
 	case "code":
-		lineOffset := max(0, y-startRow-codeBlockPadY) / 4
+		lineOffset := max(0, y-startRow-codeBlockPadY) / codeGlyphHeight(element)
 		col := max(0, x-codeBlockPadX) / max(1, editGlyphWidth(element))
-		return codeCursorIndexForVisualLineCol(element.Text, codeCharsPerVisualLine(width-startCol), lineOffset, col)
+		return codeCursorIndexForVisualLineCol(element.Text, codeCharsPerVisualLineForElement(element, width-startCol), lineOffset, col)
 	default:
 		lineOffset := max(0, y-startRow)
 		bodyCol := max(0, x/4)
@@ -8208,7 +12749,7 @@ func playShortcutHelp(title string, items []shortcutHelpItem, slide Slide, page,
 	renderer := &liveSlideRenderer{}
 	runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			renderer.draw(slide, width, height, page, frame, func(lines []Line) { drawShortcutHelp(title, items, width, height) })
 		},
 		Read: readEvent,
@@ -8277,7 +12818,7 @@ func playAxisScalePicker(slide Slide, page, width, height int, initialMode strin
 	renderer := &liveSlideRenderer{}
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			renderer.draw(slide, width, height, page, frame, func(lines []Line) {
 				drawAxisScalePicker(width, height, options, selected)
 			})
@@ -9003,20 +13544,22 @@ type liveSlideRenderer struct {
 }
 
 func (renderer *liveSlideRenderer) draw(slide Slide, width, height, page, frame int, overlay func([]Line)) {
-	if renderer.effect != slide.Effect || renderer.width != width || renderer.height != height || renderer.matrix == nil {
+	geometry := fittedTerminalContentGeometry(width, height)
+	if renderer.effect != slide.Effect || renderer.width != geometry.Width || renderer.height != geometry.Height || renderer.matrix == nil {
 		renderer.effect = slide.Effect
-		renderer.width = width
-		renderer.height = height
-		renderer.matrix = newMatrix(width, height)
-		renderer.stars = newStars(width, height)
-		renderer.fireworks = newBursts(slide.Effect, width, height)
+		renderer.width = geometry.Width
+		renderer.height = geometry.Height
+		renderer.matrix = newMatrix(geometry.Width, geometry.Height)
+		renderer.stars = newStars(geometry.Width, geometry.Height)
+		renderer.fireworks = newBursts(slide.Effect, geometry.Width, geometry.Height)
 	}
 	flushTerminalFrame(func() {
-		termPrintf("\033[%sm\033[2J\033[H", slideBG(slide))
-		drawStaticBackground(slide.Background, width, height, slideBG(slide))
-		if slide.Effect != "" {
-			drawEffectFrame(slide.Effect, width, height, frame, renderer.matrix, renderer.stars, renderer.fireworks, slideBG(slide))
-		}
+		clearPhysicalTerminalViewport()
+		drawTerminalSlideCanvas(slide, width, height, func(canvas terminalContentGeometry) {
+			if slide.Effect != "" {
+				drawEffectFrame(slide.Effect, canvas.Width, canvas.Height, frame, renderer.matrix, renderer.stars, renderer.fireworks, slideBG(slide))
+			}
+		})
 		lines := displayLines(slide, width, height, page)
 		drawOverlayLines(lines, width, height, slide)
 		drawLinkUnderlines(lines, width, height, slide)
@@ -9047,21 +13590,23 @@ func playEffectPicker(slide Slide, width, height int) (string, bool) {
 	result := ""
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(tick int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
+			geometry := fittedTerminalContentGeometry(width, height)
 			previewEffect := availableEffects[selected]
-			if previewEffect != lastEffect || matrix == nil || matrix.width != width || matrix.height != height {
-				matrix = newMatrix(width, height)
-				stars = newStars(width, height)
-				fireworks = newBursts(previewEffect, width, height)
+			if previewEffect != lastEffect || matrix == nil || matrix.width != geometry.Width || matrix.height != geometry.Height {
+				matrix = newMatrix(geometry.Width, geometry.Height)
+				stars = newStars(geometry.Width, geometry.Height)
+				fireworks = newBursts(previewEffect, geometry.Width, geometry.Height)
 				lastEffect = previewEffect
 				frame = 0
 			}
 			flushTerminalFrame(func() {
-				termPrintf("\033[%sm\033[2J\033[H", slideBG(slide))
-				drawStaticBackground(slide.Background, width, height, slideBG(slide))
-				if previewEffect != "none" {
-					drawEffectFrame(previewEffect, width, height, frame, matrix, stars, fireworks, slideBG(slide))
-				}
+				clearPhysicalTerminalViewport()
+				drawTerminalSlideCanvas(slide, width, height, func(canvas terminalContentGeometry) {
+					if previewEffect != "none" {
+						drawEffectFrame(previewEffect, canvas.Width, canvas.Height, frame, matrix, stars, fireworks, slideBG(slide))
+					}
+				})
 				drawOverlayLines(displayLines(slide, width, height, 0), width, height, slide)
 				drawEffectPicker(width, height, selected)
 				termPrint("\033[0m")
@@ -9107,7 +13652,7 @@ func playShapePicker(slide Slide, width, height, page int, current string) (stri
 	renderer := &liveSlideRenderer{}
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			renderer.draw(slide, width, height, page, frame, func(lines []Line) { drawShapePicker(width, height, selected) })
 		},
 		Read: readEffectPickerKeyEvent,
@@ -9153,7 +13698,7 @@ func playBackgroundPicker(slide Slide, width, height int) (string, bool) {
 	renderer := &liveSlideRenderer{}
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			preview := slide
 			previewBackground := availableBackgrounds[selected]
 			if previewBackground == "none" {
@@ -9325,7 +13870,7 @@ func shapeAtPoint(x, y, width, height int) (int, bool) {
 
 func readEffectPickerKeyEvent() KeyEvent {
 	var buf [32]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -9367,7 +13912,7 @@ func playColorPicker(slide Slide, current string, selected, width, height, page 
 	renderer := &liveSlideRenderer{}
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			withFastImageRender(func() {
 				renderer.draw(slide, width, height, page, frame, func(lines []Line) {
 					if selected >= 0 && selected < len(slide.Elements) {
@@ -9858,7 +14403,7 @@ type imagePlacementResult struct {
 }
 
 func playImagePlacementMode(slide *Slide, slideIndex, slideCount, imageIndex, width, height, page int, original Slide, clipboard **Element, persist func() bool) imagePlacementResult {
-	width, height = terminalAuthoredSize()
+	width, height = terminalSize()
 	withFastImageRender(func() {
 		normalizeImagePlacement(slide, imageIndex, width, height)
 	})
@@ -9872,7 +14417,7 @@ func playImagePlacementMode(slide *Slide, slideIndex, slideCount, imageIndex, wi
 			if imageIndex < 0 || imageIndex >= len(slide.Elements) {
 				return
 			}
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			background := cloneSlide(*slide)
 			background.Elements = append(background.Elements[:imageIndex], background.Elements[imageIndex+1:]...)
 			withFastImageRender(func() {
@@ -9994,8 +14539,8 @@ func drawImagePlacementPreview(element Element, width, height, page int) {
 	row, col := 0, 0
 	if placement.top != nil {
 		row = *placement.top - page*max(1, height)
-	} else if placement.bottom != nil {
-		row = height - len(rows) - *placement.bottom
+	} else {
+		row = placementTopRow(placement, height, len(rows), 0)
 	}
 	if placement.hasHorizontalOffset() {
 		col = placementLeftCol(placement, width, imageWidth)
@@ -10046,7 +14591,7 @@ type imageSettingField struct {
 }
 
 var imageSettingFields = []imageSettingField{
-	{Key: "glyph", Label: "Glyph", Values: []string{"blocks", "braille", "half", "vertical", "shade", "ascii", "dense"}},
+	{Key: "glyph", Label: "Glyph", Values: []string{"blocks", "braille", "ascii", "dense"}},
 	{Key: "shape", Label: "Shape", Values: []string{"subject", "contrast", "saturation", "luma", "alpha"}},
 	{Key: "brightness", Label: "Brightness", Min: 0.2, Max: 2.0, Step: 0.1},
 	{Key: "contrast", Label: "Contrast", Min: 0.2, Max: 2.0, Step: 0.1},
@@ -10056,7 +14601,7 @@ var imageSettingFields = []imageSettingField{
 }
 
 var textSettingFields = []imageSettingField{
-	{Key: "glyph", Label: "Glyph", Values: []string{"blocks", "braille", "half", "vertical", "shade", "ascii", "dense"}},
+	{Key: "glyph", Label: "Glyph", Values: []string{"blocks", "braille", "ascii", "dense"}},
 }
 
 func playImageSettingsDialog(slide Slide, imageIndex, width, height, page int) (string, bool) {
@@ -10079,7 +14624,7 @@ func playImageSettingsDialog(slide Slide, imageIndex, width, height, page int) (
 	renderer := &liveSlideRenderer{}
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			preview := cloneSlide(slide)
 			preview.Elements[imageIndex].Query = query
 			withFastImageRender(func() {
@@ -10169,7 +14714,7 @@ func imageSettingsFieldAt(x, y, width, height int, fields []imageSettingField) (
 
 func readImageSettingsKeyEvent() KeyEvent {
 	var buf [32]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -10379,7 +14924,7 @@ func normalizeImagePlacement(slide *Slide, imageIndex, width, height int) {
 	}
 	query := setImageQueryInt(slide.Elements[imageIndex].Query, "top", max(0, top))
 	query = setPlacementHorizontalPct(query, left, right, width)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta")
+	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
 	slide.Elements[imageIndex].Query = query
 }
 
@@ -10409,7 +14954,7 @@ func normalizeTextPlacement(slide *Slide, elementIndex, width, height int) {
 	query := slide.Elements[elementIndex].Query
 	query = setPlacementHorizontalPct(query, left, right, width)
 	query = setImageQueryInt(query, "top", max(0, top))
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta")
+	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
 	slide.Elements[elementIndex].Query = query
 }
 
@@ -10442,7 +14987,7 @@ func moveTextElement(slide *Slide, elementIndex int, direction string, width, he
 	left = max(0, min(max(0, width-1), left))
 	query := setImageQueryInt(slide.Elements[elementIndex].Query, "top", top)
 	query = setPlacementHorizontalPct(query, left, left, width)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta")
+	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
 	slide.Elements[elementIndex].Query = query
 }
 
@@ -10486,7 +15031,7 @@ func moveElementByBounds(slide *Slide, elementIndex int, direction string, width
 	query := slide.Elements[elementIndex].Query
 	query = setPlacementHorizontalPct(query, left, right, width)
 	query = setImageQueryInt(query, "top", top)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta")
+	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
 	slide.Elements[elementIndex].Query = query
 }
 
@@ -10544,14 +15089,14 @@ func naturalElementTop(slide Slide, elementIndex, width, height int, query strin
 		return 0, false
 	}
 	clone := cloneSlide(slide)
-	clone.Elements[elementIndex].Query = removeImageQueryKeys(query, "top", "bottom", "row_delta")
+	clone.Elements[elementIndex].Query = removeImageQueryKeys(query, "top", "bottom", "row_delta", "valign")
 	top, _, _, ok := elementBounds(clone, elementIndex, width, height)
 	return top, ok
 }
 
 func setPlacementRowDeltaForTop(slide Slide, elementIndex int, query string, top, width, height int) string {
 	if elementIndex < 0 || elementIndex >= len(slide.Elements) || width <= 0 || height <= 0 {
-		return removeImageQueryKeys(query, "top", "bottom", "row_delta")
+		return removeImageQueryKeys(query, "top", "bottom", "row_delta", "valign")
 	}
 	return setPlacementRowDelta(query, max(0, top))
 }
@@ -10563,7 +15108,7 @@ func normalizeFlowRelativePlacements(slide *Slide, width, height int) {
 	original := cloneSlide(*slide)
 	for index, element := range slide.Elements {
 		placement := parseImagePlacement(element.Query)
-		if !placement.hasHorizontalOffset() || placement.rowDelta != nil || !placement.hasVerticalOffset() {
+		if !placement.hasHorizontalOffset() || placement.rowDelta != nil || placement.verticalAlign != "" || !placement.hasVerticalOffset() {
 			continue
 		}
 		top, _, _, ok := elementBounds(original, index, width, height)
@@ -10571,7 +15116,7 @@ func normalizeFlowRelativePlacements(slide *Slide, width, height int) {
 			continue
 		}
 		query := setPlacementRowDeltaForTop(original, index, element.Query, top, width, height)
-		query = removeImageQueryKeys(query, "top", "bottom")
+		query = removeImageQueryKeys(query, "top", "bottom", "valign")
 		slide.Elements[index].Query = query
 	}
 }
@@ -10602,7 +15147,11 @@ func initializeInsertedImagePlacement(slide *Slide, imageIndex int) {
 	query = setImageQueryInt(query, "top", 1)
 	query = setImageQueryInt(query, "left", 1)
 	query = setImageQueryFloat(query, "scale", 1.0)
-	query = removeImageQueryKeys(query, "align", "left_pct", "right", "right_pct", "bottom", "row_delta")
+	if ext := strings.ToLower(filepath.Ext(strings.SplitN(slide.Elements[imageIndex].Path, "?", 2)[0])); ext == ".gif" || ext == ".webp" {
+		query = setImageQueryInt(query, "width", max(1, int(math.Round(float64(authoredTerminalWidth)*0.5))))
+		query = removeImageQueryKeys(query, "height", "stretch")
+	}
+	query = removeImageQueryKeys(query, "align", "left_pct", "right", "right_pct", "bottom", "row_delta", "valign")
 	slide.Elements[imageIndex].Query = query
 }
 
@@ -10633,7 +15182,7 @@ func initializeInsertedTextPlacement(slide *Slide, elementIndex, top, left, widt
 	query := slide.Elements[elementIndex].Query
 	query = setImageQueryInt(query, "top", max(0, top))
 	query = setPlacementHorizontalPct(query, left, left+max(0, displayWidth(slide.Elements[elementIndex].Text)-1), width)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta")
+	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
 	slide.Elements[elementIndex].Query = query
 }
 
@@ -10645,7 +15194,7 @@ func initializeInsertedShapePlacement(slide *Slide, elementIndex, top, left, wid
 	query := slide.Elements[elementIndex].Query
 	query = setImageQueryInt(query, "top", max(0, top))
 	query = setPlacementHorizontalPct(query, left, left+shapeWidth-1, width)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta")
+	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
 	slide.Elements[elementIndex].Query = query
 }
 
@@ -10660,7 +15209,7 @@ func clipboardElementFromSelection(slide Slide, elementIndex, width, height int)
 	}
 	element.Query = setImageQueryInt(element.Query, "top", top)
 	element.Query = setPlacementHorizontalPct(element.Query, left, right, width)
-	element.Query = removeImageQueryKeys(element.Query, "align", "left", "right", "bottom", "row_delta")
+	element.Query = removeImageQueryKeys(element.Query, "align", "left", "right", "bottom", "row_delta", "valign")
 	return element
 }
 
@@ -10678,19 +15227,21 @@ func elementForPastePage(element Element, page, width, height int) Element {
 		localTop = max(0, height-elementLayoutHeight(element, width, height)-*placement.bottom)
 	case placement.rowDelta != nil:
 		localTop = max(0, *placement.rowDelta)
+	case placement.verticalAlign != "":
+		localTop = max(0, placementTopRow(placement, height, elementLayoutHeight(element, width, height), 0))
 	default:
 		if page == 0 {
 			return element
 		}
 	}
 	element.Query = setImageQueryInt(element.Query, "top", page*height+localTop)
-	element.Query = removeImageQueryKeys(element.Query, "bottom", "row_delta")
+	element.Query = removeImageQueryKeys(element.Query, "bottom", "row_delta", "valign")
 	return element
 }
 
 func elementLayoutHeight(element Element, width, height int) int {
 	if element.Kind == "image" {
-		return max(1, len(renderASCIIImage(element.Path, element.Query, width, height)))
+		return max(1, len(renderImageElementRows(element, width, height)))
 	}
 	return max(1, len(layoutElementRows(element, width)))
 }
@@ -10713,7 +15264,7 @@ func moveImageElement(element *Element, direction string, width, height, page, s
 	if placement.top != nil {
 		top = *placement.top - pageTop
 	}
-	rows := renderASCIIImage(element.Path, element.Query, width, height)
+	rows := renderImageElementRows(*element, width, height)
 	imageWidth := max(1, maxLineDisplayWidth(rows))
 	left = placementLeftCol(placement, width, imageWidth)
 	right := left + imageWidth - 1
@@ -10734,7 +15285,7 @@ func moveImageElement(element *Element, direction string, width, height, page, s
 	right = left + imageWidth - 1
 	query := setImageQueryInt(element.Query, "top", pageTop+top)
 	query = setPlacementHorizontalPct(query, left, right, width)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta")
+	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
 	element.Query = query
 }
 
@@ -10957,7 +15508,7 @@ func setElementSize(query string, width, height int) string {
 func setElementTopLeft(query string, top, left int) string {
 	query = setImageQueryInt(query, "top", max(0, top))
 	query = setImageQueryInt(query, "left", max(0, left))
-	return removeImageQueryKeys(query, "align", "left_pct", "right", "right_pct", "bottom", "row_delta")
+	return removeImageQueryKeys(query, "align", "left_pct", "right", "right_pct", "bottom", "row_delta", "valign")
 }
 
 func setImageResizeSize(query string, width, height int) string {
@@ -11039,6 +15590,7 @@ func setPlacementRowDelta(query string, delta int) string {
 	values.Del("top")
 	values.Del("bottom")
 	values.Del("row_delta")
+	values.Del("valign")
 	if delta != 0 {
 		values.Set("row_delta", strconv.Itoa(delta))
 	}
@@ -11078,8 +15630,8 @@ func elementHasOutline(element Element) bool {
 	return err == nil && values.Get("outline") != ""
 }
 
-func toggleShapeTransparency(element *Element) {
-	if element == nil || element.Kind != "shape" {
+func toggleElementTransparency(element *Element) {
+	if element == nil || !elementSupportsTransparency(*element) {
 		return
 	}
 	values, _ := url.ParseQuery(element.Query)
@@ -11093,7 +15645,28 @@ func toggleShapeTransparency(element *Element) {
 
 func elementTransparent(element Element) bool {
 	values, err := url.ParseQuery(element.Query)
-	return err == nil && values.Get("transparent") == "1"
+	return err == nil && values.Get("transparent") == "1" && elementSupportsTransparency(element)
+}
+
+func elementSupportsTransparency(element Element) bool {
+	switch element.Kind {
+	case "heading", "text", "text-image", "bullet", "code", "shape", "image":
+	default:
+		return false
+	}
+	if element.Kind == "image" && strings.EqualFold(filepath.Ext(strings.SplitN(element.Path, "?", 2)[0]), ".gif") {
+		return false
+	}
+	values, err := url.ParseQuery(element.Query)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(values.Get("glyph")) {
+	case "", "block", "blocks":
+		return true
+	default:
+		return false
+	}
 }
 
 func outlineLineQuery(query string) string {
@@ -11134,7 +15707,7 @@ func playSearchMode(slides []Slide, current, page, width, height int, lastQuery 
 	renderer := &liveSlideRenderer{}
 	runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			renderer.draw(slides[current], width, height, page, frame, func(lines []Line) {
 				drawSearchHighlights(lines, slides[current], width, height, query)
 				drawSearchField(width, height, query, status)
@@ -11196,7 +15769,7 @@ func playLinkInput(slide Slide, width, height, page int, current string, slideCo
 	renderer := &liveSlideRenderer{}
 	decision := runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			renderer.draw(slide, width, height, page, frame, func(lines []Line) { drawLinkField(width, height, query, status) })
 		},
 		Read: readLinkInputKeyEvent,
@@ -11248,7 +15821,7 @@ func playJumpMode(slides []Slide, current, page, width, height int) (int, int) {
 	renderer := &liveSlideRenderer{}
 	runOverlayLoop(overlayLoopSpec{
 		Draw: func(frame int) {
-			width, height = terminalAuthoredSize()
+			width, height = terminalSize()
 			renderer.draw(slides[current], width, height, page, frame, func(lines []Line) { drawJumpField(width, height, query, status) })
 		},
 		Read: readJumpKeyEvent,
@@ -11424,18 +15997,181 @@ func drawRenderedHeadingMatch(element Element, renderedRows []string, width, hei
 
 func renderedOffsetForCursor(element Element, width, cursor int) (int, int) {
 	cursor = max(0, min(cursor, len([]rune(element.Text))))
-	if element.Kind == "heading" && !rendersAsTextImage(element) {
-		return 0, cursor * editGlyphWidth(element)
+	if element.Kind == "bullet" {
+		row, col, _ := bulletCaretMetrics(element, width, cursor)
+		return row, col
 	}
-	if element.Kind == "code" && !rendersAsTextImage(element) {
-		visualLine, col := codeCursorVisualLineCol(element.Text, codeCharsPerVisualLine(width), cursor)
-		return codeBlockPadY + visualLine*4 + 3, codeBlockPadX + col*editGlyphWidth(element)
+	if element.Kind == "heading" && !rendersAsTextImage(element) {
+		rows := editableRowsForElementPrefix(element, width, cursor)
+		if len(rows) == 0 {
+			return max(0, editGlyphHeight(element)-1), 0
+		}
+		glyphHeight := max(1, editGlyphHeight(element))
+		return max(0, glyphHeight-1), maxLineDisplayWidth(rows[max(0, len(rows)-glyphHeight):]) + editorTrailingSpaceWidth(element, cursor)
+	}
+	if element.Kind == "code" {
+		visualLine, col := codeCursorVisualLineCol(element.Text, codeCharsPerVisualLineForElement(element, width), cursor)
+		glyphHeight := codeGlyphHeight(element)
+		return codeBlockPadY + visualLine*glyphHeight + glyphHeight - 1, codeBlockPadX + col*editGlyphWidth(element)
 	}
 	rows := editableRowsForElementPrefix(element, width, cursor)
 	if len(rows) == 0 {
 		return 0, 0
 	}
-	return len(rows) - 1, displayWidth(strings.TrimRight(rows[len(rows)-1], " "))
+	if rendersAsTextImage(element) {
+		glyphHeight := max(1, editGlyphHeight(element))
+		return len(rows) - 1, maxLineDisplayWidth(rows[max(0, len(rows)-glyphHeight):]) + editorTrailingSpaceWidth(element, cursor)
+	}
+	if hasEmoji(element.Text) {
+		glyphHeight := max(1, editGlyphHeight(element))
+		return len(rows) - 1, maxLineDisplayWidth(rows[max(0, len(rows)-glyphHeight):]) + editorTrailingSpaceWidth(element, cursor)
+	}
+	lastRow := strings.TrimRight(stripANSI(rows[len(rows)-1]), " ")
+	return len(rows) - 1, displayWidth(lastRow) + editorTrailingSpaceWidth(element, cursor)
+}
+
+func editorTrailingSpaceWidth(element Element, cursor int) int {
+	spans := parseMarkdownStyledSpansUntil(element.Text, cursor)
+	width := 0
+	for spanIndex := len(spans) - 1; spanIndex >= 0; spanIndex-- {
+		span := spans[spanIndex]
+		unitWidth := editorStyledSpaceWidth(element, span.Bold)
+		runes := []rune(span.Text)
+		for index := len(runes) - 1; index >= 0; index-- {
+			switch runes[index] {
+			case ' ', '\t':
+				width += unitWidth
+			case '\n', '\r':
+				return 0
+			default:
+				return width
+			}
+		}
+	}
+	return width
+}
+
+func editorStyledSpaceWidth(element Element, bold bool) int {
+	unitWidth := editGlyphWidth(element)
+	if bold {
+		if rendersAsTextImage(element) {
+			unitWidth = max(unitWidth, int(math.Ceil(5*textImageScale(element))))
+		} else if element.Kind == "heading" && element.Level == 1 {
+			unitWidth = 20
+		} else {
+			unitWidth = 5
+			if element.Kind == "heading" {
+				unitWidth = 10
+			}
+		}
+	}
+	return unitWidth
+}
+
+func bulletCaretMetrics(element Element, width, cursor int) (int, int, int) {
+	runes := []rune(element.Text)
+	cursor = max(0, min(cursor, len(runes)))
+	before := string(runes[:cursor])
+	lines := strings.Split(strings.ReplaceAll(before, "\r\n", "\n"), "\n")
+	current := lines[len(lines)-1]
+	continuation := len(current) > 0 && (current[0] == ' ' || current[0] == '\t')
+	allLines := strings.Split(strings.ReplaceAll(element.Text, "\r\n", "\n"), "\n")
+	lineIndex := min(len(allLines)-1, len(lines)-1)
+	fullCurrent := allLines[lineIndex]
+	leading := len([]rune(fullCurrent)) - len([]rune(strings.TrimLeft(fullCurrent, " \t")))
+	contentCursor := max(0, len([]rune(current))-leading)
+	content := strings.TrimLeft(fullCurrent, " \t")
+	row := 0
+	if len(lines) > 1 {
+		previous := strings.Join(lines[:len(lines)-1], "\n")
+		if rendersAsTextImage(element) {
+			copyElement := element
+			copyElement.Text = previous
+			row += len(renderTextImageBulletElement(copyElement, width, textImageScale(element)))
+		} else {
+			row += len(renderBulletWrapped(previous, width))
+		}
+	}
+	if rendersAsTextImage(element) {
+		itemRow, col, cells := textImageBulletItemCaretMetrics(element, content, contentCursor, width, !continuation)
+		return row + itemRow, col, cells
+	}
+
+	const prefixWidth = 8
+	prefixText := string([]rune(content)[:min(contentCursor, len([]rune(content)))])
+	_, trailing := trimTrailingEditorSpaces(prefixText)
+	spans := parseMarkdownStyledSpansUntil(content, contentCursor)
+	chunks := wrapStyledSpans(spans, max(1, width-prefixWidth), 4, 5)
+	chunkIndex := max(0, len(chunks)-1)
+	textRows := renderQuadStyled(chunks[chunkIndex])
+	col := prefixWidth + maxLineDisplayWidth(textRows) + trailing*4
+	if continuation {
+		row += chunkIndex*4 + max(0, len(textRows)-1)
+	} else if chunkIndex == 0 {
+		row += max(0, (len(renderBulletMarkerRows())-len(textRows))/2) + max(0, len(textRows)-1)
+		if len(textRows) == 0 {
+			row += 4
+		}
+	} else {
+		row += len(renderBulletMarkerRows()) + (chunkIndex-1)*4 + max(0, len(textRows)-1)
+	}
+	return row, min(width, col), 4
+}
+
+func textImageScale(element Element) float64 {
+	values, _ := url.ParseQuery(element.Query)
+	if scale, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && scale > 0 {
+		return scale
+	}
+	return 1
+}
+
+func textImageBulletItemCaretMetrics(element Element, current string, cursor, width int, showMarker bool) (int, int, int) {
+	scale := textImageScale(element)
+	marker := element
+	marker.Kind = "text"
+	marker.Text = "·"
+	markerRows := renderTextImageElement(marker, width)
+	markerWidth := max(1, maxLineDisplayWidth(markerRows))
+	prefixWidth := min(max(1, width-1), markerWidth+max(1, int(math.Ceil(scale))))
+	contentWidth := max(1, width-prefixWidth)
+	glyphWidth := max(1, int(math.Ceil(4*scale)))
+	boldWidth := max(glyphWidth, int(math.Ceil(5*scale)))
+	runes := []rune(current)
+	cursor = max(0, min(cursor, len(runes)))
+	_, trailing := trimTrailingEditorSpaces(string(runes[:cursor]))
+	chunks := wrapStyledSpans(parseMarkdownStyledSpansUntil(current, cursor), contentWidth, glyphWidth, boldWidth)
+	row := 0
+	for chunkIndex, chunk := range chunks {
+		textElement := element
+		textElement.Kind = "text"
+		textRows := renderTextImageStyledSpans(textElement, contentWidth, chunk)
+		if chunkIndex < len(chunks)-1 {
+			if showMarker && chunkIndex == 0 {
+				row += max(len(markerRows), len(textRows))
+			} else {
+				row += len(textRows)
+			}
+			continue
+		}
+		textOffset := 0
+		if showMarker && chunkIndex == 0 {
+			textOffset = max(0, (max(len(markerRows), len(textRows))-len(textRows))/2)
+		}
+		row += textOffset + max(0, len(textRows)-1)
+		col := prefixWidth + maxLineDisplayWidth(textRows) + trailing*glyphWidth
+		return row, min(width, col), glyphWidth
+	}
+	return row, prefixWidth, glyphWidth
+}
+
+func trimTrailingEditorSpaces(text string) (string, int) {
+	runes := []rune(text)
+	end := len(runes)
+	for end > 0 && (runes[end-1] == ' ' || runes[end-1] == '\t') {
+		end--
+	}
+	return string(runes[:end]), len(runes) - end
 }
 
 func runeSliceWithPadding(text string, start, end int) string {
@@ -11543,6 +16279,21 @@ func drawViewOverlays(width, height int, view ViewState) {
 	if view.TimerMode != "" {
 		drawTimerOverlay(width, height, view.TimerMode, view.TimerInput, view.TimerDeadline)
 	}
+	drawViewportFitWarning(width, height)
+}
+
+func viewportFitWarningActive() bool {
+	return viewportWarning.Text != "" && time.Now().Before(viewportWarning.ExpiresAt)
+}
+
+func drawViewportFitWarning(width, height int) {
+	if width <= 0 || height <= 1 || !viewportFitWarningActive() {
+		return
+	}
+	text := cropANSIVisible(viewportWarning.Text, max(1, width-4))
+	textWidth := displayWidth(text)
+	col := max(1, (width-textWidth)/2+1)
+	termPrintf("\033[0;30;103m\033[1;%dH %s \033[0m", col, text)
 }
 
 func slideNumberLabel(view ViewState) string {
@@ -11627,21 +16378,25 @@ func padRight(text string, width int) string {
 }
 
 func editableRowsForElementPrefix(element Element, width, cursor int) []string {
+	text := editablePrefixText(element, cursor)
 	runes := []rune(element.Text)
 	cursor = max(0, min(cursor, len(runes)))
-	text := string(runes[:cursor])
-	if rendersAsTextImage(element) {
+	if element.Kind == "code" {
 		copyElement := element
 		copyElement.Text = text
-		return renderTextImageElement(copyElement, width)
+		return renderCodeBlockRows(copyElement, width)
 	}
+	if rendersAsTextImage(element) {
+		return renderTextImageStyledSpans(element, width, parseMarkdownStyledSpansUntil(element.Text, cursor))
+	}
+	spans := parseMarkdownStyledSpansUntil(element.Text, cursor)
 	switch element.Kind {
 	case "heading":
 		scale := 1
 		if element.Level == 1 {
 			scale = 2
 		}
-		return renderFull(text, scale)
+		return renderFullStyledWrapped(spans, width, scale)
 	case "bullet":
 		return renderBulletWrapped(text, width)
 	case "code":
@@ -11649,8 +16404,36 @@ func editableRowsForElementPrefix(element Element, width, cursor int) []string {
 		copyElement.Text = text
 		return renderCodeBlockRows(copyElement, width)
 	default:
-		return renderBodyWrapped(text, width, "", "")
+		return renderStyledBodyWrapped(spans, width, "", "")
 	}
+}
+
+func editablePrefixText(element Element, cursor int) string {
+	runes := []rune(element.Text)
+	cursor = max(0, min(cursor, len(runes)))
+	text := string(runes[:cursor])
+	if strings.Count(text, "[color=") > strings.Count(text, "[/color]") && strings.Contains(string(runes[cursor:]), "[/color]") {
+		text += "[/color]"
+	}
+	for _, marker := range []string{"***", "**", "*"} {
+		markerRunes := []rune(marker)
+		if len(runes) >= len(markerRunes)*2 && strings.HasPrefix(element.Text, marker) && strings.HasSuffix(element.Text, marker) && cursor >= len(markerRunes) && cursor <= len(runes)-len(markerRunes) {
+			text += marker
+			break
+		}
+	}
+	return text
+}
+
+func codeCharsPerVisualLineForElement(element Element, width int) int {
+	return max(1, (max(1, width)-codeBlockPadX*2)/max(1, editGlyphWidth(element)))
+}
+
+func codeGlyphHeight(element Element) int {
+	if !rendersAsTextImage(element) {
+		return 4
+	}
+	return max(1, len(renderBitmapTextImage("M", textImageScale(element))))
 }
 
 func editGlyphWidth(element Element) int {
@@ -11679,6 +16462,22 @@ func editGlyphWidth(element Element) int {
 	}
 	if element.Kind == "code" {
 		return 4
+	}
+	return 4
+}
+
+func editGlyphHeight(element Element) int {
+	if element.Kind == "code" {
+		return codeGlyphHeight(element)
+	}
+	if rendersAsTextImage(element) {
+		return max(1, len(renderBitmapTextImage("M", textImageScale(element))))
+	}
+	if element.Kind == "heading" && element.Level == 1 {
+		return 16
+	}
+	if element.Kind == "heading" {
+		return 8
 	}
 	return 4
 }
@@ -11736,19 +16535,18 @@ func codeCursorIndexForLineCol(text string, targetLine, targetCol int) int {
 	return len(runes)
 }
 
-func codeCharsPerVisualLine(width int) int {
-	return max(1, max(1, width-codeBlockPadX*2)/4)
-}
-
 func codeCursorVisualLineCol(text string, charsPerLine, cursor int) (int, int) {
 	charsPerLine = max(1, charsPerLine)
 	line, col := codeCursorLineCol(text, cursor)
 	visualLine := 0
 	for index, rawLine := range strings.Split(text, "\n") {
 		if index == line {
-			return visualLine + col/charsPerLine, col % charsPerLine
+			runes := []rune(rawLine)
+			visualCol := textVisualUnitWidth(string(runes[:min(col, len(runes))]))
+			return visualLine + visualCol/charsPerLine, visualCol % charsPerLine
 		}
-		visualLine += max(1, (len([]rune(rawLine))+charsPerLine-1)/charsPerLine)
+		visualWidth := textVisualUnitWidth(rawLine)
+		visualLine += max(1, (visualWidth+charsPerLine-1)/charsPerLine)
 	}
 	return visualLine, 0
 }
@@ -11761,11 +16559,20 @@ func codeCursorIndexForVisualLineCol(text string, charsPerLine, targetVisualLine
 	visualLine := 0
 	for _, rawLine := range strings.Split(text, "\n") {
 		runes := []rune(rawLine)
-		chunkCount := max(1, (len(runes)+charsPerLine-1)/charsPerLine)
+		visualWidth := textVisualUnitWidth(rawLine)
+		chunkCount := max(1, (visualWidth+charsPerLine-1)/charsPerLine)
 		if targetVisualLine < visualLine+chunkCount {
 			chunk := targetVisualLine - visualLine
-			col := min(len(runes), chunk*charsPerLine+targetCol)
-			return offset + col
+			targetWidth := min(visualWidth, chunk*charsPerLine+targetCol)
+			runeCol, used := 0, 0
+			for _, unit := range textVisualUnits(rawLine) {
+				if used+unit.width > targetWidth {
+					break
+				}
+				used += unit.width
+				runeCol += len([]rune(unit.text))
+			}
+			return offset + min(len(runes), runeCol)
 		}
 		offset += len(runes)
 		if offset < len([]rune(text)) {
@@ -11777,7 +16584,7 @@ func codeCursorIndexForVisualLineCol(text string, charsPerLine, targetVisualLine
 }
 
 func moveCodeCursorVertical(element Element, cursor, delta, width int) int {
-	charsPerLine := codeCharsPerVisualLine(width)
+	charsPerLine := codeCharsPerVisualLineForElement(element, width)
 	visualLine, col := codeCursorVisualLineCol(element.Text, charsPerLine, cursor)
 	return codeCursorIndexForVisualLineCol(element.Text, charsPerLine, visualLine+delta, col)
 }
@@ -11852,9 +16659,10 @@ const (
 )
 
 type interactionContext struct {
-	Mode      editorMode
-	Selection selectionKind
-	Master    bool
+	Mode                 editorMode
+	Selection            selectionKind
+	Master               bool
+	SupportsTransparency bool
 }
 
 type actionSpec struct {
@@ -11888,6 +16696,7 @@ func interactionContextFor(mode string, slide Slide, selected int, selection map
 	if selected < 0 || selected >= len(slide.Elements) {
 		return ctx
 	}
+	ctx.SupportsTransparency = elementSupportsTransparency(slide.Elements[selected])
 	if status == "code text selected" {
 		ctx.Selection = selectionCode
 		return ctx
@@ -11962,7 +16771,7 @@ func editActionSpecs(ctx interactionContext) []actionSpec {
 			action("1", "slide overview", "1 slides", "1", true, 3, "slide-list"),
 			action("2", "speaker notes", "2 notes", "2", true, 3, "speaker-notes"),
 			action("Ctrl-V", "paste element", "", "", false, 4, "paste"),
-			action("t / i / s", "insert text, image, or shape", "", "", false, 3, "insert-text", "insert-image", "style"),
+			action("t / i / s", "insert text, image, or shape", "", "", false, 3, "insert-text", "insert-image", "shape-picker"),
 		)
 	}
 	if ctx.Master {
@@ -12014,10 +16823,10 @@ func editActionSpecs(ctx interactionContext) []actionSpec {
 	if ctx.Selection == selectionText || ctx.Selection == selectionImage || ctx.Selection == selectionShape {
 		specs = append(specs, action("l", "set link", "", "", false, 3, "link"))
 	}
-	if ctx.Selection == selectionShape {
-		specs = append(specs, action("/", "toggle see-through shape", "/ see-through", "/", true, 2, "transparency"))
+	if ctx.SupportsTransparency && (ctx.Selection == selectionText || ctx.Selection == selectionCode || ctx.Selection == selectionImage || ctx.Selection == selectionShape) {
+		specs = append(specs, action("/", "toggle see-through", "/ see-through", "/", true, 2, "transparency"))
 	}
-	if ctx.Selection == selectionMulti {
+	if ctx.Selection == selectionText || ctx.Selection == selectionImage || ctx.Selection == selectionShape || ctx.Selection == selectionMulti {
 		specs = append(specs, action("< / = / >", "align left, center, or right", "align", "align", true, 2, "align-left", "align-center", "align-right"))
 	}
 	if ctx.Selection != selectionNone && ctx.Selection != selectionCode && ctx.Selection != selectionPage {
@@ -12321,10 +17130,54 @@ func finalizeTextEdit(slide *Slide, selected int, cursor map[int]int) int {
 	if selected < 0 || selected >= len(slide.Elements) {
 		return selected
 	}
+	if slide.Elements[selected].Kind == "bullet" {
+		slide.Elements[selected].Text = normalizeBulletText(slide.Elements[selected].Text)
+	}
 	if slide.Elements[selected].Placeholder || strings.TrimSpace(slide.Elements[selected].Text) == "" {
 		return removeEditableElement(slide, selected, cursor)
 	}
 	return selected
+}
+
+func bulletItemAtCursorEmpty(text string, cursor int) bool {
+	runes := []rune(text)
+	cursor = max(0, min(cursor, len(runes)))
+	start := cursor
+	for start > 0 && runes[start-1] != '\n' {
+		start--
+	}
+	end := cursor
+	for end < len(runes) && runes[end] != '\n' {
+		end++
+	}
+	return strings.TrimSpace(string(runes[start:end])) == ""
+}
+
+func removeEmptyTextLineAtCursor(element *Element, cursor int) int {
+	if element == nil {
+		return cursor
+	}
+	runes := []rune(element.Text)
+	cursor = max(0, min(cursor, len(runes)))
+	start := cursor
+	for start > 0 && runes[start-1] != '\n' {
+		start--
+	}
+	end := cursor
+	for end < len(runes) && runes[end] != '\n' {
+		end++
+	}
+	if strings.TrimSpace(string(runes[start:end])) != "" {
+		return cursor
+	}
+	removeStart, removeEnd := start, end
+	if start > 0 {
+		removeStart--
+	} else if end < len(runes) {
+		removeEnd++
+	}
+	element.Text = string(append(append([]rune(nil), runes[:removeStart]...), runes[removeEnd:]...))
+	return removeStart
 }
 
 func removeEditableElement(slide *Slide, selected int, cursor map[int]int) int {
@@ -12394,6 +17247,9 @@ func renderElementRows(element Element, width int) []string {
 
 func renderElementRowsBase(element Element, width int) []string {
 	width = constrainedElementWidth(element, width)
+	if element.Kind == "code" {
+		return renderCodeBlockRows(element, width)
+	}
 	if rendersAsTextImage(element) {
 		return renderTextImageElement(element, width)
 	}
@@ -12406,8 +17262,6 @@ func renderElementRowsBase(element Element, width int) []string {
 		return renderFullWrapped(element.Text, width, scale)
 	case "bullet":
 		return renderBulletWrapped(element.Text, width)
-	case "code":
-		return renderCodeBlockRows(element, width)
 	case "shape":
 		return renderShapeRows(element, width)
 	default:
@@ -12587,7 +17441,7 @@ func renderCodeBlockRows(element Element, width int) []string {
 	if width <= 0 {
 		return nil
 	}
-	glyphRows := renderCodeGlyphRows(element.Text, max(1, width-codeBlockPadX*2))
+	glyphRows := renderCodeGlyphRows(element, max(1, width-codeBlockPadX*2))
 	contentWidth := max(1, maxLineDisplayWidth(glyphRows))
 	blockWidth := min(width, contentWidth+codeBlockPadX*2)
 	blank := strings.Repeat(" ", blockWidth)
@@ -12604,13 +17458,21 @@ func renderCodeBlockRows(element Element, width int) []string {
 	return rows
 }
 
-func renderCodeGlyphRows(text string, width int) []string {
-	charsPerLine := max(1, width/4)
+func renderCodeGlyphRows(element Element, width int) []string {
+	glyphWidth := 4
+	if rendersAsTextImage(element) {
+		glyphWidth = editGlyphWidth(element)
+	}
+	charsPerLine := max(1, width/max(1, glyphWidth))
 	var rows []string
-	for _, rawLine := range strings.Split(text, "\n") {
+	for _, rawLine := range strings.Split(element.Text, "\n") {
 		chunks := fixedRuneChunks(rawLine, charsPerLine)
 		for _, chunk := range chunks {
-			rows = append(rows, renderQuad(chunk)...)
+			if rendersAsTextImage(element) {
+				rows = append(rows, renderBitmapTextImage(chunk, textImageScale(element))...)
+			} else {
+				rows = append(rows, renderQuad(chunk)...)
+			}
 		}
 	}
 	if len(rows) == 0 {
@@ -12620,18 +17482,7 @@ func renderCodeGlyphRows(text string, width int) []string {
 }
 
 func fixedRuneChunks(text string, width int) []string {
-	width = max(1, width)
-	runes := []rune(text)
-	if len(runes) == 0 {
-		return []string{""}
-	}
-	chunks := make([]string, 0, (len(runes)+width-1)/width)
-	for len(runes) > 0 {
-		n := min(width, len(runes))
-		chunks = append(chunks, string(runes[:n]))
-		runes = runes[n:]
-	}
-	return chunks
+	return splitTextVisualUnits(text, width)
 }
 
 func layoutElementRows(element Element, width int) []string {
@@ -12707,25 +17558,24 @@ func layout(slide Slide, width, height int) []Line {
 		if isImage {
 			placement := parseImagePlacement(block[0].Query)
 			maxImageRows := height
-			if placement.top != nil && placement.bottom != nil {
-				maxImageRows = max(1, height-*placement.top-*placement.bottom)
+			if placement.top != nil {
+				maxImageRows = max(1, height-*placement.top)
+			}
+			if placement.bottom != nil {
+				maxImageRows = max(1, maxImageRows-*placement.bottom)
 			}
 			imageElement := slide.Elements[block[0].Element]
 			maxImageWidth := constrainedElementWidth(imageElement, width)
+			if placement.left != nil {
+				maxImageWidth = max(1, min(maxImageWidth, width-*placement.left))
+			}
+			if placement.right != nil {
+				maxImageWidth = max(1, min(maxImageWidth, width-*placement.right))
+			}
 			maxImageRows = constrainedElementHeight(imageElement, maxImageRows)
-			rows := renderASCIIImage(block[0].Text, block[0].Query, maxImageWidth, maxImageRows)
-			if len(rows) == 0 && imageElement.Placeholder {
-				rows = renderImagePlaceholderRows(imageElement, maxImageWidth, maxImageRows)
-			}
+			rows := renderImageElementRows(imageElement, maxImageWidth, maxImageRows)
 			imageWidth := maxLineDisplayWidth(rows)
-			row := currentRow
-			if placement.top != nil {
-				row = *placement.top
-			} else if placement.bottom != nil {
-				row = height - len(rows) - *placement.bottom
-			} else if placement.rowDelta != nil {
-				row = *placement.rowDelta
-			}
+			row := placementTopRow(placement, height, len(rows), currentRow)
 			col := 0
 			if placement.hasHorizontalOffset() {
 				col = placementLeftCol(placement, width, imageWidth)
@@ -12739,7 +17589,7 @@ func layout(slide Slide, width, height int) []Line {
 			}
 			if placement.top != nil {
 				row = max(0, row)
-			} else if placement.bottom != nil {
+			} else if placement.bottom != nil || placement.verticalAlign != "" {
 				row = max(0, min(height-1, row))
 			} else {
 				row = max(0, row)
@@ -12771,14 +17621,7 @@ func layout(slide Slide, width, height int) []Line {
 			for _, line := range block {
 				blockWidth = max(blockWidth, displayWidth(stripANSI(line.Text)))
 			}
-			row := currentRow
-			if placement.top != nil {
-				row = *placement.top
-			} else if placement.bottom != nil {
-				row = height - blockHeight - *placement.bottom
-			} else if placement.rowDelta != nil {
-				row = *placement.rowDelta
-			}
+			row := placementTopRow(placement, height, blockHeight, currentRow)
 			col := 0
 			if placement.hasHorizontalOffset() {
 				col = placementLeftCol(placement, width, blockWidth)
@@ -12792,19 +17635,25 @@ func layout(slide Slide, width, height int) []Line {
 			}
 			if placement.top != nil {
 				row = max(0, row)
-			} else if placement.bottom != nil {
+			} else if placement.bottom != nil || placement.verticalAlign != "" {
 				row = max(0, min(max(0, height-1), row))
 			} else {
 				row = max(0, row)
 			}
-			col = clampBlockCol(col, width, blockWidth)
+			if placement.left != nil || placement.leftPct != nil {
+				// A left anchor is stable. Re-render into the remaining width below
+				// instead of shifting the element left as its content grows.
+				col = max(0, min(max(0, width-1), col))
+			} else {
+				col = clampBlockCol(col, width, blockWidth)
+			}
 			availableWidth := max(1, width-col)
 			if availableWidth < width {
 				role := block[0].Role
 				block = roleLines(layoutElementRows(slide.Elements[block[0].Element], availableWidth), role, block[0].Element, block[0].Query)
 				blockHeight = len(block)
-				if placement.bottom != nil {
-					row = height - blockHeight - *placement.bottom
+				if placement.bottom != nil || placement.verticalAlign != "" {
+					row = placementTopRow(placement, height, blockHeight, currentRow)
 					row = max(0, min(max(0, height-1), row))
 				}
 			}
@@ -12872,6 +17721,31 @@ func renderImagePlaceholderRows(element Element, maxWidth, maxHeight int) []stri
 		rows[middle] = string(runes)
 	}
 	return rows
+}
+
+func renderUnavailableImageRows(maxWidth, maxHeight int) []string {
+	if maxWidth <= 0 || maxHeight <= 0 {
+		return nil
+	}
+	rows := renderBodyWrapped("[IMG]", maxWidth, "", "")
+	if len(rows) > maxHeight {
+		rows = rows[:maxHeight]
+	}
+	return rows
+}
+
+func renderImageElementRows(element Element, maxWidth, maxHeight int) []string {
+	var rows []string
+	if element.AssetID != "" {
+		rows = renderASCIIImage(element.Path, element.Query, maxWidth, maxHeight)
+	}
+	if len(rows) > 0 {
+		return rows
+	}
+	if element.Placeholder {
+		return renderImagePlaceholderRows(element, maxWidth, maxHeight)
+	}
+	return renderUnavailableImageRows(maxWidth, maxHeight)
 }
 
 func resolveTextCollisions(lines []Line) []Line {
@@ -13179,12 +18053,13 @@ func hasPage(slide Slide, width, height, page int) bool {
 }
 
 type imagePlacement struct {
-	align       string
-	top, bottom *int
-	left, right *int
-	rowDelta    *int
-	leftPct     *float64
-	rightPct    *float64
+	align         string
+	verticalAlign string
+	top, bottom   *int
+	left, right   *int
+	rowDelta      *int
+	leftPct       *float64
+	rightPct      *float64
 }
 
 func parseImagePlacement(query string) imagePlacement {
@@ -13196,6 +18071,10 @@ func parseImagePlacement(query string) imagePlacement {
 	switch values.Get("align") {
 	case "center", "right", "left":
 		placement.align = values.Get("align")
+	}
+	switch values.Get("valign") {
+	case "top", "middle", "bottom":
+		placement.verticalAlign = values.Get("valign")
 	}
 	placement.top = intQuery(values, "top")
 	placement.bottom = intQuery(values, "bottom")
@@ -13212,11 +18091,30 @@ func (placement imagePlacement) hasHorizontalOffset() bool {
 }
 
 func (placement imagePlacement) hasVerticalOffset() bool {
-	return placement.top != nil || placement.bottom != nil || placement.rowDelta != nil
+	return placement.top != nil || placement.bottom != nil || placement.rowDelta != nil || placement.verticalAlign != ""
 }
 
 func (placement imagePlacement) hasAbsoluteOffset() bool {
 	return placement.hasVerticalOffset()
+}
+
+func placementTopRow(placement imagePlacement, height, contentHeight, fallback int) int {
+	switch {
+	case placement.top != nil:
+		return *placement.top
+	case placement.bottom != nil:
+		return height - contentHeight - *placement.bottom
+	case placement.rowDelta != nil:
+		return *placement.rowDelta
+	case placement.verticalAlign == "middle":
+		return (height - contentHeight) / 2
+	case placement.verticalAlign == "bottom":
+		return height - contentHeight
+	case placement.verticalAlign == "top":
+		return 0
+	default:
+		return fallback
+	}
 }
 
 func placementLeftCol(placement imagePlacement, width, contentWidth int) int {
@@ -13345,11 +18243,18 @@ func renderFull(text string, scale int) []string {
 }
 
 func renderFullWithFont(text string, scale int, font map[rune][]string, glyphWidth int) []string {
-	rows := renderFullRawWithFont(text, font, glyphWidth)
-	rows = trimBlank(rows)
-	if scale > 1 {
-		rows = scaleRows(rows, scale)
+	scale = max(1, scale)
+	rows := renderTextWithEmoji(text, 8*scale, func(chunk string) []string {
+		plain := renderFullRawWithFont(chunk, font, glyphWidth)
+		if scale > 1 {
+			plain = scaleRows(plain, scale)
+		}
+		return plain
+	})
+	if hasEmoji(text) {
+		return rows
 	}
+	rows = trimBlank(rows)
 	return rows
 }
 
@@ -13368,7 +18273,7 @@ func renderFullRawWithFont(text string, font map[rune][]string, glyphWidth int) 
 }
 
 func renderFullWrapped(text string, width, scale int) []string {
-	if strings.Contains(text, "*") {
+	if strings.ContainsAny(text, "*`") || strings.Contains(text, "[color=") {
 		return renderFullStyledWrapped(parseMarkdownStyledSpans(text), width, scale)
 	}
 	glyphWidth := max(1, 8*max(1, scale))
@@ -13401,9 +18306,18 @@ func renderFullStyled(spans []styledTextSpan, scale int) []string {
 			font = c64BoldFont
 			glyphWidth = 10
 		}
-		chunk := renderFullRawWithFont(span.Text, font, glyphWidth)
-		if scale > 1 {
-			chunk = scaleRows(chunk, scale)
+		chunk := renderTextWithEmoji(span.Text, 8*scale, func(text string) []string {
+			plain := renderFullRawWithFont(text, font, glyphWidth)
+			if scale > 1 {
+				plain = scaleRows(plain, scale)
+			}
+			return plain
+		})
+		if span.Code {
+			chunk = decorateInlineCodeRows(chunk)
+		}
+		if span.Color != "" {
+			chunk = colourStyledRows(chunk, span.Color)
 		}
 		for i := 0; i < len(rows); i++ {
 			if i < len(chunk) {
@@ -13415,8 +18329,19 @@ func renderFullStyled(spans []styledTextSpan, scale int) []string {
 			}
 		}
 	}
-	rows = trimBlank(rows)
+	if !styledSpansContainEmoji(spans) {
+		rows = trimBlank(rows)
+	}
 	return rows
+}
+
+func styledSpansContainEmoji(spans []styledTextSpan) bool {
+	for _, span := range spans {
+		if hasEmoji(span.Text) {
+			return true
+		}
+	}
+	return false
 }
 
 func highlightVisibleText(text string) string {
@@ -13428,21 +18353,57 @@ func highlightVisibleText(text string) string {
 	return text[:left] + "\033[1m" + text[left:right] + "\033[22m" + text[right:]
 }
 
+func colourStyledRows(rows []string, color string) []string {
+	r, g, b, ok := parseHexColour(color)
+	if !ok {
+		return rows
+	}
+	prefix := fmt.Sprintf("\033[38;2;%d;%d;%dm", r, g, b)
+	for index := range rows {
+		rows[index] = prefix + rows[index] + "\033[39m"
+	}
+	return rows
+}
+
+func decorateInlineCodeRows(rows []string) []string {
+	if len(rows) == 0 {
+		return rows
+	}
+	width := max(1, maxLineDisplayWidth(rows))
+	out := make([]string, len(rows))
+	for row, text := range rows {
+		text = padRight(text, width)
+		if row == 0 || row == len(rows)-1 {
+			corner := "▄"
+			if row == len(rows)-1 {
+				corner = "▀"
+			}
+			out[row] = "\033[90;49m" + corner + "\033[39;100m " + text + " \033[90;49m" + corner + "\033[39;49m"
+		} else {
+			out[row] = "\033[39;100m  " + text + "  \033[49m"
+		}
+	}
+	return out
+}
+
 func renderBodyWrapped(text string, width int, firstPrefix, contPrefix string) []string {
 	prefixWidth := max(displayWidth(firstPrefix), displayWidth(contPrefix))
 	chars := max(1, (width-prefixWidth)/4)
-	if strings.Contains(text, "*") {
+	if strings.ContainsAny(text, "*`") || strings.Contains(text, "[color=") {
 		return renderStyledBodyWrapped(parseMarkdownStyledSpans(text), width, firstPrefix, contPrefix)
 	}
-	chunks := wrapWords(text, chars)
 	var out []string
-	for i, chunk := range chunks {
-		prefix := firstPrefix
-		if i > 0 {
-			prefix = contPrefix
-		}
-		for _, row := range renderQuad(chunk) {
-			out = append(out, crop(prefix+row, width))
+	visualLine := 0
+	for _, logicalLine := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		for _, chunk := range wrapWords(logicalLine, chars) {
+			prefix := firstPrefix
+			if visualLine > 0 {
+				prefix = contPrefix
+			}
+			for _, row := range renderQuad(chunk) {
+				out = append(out, crop(prefix+row, width))
+			}
+			visualLine++
 		}
 	}
 	return out
@@ -13450,37 +18411,101 @@ func renderBodyWrapped(text string, width int, firstPrefix, contPrefix string) [
 
 func renderStyledBodyWrapped(spans []styledTextSpan, width int, firstPrefix, contPrefix string) []string {
 	prefixWidth := max(displayWidth(firstPrefix), displayWidth(contPrefix))
-	lines := wrapStyledSpans(spans, max(1, width-prefixWidth), 4, 5)
 	var out []string
-	for i, line := range lines {
-		prefix := firstPrefix
-		if i > 0 {
-			prefix = contPrefix
-		}
-		for _, row := range renderQuadStyled(line) {
-			out = append(out, cropANSIVisible(prefix+row, width))
+	visualLine := 0
+	for _, logicalLine := range splitStyledSpanLines(spans) {
+		for _, line := range wrapStyledSpans(logicalLine, max(1, width-prefixWidth), 4, 5) {
+			prefix := firstPrefix
+			if visualLine > 0 {
+				prefix = contPrefix
+			}
+			for _, row := range renderQuadStyled(line) {
+				out = append(out, cropANSIVisible(prefix+row, width))
+			}
+			visualLine++
 		}
 	}
 	return out
 }
 
+func splitStyledSpanLines(spans []styledTextSpan) [][]styledTextSpan {
+	lines := [][]styledTextSpan{{}}
+	for _, span := range spans {
+		parts := strings.Split(strings.ReplaceAll(span.Text, "\r\n", "\n"), "\n")
+		for index, part := range parts {
+			if part != "" {
+				lines[len(lines)-1] = appendStyledText(lines[len(lines)-1], part, span)
+			}
+			if index < len(parts)-1 {
+				lines = append(lines, []styledTextSpan{})
+			}
+		}
+	}
+	return lines
+}
+
+var bulletMarkerBitmap = []string{
+	"       ",
+	"       ",
+	"       ",
+	"  ###  ",
+	" ##### ",
+	" ##### ",
+	" ##### ",
+	" ##### ",
+	"  ###  ",
+	"       ",
+	"       ",
+	"       ",
+}
+
+func renderBulletMarkerRows() []string {
+	mask := make([][]bool, len(bulletMarkerBitmap))
+	for row, source := range bulletMarkerBitmap {
+		mask[row] = make([]bool, len([]rune(source)))
+		for col, pixel := range []rune(source) {
+			mask[row][col] = pixel != ' '
+		}
+	}
+	return maskToQuadrantsPadded(mask)
+}
+
 func renderBulletWrapped(text string, width int) []string {
+	var out []string
+	for _, item := range splitBulletListItems(text, true) {
+		out = append(out, renderBulletItemWrapped(item.Text, width)...)
+		for _, continuation := range item.Continuations {
+			out = append(out, renderBodyWrapped(continuation, width, "        ", "        ")...)
+		}
+	}
+	return out
+}
+
+func renderBulletItemWrapped(text string, width int) []string {
 	blankPrefix := "        "
 	prefixWidth := displayWidth(blankPrefix)
 	chars := max(1, (width-prefixWidth)/4)
-	if strings.Contains(text, "*") {
-		return renderStyledBulletWrapped(parseMarkdownStyledSpans(text), width, blankPrefix)
+	if strings.ContainsAny(text, "*`") || strings.Contains(text, "[color=") {
+		return renderStyledBulletItemWrapped(parseMarkdownStyledSpans(text), width, blankPrefix)
 	}
 	chunks := wrapWords(text, chars)
-	markerRows := renderQuad("·")
+	markerRows := renderBulletMarkerRows()
 	var out []string
 	for chunkIndex, chunk := range chunks {
-		for rowIndex, row := range renderQuad(chunk) {
+		textRows := renderQuad(chunk)
+		rowCount, textOffset := len(textRows), 0
+		if chunkIndex == 0 {
+			rowCount = max(rowCount, len(markerRows))
+			textOffset = max(0, (rowCount-len(textRows))/2)
+		}
+		for rowIndex := 0; rowIndex < rowCount; rowIndex++ {
 			prefix := blankPrefix
-			if chunkIndex == 0 && rowIndex == 0 {
-				prefix = padRunes(markerRows[0], prefixWidth)
-			} else if chunkIndex == 0 && rowIndex < len(markerRows) {
+			if chunkIndex == 0 && rowIndex < len(markerRows) {
 				prefix = padRunes(markerRows[rowIndex], prefixWidth)
+			}
+			row := ""
+			if rowIndex >= textOffset && rowIndex-textOffset < len(textRows) {
+				row = textRows[rowIndex-textOffset]
 			}
 			out = append(out, crop(prefix+row, width))
 		}
@@ -13488,18 +18513,26 @@ func renderBulletWrapped(text string, width int) []string {
 	return out
 }
 
-func renderStyledBulletWrapped(spans []styledTextSpan, width int, blankPrefix string) []string {
+func renderStyledBulletItemWrapped(spans []styledTextSpan, width int, blankPrefix string) []string {
 	prefixWidth := displayWidth(blankPrefix)
 	lines := wrapStyledSpans(spans, max(1, width-prefixWidth), 4, 5)
-	markerRows := renderQuad("·")
+	markerRows := renderBulletMarkerRows()
 	var out []string
 	for chunkIndex, chunk := range lines {
-		for rowIndex, row := range renderQuadStyled(chunk) {
+		textRows := renderQuadStyled(chunk)
+		rowCount, textOffset := len(textRows), 0
+		if chunkIndex == 0 {
+			rowCount = max(rowCount, len(markerRows))
+			textOffset = max(0, (rowCount-len(textRows))/2)
+		}
+		for rowIndex := 0; rowIndex < rowCount; rowIndex++ {
 			prefix := blankPrefix
-			if chunkIndex == 0 && rowIndex == 0 {
-				prefix = padRunes(markerRows[0], prefixWidth)
-			} else if chunkIndex == 0 && rowIndex < len(markerRows) {
+			if chunkIndex == 0 && rowIndex < len(markerRows) {
 				prefix = padRunes(markerRows[rowIndex], prefixWidth)
+			}
+			row := ""
+			if rowIndex >= textOffset && rowIndex-textOffset < len(textRows) {
+				row = textRows[rowIndex-textOffset]
 			}
 			out = append(out, cropANSIVisible(prefix+row, width))
 		}
@@ -13508,15 +18541,9 @@ func renderStyledBulletWrapped(spans []styledTextSpan, width int, blankPrefix st
 }
 
 func renderQuad(text string) []string {
-	rows := make([]string, 4)
-	for _, r := range text {
-		glyph := c64QuadFont[r]
-		if glyph == nil {
-			glyph = c64QuadFont['?']
-		}
-		for i := 0; i < 4; i++ {
-			rows[i] += padRunes(glyph[i], 4)
-		}
+	rows := renderQuadRaw(text)
+	if hasEmoji(text) {
+		return rows
 	}
 	return trimBlank(rows)
 }
@@ -13525,6 +18552,8 @@ type styledTextSpan struct {
 	Text      string
 	Bold      bool
 	Highlight bool
+	Code      bool
+	Color     string
 }
 
 func toggleMarkdownStyle(text, marker string) string {
@@ -13542,18 +18571,50 @@ func hasMarkdownStyleWrapper(text, marker string) bool {
 }
 
 func parseMarkdownStyledSpans(text string) []styledTextSpan {
+	return parseMarkdownStyledSpansUntil(text, -1)
+}
+
+func parseMarkdownStyledSpansUntil(text string, visibleRuneLimit int) []styledTextSpan {
 	var spans []styledTextSpan
 	var b strings.Builder
 	bold := false
 	highlight := false
+	code := false
+	color := ""
+	sourceRunes := 0
 	flush := func() {
 		if b.Len() == 0 {
 			return
 		}
-		spans = appendStyledSpan(spans, styledTextSpan{Text: b.String(), Bold: bold, Highlight: highlight})
+		spans = appendStyledSpan(spans, styledTextSpan{Text: b.String(), Bold: bold, Highlight: highlight, Code: code, Color: color})
 		b.Reset()
 	}
 	for i := 0; i < len(text); {
+		if strings.HasPrefix(text[i:], "[color=") {
+			if end := strings.IndexByte(text[i:], ']'); end > len("[color=") && strings.Contains(text[i+end+1:], "[/color]") {
+				if hex, ok := normalizeHexColour(text[i+len("[color=") : i+end]); ok {
+					flush()
+					color = hex
+					i += end + 1
+					sourceRunes += len([]rune(text[i-end-1 : i]))
+					continue
+				}
+			}
+		}
+		if color != "" && strings.HasPrefix(text[i:], "[/color]") {
+			flush()
+			color = ""
+			i += len("[/color]")
+			sourceRunes += len([]rune("[/color]"))
+			continue
+		}
+		if text[i] == '`' && (code || strings.Contains(text[i+1:], "`")) {
+			flush()
+			code = !code
+			i++
+			sourceRunes++
+			continue
+		}
 		if text[i] == '*' {
 			run := markdownStarRun(text, i)
 			consume := 0
@@ -13580,6 +18641,7 @@ func parseMarkdownStyledSpans(text string) []styledTextSpan {
 					highlight = !highlight
 				}
 				i += consume
+				sourceRunes += consume
 				continue
 			}
 		}
@@ -13587,8 +18649,11 @@ func parseMarkdownStyledSpans(text string) []styledTextSpan {
 		if r == utf8.RuneError && size == 0 {
 			break
 		}
-		b.WriteRune(r)
+		if visibleRuneLimit < 0 || sourceRunes < visibleRuneLimit {
+			b.WriteRune(r)
+		}
 		i += size
+		sourceRunes++
 	}
 	flush()
 	return spans
@@ -13625,7 +18690,7 @@ func appendStyledSpan(spans []styledTextSpan, span styledTextSpan) []styledTextS
 	if span.Text == "" {
 		return spans
 	}
-	if len(spans) > 0 && spans[len(spans)-1].Bold == span.Bold && spans[len(spans)-1].Highlight == span.Highlight {
+	if len(spans) > 0 && spans[len(spans)-1].Bold == span.Bold && spans[len(spans)-1].Highlight == span.Highlight && spans[len(spans)-1].Code == span.Code && spans[len(spans)-1].Color == span.Color {
 		spans[len(spans)-1].Text += span.Text
 		return spans
 	}
@@ -13698,7 +18763,7 @@ func styledWords(spans []styledTextSpan) [][]styledTextSpan {
 	}
 	for _, span := range spans {
 		for _, r := range span.Text {
-			if unicode.IsSpace(r) {
+			if unicode.IsSpace(r) && !span.Code {
 				flush()
 				continue
 			}
@@ -13711,6 +18776,11 @@ func styledWords(spans []styledTextSpan) [][]styledTextSpan {
 
 func appendStyledRune(spans []styledTextSpan, r rune, style styledTextSpan) []styledTextSpan {
 	style.Text = string(r)
+	return appendStyledSpan(spans, style)
+}
+
+func appendStyledText(spans []styledTextSpan, text string, style styledTextSpan) []styledTextSpan {
+	style.Text = text
 	return appendStyledSpan(spans, style)
 }
 
@@ -13729,7 +18799,15 @@ func styledSpansWidth(spans []styledTextSpan, normalRuneWidth, boldRuneWidth int
 		if span.Bold {
 			runeWidth = boldRuneWidth
 		}
-		total += len([]rune(span.Text)) * runeWidth
+		for _, unit := range textVisualUnits(span.Text) {
+			total += unit.width * runeWidth
+			if unit.emoji {
+				total += 2
+			}
+		}
+		if span.Code {
+			total += 4
+		}
 	}
 	return total
 }
@@ -13742,12 +18820,16 @@ func splitStyledSpans(spans []styledTextSpan, width, normalRuneWidth, boldRuneWi
 		if span.Bold {
 			runeWidth = boldRuneWidth
 		}
-		for _, r := range span.Text {
-			if used+runeWidth <= width || styledSpansLen(left) == 0 {
-				left = appendStyledRune(left, r, span)
-				used += runeWidth
+		for _, unit := range textVisualUnits(span.Text) {
+			unitWidth := unit.width * runeWidth
+			if unit.emoji {
+				unitWidth += 2
+			}
+			if used+unitWidth <= width || styledSpansLen(left) == 0 {
+				left = appendStyledText(left, unit.text, span)
+				used += unitWidth
 			} else {
-				right = appendStyledRune(right, r, span)
+				right = appendStyledText(right, unit.text, span)
 			}
 		}
 	}
@@ -13761,6 +18843,12 @@ func renderQuadStyled(spans []styledTextSpan) []string {
 		if span.Bold {
 			chunk = renderQuadBoldRaw(span.Text)
 		}
+		if span.Code {
+			chunk = decorateInlineCodeRows(chunk)
+		}
+		if span.Color != "" {
+			chunk = colourStyledRows(chunk, span.Color)
+		}
 		for i := 0; i < 4; i++ {
 			if span.Highlight {
 				rows[i] += "\033[1m" + chunk[i] + "\033[22m"
@@ -13769,10 +18857,17 @@ func renderQuadStyled(spans []styledTextSpan) []string {
 			}
 		}
 	}
+	if styledSpansContainEmoji(spans) {
+		return rows
+	}
 	return trimBlank(rows)
 }
 
 func renderQuadBoldRaw(text string) []string {
+	return renderTextWithEmoji(text, 4, renderQuadBoldPlainRaw)
+}
+
+func renderQuadBoldPlainRaw(text string) []string {
 	const pixelWidth = 10
 	rows := make([]string, 4)
 	for _, r := range text {
@@ -13800,6 +18895,10 @@ func renderQuadBoldRaw(text string) []string {
 }
 
 func renderQuadRaw(text string) []string {
+	return renderTextWithEmoji(text, 4, renderQuadPlainRaw)
+}
+
+func renderQuadPlainRaw(text string) []string {
 	rows := make([]string, 4)
 	for _, r := range text {
 		glyph := c64QuadFont[r]
@@ -13820,10 +18919,15 @@ func renderTextImageElement(element Element, width int) []string {
 		scale = parsed
 	}
 	if element.Kind == "bullet" {
-		element.Text = "·  " + element.Text
+		return renderTextImageBulletElement(element, width, scale)
+	}
+	if strings.Contains(strings.ReplaceAll(element.Text, "\r\n", "\n"), "\n") {
+		return renderTextImageStyledSpans(element, width, parseMarkdownStyledSpans(element.Text))
 	}
 	var rows []string
-	if hasTextImageStyle(element.Query) {
+	if strings.ContainsAny(element.Text, "*`") || strings.Contains(element.Text, "[color=") {
+		rows = renderMarkdownBitmapTextImage(element, scale)
+	} else if hasTextImageStyle(element.Query) {
 		rows = renderStyledBitmapTextImage(element, scale)
 	}
 	if len(rows) == 0 {
@@ -13835,6 +18939,128 @@ func renderTextImageElement(element Element, width int) []string {
 		} else {
 			rows[i] = crop(row, width)
 		}
+	}
+	if hasEmoji(element.Text) {
+		return rows
+	}
+	return trimBlank(rows)
+}
+
+func renderTextImageStyledSpans(element Element, width int, spans []styledTextSpan) []string {
+	values, _ := url.ParseQuery(element.Query)
+	scale := 1.0
+	if parsed, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && parsed > 0 {
+		scale = parsed
+	}
+	logicalLines := splitStyledSpanLines(spans)
+	var out []string
+	lineHeight := max(1, len(renderBitmapTextImage("M", scale)))
+	for _, line := range logicalLines {
+		rows := renderMarkdownBitmapTextImageSpans(element, line, scale)
+		if len(rows) == 0 && len(logicalLines) > 1 {
+			rows = make([]string, lineHeight)
+		}
+		for _, row := range rows {
+			out = append(out, cropANSIVisible(row, width))
+		}
+	}
+	return out
+}
+
+func renderTextImageBulletElement(element Element, width int, scale float64) []string {
+	marker := element
+	marker.Kind = "text"
+	marker.Text = "·"
+	markerRows := renderTextImageElement(marker, width)
+	markerWidth := max(1, maxLineDisplayWidth(markerRows))
+	gap := max(1, int(math.Ceil(scale)))
+	prefixWidth := min(max(1, width-1), markerWidth+gap)
+	contentWidth := max(1, width-prefixWidth)
+
+	var out []string
+	renderLine := func(text string, showMarker bool) {
+		normalWidth := max(1, int(math.Ceil(4*scale)))
+		boldWidth := max(normalWidth, int(math.Ceil(5*scale)))
+		chunks := wrapStyledSpans(parseMarkdownStyledSpans(text), contentWidth, normalWidth, boldWidth)
+		for chunkIndex, chunk := range chunks {
+			textElement := element
+			textElement.Kind = "text"
+			textRows := renderTextImageStyledSpans(textElement, contentWidth, chunk)
+			rowCount, textOffset := len(textRows), 0
+			if showMarker && chunkIndex == 0 {
+				rowCount = max(rowCount, len(markerRows))
+				textOffset = max(0, (rowCount-len(textRows))/2)
+			}
+			for rowIndex := 0; rowIndex < rowCount; rowIndex++ {
+				prefix := strings.Repeat(" ", prefixWidth)
+				if showMarker && chunkIndex == 0 && rowIndex < len(markerRows) {
+					markerRow := markerRows[rowIndex]
+					prefix = markerRow + strings.Repeat(" ", max(0, prefixWidth-displayWidth(stripANSI(markerRow))))
+				}
+				row := ""
+				if rowIndex >= textOffset && rowIndex-textOffset < len(textRows) {
+					row = textRows[rowIndex-textOffset]
+				}
+				out = append(out, cropANSIVisible(prefix+row, width))
+			}
+		}
+	}
+	for _, item := range splitBulletListItems(element.Text, true) {
+		renderLine(item.Text, true)
+		for _, continuation := range item.Continuations {
+			renderLine(continuation, false)
+		}
+	}
+	return trimBlank(out)
+}
+
+func renderMarkdownBitmapTextImage(element Element, factor float64) []string {
+	return renderMarkdownBitmapTextImageSpans(element, parseMarkdownStyledSpans(element.Text), factor)
+}
+
+func renderMarkdownBitmapTextImageSpans(element Element, spans []styledTextSpan, factor float64) []string {
+	chunks := make([][]string, 0, len(spans))
+	maxRows := 0
+	for _, span := range spans {
+		font, glyphWidth := c64FullFont, 8
+		if span.Bold {
+			font, glyphWidth = c64BoldFont, 10
+		}
+		height := bitmapTextRowHeight(factor)
+		rows := renderTextWithEmoji(span.Text, height, func(text string) []string {
+			mask := scaledTextMaskWithFont(text, factor, font, glyphWidth)
+			if hasTextImageStyle(element.Query) {
+				return renderStyledBitmapTextMask(element, mask)
+			}
+			return maskToQuadrantsPadded(mask)
+		})
+		if span.Code {
+			rows = decorateInlineCodeRows(rows)
+		}
+		if span.Highlight {
+			for index := range rows {
+				rows[index] = highlightVisibleText(rows[index])
+			}
+		}
+		if span.Color != "" {
+			rows = colourStyledRows(rows, span.Color)
+		}
+		chunks = append(chunks, rows)
+		maxRows = max(maxRows, len(rows))
+	}
+	rows := make([]string, maxRows)
+	for _, chunk := range chunks {
+		chunkWidth := maxLineDisplayWidth(chunk)
+		for row := 0; row < maxRows; row++ {
+			if row < len(chunk) {
+				rows[row] += chunk[row] + strings.Repeat(" ", max(0, chunkWidth-displayWidth(stripANSI(chunk[row]))))
+			} else {
+				rows[row] += strings.Repeat(" ", chunkWidth)
+			}
+		}
+	}
+	if hasEmoji(element.Text) {
+		return rows
 	}
 	return trimBlank(rows)
 }
@@ -13887,11 +19113,14 @@ func hasTextImageStyle(query string) bool {
 }
 
 func renderStyledBitmapTextImage(element Element, factor float64) []string {
-	mask := scaledC64TextMask(element.Text, factor)
-	if len(mask) == 0 || len(mask[0]) == 0 {
-		return nil
-	}
-	return renderStyledBitmapTextMask(element, mask)
+	height := bitmapTextRowHeight(factor)
+	return renderTextWithEmoji(element.Text, height, func(text string) []string {
+		mask := scaledC64TextMask(text, factor)
+		if len(mask) == 0 || len(mask[0]) == 0 {
+			return nil
+		}
+		return renderStyledBitmapTextMask(element, mask)
+	})
 }
 
 func renderStyledBitmapTextMask(element Element, mask [][]bool) []string {
@@ -13934,15 +19163,27 @@ func doubleMaskRows(mask [][]bool) [][]bool {
 }
 
 func renderBitmapTextImage(text string, factor float64) []string {
-	mask := scaledC64TextMask(text, factor)
-	if len(mask) == 0 {
-		return nil
-	}
-	return maskToQuadrants(mask)
+	height := bitmapTextRowHeight(factor)
+	return renderTextWithEmoji(text, height, func(chunk string) []string {
+		mask := scaledC64TextMask(chunk, factor)
+		if len(mask) == 0 {
+			return nil
+		}
+		return maskToQuadrants(mask)
+	})
+}
+
+func bitmapTextRowHeight(factor float64) int {
+	pixelHeight := max(1, int(math.Round(8*factor)))
+	return max(1, (pixelHeight+1)/2)
 }
 
 func scaledC64TextMask(text string, factor float64) [][]bool {
-	mask := c64TextMask(text)
+	return scaledTextMaskWithFont(text, factor, c64FullFont, 8)
+}
+
+func scaledTextMaskWithFont(text string, factor float64, font map[rune][]string, glyphWidth int) [][]bool {
+	mask := textMaskWithFont(text, font, glyphWidth)
 	if len(mask) == 0 || len(mask[0]) == 0 || factor <= 0 {
 		return nil
 	}
@@ -14024,15 +19265,18 @@ func rotateMaskCounterClockwise(mask [][]bool) [][]bool {
 }
 
 func c64TextMask(text string) [][]bool {
-	const glyphW = 8
+	return textMaskWithFont(text, c64FullFont, 8)
+}
+
+func textMaskWithFont(text string, font map[rune][]string, glyphW int) [][]bool {
 	rows := make([][]bool, 8)
 	for i := range rows {
 		rows[i] = make([]bool, 0, len([]rune(text))*glyphW)
 	}
 	for _, r := range text {
-		glyph := c64FullFont[r]
+		glyph := font[r]
 		if glyph == nil {
-			glyph = c64FullFont['?']
+			glyph = font['?']
 		}
 		for y := 0; y < 8; y++ {
 			line := []rune(padRunes(glyph[y], glyphW))
@@ -14197,12 +19441,40 @@ const diskImageAnimationVersion = 3
 var asciiImageCache = map[string]*asciiImageAnimation{}
 var fastASCIIImageCache = map[string][]string{}
 var decodedStillImageCache = map[string]image.Image{}
+var decodedStillImageCacheMu sync.RWMutex
+var embeddedAnimatedAssets = struct {
+	sync.RWMutex
+	assets map[string]DeckAsset
+}{assets: map[string]DeckAsset{}}
 var prewarmingImageCache bool
 var fastImageRender bool
+
+func registerEmbeddedAnimatedAsset(id string, asset DeckAsset) {
+	if id == "" || len(asset.Frames) == 0 {
+		return
+	}
+	embeddedAnimatedAssets.Lock()
+	embeddedAnimatedAssets.assets[id] = asset
+	embeddedAnimatedAssets.Unlock()
+}
+
+func embeddedAnimatedAsset(path string) (DeckAsset, bool) {
+	if !strings.HasPrefix(path, "keynope-asset:") || !strings.HasSuffix(strings.ToLower(path), ".gif") {
+		return DeckAsset{}, false
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, "keynope-asset:"), filepath.Ext(path))
+	embeddedAnimatedAssets.RLock()
+	asset, ok := embeddedAnimatedAssets.assets[id]
+	embeddedAnimatedAssets.RUnlock()
+	return asset, ok
+}
 
 func renderASCIIImage(path, query string, maxWidth, maxHeight int) []string {
 	if maxWidth <= 0 || maxHeight <= 0 {
 		return nil
+	}
+	if values, err := url.ParseQuery(query); err == nil && values.Get("keynope_freeze") == "1" {
+		return renderFastASCIIImage(path, query, maxWidth, maxHeight)
 	}
 	if fastImageRender {
 		return renderFastASCIIImage(path, query, maxWidth, maxHeight)
@@ -14244,7 +19516,8 @@ func imageRenderQuery(query string) string {
 		return query
 	}
 	for _, key := range []string{
-		"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "width", "height", "layer", "outline", "link", "slide",
+		"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "layer", "outline", "link", "slide",
+		"keynope_freeze",
 	} {
 		values.Del(key)
 	}
@@ -14271,13 +19544,36 @@ func renderFastASCIIImage(path, query string, maxWidth, maxHeight int) []string 
 }
 
 func loadDecodedStillImage(path string) image.Image {
+	if asset, ok := embeddedAnimatedAsset(path); ok {
+		if len(asset.Frames) == 0 {
+			return nil
+		}
+		key := "embedded-first|" + path
+		decodedStillImageCacheMu.RLock()
+		cached := decodedStillImageCache[key]
+		decodedStillImageCacheMu.RUnlock()
+		if cached != nil {
+			return cached
+		}
+		img, err := png.Decode(bytes.NewReader(asset.Frames[0].Data))
+		if err != nil {
+			return nil
+		}
+		decodedStillImageCacheMu.Lock()
+		decodedStillImageCache[key] = img
+		decodedStillImageCacheMu.Unlock()
+		return img
+	}
 	info, err := os.Stat(path)
 	stamp := "missing"
 	if err == nil {
 		stamp = fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
 	}
 	key := path + "|" + stamp
-	if img, ok := decodedStillImageCache[key]; ok {
+	decodedStillImageCacheMu.RLock()
+	img, ok := decodedStillImageCache[key]
+	decodedStillImageCacheMu.RUnlock()
+	if ok {
 		return img
 	}
 	f, err := os.Open(path)
@@ -14285,11 +19581,13 @@ func loadDecodedStillImage(path string) image.Image {
 		return nil
 	}
 	defer f.Close()
-	img, _, err := image.Decode(f)
+	img, _, err = image.Decode(f)
 	if err != nil {
 		return nil
 	}
+	decodedStillImageCacheMu.Lock()
 	decodedStillImageCache[key] = img
+	decodedStillImageCacheMu.Unlock()
 	return img
 }
 
@@ -14338,9 +19636,12 @@ func renderUnicodeImage(img image.Image, b image.Rectangle, opts imageASCIIOptio
 
 func loadASCIIImageAnimation(path, query string, maxWidth, maxHeight int) *asciiImageAnimation {
 	opts := parseImageASCIIOptions(query)
-	cachePath := asciiAnimationCachePath(path, query, maxWidth, maxHeight)
-	if cached := loadDiskASCIIAnimation(cachePath); cached != nil {
-		return cached
+	cachePath := ""
+	if _, embedded := embeddedAnimatedAsset(path); !embedded {
+		cachePath = asciiAnimationCachePath(path, query, maxWidth, maxHeight)
+		if cached := loadDiskASCIIAnimation(cachePath); cached != nil {
+			return cached
+		}
 	}
 	frames := decodeImageFrames(path)
 	if len(frames) == 0 {
@@ -14435,7 +19736,16 @@ func asciiAnimationCachePath(path, query string, maxWidth, maxHeight int) string
 	}
 	sum := sha256.Sum256([]byte(fmt.Sprintf("v3|%s|%s|%s|%dx%d", path, stamp, query, maxWidth, maxHeight)))
 	name := hex.EncodeToString(sum[:]) + ".json"
-	return filepath.Join(".keynope", "cache", name)
+	return filepath.Join(imageCacheDirectory(), name)
+}
+
+func imageCacheDirectory() string {
+	if os.Getenv("APP_SANDBOX_CONTAINER_ID") != "" {
+		if root, err := os.UserCacheDir(); err == nil && root != "" {
+			return filepath.Join(root, "Keynope", "images")
+		}
+	}
+	return filepath.Join(".keynope", "cache")
 }
 
 func cacheSourcePath(path string) string {
@@ -14455,7 +19765,7 @@ func cleanUnusedImageCache(slides []Slide) {
 			}
 		}
 	}
-	entries, err := os.ReadDir(filepath.Join(".keynope", "cache"))
+	entries, err := os.ReadDir(imageCacheDirectory())
 	if err != nil {
 		return
 	}
@@ -14463,7 +19773,7 @@ func cleanUnusedImageCache(slides []Slide) {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
-		path := filepath.Join(".keynope", "cache", entry.Name())
+		path := filepath.Join(imageCacheDirectory(), entry.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
@@ -14527,6 +19837,21 @@ type decodedImageFrame struct {
 }
 
 func decodeImageFrames(path string) []decodedImageFrame {
+	if asset, ok := embeddedAnimatedAsset(path); ok {
+		frames := make([]decodedImageFrame, 0, len(asset.Frames))
+		for _, stored := range asset.Frames {
+			decoded, err := png.Decode(bytes.NewReader(stored.Data))
+			if err != nil {
+				return nil
+			}
+			delay := time.Duration(stored.DelayMS) * time.Millisecond
+			if delay <= 0 {
+				delay = 100 * time.Millisecond
+			}
+			frames = append(frames, decodedImageFrame{image: decoded, delay: delay})
+		}
+		return frames
+	}
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".gif" {
 		return decodeGIFFrames(path)
@@ -14556,6 +19881,13 @@ func decodeGIFFrames(path string) []decodedImageFrame {
 	defer f.Close()
 	g, err := gif.DecodeAll(f)
 	if err != nil || len(g.Image) == 0 {
+		return nil
+	}
+	return decodeGIFAnimation(g)
+}
+
+func decodeGIFAnimation(g *gif.GIF) []decodedImageFrame {
+	if g == nil || len(g.Image) == 0 {
 		return nil
 	}
 	bounds := image.Rect(0, 0, g.Config.Width, g.Config.Height)
@@ -14739,7 +20071,7 @@ func parseImageASCIIOptions(query string) imageASCIIOptions {
 		return opts
 	}
 	switch strings.ToLower(values.Get("glyph")) {
-	case "braille", "half", "vertical", "shade", "ascii", "dense":
+	case "braille", "ascii", "dense":
 		opts.glyph = strings.ToLower(values.Get("glyph"))
 	case "blocks", "block", "":
 		opts.glyph = "blocks"
@@ -14856,37 +20188,6 @@ func unicodeImageCellRune(block [8]rgba8, decisions [8]bool, opts imageASCIIOpti
 			}
 		}
 		return rune(0x2800 + mask)
-	case "half":
-		top := decisions[0] || decisions[1] || decisions[2] || decisions[3]
-		bottom := decisions[4] || decisions[5] || decisions[6] || decisions[7]
-		switch {
-		case top && bottom:
-			return '█'
-		case top:
-			return '▀'
-		case bottom:
-			return '▄'
-		default:
-			return ' '
-		}
-	case "vertical":
-		left := decisions[0] || decisions[2] || decisions[4] || decisions[6]
-		right := decisions[1] || decisions[3] || decisions[5] || decisions[7]
-		switch {
-		case left && right:
-			return '█'
-		case left:
-			return '▌'
-		case right:
-			return '▐'
-		default:
-			return ' '
-		}
-	case "shade":
-		if opts.binaryTone {
-			return binaryToneGlyph(decisions, []rune(" ░▒▓█"))
-		}
-		return toneGlyph(block, decisions, []rune(" ░▒▓█"))
 	case "ascii":
 		if opts.binaryTone {
 			return binaryToneGlyph(decisions, []rune(" .:-=+*#%@"))
@@ -15042,24 +20343,29 @@ func analyzeImagePixels(pixels []rgba8) imageRenderStats {
 }
 
 func averageImageBlockColour(block [8]rgba8, decisions [8]bool) rgba8 {
-	var r, g, b, n int
+	var r, g, b, weight int
 	for i, p := range block {
 		if decisions[i] {
-			r += int(p.r)
-			g += int(p.g)
-			b += int(p.b)
-			n++
+			alpha := int(p.a)
+			r += int(p.r) * alpha
+			g += int(p.g) * alpha
+			b += int(p.b) * alpha
+			weight += alpha
 		}
 	}
-	if n == 0 {
+	if weight == 0 {
 		for _, p := range block {
-			r += int(p.r)
-			g += int(p.g)
-			b += int(p.b)
+			alpha := int(p.a)
+			r += int(p.r) * alpha
+			g += int(p.g) * alpha
+			b += int(p.b) * alpha
+			weight += alpha
 		}
-		n = len(block)
 	}
-	return rgba8{r: uint8(r / n), g: uint8(g / n), b: uint8(b / n), a: 255}
+	if weight == 0 {
+		return rgba8{}
+	}
+	return rgba8{r: uint8(r / weight), g: uint8(g / weight), b: uint8(b / weight), a: 255}
 }
 
 func adjustImagePixels(pixels []rgba8, opts imageASCIIOptions) {
@@ -15189,9 +20495,9 @@ func resizeLanczosRGBA(img image.Image, box image.Rectangle, targetW, targetH in
 			for i := 0; i < xmax; i++ {
 				p := src[y*srcW+xmin+i]
 				coef := k[i]
-				ssR += int(p.r) * coef
-				ssG += int(p.g) * coef
-				ssB += int(p.b) * coef
+				ssR += int(p.r) * int(p.a) / 255 * coef
+				ssG += int(p.g) * int(p.a) / 255 * coef
+				ssB += int(p.b) * int(p.a) / 255 * coef
 				ssA += int(p.a) * coef
 			}
 			tmp[y*targetW+x] = rgba8{
@@ -15219,12 +20525,16 @@ func resizeLanczosRGBA(img image.Image, box image.Rectangle, targetW, targetH in
 				ssB += int(p.b) * coef
 				ssA += int(p.a) * coef
 			}
-			out[y*targetW+x] = rgba8{
-				r: clipPillow8(ssR),
-				g: clipPillow8(ssG),
-				b: clipPillow8(ssB),
-				a: clipPillow8(ssA),
+			a := clipPillow8(ssA)
+			r, g, b := clipPillow8(ssR), clipPillow8(ssG), clipPillow8(ssB)
+			if a == 0 {
+				r, g, b = 0, 0, 0
+			} else {
+				r = uint8(min(255, int(r)*255/int(a)))
+				g = uint8(min(255, int(g)*255/int(a)))
+				b = uint8(min(255, int(b)*255/int(a)))
 			}
+			out[y*targetW+x] = rgba8{r: r, g: g, b: b, a: a}
 		}
 	}
 	return out
@@ -15499,42 +20809,23 @@ func playEffect(slide Slide, width, height, page int, view ViewState) string {
 	frame := 0
 	overlay := displayLines(slide, width, height, page)
 	hasAnimatedOverlay := slideHasAnimatedImage(slide)
-	matrix := newMatrix(width, height)
-	stars := newStars(width, height)
-	fireworks := newBursts(name, width, height)
-	cleared := false
+	geometry := fittedTerminalContentGeometry(width, height)
+	matrix := newMatrix(geometry.Width, geometry.Height)
+	stars := newStars(geometry.Width, geometry.Height)
+	fireworks := newBursts(name, geometry.Width, geometry.Height)
 	for {
 		if action := pollKey(); action != "" {
 			return action
 		}
 		flushTerminalFrame(func() {
-			var backdropLines []exportLine
-			if name == "matrix" || name == "plasma" {
-				if !cleared {
-					termPrintf("\033[%sm\033[2J\033[H%s", slideBG(slide), slideStyle(slide, false))
-					backgroundFrame := captureTerminalOutput(func() {
-						drawStaticBackground(slide.Background, width, height, slideBG(slide))
-					})
-					termPrint(backgroundFrame)
-					backdropLines = append(backdropLines, ansiFrameToExportLines(backgroundFrame, width, height, ansiCSSColour(slideFG(slide)))...)
-					cleared = true
-				}
-			} else {
-				termPrintf("\033[%sm\033[2J\033[H%s", slideBG(slide), slideStyle(slide, false))
-				backgroundFrame := captureTerminalOutput(func() {
-					drawStaticBackground(slide.Background, width, height, slideBG(slide))
-				})
-				termPrint(backgroundFrame)
-				backdropLines = append(backdropLines, ansiFrameToExportLines(backgroundFrame, width, height, ansiCSSColour(slideFG(slide)))...)
-			}
-			effectFrame := captureTerminalOutput(func() {
-				drawEffectFrame(name, width, height, frame, matrix, stars, fireworks, slideBG(slide))
+			clearPhysicalTerminalViewport()
+			canvasFrame, _ := drawTerminalSlideCanvas(slide, width, height, func(canvas terminalContentGeometry) {
+				drawEffectFrame(name, canvas.Width, canvas.Height, frame, matrix, stars, fireworks, slideBG(slide))
 			})
-			termPrint(effectFrame)
 			if hasAnimatedOverlay {
 				overlay = displayLines(slide, width, height, page)
 			}
-			backdropLines = append(backdropLines, ansiFrameToExportLines(effectFrame, width, height, ansiCSSColour(slideFG(slide)))...)
+			backdropLines := ansiFrameToExportLines(canvasFrame, width, height, ansiCSSColour(slideFG(slide)))
 			drawTransparentShapeBackdrop(overlay, backdropLines, width, height, slide)
 			drawOverlayLines(overlay, width, height, slide)
 			drawLinkUnderlines(overlay, width, height, slide)
@@ -16408,7 +21699,7 @@ func readKeyEvent() KeyEvent {
 		return event
 	}
 	var buf [64]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -16562,7 +21853,7 @@ func readEditKeyEventMode(textMode bool) KeyEvent {
 		return event
 	}
 	var buf [32]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -16758,7 +22049,7 @@ func printableKeyEvent(b []byte) KeyEvent {
 
 func readSlideNavigatorKeyEvent() KeyEvent {
 	var buf [64]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -16786,7 +22077,7 @@ func readSlideNavigatorKeyEvent() KeyEvent {
 
 func readSpeakerNotesViewKeyEvent() KeyEvent {
 	var buf [64]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -16862,7 +22153,7 @@ func readSpeakerNotesViewKeyEvent() KeyEvent {
 
 func readSpeakerNotesKeyEvent() KeyEvent {
 	var buf [64]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -16911,7 +22202,7 @@ func readSpeakerNotesKeyEvent() KeyEvent {
 
 func readColorPickerKeyEvent() KeyEvent {
 	var buf [32]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -16949,7 +22240,7 @@ func readColorPickerKeyEvent() KeyEvent {
 
 func readLinkInputKeyEvent() KeyEvent {
 	var buf [256]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -16981,7 +22272,7 @@ func readLinkInputKeyEvent() KeyEvent {
 
 func readSearchKeyEvent() KeyEvent {
 	var buf [32]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -17022,7 +22313,7 @@ func readSearchKeyEvent() KeyEvent {
 
 func readJumpKeyEvent() KeyEvent {
 	var buf [32]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -17063,7 +22354,7 @@ func readJumpKeyEvent() KeyEvent {
 
 func readImagePlacementKeyEvent() KeyEvent {
 	var buf [32]byte
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := inputRead(buf[:])
 	if n == 0 {
 		return KeyEvent{}
 	}
@@ -17138,7 +22429,7 @@ func consumeBracketedPaste(initial []byte) bool {
 	var buf [512]byte
 	deadline := time.Now().Add(750 * time.Millisecond)
 	for !bytes.Contains(data, bracketedPasteEnd) && time.Now().Before(deadline) {
-		n, _ := os.Stdin.Read(buf[:])
+		n, _ := inputRead(buf[:])
 		if n == 0 {
 			time.Sleep(5 * time.Millisecond)
 			continue
@@ -17307,18 +22598,18 @@ func wrapWords(text string, width int) []string {
 	var lines []string
 	cur := ""
 	for _, word := range words {
-		if len([]rune(word)) > width {
+		if textSpacedVisualUnitWidth(word) > width {
 			if cur != "" {
 				lines = append(lines, cur)
 				cur = ""
 			}
-			rs := []rune(word)
-			for len(rs) > width {
-				lines = append(lines, string(rs[:width]))
-				rs = rs[width:]
+			chunks := splitTextVisualUnits(word, width)
+			for len(chunks) > 1 {
+				lines = append(lines, chunks[0])
+				chunks = chunks[1:]
 			}
-			if len(rs) > 0 {
-				cur = string(rs)
+			if len(chunks) > 0 {
+				cur = chunks[0]
 			}
 			continue
 		}
@@ -17326,7 +22617,7 @@ func wrapWords(text string, width int) []string {
 		if cur != "" {
 			candidate = cur + " " + word
 		}
-		if len([]rune(candidate)) <= width {
+		if textSpacedVisualUnitWidth(candidate) <= width {
 			cur = candidate
 		} else {
 			lines = append(lines, cur)

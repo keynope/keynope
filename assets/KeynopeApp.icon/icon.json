@@ -1,0 +1,30 @@
+{
+  "color-space-for-untagged-svg-colors": "display-p3",
+  "fill": {
+    "automatic-gradient": "extended-srgb:0.39608,0.32157,0.41176,1.00000"
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "glass": true,
+          "image-name": "KeynopeIconArtwork.png",
+          "name": "Keynope Computer"
+        }
+      ],
+      "lighting": "individual",
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.35
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": false,
+        "value": 0.5
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}

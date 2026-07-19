@@ -136,6 +136,18 @@ func TestSparseQueryOverrideCanRemoveInheritedProperty(t *testing.T) {
 	}
 }
 
+func TestVerticalAlignmentMetadataRoundTrips(t *testing.T) {
+	query := "align=center&valign=middle"
+	line := "<!-- " + placementCommentText(query) + " -->"
+	parsed, ok := textPlacementComment(line)
+	if !ok || parsed != query {
+		t.Fatalf("vertical alignment round-trip = %q ok=%v line=%q", parsed, ok, line)
+	}
+	if !isMasterOverrideQueryKey("valign") {
+		t.Fatal("vertical alignment cannot override a master placement")
+	}
+}
+
 func TestResolveSlideShowsEmptySlotsOnlyForEditing(t *testing.T) {
 	deck := Deck{Masters: defaultMasterDeck(), Slides: []Slide{{LayoutID: "title-subtitle"}}}
 	for _, element := range deck.ResolveSlide(0, false).Elements {

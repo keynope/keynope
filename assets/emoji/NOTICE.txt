@@ -1,0 +1,15 @@
+Keynope Emoji Glyphs
+
+The coloured block glyphs in keynope-emoji-glyphs.bin.gz are modified
+derivatives of Noto Emoji artwork, Copyright 2013 Google LLC.
+
+The source artwork was converted into Keynope's maximum-size 80 by 40
+terminal-cell representation. Each stored cell contains a Unicode quadrant
+mask and an RGB colour. Keynope samples this canonical representation when
+rendering smaller emoji sizes. The original PNG artwork is not distributed.
+
+The derived glyph collection is distributed under the SIL Open Font License,
+Version 1.1. See OFL.txt. Keynope itself is separately licensed.
+
+Regional flag sources and Unicode emoji catalog data have their own notices in
+NOTO-REGION-FLAGS-LICENSE.txt and UNICODE-LICENSE.txt.
