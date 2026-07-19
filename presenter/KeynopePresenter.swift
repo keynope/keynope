@@ -3,7 +3,7 @@ import Cocoa
 import Darwin
 @preconcurrency import ScreenCaptureKit
 import UniformTypeIdentifiers
-@preconcurrency import WebKit
+import WebKit
 
 final class PresenterWindow: NSWindow {
     override var canBecomeKey: Bool { true }
@@ -286,13 +286,15 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         presentImageOpenPanel(in: webView, parameters: parameters, completionHandler: completionHandler)
     }
     #else
-    func webView(
+    nonisolated func webView(
         _ webView: WKWebView,
         runOpenPanelWith parameters: WKOpenPanelParameters,
         initiatedByFrame frame: WKFrameInfo,
         completionHandler: @escaping ([URL]?) -> Void
     ) {
-        presentImageOpenPanel(in: webView, parameters: parameters, completionHandler: completionHandler)
+        MainActor.assumeIsolated {
+            presentImageOpenPanel(in: webView, parameters: parameters, completionHandler: completionHandler)
+        }
     }
     #endif
 
