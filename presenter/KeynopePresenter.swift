@@ -1,8 +1,9 @@
+@preconcurrency import Foundation
 import Cocoa
 import Darwin
 @preconcurrency import ScreenCaptureKit
 import UniformTypeIdentifiers
-import WebKit
+@preconcurrency import WebKit
 
 final class PresenterWindow: NSWindow {
     override var canBecomeKey: Bool { true }
@@ -275,11 +276,30 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    #if compiler(>=6.0)
     func webView(
         _ webView: WKWebView,
         runOpenPanelWith parameters: WKOpenPanelParameters,
         initiatedByFrame frame: WKFrameInfo,
         completionHandler: @escaping @MainActor @Sendable ([URL]?) -> Void
+    ) {
+        presentImageOpenPanel(in: webView, parameters: parameters, completionHandler: completionHandler)
+    }
+    #else
+    func webView(
+        _ webView: WKWebView,
+        runOpenPanelWith parameters: WKOpenPanelParameters,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping ([URL]?) -> Void
+    ) {
+        presentImageOpenPanel(in: webView, parameters: parameters, completionHandler: completionHandler)
+    }
+    #endif
+
+    private func presentImageOpenPanel(
+        in webView: WKWebView,
+        parameters: WKOpenPanelParameters,
+        completionHandler: @escaping ([URL]?) -> Void
     ) {
         let panel = NSOpenPanel()
         panel.title = "Import an Image"
