@@ -14,14 +14,17 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var presenterURL: URL
     private let appMode: Bool
     private let openDeckHandler: ((String) -> URL?)?
+    private let selectedDeckURLHandler: ((URL) throws -> Void)?
     private let newDeckHandler: (() -> URL?)?
     private let activeDeckURLHandler: (() -> URL?)?
     private let recentDeckPathsHandler: (() -> [String])?
+    private let didSaveDeckHandler: ((String) -> Void)?
     private let inputHandler: ((Data) -> Void)?
     private var statusItem: NSStatusItem?
     private var editorWindow: NSWindow?
     private var editorWebView: WKWebView?
     private var aboutWindow: NSWindow?
+    private var licensesWindow: NSWindow?
     private var window: NSWindow?
     private var webView: WKWebView?
     private var compositeView: PresenterCompositeView?
@@ -31,29 +34,40 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var shareRootItem: NSMenuItem?
     private var shareMenu: NSMenu?
     private var recentDecksMenu: NSMenu?
+    private var saveMenuItem: NSMenuItem?
     private var shareableContent: SCShareableContent?
     private var loadingShareSources = false
     private let screenShareController = ScreenShareController()
     private var presentationMode: String = "none"
     private var presentationPaused = false
     private var terminatingAfterEditorClose = false
+    private var documentDirty = true
+    private var savingDocument = false
+    private var closeAfterSave = false
+    private var terminateAfterSave = false
+    private var discardingUnsavedChanges = false
+    private var actionAfterSave: (() -> Void)?
     private let presentationModeKey = "keynope.presenter.mode"
 
     init(
         url: URL,
         appMode: Bool = false,
         openDeckHandler: ((String) -> URL?)? = nil,
+        selectedDeckURLHandler: ((URL) throws -> Void)? = nil,
         newDeckHandler: (() -> URL?)? = nil,
         activeDeckURLHandler: (() -> URL?)? = nil,
         recentDeckPathsHandler: (() -> [String])? = nil,
+        didSaveDeckHandler: ((String) -> Void)? = nil,
         inputHandler: ((Data) -> Void)? = nil
     ) {
         self.presenterURL = url
         self.appMode = appMode
         self.openDeckHandler = openDeckHandler
+        self.selectedDeckURLHandler = selectedDeckURLHandler
         self.newDeckHandler = newDeckHandler
         self.activeDeckURLHandler = activeDeckURLHandler
         self.recentDeckPathsHandler = recentDeckPathsHandler
+        self.didSaveDeckHandler = didSaveDeckHandler
         self.inputHandler = inputHandler
         super.init()
     }
@@ -154,10 +168,17 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         let fileItem = NSMenuItem()
         let fileMenu = NSMenu(title: "File")
-        let newItem = fileMenu.addItem(withTitle: "New Presentation…", action: #selector(newDeck), keyEquivalent: "n")
+        let newItem = fileMenu.addItem(withTitle: "New Presentation", action: #selector(newDeck), keyEquivalent: "n")
         newItem.target = self
         let openItem = fileMenu.addItem(withTitle: "Open…", action: #selector(openDeck), keyEquivalent: "o")
         openItem.target = self
+        let saveItem = fileMenu.addItem(withTitle: "Save", action: #selector(saveDeck), keyEquivalent: "s")
+        saveItem.target = self
+        saveItem.isEnabled = documentDirty
+        saveMenuItem = saveItem
+        let saveAsItem = fileMenu.addItem(withTitle: "Save As…", action: #selector(saveDeckAs), keyEquivalent: "S")
+        saveAsItem.keyEquivalentModifierMask = [.command, .shift]
+        saveAsItem.target = self
         let recentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
         let recentMenu = NSMenu(title: "Open Recent")
         recentMenu.delegate = self
@@ -207,11 +228,12 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     private func updateEditorWindowTitle(deckPath: String? = nil) {
         let path = deckPath ?? activeDeckURLHandler?()?.path
+        let dirtySuffix = documentDirty ? " *" : ""
         guard let path, !path.isEmpty else {
-            editorWindow?.title = versionedAppName
+            editorWindow?.title = "\(versionedAppName) — Untitled\(dirtySuffix)"
             return
         }
-        editorWindow?.title = "\(versionedAppName) — \(URL(fileURLWithPath: path).lastPathComponent)"
+        editorWindow?.title = "\(versionedAppName) — \(URL(fileURLWithPath: path).lastPathComponent)\(dirtySuffix)"
     }
 
     private func showEditorWindow() {
@@ -287,7 +309,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 440),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 478),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -357,6 +379,12 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         authorLinks.distribution = .fillEqually
         authorLinks.spacing = 10
 
+        let licensesButton = NSButton(title: "Licenses", target: self, action: #selector(showLicenses))
+        licensesButton.bezelStyle = .rounded
+        licensesButton.controlSize = .large
+        licensesButton.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        licensesButton.toolTip = "View Keynope and third-party licenses"
+
         let stack = NSStackView(views: [
             iconView,
             nameLabel,
@@ -365,7 +393,8 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             projectLinks,
             separator,
             copyright,
-            authorLinks
+            authorLinks,
+            licensesButton
         ])
         stack.orientation = .vertical
         stack.alignment = .centerX
@@ -373,6 +402,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         stack.setCustomSpacing(16, after: versionBadge)
         stack.setCustomSpacing(10, after: projectLinks)
         stack.setCustomSpacing(12, after: separator)
+        stack.setCustomSpacing(10, after: authorLinks)
         stack.translatesAutoresizingMaskIntoConstraints = false
         background.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -389,6 +419,83 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         aboutWindow = panel
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func showLicenses() {
+        if let licensesWindow {
+            NSApp.activate(ignoringOtherApps: true)
+            licensesWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 590),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Keynope Licenses"
+        panel.isReleasedWhenClosed = false
+        panel.minSize = NSSize(width: 520, height: 360)
+
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 720, height: 590))
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.textColor = .labelColor
+        textView.backgroundColor = .textBackgroundColor
+        textView.textContainerInset = NSSize(width: 18, height: 18)
+        textView.minSize = .zero
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.containerSize = NSSize(width: 720, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = true
+        textView.string = bundledLicenseDocuments()
+
+        let scrollView = NSScrollView(frame: .zero)
+        scrollView.drawsBackground = true
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.documentView = textView
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        let content = NSView()
+        content.addSubview(scrollView)
+        NSLayoutConstraint.activate([
+            scrollView.topAnchor.constraint(equalTo: content.topAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+        ])
+        panel.contentView = content
+        panel.center()
+        licensesWindow = panel
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    private func bundledLicenseDocuments() -> String {
+        let documents = [
+            ("KEYNOPE", "Keynope-LICENSE"),
+            ("KEYNOPE EMOJI GLYPHS NOTICE", "NOTICE"),
+            ("SIL OPEN FONT LICENSE 1.1", "OFL"),
+            ("NOTO REGIONAL FLAGS", "NOTO-REGION-FLAGS-LICENSE"),
+            ("UNICODE DATA FILES", "UNICODE-LICENSE")
+        ]
+        guard let directory = Bundle.main.resourceURL?.appendingPathComponent("EmojiLicenses", isDirectory: true) else {
+            return "License documents are unavailable."
+        }
+        var sections: [String] = []
+        for (title, name) in documents {
+            let url = directory.appendingPathComponent(name).appendingPathExtension("txt")
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            sections.append("===== \(title) =====\n\n\(text.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        return sections.isEmpty ? "License documents are unavailable." : sections.joined(separator: "\n\n") + "\n"
     }
 
     private func aboutLabel(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor) -> NSTextField {
@@ -440,10 +547,17 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.directoryURL = try? presentationsLibraryURL()
-        guard panel.runModal() == .OK, let path = panel.url?.path else {
+        guard panel.runModal() == .OK, let url = panel.url?.standardizedFileURL else {
             return
         }
-        replaceDeck(path: path)
+        do {
+            try selectedDeckURLHandler?(url)
+            replaceDeck(path: url.path)
+        } catch {
+            let alert = NSAlert(error: error)
+            alert.messageText = "Could Not Open Presentation"
+            alert.runModal()
+        }
     }
 
     @objc private func openRecentDeck(_ sender: NSMenuItem) {
@@ -499,13 +613,183 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     @objc private func newDeck() {
+        guard documentDirty else {
+            openNewDeck()
+            return
+        }
+        switch unsavedChangesAlert().runModal() {
+        case .alertFirstButtonReturn:
+            actionAfterSave = { [weak self] in self?.openNewDeck() }
+            saveDocument(forceSaveAs: false)
+        case .alertSecondButtonReturn:
+            openNewDeck()
+        default:
+            break
+        }
+    }
+
+    private func openNewDeck() {
         guard let newURL = newDeckHandler?() else {
             return
         }
         noPresentation()
         presenterURL = newURL
         editorWebView?.load(URLRequest(url: editorURL()))
+        documentDirty = true
+        saveMenuItem?.isEnabled = true
         updateEditorWindowTitle()
+    }
+
+    private struct SaveDocumentResponse: Decodable {
+        let content: String
+        let version: Int
+    }
+
+    private struct ExportDocumentResponse: Decodable {
+        let content: String
+    }
+
+    private func editorEndpoint(_ path: String) -> URL? {
+        var components = URLComponents(url: presenterURL, resolvingAgainstBaseURL: false)
+        components?.path = path
+        return components?.url
+    }
+
+    @objc private func saveDeck() {
+        saveDocument(forceSaveAs: false)
+    }
+
+    @objc private func saveDeckAs() {
+        saveDocument(forceSaveAs: true)
+    }
+
+    private func exportHTML() {
+        let panel = NSSavePanel()
+        panel.title = "Export Keynope Presentation to HTML"
+        panel.prompt = "Export"
+        panel.allowedContentTypes = [UTType.html]
+        panel.canCreateDirectories = true
+        if let deck = activeDeckURLHandler?() {
+            panel.directoryURL = deck.deletingLastPathComponent()
+            panel.nameFieldStringValue = deck.deletingPathExtension().lastPathComponent + ".html"
+        } else {
+            panel.directoryURL = try? presentationsLibraryURL()
+            panel.nameFieldStringValue = "Untitled.html"
+        }
+        guard panel.runModal() == .OK,
+              let destination = panel.url?.standardizedFileURL,
+              let endpoint = editorEndpoint("/api/editor/export-document") else { return }
+        Task {
+            do {
+                let existing = (try? String(contentsOf: destination, encoding: .utf8)) ?? ""
+                var request = URLRequest(url: endpoint)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONSerialization.data(withJSONObject: ["path": destination.path, "existing": existing])
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                    throw NSError(domain: "sh.keynope.app", code: 22, userInfo: [NSLocalizedDescriptionKey: String(data: data, encoding: .utf8) ?? "The presentation could not be exported."])
+                }
+                let document = try JSONDecoder().decode(ExportDocumentResponse.self, from: data)
+                try Data(document.content.utf8).write(to: destination, options: .atomic)
+                await MainActor.run {
+                    self.editorWebView?.evaluateJavaScript("window.keynopeDidExport && window.keynopeDidExport()")
+                }
+            } catch {
+                await MainActor.run {
+                    let alert = NSAlert(error: error)
+                    alert.messageText = "Could Not Export Presentation"
+                    alert.runModal()
+                }
+            }
+        }
+    }
+
+    private func saveDocument(forceSaveAs: Bool) {
+        guard !savingDocument else { return }
+        var destination = forceSaveAs ? nil : activeDeckURLHandler?()
+        if destination == nil {
+            let panel = NSSavePanel()
+            panel.title = "Save Keynope Presentation"
+            panel.prompt = "Save"
+            panel.allowedContentTypes = [UTType(filenameExtension: "md")].compactMap { $0 }
+            panel.canCreateDirectories = true
+            panel.nameFieldStringValue = "Untitled.md"
+            panel.directoryURL = try? presentationsLibraryURL()
+            guard panel.runModal() == .OK else {
+                closeAfterSave = false
+                actionAfterSave = nil
+                if terminateAfterSave {
+                    terminateAfterSave = false
+                    NSApp.reply(toApplicationShouldTerminate: false)
+                }
+                return
+            }
+            destination = panel.url
+        }
+        guard let destination = destination?.standardizedFileURL,
+              let documentURL = editorEndpoint("/api/editor/document"),
+              let actionURL = editorEndpoint("/api/editor/action") else { return }
+        savingDocument = true
+        saveMenuItem?.isEnabled = false
+        Task {
+            do {
+                var request = URLRequest(url: documentURL)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONSerialization.data(withJSONObject: ["path": destination.path])
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                    throw NSError(domain: "sh.keynope.app", code: 20, userInfo: [NSLocalizedDescriptionKey: String(data: data, encoding: .utf8) ?? "The presentation could not be prepared for saving."])
+                }
+                let document = try JSONDecoder().decode(SaveDocumentResponse.self, from: data)
+                try Data(document.content.utf8).write(to: destination, options: .atomic)
+                var confirm = URLRequest(url: actionURL)
+                confirm.httpMethod = "POST"
+                confirm.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                confirm.httpBody = try JSONSerialization.data(withJSONObject: ["action": "confirm-save", "path": destination.path, "value": document.version])
+                let (confirmData, confirmResponse) = try await URLSession.shared.data(for: confirm)
+                guard (confirmResponse as? HTTPURLResponse)?.statusCode == 200 else {
+                    throw NSError(domain: "sh.keynope.app", code: 21, userInfo: [NSLocalizedDescriptionKey: String(data: confirmData, encoding: .utf8) ?? "The saved snapshot changed while it was being written."])
+                }
+                await MainActor.run {
+                    self.savingDocument = false
+                    self.documentDirty = false
+                    self.saveMenuItem?.isEnabled = false
+                    self.didSaveDeckHandler?(destination.path)
+                    self.updateEditorWindowTitle(deckPath: destination.path)
+                    self.editorWebView?.evaluateJavaScript("window.keynopeDidSave && window.keynopeDidSave()")
+                    if let action = self.actionAfterSave {
+                        self.actionAfterSave = nil
+                        action()
+                        return
+                    }
+                    if self.terminateAfterSave {
+                        self.terminateAfterSave = false
+                        NSApp.reply(toApplicationShouldTerminate: true)
+                        return
+                    }
+                    if self.closeAfterSave {
+                        self.closeAfterSave = false
+                        self.editorWindow?.performClose(nil)
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.savingDocument = false
+                    self.closeAfterSave = false
+                    self.actionAfterSave = nil
+                    if self.terminateAfterSave {
+                        self.terminateAfterSave = false
+                        NSApp.reply(toApplicationShouldTerminate: false)
+                    }
+                    self.saveMenuItem?.isEnabled = self.documentDirty
+                    let alert = NSAlert(error: error)
+                    alert.messageText = "Could Not Save Presentation"
+                    alert.runModal()
+                }
+            }
+        }
     }
 
     private func replaceDeck(path: String) {
@@ -514,6 +798,8 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
         noPresentation()
         presenterURL = newURL
+        documentDirty = false
+        saveMenuItem?.isEnabled = false
         editorWebView?.load(URLRequest(url: editorURL()))
         updateEditorWindowTitle(deckPath: path)
         showEditorWindow()
@@ -1000,12 +1286,63 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 resumePresentation()
             } else if action == "show-about" {
                 showAbout()
+            } else if action == "save-presentation" {
+                saveDocument(forceSaveAs: false)
+            } else if action == "export-html" {
+                exportHTML()
+            } else if action == "editor-dirty-state", let dirty = body["dirty"] as? Bool {
+                documentDirty = dirty
+                saveMenuItem?.isEnabled = dirty && !savingDocument
+                updateEditorWindowTitle()
             }
         }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return appMode
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard appMode, documentDirty, !discardingUnsavedChanges else { return .terminateNow }
+        let response = unsavedChangesAlert().runModal()
+        switch response {
+        case .alertFirstButtonReturn:
+            terminateAfterSave = true
+            saveDocument(forceSaveAs: false)
+            return .terminateLater
+        case .alertSecondButtonReturn:
+            discardingUnsavedChanges = true
+            return .terminateNow
+        default:
+            return .terminateCancel
+        }
+    }
+
+    private func unsavedChangesAlert() -> NSAlert {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Do you want to save the changes to this presentation?"
+        alert.informativeText = "Your changes will be lost if you don’t save them."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Don’t Save")
+        alert.addButton(withTitle: "Cancel")
+        return alert
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard appMode, sender === editorWindow, documentDirty else { return true }
+        let alert = unsavedChangesAlert()
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            closeAfterSave = true
+            saveDocument(forceSaveAs: false)
+            return false
+        case .alertSecondButtonReturn:
+            discardingUnsavedChanges = true
+            return true
+        default:
+            return false
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -1060,7 +1397,6 @@ struct KeynopePresenterMain {
     private static var engineInput: Pipe?
     private static var activeDeckPath: String?
     private static var activeSandboxURL: URL?
-    private static let deckDirectoryBookmarkPrefix = "keynope.deck-directory."
     private static let deckFileBookmarkPrefix = "keynope.deck-file."
     private static let recentDecksKey = "keynope.recent-decks"
     private static let maximumRecentDecks = 12
@@ -1093,15 +1429,23 @@ struct KeynopePresenterMain {
             url: url,
             appMode: appMode,
             openDeckHandler: appMode ? { path in startEngine(deckPath: path) } : nil,
+            selectedDeckURLHandler: appMode ? { url in
+                try rememberUserSelectedDeckAccess(url)
+            } : nil,
             newDeckHandler: appMode ? {
-                guard let path = createNewDeck() else { return nil }
-                return startEngine(deckPath: path)
+                guard let path = bundledWelcomeDeckPath() else { return nil }
+                return startEngine(deckPath: path, untitled: true)
             } : nil,
             activeDeckURLHandler: appMode ? {
                 activeDeckPath.map { URL(fileURLWithPath: $0) }
             } : nil,
             recentDeckPathsHandler: appMode ? {
                 recentDecks().map(\.path)
+            } : nil,
+            didSaveDeckHandler: appMode ? { path in
+                activeDeckPath = path
+                recordRecentDeck(path)
+                rememberSavedDeckAccess(path)
             } : nil,
             inputHandler: appMode ? { data in
                 try? engineInput?.fileHandleForWriting.write(contentsOf: data)
@@ -1131,17 +1475,14 @@ struct KeynopePresenterMain {
         if let index = arguments.firstIndex(of: "--app"), index + 1 < arguments.count {
             return startEngine(deckPath: arguments[index + 1])
         }
-        for recent in recentDecks() {
-            if let engineURL = startEngine(deckPath: recent.path) {
-                return engineURL
-            }
-        }
-        do {
-            return startEngine(deckPath: try welcomeDeckPath())
-        } catch {
-            showFileError(title: "Could Not Create Welcome Presentation", error: error)
+        guard let path = bundledWelcomeDeckPath() else {
+            showFileError(title: "Could Not Open Starter Presentation", error: NSError(
+                domain: "sh.keynope.app", code: 5,
+                userInfo: [NSLocalizedDescriptionKey: "The bundled Welcome.md starter is missing."]
+            ))
             return nil
         }
+        return startEngine(deckPath: path, untitled: true)
     }
 
     private static func recentDecks() -> [RecentDeck] {
@@ -1152,6 +1493,7 @@ struct KeynopePresenterMain {
         var seen = Set<String>()
         return records
             .sorted { $0.lastOpened > $1.lastOpened }
+            .filter { !$0.path.hasSuffix("/Keynope Presentations/Welcome/Welcome.md") }
             .filter { seen.insert(URL(fileURLWithPath: $0.path).standardizedFileURL.path).inserted }
             .prefix(maximumRecentDecks)
             .map { $0 }
@@ -1167,63 +1509,11 @@ struct KeynopePresenterMain {
         }
     }
 
-    private static func welcomeDeckPath() throws -> String {
-        let project = try presentationsLibraryURL().appendingPathComponent("Welcome", isDirectory: true)
-        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
-        let destination = project.appendingPathComponent("Welcome.md")
-        if !FileManager.default.fileExists(atPath: destination.path) {
-            guard let source = Bundle.main.url(forResource: "Welcome", withExtension: "md") else {
-                throw NSError(
-                    domain: "sh.keynope.app",
-                    code: 5,
-                    userInfo: [NSLocalizedDescriptionKey: "The bundled welcome presentation is missing."]
-                )
-            }
-            try FileManager.default.copyItem(at: source, to: destination)
-        }
-        return destination.path
+    private static func bundledWelcomeDeckPath() -> String? {
+        Bundle.main.url(forResource: "Welcome", withExtension: "md")?.path
     }
 
-    private static func createNewDeck() -> String? {
-        let alert = NSAlert()
-        alert.messageText = "New Presentation"
-        alert.informativeText = "Create a presentation in your Keynope library."
-        alert.addButton(withTitle: "Create")
-        alert.addButton(withTitle: "Cancel")
-        let nameField = NSTextField(string: "Untitled")
-        nameField.placeholderString = "Presentation name"
-        nameField.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
-        alert.accessoryView = nameField
-        alert.window.initialFirstResponder = nameField
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            return nil
-        }
-        let requestedName = safePresentationName(nameField.stringValue)
-        let starter = "<!-- keynope width=\(defaultDeckColumns) height=\(defaultDeckRows) -->\n\n# Title\n\nText\n"
-        do {
-            let library = try presentationsLibraryURL()
-            let project = library.appendingPathComponent(requestedName, isDirectory: true)
-            if FileManager.default.fileExists(atPath: project.path) {
-                let replace = NSAlert()
-                replace.alertStyle = .warning
-                replace.messageText = "“\(requestedName)” already exists"
-                replace.informativeText = "Replacing it removes the existing presentation and assets in its Keynope project folder."
-                replace.addButton(withTitle: "Replace")
-                replace.addButton(withTitle: "Cancel")
-                guard replace.runModal() == .alertFirstButtonReturn else { return nil }
-                try FileManager.default.removeItem(at: project)
-            }
-            try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
-            let url = project.appendingPathComponent(requestedName).appendingPathExtension("md")
-            try Data(starter.utf8).write(to: url, options: .atomic)
-            return url.path
-        } catch {
-            showFileError(title: "Could Not Create Presentation", error: error)
-            return nil
-        }
-    }
-
-    private static func startEngine(deckPath: String) -> URL? {
+    private static func startEngine(deckPath: String, untitled: Bool = false) -> URL? {
         let authorization: DeckAuthorization
         do {
             authorization = try authorizeDeck(for: deckPath)
@@ -1240,6 +1530,7 @@ struct KeynopePresenterMain {
         let process = Process()
         process.executableURL = engineURL
         process.arguments = ["--app", authorization.path]
+            + (untitled ? ["--untitled"] : [])
         var environment = ProcessInfo.processInfo.environment
         environment["COLUMNS"] = String(engineViewportColumns)
         environment["LINES"] = String(engineViewportRows)
@@ -1273,8 +1564,8 @@ struct KeynopePresenterMain {
                 if line.hasPrefix("KEYNOPE_URL="), let url = URL(string: String(line.dropFirst(12))) {
                     engineProcess = process
                     engineInput = input
-                    activeDeckPath = authorization.path
-                    recordRecentDeck(authorization.path)
+                    activeDeckPath = untitled ? nil : authorization.path
+                    if !untitled { recordRecentDeck(authorization.path) }
                     if let previousProcess, previousProcess.isRunning {
                         try? previousInput?.fileHandleForWriting.close()
                         previousProcess.terminate()
@@ -1303,34 +1594,36 @@ struct KeynopePresenterMain {
             return DeckAuthorization(path: deckPath, helperBookmark: nil)
         }
         let deckURL = URL(fileURLWithPath: deckPath).standardizedFileURL
+        if contains(deckURL, in: Bundle.main.bundleURL.standardizedFileURL) {
+            return DeckAuthorization(path: deckURL.path, helperBookmark: nil)
+        }
         if try contains(deckURL, in: presentationsLibraryURL()) || contains(deckURL, in: downloadsDirectoryURL()) {
             stopAccessingDeckDirectory()
             return DeckAuthorization(path: deckURL.path, helperBookmark: nil)
         }
-        let directory = deckURL.deletingLastPathComponent().standardizedFileURL
-        let directoryBookmarkKey = deckDirectoryBookmarkPrefix + bookmarkKeySuffix(for: directory)
-        if try restoredBookmark(for: directory, key: directoryBookmarkKey) != nil {
-            return DeckAuthorization(path: deckURL.path, helperBookmark: try bookmarkForEngineHelper())
-        }
         _ = try authorizeDeckFile(deckURL)
-        let assets = try localAssetURLs(in: deckURL)
-        if !assets.isEmpty {
-            switch externalAssetsChoice(for: deckURL) {
-            case .alertFirstButtonReturn:
-                let selected = try selectDeckDirectory(deckURL)
-                stopAccessingDeckDirectory()
-                activeSandboxURL = selected
-                let imported = try importPresentation(deckURL, assets: assets)
-                stopAccessingDeckDirectory()
-                return DeckAuthorization(path: imported.path, helperBookmark: nil)
-            case .alertSecondButtonReturn:
-                _ = try authorizeDeckDirectory(deckURL)
-                return DeckAuthorization(path: deckURL.path, helperBookmark: try bookmarkForEngineHelper())
-            default:
-                throw CocoaError(.userCancelled)
-            }
-        }
         return DeckAuthorization(path: deckURL.path, helperBookmark: try bookmarkForEngineHelper())
+    }
+
+    private static func rememberSavedDeckAccess(_ path: String) {
+        guard isSandboxed else { return }
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        guard let bookmark = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) else { return }
+        UserDefaults.standard.set(bookmark, forKey: deckFileBookmarkPrefix + bookmarkKeySuffix(for: url))
+    }
+
+    private static func rememberUserSelectedDeckAccess(_ url: URL) throws {
+        guard isSandboxed else { return }
+        let selected = url.standardizedFileURL
+        let bookmark = try selected.bookmarkData(
+            options: .withSecurityScope,
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+        UserDefaults.standard.set(bookmark, forKey: deckFileBookmarkPrefix + bookmarkKeySuffix(for: selected))
+        stopAccessingDeckDirectory()
+        _ = selected.startAccessingSecurityScopedResource()
+        activeSandboxURL = selected
     }
 
     // Persistent security-scoped bookmarks are tied to this app's signing identity.
@@ -1391,47 +1684,6 @@ struct KeynopePresenterMain {
         return bookmark
     }
 
-    private static func authorizeDeckDirectory(_ deckURL: URL) throws -> Data {
-        let directory = deckURL.deletingLastPathComponent().standardizedFileURL
-        if let activeSandboxURL, activeSandboxURL.standardizedFileURL == directory {
-            return try activeSandboxURL.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
-        }
-        let bookmarkKey = deckDirectoryBookmarkPrefix + Data(directory.path.utf8).base64EncodedString()
-        if let bookmark = try restoredBookmark(for: directory, key: bookmarkKey) {
-            return bookmark
-        }
-
-        let selected = try selectDeckDirectory(deckURL)
-        let saved = try selected.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
-        UserDefaults.standard.set(saved, forKey: bookmarkKey)
-        stopAccessingDeckDirectory()
-        activeSandboxURL = selected
-        return saved
-    }
-
-    private static func selectDeckDirectory(_ deckURL: URL) throws -> URL {
-        let directory = deckURL.deletingLastPathComponent().standardizedFileURL
-        let panel = NSOpenPanel()
-        panel.title = "Allow Presentation Folder Access"
-        panel.message = "Select “\(directory.lastPathComponent)” to let Keynope use this presentation and its assets."
-        panel.prompt = "Allow Access"
-        panel.directoryURL = directory.deletingLastPathComponent()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let selected = panel.url?.standardizedFileURL else {
-            throw CocoaError(.userCancelled)
-        }
-        guard selected == directory else {
-            throw NSError(
-                domain: "sh.keynope.app",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Select the folder containing \(deckURL.lastPathComponent)."]
-            )
-        }
-        return selected
-    }
-
     private static func restoredBookmark(for expectedURL: URL, key: String) throws -> Data? {
         guard let saved = UserDefaults.standard.data(forKey: key) else { return nil }
         do {
@@ -1484,104 +1736,6 @@ struct KeynopePresenterMain {
 
     private static func bookmarkKeySuffix(for url: URL) -> String {
         Data(url.standardizedFileURL.path.utf8).base64EncodedString()
-    }
-
-    private static func safePresentationName(_ input: String) -> String {
-        let forbidden = CharacterSet(charactersIn: "/:")
-        let cleaned = input.components(separatedBy: forbidden).joined(separator: "-").trimmingCharacters(in: .whitespacesAndNewlines)
-        return cleaned.isEmpty ? "Untitled" : cleaned
-    }
-
-    private static func uniqueProjectURL(named name: String, in library: URL) -> URL {
-        var candidate = library.appendingPathComponent(name, isDirectory: true)
-        var suffix = 2
-        while FileManager.default.fileExists(atPath: candidate.path) {
-            candidate = library.appendingPathComponent("\(name) \(suffix)", isDirectory: true)
-            suffix += 1
-        }
-        return candidate
-    }
-
-    private static func externalAssetsChoice(for deckURL: URL) -> NSApplication.ModalResponse {
-        let alert = NSAlert()
-        alert.messageText = "This presentation uses local assets"
-        alert.informativeText = "Import the presentation into Keynope, or allow access to “\(deckURL.deletingLastPathComponent().lastPathComponent)”."
-        alert.addButton(withTitle: "Import into Keynope")
-        alert.addButton(withTitle: "Allow Folder")
-        alert.addButton(withTitle: "Cancel")
-        return alert.runModal()
-    }
-
-    private static func localAssetURLs(in deckURL: URL) throws -> [URL] {
-        let data = try Data(contentsOf: deckURL)
-        guard let text = String(data: data, encoding: .utf8) else { return [] }
-        let base = deckURL.deletingLastPathComponent()
-        var paths: [String] = []
-        let imagePattern = try NSRegularExpression(pattern: #"!\[[^\]]*\]\(([^)]+)\)"#)
-        let range = NSRange(text.startIndex..., in: text)
-        for match in imagePattern.matches(in: text, range: range) {
-            guard let sourceRange = Range(match.range(at: 1), in: text) else { continue }
-            paths.append(String(text[sourceRange]).components(separatedBy: "?")[0])
-        }
-        let masterPattern = try NSRegularExpression(pattern: #"keynope-masters\s+version=[0-9]+\s+base64:([A-Za-z0-9+/=]+)"#)
-        for match in masterPattern.matches(in: text, range: range) {
-            guard let payloadRange = Range(match.range(at: 1), in: text),
-                  let payload = Data(base64Encoded: String(text[payloadRange])),
-                  let object = try? JSONSerialization.jsonObject(with: payload) else { continue }
-            collectAssetPaths(from: object, into: &paths)
-        }
-        var seen = Set<String>()
-        return paths.compactMap { raw in
-            guard !raw.isEmpty, !raw.contains("://") else { return nil }
-            let expanded = NSString(string: raw).expandingTildeInPath
-            let url = expanded.hasPrefix("/")
-                ? URL(fileURLWithPath: expanded)
-                : base.appendingPathComponent(expanded)
-            let normalized = url.standardizedFileURL
-            guard FileManager.default.fileExists(atPath: normalized.path) else { return nil }
-            guard seen.insert(normalized.path).inserted else { return nil }
-            return normalized
-        }
-    }
-
-    private static func collectAssetPaths(from object: Any, into paths: inout [String]) {
-        if let dictionary = object as? [String: Any] {
-            if let path = dictionary["path"] as? String { paths.append(path) }
-            for value in dictionary.values { collectAssetPaths(from: value, into: &paths) }
-        } else if let array = object as? [Any] {
-            for value in array { collectAssetPaths(from: value, into: &paths) }
-        }
-    }
-
-    private static func importPresentation(_ deckURL: URL, assets: [URL]) throws -> URL {
-        let sourceDirectory = deckURL.deletingLastPathComponent().standardizedFileURL
-        let library = try presentationsLibraryURL()
-        let name = safePresentationName(deckURL.deletingPathExtension().lastPathComponent)
-        let project = uniqueProjectURL(named: name, in: library)
-        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
-        do {
-            let importedDeck = project.appendingPathComponent(deckURL.lastPathComponent)
-            try FileManager.default.copyItem(at: deckURL, to: importedDeck)
-            for asset in assets {
-                guard contains(asset, in: sourceDirectory) else {
-                    throw NSError(
-                        domain: "sh.keynope.app",
-                        code: 2,
-                        userInfo: [NSLocalizedDescriptionKey: "The asset \(asset.lastPathComponent) is outside the presentation folder and cannot be imported automatically."]
-                    )
-                }
-                let relative = String(asset.path.dropFirst(sourceDirectory.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                let destination = project.appendingPathComponent(relative)
-                try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-                if !FileManager.default.fileExists(atPath: destination.path) {
-                    try FileManager.default.copyItem(at: asset, to: destination)
-                }
-            }
-            return importedDeck
-        } catch {
-            try? FileManager.default.removeItem(at: project)
-            throw error
-        }
     }
 
     private static func stopAccessingDeckDirectory() {

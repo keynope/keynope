@@ -112,6 +112,13 @@ func TestParseAppMode(t *testing.T) {
 	if _, ok := parseArgs([]string{"--app", "--classic", "deck.md"}); ok {
 		t.Fatal("app and classic modes must be mutually exclusive")
 	}
+	untitled, ok := parseArgs([]string{"--app", "deck.md", "--untitled"})
+	if !ok || !untitled.AppMode || !untitled.Untitled {
+		t.Fatalf("untitled args = %#v, ok = %v", untitled, ok)
+	}
+	if _, ok := parseArgs([]string{"deck.md", "--untitled"}); ok {
+		t.Fatal("untitled mode requires the windowed app")
+	}
 }
 
 func TestParseLicensesMode(t *testing.T) {
@@ -191,8 +198,13 @@ func TestExternalImageSourceRemainsExternal(t *testing.T) {
 
 func TestUnavailableImagesUseStandardTextPlaceholder(t *testing.T) {
 	want := renderBodyWrapped("[IMG]", 80, "", "")
+	existing := filepath.Join(t.TempDir(), "existing.png")
+	if err := os.WriteFile(existing, []byte("available but referenced"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	for _, element := range []Element{
 		{Kind: "image", Path: filepath.Join(t.TempDir(), "missing.png")},
+		{Kind: "image", Path: existing},
 		{Kind: "image", Path: "https://example.com/image.png"},
 	} {
 		if got := renderImageElementRows(element, 80, 25); !reflect.DeepEqual(got, want) {

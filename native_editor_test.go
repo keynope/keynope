@@ -3,6 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	stdimage "image"
+	"image/color"
+	"image/gif"
+	"image/png"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -75,7 +81,16 @@ func TestNativeEditorUploadUsesVisibleImagePlacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := part.Write([]byte("image bytes")); err != nil {
+	var imageData bytes.Buffer
+	pixels := stdimage.NewNRGBA(stdimage.Rect(0, 0, 4, 2))
+	for index := range pixels.Pix {
+		pixels.Pix[index] = 0xff
+	}
+	pixels.Set(0, 0, color.NRGBA{R: 255, A: 255})
+	if err := png.Encode(&imageData, pixels); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(imageData.Bytes()); err != nil {
 		t.Fatal(err)
 	}
 	if err := writer.Close(); err != nil {
@@ -94,8 +109,11 @@ func TestNativeEditorUploadUsesVisibleImagePlacement(t *testing.T) {
 		t.Fatalf("uploaded image placement in element list = %#v", state)
 	}
 	image := state.Slides[0].Elements[1]
-	if image.Kind != "image" || filepath.Base(image.Path) != "photo.png" {
+	if image.Kind != "image" || image.AssetID == "" || filepath.Ext(image.Path) != ".png" {
 		t.Fatalf("uploaded element = %#v", image)
+	}
+	if len(session.deck.Assets) != 1 {
+		t.Fatalf("embedded assets = %#v", session.deck.Assets)
 	}
 	if image.Query != "left=1&scale=1.0&top=1" {
 		t.Fatalf("uploaded image query = %q", image.Query)
@@ -108,6 +126,122 @@ func TestNativeEditorUploadUsesVisibleImagePlacement(t *testing.T) {
 	}
 	if got := session.state().Slides[0].Elements; len(got) != 2 {
 		t.Fatalf("single undo did not remove upload: %#v", got)
+	}
+}
+
+func TestEmbeddedImageAssetRoundTripsThroughMarkdown(t *testing.T) {
+	t.Setenv("APP_SANDBOX_CONTAINER_ID", "tests")
+	t.Setenv("HOME", t.TempDir())
+	var encoded bytes.Buffer
+	pixels := stdimage.NewNRGBA(stdimage.Rect(0, 0, 8, 4))
+	for y := 0; y < 4; y++ {
+		for x := 0; x < 8; x++ {
+			pixels.Set(x, y, color.NRGBA{R: uint8(x * 20), G: uint8(y * 40), B: 120, A: 255})
+		}
+	}
+	if err := png.Encode(&encoded, pixels); err != nil {
+		t.Fatal(err)
+	}
+	id, asset, path, err := embeddedImageAsset(encoded.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	deck := Deck{Slides: []Slide{{Elements: []Element{{Kind: "image", Path: path, AssetID: id, Query: "top=1&left=1"}}}}, Assets: map[string]DeckAsset{id: asset}}
+	destination := filepath.Join(t.TempDir(), "embedded.md")
+	if err := saveDeck(destination, deck); err != nil {
+		t.Fatal(err)
+	}
+	markdown, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(markdown, []byte("keynope-assets version=1")) || !bytes.Contains(markdown, []byte("keynope-asset:"+id)) {
+		t.Fatalf("saved markdown does not reference embedded asset: %s", markdown)
+	}
+	loaded, err := parseDeck(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Assets) != 1 || loaded.Slides[0].Elements[0].AssetID != id {
+		t.Fatalf("loaded embedded deck = %#v", loaded)
+	}
+	if _, err := os.Stat(loaded.Slides[0].Elements[0].Path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEmbeddedAnimatedGIFStoresResizedFramesAndTimingInDeck(t *testing.T) {
+	palette := color.Palette{color.Transparent, color.RGBA{R: 255, A: 255}, color.RGBA{G: 255, A: 255}}
+	first := stdimage.NewPaletted(stdimage.Rect(0, 0, 768, 384), palette)
+	second := stdimage.NewPaletted(first.Rect, palette)
+	for y := 0; y < first.Rect.Dy(); y++ {
+		for x := 0; x < first.Rect.Dx(); x++ {
+			first.SetColorIndex(x, y, 1)
+			second.SetColorIndex(x, y, 2)
+		}
+	}
+	var encoded bytes.Buffer
+	if err := gif.EncodeAll(&encoded, &gif.GIF{
+		Image:     []*stdimage.Paletted{first, second},
+		Delay:     []int{5, 12},
+		Disposal:  []byte{gif.DisposalNone, gif.DisposalNone},
+		LoopCount: 3,
+		Config:    stdimage.Config{ColorModel: palette, Width: 768, Height: 384},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	id, asset, path, err := embeddedImageAsset(encoded.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == "" || path != "keynope-asset:"+id+".gif" {
+		t.Fatalf("animated asset path = %q, id = %q", path, id)
+	}
+	if asset.Width != 384 || asset.Height != 192 || asset.LoopCount != 3 || len(asset.Data) != 0 || len(asset.Frames) != 2 {
+		t.Fatalf("animated asset metadata = %#v", asset)
+	}
+	if asset.Frames[0].DelayMS != 50 || asset.Frames[1].DelayMS != 120 {
+		t.Fatalf("animated frame timing = %#v", asset.Frames)
+	}
+	for index, frame := range asset.Frames {
+		decoded, err := png.Decode(bytes.NewReader(frame.Data))
+		if err != nil {
+			t.Fatalf("decode frame %d: %v", index, err)
+		}
+		if decoded.Bounds().Dx() != 384 || decoded.Bounds().Dy() != 192 {
+			t.Fatalf("frame %d size = %v", index, decoded.Bounds())
+		}
+	}
+	frames := decodeImageFrames(path)
+	if len(frames) != 2 || frames[0].delay != 50*time.Millisecond || frames[1].delay != 120*time.Millisecond {
+		t.Fatalf("decoded embedded frames = %#v", frames)
+	}
+	slide := Slide{Elements: []Element{{Kind: "image", Path: path, AssetID: id}}}
+	initializeInsertedImagePlacement(&slide, 0)
+	query, err := url.ParseQuery(slide.Elements[0].Query)
+	wantWidth := strconv.Itoa(max(1, int(math.Round(float64(authoredTerminalWidth)*0.5))))
+	if err != nil || query.Get("scale") != "1.0" || query.Get("width") != wantWidth || query.Get("height") != "" {
+		t.Fatalf("animated image placement query = %q", slide.Elements[0].Query)
+	}
+	frozen := slide
+	frozen.Elements = append([]Element(nil), slide.Elements...)
+	frozen.Elements[0].Query = setQueryValue(frozen.Elements[0].Query, "keynope_freeze", "1")
+	pages := exportSlidePagesFrozen(frozen, 0, 1, 80, 25)
+	if len(pages) == 0 || len(pages[0].ContentFrames) != 0 {
+		t.Fatalf("frozen animation preview pages = %#v", pages)
+	}
+	deck := Deck{Slides: []Slide{slide}, Assets: map[string]DeckAsset{id: asset}}
+	destination := filepath.Join(t.TempDir(), "animated.md")
+	if err := saveDeck(destination, deck); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := parseDeck(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadedAsset := loaded.Assets[id]
+	if len(loadedAsset.Frames) != 2 || loaded.Slides[0].Elements[0].Path != path {
+		t.Fatalf("round-tripped animated asset = %#v; element = %#v", loadedAsset, loaded.Slides[0].Elements[0])
 	}
 }
 
@@ -924,7 +1058,7 @@ func TestConvertBlockKindTogglesAndCrossConverts(t *testing.T) {
 	}
 }
 
-func TestConvertTextKindActionPersistsAsSingleUndoableMutation(t *testing.T) {
+func TestConvertTextKindActionStaysDirtyUntilExplicitSave(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "deck.md")
 	deck := Deck{Slides: []Slide{{Elements: []Element{{Kind: "code", Text: "one\ntwo", Query: "left=2&top=2"}}}}}
 	if err := saveDeck(path, deck); err != nil {
@@ -942,8 +1076,11 @@ func TestConvertTextKindActionPersistsAsSingleUndoableMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reloaded.Slides[0].Elements) != 2 {
-		t.Fatalf("persisted elements=%d, want 2", len(reloaded.Slides[0].Elements))
+	if len(reloaded.Slides[0].Elements) != 1 {
+		t.Fatalf("on-disk elements=%d, want unchanged deck", len(reloaded.Slides[0].Elements))
+	}
+	if !state.Dirty {
+		t.Fatal("converted deck should be dirty")
 	}
 	if err := session.apply(nativeEditorAction{Action: "undo"}); err != nil {
 		t.Fatal(err)
@@ -951,6 +1088,9 @@ func TestConvertTextKindActionPersistsAsSingleUndoableMutation(t *testing.T) {
 	state = session.state()
 	if len(state.Slides[0].Elements) != 1 || state.Slides[0].Elements[0].Kind != "code" {
 		t.Fatalf("undo state = %#v", state.Slides[0].Elements)
+	}
+	if state.Dirty {
+		t.Fatal("undoing to the saved snapshot should clear dirty state")
 	}
 }
 
@@ -1047,24 +1187,151 @@ func TestNativeEditorRefreshScopeAvoidsFullDeckReloadForElementMutations(t *test
 	}
 }
 
-func TestNativeEditorReportsSlideSaveFailure(t *testing.T) {
+func TestNativeEditorMutationDoesNotWriteToDisk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing", "deck.md")
 	session := newNativeEditorSession(path, Deck{Slides: []Slide{{Elements: []Element{{Kind: "text", Text: "Original"}}}}})
-	err := session.apply(nativeEditorAction{Action: "update-slide-notes", Slide: 0, Notes: "unsaved"})
-	if err == nil || !strings.Contains(err.Error(), "save presentation") {
-		t.Fatalf("save error = %v, want surfaced persistence failure", err)
+	if err := session.apply(nativeEditorAction{Action: "update-slide-notes", Slide: 0, Notes: "unsaved"}); err != nil {
+		t.Fatal(err)
+	}
+	if !session.state().Dirty {
+		t.Fatal("mutation should mark the document dirty")
 	}
 }
 
-func TestNativeEditorReportsMasterSaveFailure(t *testing.T) {
+func TestNativeEditorUntitledRemainsDirtyUntilConfirmedSave(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing", "deck.md")
 	deck := Deck{Slides: []Slide{{Elements: []Element{{Kind: "text", Text: "Slide"}}}}, Masters: defaultMasterDeck()}
-	session := newNativeEditorSession(path, deck)
-	if err := session.apply(nativeEditorAction{Action: "toggle-master-mode"}); err != nil {
+	session := newNativeEditorSession(path, deck, true)
+	if !session.state().Dirty || !session.state().Untitled {
+		t.Fatal("untitled deck should start dirty")
+	}
+	version := session.state().Version
+	if err := session.apply(nativeEditorAction{Action: "confirm-save", Path: path, Value: int(version)}); err != nil {
 		t.Fatal(err)
 	}
-	err := session.apply(nativeEditorAction{Action: "update-slide", SlideData: &Slide{Elements: []Element{{Kind: "text", Text: "Master"}}}})
-	if err == nil || !strings.Contains(err.Error(), "save presentation") {
-		t.Fatalf("save error = %v, want surfaced persistence failure", err)
+	if session.state().Dirty || session.state().Untitled {
+		t.Fatal("confirmed save should establish a clean saved snapshot")
+	}
+}
+
+func TestNativeEditorDocumentSerializesWithoutWriting(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "Untitled.md")
+	deck := Deck{Slides: []Slide{{Elements: []Element{{Kind: "heading", Level: 1, Text: "Starter"}}}}}
+	session := newNativeEditorSession("Welcome.md", deck, true)
+	body, err := json.Marshal(nativeEditorDocumentRequest{Path: destination})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/editor/document", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	session.handleDocument(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("document status = %d: %s", response.Code, response.Body.String())
+	}
+	if _, err := os.Stat(destination); !os.IsNotExist(err) {
+		t.Fatalf("document endpoint wrote destination: %v", err)
+	}
+	var document nativeEditorDocument
+	if err := json.NewDecoder(response.Body).Decode(&document); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains([]byte(document.Content), []byte("# Starter")) {
+		t.Fatalf("serialized document = %q", document.Content)
+	}
+	if err := session.apply(nativeEditorAction{Action: "confirm-save", Path: destination, Value: int(document.Version)}); err != nil {
+		t.Fatal(err)
+	}
+	if session.state().Dirty || session.state().Path != destination {
+		t.Fatalf("confirmed state = %#v", session.state())
+	}
+}
+
+func TestNativeEditorExportDocumentReturnsHTMLWithoutWriting(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "slides.html")
+	session := newNativeEditorSession("deck.md", Deck{Slides: []Slide{{Elements: []Element{{Kind: "heading", Level: 1, Text: "Export me"}}}}})
+	body, err := json.Marshal(nativeEditorExportRequest{Path: destination, Existing: "<!doctype html><html><head><title>Custom title</title></head><body></body></html>"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/editor/export-document", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	session.handleExportDocument(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("export status = %d: %s", response.Code, response.Body.String())
+	}
+	if _, err := os.Stat(destination); !os.IsNotExist(err) {
+		t.Fatalf("export endpoint wrote destination: %v", err)
+	}
+	var document struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&document); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(document.Content, `<script id="keynope-data"`) {
+		t.Fatal("exported HTML omitted the embedded deck data")
+	}
+	if !strings.Contains(document.Content, "<title>Custom title</title>") {
+		t.Fatal("exported HTML did not preserve the existing title")
+	}
+}
+
+func TestNativeEditorUndoRedoDirtyTracksSavedSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deck.md")
+	deck := Deck{Slides: []Slide{{Elements: []Element{{Kind: "text", Text: "Saved"}}}}}
+	session := newNativeEditorSession(path, deck)
+	if session.state().Dirty {
+		t.Fatal("freshly opened deck should be clean")
+	}
+	if err := session.apply(nativeEditorAction{Action: "update-slide-notes", Slide: 0, Notes: "changed"}); err != nil {
+		t.Fatal(err)
+	}
+	if !session.state().Dirty {
+		t.Fatal("mutation should be dirty")
+	}
+	if err := session.apply(nativeEditorAction{Action: "undo"}); err != nil {
+		t.Fatal(err)
+	}
+	if session.state().Dirty {
+		t.Fatal("undo to on-disk snapshot should be clean")
+	}
+	if err := session.apply(nativeEditorAction{Action: "redo"}); err != nil {
+		t.Fatal(err)
+	}
+	if !session.state().Dirty {
+		t.Fatal("redo away from on-disk snapshot should be dirty")
+	}
+	version := session.state().Version
+	if err := session.apply(nativeEditorAction{Action: "confirm-save", Path: path, Value: int(version)}); err != nil {
+		t.Fatal(err)
+	}
+	if session.state().Dirty {
+		t.Fatal("confirmed snapshot should be clean")
+	}
+	if err := session.apply(nativeEditorAction{Action: "undo"}); err != nil {
+		t.Fatal(err)
+	}
+	if !session.state().Dirty {
+		t.Fatal("undo away from the newly saved snapshot should be dirty")
+	}
+	if err := session.apply(nativeEditorAction{Action: "redo"}); err != nil {
+		t.Fatal(err)
+	}
+	if session.state().Dirty {
+		t.Fatal("redo to the newly saved snapshot should be clean")
+	}
+}
+
+func TestNativeEditorUntitledUndoNeverClearsDirty(t *testing.T) {
+	deck := Deck{Slides: []Slide{{Elements: []Element{{Kind: "text", Text: "Starter"}}}}}
+	session := newNativeEditorSession("Welcome.md", deck, true)
+	if err := session.apply(nativeEditorAction{Action: "update-slide-notes", Slide: 0, Notes: "changed"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.apply(nativeEditorAction{Action: "undo"}); err != nil {
+		t.Fatal(err)
+	}
+	if !session.state().Dirty || !session.state().Untitled {
+		t.Fatal("untitled deck must remain dirty after undoing to its starter state")
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -14,7 +15,7 @@ import (
 	"image/draw"
 	"image/gif"
 	_ "image/jpeg"
-	_ "image/png"
+	"image/png"
 	"io"
 	"math"
 	"math/rand"
@@ -35,6 +36,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	xdraw "golang.org/x/image/draw"
+
 	"golang.org/x/image/webp"
 )
 
@@ -43,6 +46,7 @@ type Element struct {
 	Level           int    `json:"level,omitempty"`
 	Text            string `json:"text,omitempty"`
 	Path            string `json:"path,omitempty"`
+	AssetID         string `json:"assetId,omitempty"`
 	Query           string `json:"query,omitempty"`
 	Placeholder     bool   `json:"placeholder,omitempty"`
 	ID              string `json:"id,omitempty"`
@@ -192,6 +196,7 @@ type appArgs struct {
 	ExportOnly bool
 	Classic    bool
 	AppMode    bool
+	Untitled   bool
 	Licenses   bool
 	DeckPath   string
 	Startup    bool
@@ -342,12 +347,6 @@ func main() {
 	}
 	if args.AppMode {
 		ensureDefaultAuthoredSize()
-		if parsedDeckElementOrderChanged {
-			if err := saveDeck(args.DeckPath, deck); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
-			}
-		}
 	}
 	if len(deck.Slides) == 0 {
 		fmt.Fprintln(os.Stderr, "deck has no slides")
@@ -379,7 +378,7 @@ func main() {
 	var presenter *presenterCompanion
 	var nativeEditor *nativeEditorSession
 	if args.AppMode {
-		nativeEditor = newNativeEditorSession(args.DeckPath, deck)
+		nativeEditor = newNativeEditorSession(args.DeckPath, deck, args.Untitled, parsedDeckElementOrderChanged)
 		activeNativeEditor = nativeEditor
 		defer func() { activeNativeEditor = nil }()
 	}
@@ -523,6 +522,8 @@ func parseArgs(raw []string) (appArgs, bool) {
 			args.Classic = true
 		case "--app":
 			args.AppMode = true
+		case "--untitled":
+			args.Untitled = true
 		case "--licenses":
 			args.Licenses = true
 		default:
@@ -535,7 +536,7 @@ func parseArgs(raw []string) (appArgs, bool) {
 	if args.Licenses {
 		return args, args.DeckPath == "" && !args.ExportOnly && !args.Classic && !args.AppMode
 	}
-	if args.DeckPath == "" || (args.ExportOnly && args.Classic) || (args.AppMode && (args.ExportOnly || args.Classic)) {
+	if args.DeckPath == "" || (args.ExportOnly && args.Classic) || (args.AppMode && (args.ExportOnly || args.Classic)) || (args.Untitled && !args.AppMode) {
 		return appArgs{}, false
 	}
 	return args, true
@@ -1511,6 +1512,210 @@ func handleAction(action string, deck *Deck, current, page, width, height int, d
 	}
 }
 
+func decodeDeckAssets(text string) (map[string]DeckAsset, string, error) {
+	match := keynopeAssetsRE.FindStringSubmatch(text)
+	if match == nil {
+		return nil, text, nil
+	}
+	compressed, err := base64.StdEncoding.DecodeString(match[1])
+	if err != nil {
+		return nil, text, fmt.Errorf("decode embedded assets: %w", err)
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		return nil, text, fmt.Errorf("open embedded assets: %w", err)
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, 100<<20))
+	closeErr := reader.Close()
+	if err != nil || closeErr != nil {
+		return nil, text, fmt.Errorf("read embedded assets: %w", errors.Join(err, closeErr))
+	}
+	assets := map[string]DeckAsset{}
+	if err := json.Unmarshal(data, &assets); err != nil {
+		return nil, text, fmt.Errorf("parse embedded assets: %w", err)
+	}
+	return assets, keynopeAssetsRE.ReplaceAllString(text, ""), nil
+}
+
+func encodeDeckAssets(assets map[string]DeckAsset) (string, error) {
+	if len(assets) == 0 {
+		return "", nil
+	}
+	data, err := json.Marshal(assets)
+	if err != nil {
+		return "", err
+	}
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(data); err != nil {
+		return "", err
+	}
+	if err := writer.Close(); err != nil {
+		return "", err
+	}
+	return "<!-- keynope-assets version=1 base64:" + base64.StdEncoding.EncodeToString(compressed.Bytes()) + " -->", nil
+}
+
+func embeddedAssetPath(id string, asset DeckAsset) string {
+	if len(asset.Frames) > 0 {
+		return "keynope-asset:" + id + ".gif"
+	}
+	ext := ".png"
+	if asset.MIME == "image/gif" {
+		ext = ".gif"
+	}
+	return filepath.Join(imageCacheDirectory(), "embedded", id+ext)
+}
+
+func embeddedImageAsset(data []byte) (string, DeckAsset, string, error) {
+	if len(data) == 0 || len(data) > 50<<20 {
+		return "", DeckAsset{}, "", errors.New("image is empty or too large")
+	}
+	if animation, err := gif.DecodeAll(bytes.NewReader(data)); err == nil && len(animation.Image) > 1 {
+		width, height := animation.Config.Width, animation.Config.Height
+		targetW, targetH := boundedImageSize(width, height, 384)
+		decoded := decodeGIFAnimation(animation)
+		asset := DeckAsset{MIME: "image/gif", Width: targetW, Height: targetH, LoopCount: animation.LoopCount}
+		for _, frame := range decoded {
+			frameImage := frame.image
+			if targetW != width || targetH != height {
+				resized := image.NewNRGBA(image.Rect(0, 0, targetW, targetH))
+				xdraw.CatmullRom.Scale(resized, resized.Bounds(), frame.image, frame.image.Bounds(), draw.Src, nil)
+				frameImage = resized
+			}
+			var output bytes.Buffer
+			if err := png.Encode(&output, frameImage); err != nil {
+				return "", DeckAsset{}, "", err
+			}
+			delay := frame.delay
+			if delay <= 0 {
+				delay = 100 * time.Millisecond
+			}
+			asset.Frames = append(asset.Frames, DeckAssetFrame{Data: output.Bytes(), DelayMS: delay.Milliseconds()})
+		}
+		return makeAnimatedDeckAsset(asset)
+	}
+	decoded, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return "", DeckAsset{}, "", fmt.Errorf("decode image: %w", err)
+	}
+	width, height := decoded.Bounds().Dx(), decoded.Bounds().Dy()
+	targetW, targetH := boundedImageSize(width, height, 384)
+	outputImage := image.Image(decoded)
+	if targetW != width || targetH != height {
+		resized := image.NewNRGBA(image.Rect(0, 0, targetW, targetH))
+		xdraw.CatmullRom.Scale(resized, resized.Bounds(), decoded, decoded.Bounds(), draw.Src, nil)
+		outputImage = resized
+	}
+	var output bytes.Buffer
+	if err := png.Encode(&output, outputImage); err != nil {
+		return "", DeckAsset{}, "", err
+	}
+	return makeDeckAsset(output.Bytes(), "image/png", targetW, targetH)
+}
+
+func makeAnimatedDeckAsset(asset DeckAsset) (string, DeckAsset, string, error) {
+	if len(asset.Frames) < 2 {
+		return "", DeckAsset{}, "", errors.New("animated image has fewer than two frames")
+	}
+	hash := sha256.New()
+	fmt.Fprintf(hash, "%s:%dx%d:%d:", asset.MIME, asset.Width, asset.Height, asset.LoopCount)
+	for _, frame := range asset.Frames {
+		fmt.Fprintf(hash, "%d:", frame.DelayMS)
+		_, _ = hash.Write(frame.Data)
+	}
+	id := hex.EncodeToString(hash.Sum(nil))
+	registerEmbeddedAnimatedAsset(id, asset)
+	return id, asset, embeddedAssetPath(id, asset), nil
+}
+
+func boundedImageSize(width, height, maximum int) (int, int) {
+	if width <= 0 || height <= 0 || maximum <= 0 || (width <= maximum && height <= maximum) {
+		return width, height
+	}
+	scale := math.Min(float64(maximum)/float64(width), float64(maximum)/float64(height))
+	return max(1, int(math.Round(float64(width)*scale))), max(1, int(math.Round(float64(height)*scale)))
+}
+
+func makeDeckAsset(data []byte, mime string, width, height int) (string, DeckAsset, string, error) {
+	hash := sha256.Sum256(data)
+	id := hex.EncodeToString(hash[:])
+	asset := DeckAsset{MIME: mime, Width: width, Height: height, Data: append([]byte(nil), data...)}
+	path := embeddedAssetPath(id, asset)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", DeckAsset{}, "", err
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return "", DeckAsset{}, "", err
+	}
+	return id, asset, path, nil
+}
+
+func materializeDeckAssets(deck *Deck) {
+	if deck == nil || len(deck.Assets) == 0 {
+		return
+	}
+	for id, asset := range deck.Assets {
+		path := embeddedAssetPath(id, asset)
+		if len(asset.Frames) > 0 {
+			registerEmbeddedAnimatedAsset(id, asset)
+			visitDeckImages(deck, func(element *Element) {
+				if element.AssetID == id {
+					element.Path = path
+				}
+			})
+			continue
+		}
+		if _, err := os.Stat(path); err != nil {
+			if os.MkdirAll(filepath.Dir(path), 0o755) == nil {
+				_ = os.WriteFile(path, asset.Data, 0o644)
+			}
+		}
+		visitDeckImages(deck, func(element *Element) {
+			if element.AssetID == id {
+				element.Path = path
+			}
+		})
+	}
+}
+
+func visitDeckImages(deck *Deck, visit func(*Element)) {
+	if deck == nil || visit == nil {
+		return
+	}
+	visitSlide := func(slide *Slide) {
+		for index := range slide.Elements {
+			if slide.Elements[index].Kind == "image" {
+				visit(&slide.Elements[index])
+			}
+		}
+	}
+	for index := range deck.Slides {
+		visitSlide(&deck.Slides[index])
+	}
+	visitSlide(&deck.Masters.Base.Slide)
+	for index := range deck.Masters.Layouts {
+		visitSlide(&deck.Masters.Layouts[index].Slide)
+	}
+}
+
+func pruneUnusedDeckAssets(deck *Deck) {
+	if deck == nil || len(deck.Assets) == 0 {
+		return
+	}
+	used := map[string]bool{}
+	visitDeckImages(deck, func(element *Element) {
+		if element.AssetID != "" {
+			used[element.AssetID] = true
+		}
+	})
+	for id := range deck.Assets {
+		if !used[id] {
+			delete(deck.Assets, id)
+		}
+	}
+}
+
 func parseDeck(path string) (Deck, error) {
 	parsedDeckElementOrderChanged = false
 	data, err := os.ReadFile(path)
@@ -1518,6 +1723,11 @@ func parseDeck(path string) (Deck, error) {
 		return Deck{}, err
 	}
 	text := string(data)
+	assets, remainingAssets, err := decodeDeckAssets(text)
+	if err != nil {
+		return Deck{}, err
+	}
+	text = remainingAssets
 	authoredTerminalWidth = 0
 	authoredTerminalHeight = 0
 	if match := keynopeMetaRE.FindStringSubmatch(text); match != nil {
@@ -1544,7 +1754,9 @@ func parseDeck(path string) (Deck, error) {
 			slides = append(slides, slide)
 		}
 	}
-	return Deck{Slides: slides, Masters: masters}, nil
+	deck := Deck{Slides: slides, Masters: masters, Assets: assets}
+	materializeDeckAssets(&deck)
+	return deck, nil
 }
 
 func ensureDefaultAuthoredSize() {
@@ -1554,11 +1766,17 @@ func ensureDefaultAuthoredSize() {
 	}
 }
 
-func saveDeck(path string, deck Deck) error {
+func serializeDeck(path string, deck Deck) ([]byte, error) {
 	if authoredTerminalWidth <= 0 || authoredTerminalHeight <= 0 {
 		authoredTerminalWidth, authoredTerminalHeight = terminalSize()
 	}
 	deck = cloneDeck(deck)
+	pruneUnusedDeckAssets(&deck)
+	visitDeckImages(&deck, func(element *Element) {
+		if element.AssetID != "" {
+			element.Path = "keynope-asset:" + element.AssetID
+		}
+	})
 	for index := range deck.Slides {
 		canonicalizeSlideElementOrder(&deck.Slides[index], authoredTerminalWidth, authoredTerminalHeight)
 	}
@@ -1570,10 +1788,16 @@ func saveDeck(path string, deck Deck) error {
 	if authoredTerminalWidth > 0 && authoredTerminalHeight > 0 {
 		fmt.Fprintf(&out, "<!-- keynope width=%d height=%d -->\n\n", authoredTerminalWidth, authoredTerminalHeight)
 	}
+	if metadata, err := encodeDeckAssets(deck.Assets); err != nil {
+		return nil, err
+	} else if metadata != "" {
+		out.WriteString(metadata)
+		out.WriteString("\n\n")
+	}
 	if deckHasMasterData(deck.Masters) {
 		metadata, err := encodeMasterDeckMetadataForPath(deck.Masters, path)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		out.WriteString(metadata)
 		out.WriteString("\n\n")
@@ -1658,6 +1882,9 @@ func saveDeck(path string, deck Deck) error {
 				out.WriteString("```\n")
 			case "image":
 				src := element.Path
+				if element.AssetID != "" {
+					src = "keynope-asset:" + element.AssetID
+				}
 				if !isExternalImageSource(element.Path) {
 					if rel, err := filepath.Rel(filepath.Dir(path), element.Path); err == nil && !strings.HasPrefix(rel, "..") {
 						src = rel
@@ -1679,7 +1906,15 @@ func saveDeck(path string, deck Deck) error {
 			}
 		}
 	}
-	if err := os.WriteFile(path, []byte(out.String()), 0o644); err != nil {
+	return []byte(out.String()), nil
+}
+
+func saveDeck(path string, deck Deck) error {
+	data, err := serializeDeck(path, deck)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return err
 	}
 	if activePresenter != nil {
@@ -1904,11 +2139,22 @@ func exportHTMLDocument(deckPath string, slides []Slide, cols, rows int, preserv
 }
 
 func exportSlidePages(slide Slide, slideIndex, slideCount, cols, rows int) []exportPage {
+	return exportSlidePagesMode(slide, slideIndex, slideCount, cols, rows, false)
+}
+
+func exportSlidePagesFrozen(slide Slide, slideIndex, slideCount, cols, rows int) []exportPage {
+	return exportSlidePagesMode(slide, slideIndex, slideCount, cols, rows, true)
+}
+
+func exportSlidePagesMode(slide Slide, slideIndex, slideCount, cols, rows int, frozenImages bool) []exportPage {
 	pageCount := slidePageCount(slide, cols, rows)
 	pages := make([]exportPage, 0, pageCount)
 	for page := 0; page < pageCount; page++ {
 		lines := displayLines(slide, cols, rows, page)
-		contentFrames := exportContentFrames(slide, page, cols, rows, slideCount)
+		var contentFrames []exportContentFrame
+		if !frozenImages {
+			contentFrames = exportContentFrames(slide, page, cols, rows, slideCount)
+		}
 		pages = append(pages, exportPage{
 			Slide:                slideIndex,
 			Page:                 page,
@@ -2024,6 +2270,8 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int, la
 		mux.HandleFunc("/api/editor/emojis", activeNativeEditor.handleEmojiCatalog)
 		mux.HandleFunc("/api/editor/workspace", activeNativeEditor.handleWorkspace)
 		mux.HandleFunc("/api/editor/upload", activeNativeEditor.handleUpload)
+		mux.HandleFunc("/api/editor/document", activeNativeEditor.handleDocument)
+		mux.HandleFunc("/api/editor/export-document", activeNativeEditor.handleExportDocument)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -2102,6 +2350,15 @@ func (p *presenterCompanion) Status() (available bool, target string, live bool)
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.helper, p.target, p.state.Presenting
+}
+
+func (p *presenterCompanion) Position() (slide, page int) {
+	if p == nil {
+		return 0, 0
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.state.Slide, p.state.Page
 }
 
 func (p *presenterCompanion) handlePresenterStatus(w http.ResponseWriter, r *http.Request) {
@@ -3276,7 +3533,11 @@ func readPreservedExportHead(path string) preservedExportHead {
 	if err != nil {
 		return preservedExportHead{}
 	}
-	head, ok := extractHTMLHead(string(data))
+	return preservedExportHeadFromHTML(string(data))
+}
+
+func preservedExportHeadFromHTML(existing string) preservedExportHead {
+	head, ok := extractHTMLHead(existing)
 	if !ok {
 		return preservedExportHead{}
 	}
@@ -3389,6 +3650,8 @@ html[data-keynope-app="true"] button:active:not(:disabled) { background-color: #
 html[data-keynope-app="true"] button:active:not(:disabled) > svg,
 html[data-keynope-app="true"] button:active:not(:disabled) > span { translate: 0 1px; }
 .keynope-editor-topbar { position: fixed; left: 210px; right: 0; top: 0; height: 52px; z-index: 21; display: none; align-items: center; gap: 6px; padding: 0 10px; box-sizing: border-box; overflow-x: auto; background: #181818; border-bottom: 1px solid #444; font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-editor-topbar > .keynope-save-button { display: grid; flex: 0 0 auto; width: 36px; min-width: 36px; height: 32px; place-items: center; padding: 4px; }
+.keynope-editor-topbar > .keynope-save-button svg { display: block; width: 22px; height: 22px; }
 .keynope-topbar-mode { display: flex; min-width: max-content; flex: 1 0 max-content; align-items: center; gap: 6px; }
 .keynope-topbar-mode[hidden] { display: none; }
 .keynope-topbar-mode button { padding: 4px 7px; }
@@ -3597,6 +3860,7 @@ let editorCanvasCaret = null;
 let editorExportConfirmation = null;
 let keynopeEditorMasterMode = false;
 let keynopeEditorSelectionActive = false;
+let keynopeEditorVisualResizeActive = false;
 if (keynopeAppSurface) {
   document.documentElement.setAttribute('data-keynope-app', 'true');
   document.documentElement.setAttribute('data-keynope-notes', 'true');
@@ -4152,6 +4416,12 @@ function drawPresenterTimerBlock(ch, x, y, cell) {
   }
 }
 const editorExportGlyphs = {
+	S:['01111','10000','10000','01110','00001','00001','11110'],
+	A:['01110','10001','10001','11111','10001','10001','10001'],
+	V:['10001','10001','10001','10001','10001','01010','00100'],
+	N:['10001','11001','10101','10011','10001','10001','10001'],
+	I:['11111','00100','00100','00100','00100','00100','11111'],
+	G:['01110','10001','10000','10111','10001','10001','01110'],
   E:['11111','10000','10000','11110','10000','10000','11111'],
   X:['10001','10001','01010','00100','01010','10001','10001'],
   P:['11110','10001','10001','11110','10000','10000','10000'],
@@ -4160,31 +4430,52 @@ const editorExportGlyphs = {
   T:['11111','00100','00100','00100','00100','00100','00100'],
   D:['11110','10001','10001','10001','10001','10001','11110']
 };
-function showEditorExportConfirmation() {
-  if (!keynopeAppSurface) return;
-  editorExportConfirmation = {started: performance.now(), duration: 1500};
-  const animate = () => {
-    if (!editorExportConfirmation) return;
-    if (performance.now() - editorExportConfirmation.started >= editorExportConfirmation.duration) editorExportConfirmation = null;
-    drawFrame();
-    if (editorExportConfirmation) requestAnimationFrame(animate);
-  };
-  requestAnimationFrame(animate);
+function showEditorConfirmation(text) {
+	if (!keynopeAppSurface) return;
+	const confirmation = {started: performance.now(), duration: 1500, text, progress: false};
+	editorExportConfirmation = confirmation;
+	const animate = () => {
+		if (editorExportConfirmation !== confirmation) return;
+		if (performance.now() - confirmation.started >= confirmation.duration) editorExportConfirmation = null;
+		drawFrame();
+		if (editorExportConfirmation === confirmation) requestAnimationFrame(animate);
+	};
+	requestAnimationFrame(animate);
+}
+function showEditorExportConfirmation() { showEditorConfirmation('EXPORTED'); }
+function showEditorSavedConfirmation() { showEditorConfirmation('SAVED'); }
+function showEditorRenderingProgress() {
+	if (!keynopeAppSurface) return;
+	const confirmation = {started: performance.now(), duration: Infinity, text:'RENDERING', progress:true};
+	editorExportConfirmation = confirmation;
+	const animate = () => {
+		if (editorExportConfirmation !== confirmation) return;
+		drawFrame();
+		requestAnimationFrame(animate);
+	};
+	requestAnimationFrame(animate);
+}
+function hideEditorRenderingProgress() {
+	if (!editorExportConfirmation || !editorExportConfirmation.progress) return;
+	editorExportConfirmation = null;
+	drawFrame();
 }
 function drawEditorExportConfirmation() {
   if (!keynopeAppSurface || !editorExportConfirmation) return;
   const elapsed = performance.now() - editorExportConfirmation.started;
-  const progress = Math.max(0, Math.min(1, elapsed / editorExportConfirmation.duration));
-  const fade = progress < .48 ? 1 : Math.pow(1 - (progress - .48) / .52, 2);
-  const text = 'EXPORTED';
+	const rendering = !!editorExportConfirmation.progress;
+	const progress = rendering ? 0 : Math.max(0, Math.min(1, elapsed / editorExportConfirmation.duration));
+	const fade = rendering ? 1 : progress < .48 ? 1 : Math.pow(1 - (progress - .48) / .52, 2);
+  const text = editorExportConfirmation.text || 'EXPORTED';
   const block = Math.max(2, Math.floor(Math.min(presenterCanvas.width / 66, presenterCanvas.height / 24)));
   const glyphWidth = 5 * block, glyphGap = 2 * block;
   const textWidth = text.length * glyphWidth + (text.length - 1) * glyphGap;
   const textHeight = 7 * block;
-  const padX = 3 * block, padY = 2 * block;
-  const scale = 1 + progress * .035;
-  const x = (presenterCanvas.width - textWidth) / 2;
-  const y = (presenterCanvas.height - textHeight) / 2 - progress * 12;
+	const padX = 3 * block, padY = 2 * block;
+	const progressHeight = rendering ? block * 2 : 0;
+	const scale = rendering ? 1 + Math.sin(elapsed / 260) * .008 : 1 + progress * .035;
+	const x = (presenterCanvas.width - textWidth) / 2;
+	const y = (presenterCanvas.height - textHeight - progressHeight) / 2 - progress * 12;
   presenterContext.save();
   presenterContext.globalAlpha = fade;
   presenterContext.translate(presenterCanvas.width / 2, presenterCanvas.height / 2);
@@ -4193,8 +4484,8 @@ function drawEditorExportConfirmation() {
   presenterContext.fillStyle = 'rgba(3,18,9,.92)';
   presenterContext.strokeStyle = '#22cc66';
   presenterContext.lineWidth = Math.max(2, block * .45);
-  presenterContext.fillRect(x - padX, y - padY, textWidth + padX * 2, textHeight + padY * 2);
-  presenterContext.strokeRect(x - padX, y - padY, textWidth + padX * 2, textHeight + padY * 2);
+	presenterContext.fillRect(x - padX, y - padY, textWidth + padX * 2, textHeight + padY * 2 + progressHeight);
+	presenterContext.strokeRect(x - padX, y - padY, textWidth + padX * 2, textHeight + padY * 2 + progressHeight);
   let cursor = x;
   presenterContext.lineWidth = Math.max(1, block * .38);
   for (const ch of text) {
@@ -4207,9 +4498,18 @@ function drawEditorExportConfirmation() {
       presenterContext.fillRect(px, py, block, block);
       presenterContext.strokeRect(px, py, block, block);
     }
-    cursor += glyphWidth + glyphGap;
-  }
-  presenterContext.restore();
+		cursor += glyphWidth + glyphGap;
+	}
+	if (rendering) {
+		const slots = 12, slotGap = block * .65;
+		const slotWidth = (textWidth - slotGap * (slots - 1)) / slots;
+		const active = Math.floor(elapsed / 90) % slots;
+		for (let index = 0; index < slots; index++) {
+			presenterContext.fillStyle = index === active ? '#77ff99' : index < active ? '#00aa55' : '#174d2a';
+			presenterContext.fillRect(x + index * (slotWidth + slotGap), y + textHeight + block, slotWidth, block * .7);
+		}
+	}
+	presenterContext.restore();
 }
 function drawPresenterTestCard() {
   presenterCanvas.style.display = 'block';
@@ -5333,8 +5633,9 @@ async function syncPresenterState() {
     let slideRefreshed = false;
     if (initialSync) {
       presenterDeckVersion = state.deckVersion || 0;
-    } else if ((state.deckVersion || 0) !== presenterDeckVersion) {
-      presenterDeckVersion = state.deckVersion || 0;
+	} else if ((state.deckVersion || 0) !== presenterDeckVersion) {
+		if (keynopeAppSurface && keynopeEditorVisualResizeActive) return;
+		presenterDeckVersion = state.deckVersion || 0;
       slideRefreshed = await refreshPresenterSlide(Number.isInteger(state.deckSlide) ? state.deckSlide : -1);
       if (!slideRefreshed) return;
     }
@@ -5551,6 +5852,15 @@ if (keynopeAppSurface) {
   let activeCanvasLinkDialog = null;
   let emojiPickerPanel = null;
   let emojiPickerTarget = null;
+  let lastPublishedEditorDirty = null;
+  function publishEditorDirtyState() {
+    const dirty = !!(editorState && editorState.dirty);
+    saveButton.disabled = !dirty;
+    if (dirty === lastPublishedEditorDirty) return;
+    lastPublishedEditorDirty = dirty;
+    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+    if (handler) handler.postMessage({action: 'editor-dirty-state', dirty});
+  }
   async function editorAction(action) {
     const enteringMasters = action.action === 'toggle-master-mode' && editorState && !editorState.masterMode;
     if (enteringMasters) editorNormalPages = (deck.pages || []).slice();
@@ -5666,12 +5976,22 @@ if (keynopeAppSurface) {
   }
   const topbar = document.createElement('div');
   topbar.className = 'keynope-editor-topbar';
+  const saveButton = document.createElement('button');
+  saveButton.type = 'button';
+  saveButton.className = 'keynope-save-button keynope-svg-button';
+  saveButton.innerHTML = '<svg viewBox="0 0 800 800" aria-hidden="true"><g transform="translate(0 800) scale(1 -1)"><path d="M120 85h450l110 110v520H120Z" fill="none" stroke="#fff" stroke-width="34" stroke-linejoin="round"/><path d="M225 140v170h320V140M455 175v95" fill="none" stroke="#9b9b9b" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/><rect x="220" y="430" width="360" height="285" rx="28" fill="none" stroke="#fff" stroke-width="32"/><path d="M285 515h230M285 590h230" fill="none" stroke="#9b9b9b" stroke-width="28" stroke-linecap="round"/></g></svg>';
+  saveButton.title = 'Save presentation';
+  saveButton.disabled = true;
+  saveButton.addEventListener('click', () => {
+    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+    if (handler && editorState && editorState.dirty) handler.postMessage({action: 'save-presentation'});
+  });
   const mainTopbar = document.createElement('div');
   mainTopbar.className = 'keynope-topbar-mode';
   const selectionTopbar = document.createElement('div');
   selectionTopbar.className = 'keynope-topbar-mode';
   selectionTopbar.hidden = true;
-  topbar.append(mainTopbar, selectionTopbar);
+  topbar.append(saveButton, mainTopbar, selectionTopbar);
   function svgToolbarButton(title, drawing, action) {
     const button = document.createElement('button');
     button.type = 'button';
@@ -5769,21 +6089,29 @@ if (keynopeAppSurface) {
   imageInput.type = 'file';
   imageInput.accept = 'image/*';
   imageInput.hidden = true;
-  imageInput.addEventListener('change', async () => {
-    if (!imageInput.files || !imageInput.files[0]) return;
-    try {
-      const body = new FormData();
-      body.append('image', imageInput.files[0]);
-      const response = await fetch('/api/editor/upload', {method: 'POST', body});
+	imageInput.addEventListener('change', async () => {
+		if (!imageInput.files || !imageInput.files[0]) return;
+		const selectedFile = imageInput.files[0];
+		const animatedGIF = selectedFile.type === 'image/gif' || /\.gif$/i.test(selectedFile.name || '');
+		if (animatedGIF) showEditorRenderingProgress();
+		try {
+			const body = new FormData();
+			body.append('image', selectedFile);
+			const response = await fetch('/api/editor/upload', {method: 'POST', body});
       if (!response.ok) throw new Error((await response.text()).trim() || 'Image upload failed');
       editorState = await response.json();
-      editorStateVersion = editorState.version;
-      renderEditorPanels();
-    } catch (error) {
+			editorStateVersion = editorState.version;
+			renderEditorPanels();
+			const inserted = editorState && editorState.slides && editorState.slides[editorState.current]
+				? (editorState.slides[editorState.current].elements || [])[editorState.selected]
+				: null;
+			if (inserted) await previewCanvasMutation(editorState.selected, inserted, true, animatedGIF);
+		} catch (error) {
       window.alert('Could not import image\n\n' + (error && error.message ? error.message : String(error)));
-    } finally {
-      imageInput.value = '';
-    }
+		} finally {
+			if (animatedGIF) hideEditorRenderingProgress();
+			imageInput.value = '';
+		}
   });
   const importButton = document.createElement('button');
   importButton.innerHTML = '<svg viewBox="-13 80 1050 1040" aria-hidden="true"><path d="M-13 1120V80h1050v1040Zm292-428q-18 0-27.5-17t-9.5-35.5 8-28q-4-10-4-23 0-12 4-23.75t13.5-15.25q-4.5-9-4.5-22 0-20.5 6-38.5t12.5-18 12.5 17.75 6 38.75q0 13-4.5 22 10 3.5 13.75 15t3.75 23q0 7.5-1.25 13.75T305 611.5q8.5 10 8.5 30.5 0 17.5-8.5 33.75T279 692m130.5 32.5q-15 0-33.5-4.75t-32-14.25-13.5-24q0-13.5 6.5-22.75T353 648q-3.5-6.5-3.5-13.5 0-10.5 7.5-18.25t18.5-9.75q-1-3-1-6 0-11 5.75-18.5t13.75-7.5q7.5 0 12.5 7t5 17q0 4.5-1.5 10 13 12 13 28 0 9-5 15.5 11 9 16.75 20t5.75 22.5q0 16-7 23t-24 7m266 97.5q-81.5 0-151.25-23T378.5 742q-54-24.5-99-38.25T191 684l6-40q46 6.5 93.75 21.5T394.5 706q74.5 34 139.75 55t140.25 21q34 0 70.75-5t79.25-15.5l10 39q-44.5 11-84 16.25t-75 5.25M27 1080h970V120H27Zm147-145.5v-669h676v669Zm40-40h596v-589H214ZM404.5 750v-40q40 0 73.5-2t64-7q24.5-4 47.75-11.25A1586 1586 0 0 0 637.5 674q40-14.5 86-26.5T829 633l2 40q-56 2-98.75 13.5t-82.25 25q-24.5 8.5-49.25 16T549 740q-32 6-67.25 8t-77.25 2m84-193q-29.5 0-46-24-17.5 1.5-30-9.25T400 497q0-15.5 10.5-26.25t26-12.25Q434 447 434 437q0-28 20.5-48t48.5-20q23.5 0 43 14.5t24.5 36.5q27.5-1.5 41.75 9.75T625 464.5q17.5-1.5 30.25 9.5T668 499t-13.75 24.25T621 533.5q-11.5 0-23.5-4-13 17-39 17-16 0-28.5-8-17.5 18.5-41.5 18.5m129 130q0-17 10.5-30.5t25-20 26.5-3q2.5-16 17-24.5t28.5-8.5q17.5 0 22.5 10.5 5-16.5 24.75-30t44.25-13.5V642q-50.5 0-104.75 14.75T617.5 687"/></svg>';
@@ -5808,7 +6136,10 @@ if (keynopeAppSurface) {
   const exportButton = document.createElement('button');
   exportButton.type = 'button';
   exportButton.innerHTML = '<svg viewBox="0 0 800 600" aria-hidden="true"><path d="M120 55h290l130 130v350H120Z" fill="none" stroke="#fff" stroke-width="28" stroke-linejoin="round"/><path d="M410 55v130h130" fill="none" stroke="#fff" stroke-width="28" stroke-linejoin="round"/><path d="m250 245-65 55 65 55M405 245l65 55-65 55M350 220l-55 160" fill="none" stroke="#9b9b9b" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/><path d="M350 445h330M610 375l70 70-70 70" fill="none" stroke="#fff" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="keynope-export-label">HTML</span>';
-  exportButton.addEventListener('click', () => editorAction({action: 'export'}).then(showEditorExportConfirmation).catch(() => {}));
+  exportButton.addEventListener('click', () => {
+    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+    if (handler) handler.postMessage({action: 'export-html'});
+  });
   mainTopbar.appendChild(exportButton);
   exportButton.classList.add('keynope-icon-button', 'keynope-monochrome-icon', 'keynope-export-button');
   exportButton.title = 'Export to HTML';
@@ -5978,13 +6309,14 @@ if (keynopeAppSurface) {
 
   let editorPreviewOriginal = null;
   let editorPreviewSequence = 0;
-  function replaceEditorPreviewPages(slide, pages) {
+	function replaceEditorPreviewPages(slide, pages) {
     const first = deck.pages.findIndex(page => page.slide === slide);
     if (first < 0 || !Array.isArray(pages) || !pages.length) return;
     let end = first;
     while (end < deck.pages.length && deck.pages[end].slide === slide) end++;
     const currentPage = deck.pages[pageIndex] && deck.pages[pageIndex].slide === slide ? deck.pages[pageIndex].page : 0;
-    deck.pages.splice(first, end - first, ...pages);
+		deck.pages.splice(first, end - first, ...pages);
+		contentAnimationCache.clear();
     const next = deck.pages.findIndex(page => page.slide === slide && page.page === currentPage);
     pageIndex = next >= 0 ? next : first;
   }
@@ -6764,14 +7096,14 @@ if (keynopeAppSurface) {
       container.appendChild(button);
     }
   }
-  async function previewCanvasMutation(index, element, refreshOverlay = true) {
+	async function previewCanvasMutation(index, element, refreshOverlay = true, frozenImage = false) {
     const sequence = ++editorMutationPreviewSequence;
     const slide = editorState ? editorState.current : -1;
     try {
       const response = await fetch('/api/editor/preview', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({element: index, elementData: element, cols: deck.cols, rows: deck.rows})
+		body: JSON.stringify({name:frozenImage ? 'frozen-image' : '', element: index, elementData: element, cols: deck.cols, rows: deck.rows})
       });
       if (!response.ok) return;
       const pages = await response.json();
@@ -7270,6 +7602,7 @@ if (keynopeAppSurface) {
     return button;
   }
   function renderEditorTopbar() {
+    publishEditorDirtyState();
     const slide = editorState && editorState.slides && editorState.slides[editorState.current];
     const masterPageNumberMode = slide ? (slide.pageNumber || '') : '';
     const baseMaster = !!(editorState && editorState.masterMode && editorState.current === 0);
@@ -7300,10 +7633,6 @@ if (keynopeAppSurface) {
     selectionTopbar.hidden = !contextual;
     selectionTopbar.replaceChildren();
     if (!contextual) return;
-    const label = document.createElement('span');
-    label.className = 'keynope-topbar-label';
-    label.textContent = activeInlineEditor ? 'Editing text' : selectedElements.length > 1 ? (selectedElements.length + ' elements selected') : ((element.kind || 'element') + ' selected');
-    selectionTopbar.appendChild(label);
     if (activeInlineEditor) {
       const boldSelection = canvasTool('B', '', () => applyInlineSelectionWrapper('**'));
       boldSelection.title = 'Bold selected text';
@@ -7449,13 +7778,15 @@ if (keynopeAppSurface) {
         const resizing = resizeCorner !== '';
         const sourceElement = {...editorState.slides[editorState.current].elements[index]};
         const fittingText = resizing && ['heading','text','text-image','bullet','code'].includes(sourceElement.kind);
-        const resizingVisual = resizing && (sourceElement.kind === 'shape' || sourceElement.kind === 'image');
+		const resizingVisual = resizing && (sourceElement.kind === 'shape' || sourceElement.kind === 'image');
+		if (resizingVisual) keynopeEditorVisualResizeActive = true;
         let pendingFit = null;
         let fitting = false;
         let lastFit = null;
         let fitWaiters = [];
-        let pendingVisualPreview = null;
-        let visualPreviewFrame = 0;
+		let pendingVisualPreview = null;
+		let visualPreviewFrame = 0;
+		let visualPreviewing = false;
         hit.setPointerCapture(event.pointerId);
         const resizedBounds = (dx, dy) => {
           let minX = start.minX, minY = start.minY, maxX = start.maxX, maxY = start.maxY;
@@ -7476,10 +7807,11 @@ if (keynopeAppSurface) {
           element.query = query.toString();
           return element;
         };
-        const resizedElementForBounds = next => {
-          const element = {...sourceElement};
-          const query = new URLSearchParams(element.query || '');
-          for (const key of ['right','right_pct','bottom','row_delta','valign','align','left']) query.delete(key);
+		const resizedElementForBounds = next => {
+			const element = {...sourceElement};
+			const query = new URLSearchParams(element.query || '');
+			for (const key of ['right','right_pct','bottom','row_delta','valign','align','left']) query.delete(key);
+			if (element.kind === 'image') query.delete('scale');
           query.set('left_pct', Math.max(0, Math.min(1, next.minX / deck.cols)).toFixed(6));
           query.set('top', String(next.minY));
           query.set('width', String(Math.max(1, next.maxX - next.minX)));
@@ -7487,16 +7819,24 @@ if (keynopeAppSurface) {
           element.query = query.toString();
           return element;
         };
-        const queueVisualPreview = next => {
-          pendingVisualPreview = next;
-          if (visualPreviewFrame) return;
-          visualPreviewFrame = requestAnimationFrame(() => {
-            visualPreviewFrame = 0;
-            const bounds = pendingVisualPreview;
-            pendingVisualPreview = null;
-            if (bounds) previewCanvasMutation(index, resizedElementForBounds(bounds), false);
-          });
-        };
+		const pumpVisualPreview = async () => {
+			if (visualPreviewing) return;
+			visualPreviewing = true;
+			while (pendingVisualPreview) {
+				const bounds = pendingVisualPreview;
+				pendingVisualPreview = null;
+				await previewCanvasMutation(index, resizedElementForBounds(bounds), false, sourceElement.kind === 'image');
+			}
+			visualPreviewing = false;
+		};
+		const queueVisualPreview = next => {
+			pendingVisualPreview = next;
+			if (visualPreviewFrame) return;
+			visualPreviewFrame = requestAnimationFrame(() => {
+				visualPreviewFrame = 0;
+				pumpVisualPreview();
+			});
+		};
         const pumpTextFit = async () => {
           if (fitting) return;
           fitting = true;
@@ -7544,7 +7884,8 @@ if (keynopeAppSurface) {
             hit.style.top = ((start.minY + dy) / deck.rows * 100) + '%';
           }
         };
-        const up = async upEvent => {
+		const up = async upEvent => {
+			if (resizingVisual) keynopeEditorVisualResizeActive = false;
           hit.removeEventListener('pointermove', move);
           hit.removeEventListener('pointerup', up);
           if (visualPreviewFrame) cancelAnimationFrame(visualPreviewFrame);
@@ -7569,9 +7910,10 @@ if (keynopeAppSurface) {
           }
           const element = {...editorState.slides[editorState.current].elements[index]};
           const query = new URLSearchParams(element.query || '');
-          if (resizing) {
-            const next = resizedBounds(dx, dy);
-            query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('valign'); query.delete('align'); query.delete('left');
+		if (resizing) {
+			const next = resizedBounds(dx, dy);
+			query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('valign'); query.delete('align'); query.delete('left');
+			if (element.kind === 'image') query.delete('scale');
             query.set('left_pct', Math.max(0, Math.min(1, next.minX / deck.cols)).toFixed(6));
             query.set('top', String(next.minY));
             query.set('width', String(Math.max(1, next.maxX - next.minX)));
@@ -7582,11 +7924,12 @@ if (keynopeAppSurface) {
             query.set('top', String(Math.max(0, start.minY + dy)));
           }
           element.query = query.toString();
-          previewCanvasMutation(index, element);
+		  previewCanvasMutation(index, element, true, canvasElementIsGIF(element));
           editorAction({action: 'update-element', element: index, elementData: element}).catch(() => {});
         };
-        hit.addEventListener('pointermove', move);
-        hit.addEventListener('pointerup', up);
+		hit.addEventListener('pointermove', move);
+		hit.addEventListener('pointerup', up);
+		hit.addEventListener('pointercancel', () => { if (resizingVisual) keynopeEditorVisualResizeActive = false; }, {once:true});
       });
       if (index === editorState.selected) {
         for (const corner of ['nw','ne','sw','se']) {
@@ -8055,6 +8398,12 @@ if (keynopeAppSurface) {
       requestAnimationFrame(renderEditorCanvasOverlay);
     } catch (_err) {}
   }
+  window.keynopeDidSave = () => {
+    lastPublishedEditorDirty = null;
+    showEditorSavedConfirmation();
+    syncEditorState();
+  };
+  window.keynopeDidExport = showEditorExportConfirmation;
   const toolbar = document.createElement('div');
   toolbar.className = 'keynope-app-toolbar';
   const timerInputBlocker = document.createElement('div');
@@ -8124,10 +8473,6 @@ if (keynopeAppSurface) {
     speakerNotesInput.disabled = active;
   };
   toolbar.append(timerButton);
-  editorStatus = document.createElement('span');
-  editorStatus.className = 'keynope-editor-status';
-  editorStatus.textContent = 'Select an element · double-click text to edit · drag to move';
-  toolbar.appendChild(editorStatus);
   function appToolbarIconButton(label, svg, action) {
     const button = document.createElement('button');
     button.type = 'button';
@@ -8196,7 +8541,6 @@ if (keynopeAppSurface) {
     if (masterMode && editorSpeakerNotesVisible) setSpeakerNotesVisible(false, false);
     notesToggleButton.hidden = masterMode;
     timerButton.hidden = masterMode;
-    editorStatus.hidden = masterMode;
     previousButton.hidden = masterMode;
     nextButton.hidden = masterMode;
     presentButton.hidden = masterMode || presenting;
@@ -8284,6 +8628,18 @@ if (keynopeAppSurface) {
       e.preventDefault();
       e.stopImmediatePropagation();
       if (e.key === 'Escape' || e.key.toLowerCase() === 'q') editorAction({action: 'stop-timer'}).catch(() => {});
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const save = async () => {
+        if (activeInlineEditor) await activeInlineEditor.finish(true);
+        await flushSpeakerNotes();
+        const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+        if (handler && editorState && editorState.dirty) handler.postMessage({action: 'save-presentation'});
+      };
+      save().catch(() => {});
       return;
     }
     if (keynopeFormControlTarget(e.target)) return;
@@ -8496,6 +8852,7 @@ var layoutRE = regexp.MustCompile(`<!--\s*layout=([a-zA-Z0-9_-]+)\s*-->`)
 var pageNumberRE = regexp.MustCompile(`<!--\s*page-number=(show|hide)\s*-->`)
 var masterSlotRE = regexp.MustCompile(`<!--\s*master-slot=([a-zA-Z0-9_-]+)(?:\s+placeholder=(true))?\s*-->`)
 var keynopeMetaRE = regexp.MustCompile(`<!--\s*keynope\s+width=([0-9]+)\s+height=([0-9]+)\s*-->`)
+var keynopeAssetsRE = regexp.MustCompile(`<!--\s*keynope-assets\s+version=1\s+base64:([A-Za-z0-9+/=]+)\s*-->\s*`)
 var commentRE = regexp.MustCompile(`<!--\s*(.*?)\s*-->`)
 var imageRE = regexp.MustCompile(`!\[[^\]]*\]\(([^)]+)\)`)
 var shapeRE = regexp.MustCompile(`^\[shape(?::([a-zA-Z0-9_-]+))?\]$`)
@@ -8605,13 +8962,16 @@ func parseSlide(text, base string) Slide {
 		if match := imageRE.FindStringSubmatch(trimmed); match != nil {
 			flushParagraph()
 			src, query := splitImageSource(os.ExpandEnv(match[1]))
-			if !isExternalImageSource(src) {
+			assetID := ""
+			if strings.HasPrefix(src, "keynope-asset:") {
+				assetID = strings.TrimPrefix(src, "keynope-asset:")
+			} else if !isExternalImageSource(src) {
 				if !filepath.IsAbs(src) {
 					src = filepath.Join(base, src)
 				}
 				src = filepath.Clean(src)
 			}
-			slide.Elements = append(slide.Elements, Element{Kind: "image", Path: src, Query: query, MasterSlotID: pendingMasterSlot, Placeholder: pendingPlaceholder})
+			slide.Elements = append(slide.Elements, Element{Kind: "image", Path: src, AssetID: assetID, Query: query, MasterSlotID: pendingMasterSlot, Placeholder: pendingPlaceholder})
 			pendingQuery = ""
 			pendingMasterSlot = ""
 			pendingPlaceholder = false
@@ -14787,6 +15147,10 @@ func initializeInsertedImagePlacement(slide *Slide, imageIndex int) {
 	query = setImageQueryInt(query, "top", 1)
 	query = setImageQueryInt(query, "left", 1)
 	query = setImageQueryFloat(query, "scale", 1.0)
+	if ext := strings.ToLower(filepath.Ext(strings.SplitN(slide.Elements[imageIndex].Path, "?", 2)[0])); ext == ".gif" || ext == ".webp" {
+		query = setImageQueryInt(query, "width", max(1, int(math.Round(float64(authoredTerminalWidth)*0.5))))
+		query = removeImageQueryKeys(query, "height", "stretch")
+	}
 	query = removeImageQueryKeys(query, "align", "left_pct", "right", "right_pct", "bottom", "row_delta", "valign")
 	slide.Elements[imageIndex].Query = query
 }
@@ -17194,11 +17558,20 @@ func layout(slide Slide, width, height int) []Line {
 		if isImage {
 			placement := parseImagePlacement(block[0].Query)
 			maxImageRows := height
-			if placement.top != nil && placement.bottom != nil {
-				maxImageRows = max(1, height-*placement.top-*placement.bottom)
+			if placement.top != nil {
+				maxImageRows = max(1, height-*placement.top)
+			}
+			if placement.bottom != nil {
+				maxImageRows = max(1, maxImageRows-*placement.bottom)
 			}
 			imageElement := slide.Elements[block[0].Element]
 			maxImageWidth := constrainedElementWidth(imageElement, width)
+			if placement.left != nil {
+				maxImageWidth = max(1, min(maxImageWidth, width-*placement.left))
+			}
+			if placement.right != nil {
+				maxImageWidth = max(1, min(maxImageWidth, width-*placement.right))
+			}
 			maxImageRows = constrainedElementHeight(imageElement, maxImageRows)
 			rows := renderImageElementRows(imageElement, maxImageWidth, maxImageRows)
 			imageWidth := maxLineDisplayWidth(rows)
@@ -17363,7 +17736,7 @@ func renderUnavailableImageRows(maxWidth, maxHeight int) []string {
 
 func renderImageElementRows(element Element, maxWidth, maxHeight int) []string {
 	var rows []string
-	if !isExternalImageSource(element.Path) {
+	if element.AssetID != "" {
 		rows = renderASCIIImage(element.Path, element.Query, maxWidth, maxHeight)
 	}
 	if len(rows) > 0 {
@@ -19068,12 +19441,40 @@ const diskImageAnimationVersion = 3
 var asciiImageCache = map[string]*asciiImageAnimation{}
 var fastASCIIImageCache = map[string][]string{}
 var decodedStillImageCache = map[string]image.Image{}
+var decodedStillImageCacheMu sync.RWMutex
+var embeddedAnimatedAssets = struct {
+	sync.RWMutex
+	assets map[string]DeckAsset
+}{assets: map[string]DeckAsset{}}
 var prewarmingImageCache bool
 var fastImageRender bool
+
+func registerEmbeddedAnimatedAsset(id string, asset DeckAsset) {
+	if id == "" || len(asset.Frames) == 0 {
+		return
+	}
+	embeddedAnimatedAssets.Lock()
+	embeddedAnimatedAssets.assets[id] = asset
+	embeddedAnimatedAssets.Unlock()
+}
+
+func embeddedAnimatedAsset(path string) (DeckAsset, bool) {
+	if !strings.HasPrefix(path, "keynope-asset:") || !strings.HasSuffix(strings.ToLower(path), ".gif") {
+		return DeckAsset{}, false
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, "keynope-asset:"), filepath.Ext(path))
+	embeddedAnimatedAssets.RLock()
+	asset, ok := embeddedAnimatedAssets.assets[id]
+	embeddedAnimatedAssets.RUnlock()
+	return asset, ok
+}
 
 func renderASCIIImage(path, query string, maxWidth, maxHeight int) []string {
 	if maxWidth <= 0 || maxHeight <= 0 {
 		return nil
+	}
+	if values, err := url.ParseQuery(query); err == nil && values.Get("keynope_freeze") == "1" {
+		return renderFastASCIIImage(path, query, maxWidth, maxHeight)
 	}
 	if fastImageRender {
 		return renderFastASCIIImage(path, query, maxWidth, maxHeight)
@@ -19116,6 +19517,7 @@ func imageRenderQuery(query string) string {
 	}
 	for _, key := range []string{
 		"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "layer", "outline", "link", "slide",
+		"keynope_freeze",
 	} {
 		values.Del(key)
 	}
@@ -19142,13 +19544,36 @@ func renderFastASCIIImage(path, query string, maxWidth, maxHeight int) []string 
 }
 
 func loadDecodedStillImage(path string) image.Image {
+	if asset, ok := embeddedAnimatedAsset(path); ok {
+		if len(asset.Frames) == 0 {
+			return nil
+		}
+		key := "embedded-first|" + path
+		decodedStillImageCacheMu.RLock()
+		cached := decodedStillImageCache[key]
+		decodedStillImageCacheMu.RUnlock()
+		if cached != nil {
+			return cached
+		}
+		img, err := png.Decode(bytes.NewReader(asset.Frames[0].Data))
+		if err != nil {
+			return nil
+		}
+		decodedStillImageCacheMu.Lock()
+		decodedStillImageCache[key] = img
+		decodedStillImageCacheMu.Unlock()
+		return img
+	}
 	info, err := os.Stat(path)
 	stamp := "missing"
 	if err == nil {
 		stamp = fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
 	}
 	key := path + "|" + stamp
-	if img, ok := decodedStillImageCache[key]; ok {
+	decodedStillImageCacheMu.RLock()
+	img, ok := decodedStillImageCache[key]
+	decodedStillImageCacheMu.RUnlock()
+	if ok {
 		return img
 	}
 	f, err := os.Open(path)
@@ -19156,11 +19581,13 @@ func loadDecodedStillImage(path string) image.Image {
 		return nil
 	}
 	defer f.Close()
-	img, _, err := image.Decode(f)
+	img, _, err = image.Decode(f)
 	if err != nil {
 		return nil
 	}
+	decodedStillImageCacheMu.Lock()
 	decodedStillImageCache[key] = img
+	decodedStillImageCacheMu.Unlock()
 	return img
 }
 
@@ -19209,9 +19636,12 @@ func renderUnicodeImage(img image.Image, b image.Rectangle, opts imageASCIIOptio
 
 func loadASCIIImageAnimation(path, query string, maxWidth, maxHeight int) *asciiImageAnimation {
 	opts := parseImageASCIIOptions(query)
-	cachePath := asciiAnimationCachePath(path, query, maxWidth, maxHeight)
-	if cached := loadDiskASCIIAnimation(cachePath); cached != nil {
-		return cached
+	cachePath := ""
+	if _, embedded := embeddedAnimatedAsset(path); !embedded {
+		cachePath = asciiAnimationCachePath(path, query, maxWidth, maxHeight)
+		if cached := loadDiskASCIIAnimation(cachePath); cached != nil {
+			return cached
+		}
 	}
 	frames := decodeImageFrames(path)
 	if len(frames) == 0 {
@@ -19407,6 +19837,21 @@ type decodedImageFrame struct {
 }
 
 func decodeImageFrames(path string) []decodedImageFrame {
+	if asset, ok := embeddedAnimatedAsset(path); ok {
+		frames := make([]decodedImageFrame, 0, len(asset.Frames))
+		for _, stored := range asset.Frames {
+			decoded, err := png.Decode(bytes.NewReader(stored.Data))
+			if err != nil {
+				return nil
+			}
+			delay := time.Duration(stored.DelayMS) * time.Millisecond
+			if delay <= 0 {
+				delay = 100 * time.Millisecond
+			}
+			frames = append(frames, decodedImageFrame{image: decoded, delay: delay})
+		}
+		return frames
+	}
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".gif" {
 		return decodeGIFFrames(path)
@@ -19436,6 +19881,13 @@ func decodeGIFFrames(path string) []decodedImageFrame {
 	defer f.Close()
 	g, err := gif.DecodeAll(f)
 	if err != nil || len(g.Image) == 0 {
+		return nil
+	}
+	return decodeGIFAnimation(g)
+}
+
+func decodeGIFAnimation(g *gif.GIF) []decodedImageFrame {
+	if g == nil || len(g.Image) == 0 {
 		return nil
 	}
 	bounds := image.Rect(0, 0, g.Config.Width, g.Config.Height)

@@ -6,8 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,7 +17,10 @@ import (
 type nativeEditorSession struct {
 	mu            sync.RWMutex
 	deck          Deck
+	savedDeck     Deck
 	deckPath      string
+	untitled      bool
+	dirtyOverride bool
 	current       int
 	selected      int
 	selection     map[int]bool
@@ -42,32 +44,19 @@ func (s *nativeEditorSession) handleUpload(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	defer file.Close()
-	ext := strings.ToLower(filepath.Ext(filepath.Base(header.Filename)))
-	if ext == "" || len(ext) > 10 {
-		http.Error(w, "unsupported image filename", http.StatusBadRequest)
-		return
-	}
-	name := filepath.Base(header.Filename)
-	stem := strings.TrimSuffix(name, filepath.Ext(name))
-	destination := filepath.Join(filepath.Dir(s.deckPath), name)
-	for suffix := 2; fileExists(destination); suffix++ {
-		destination = filepath.Join(filepath.Dir(s.deckPath), fmt.Sprintf("%s-%d%s", stem, suffix, ext))
-	}
-	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	_ = header
+	data, err := io.ReadAll(file)
 	if err != nil {
-		http.Error(w, "could not create image", http.StatusInternalServerError)
+		http.Error(w, "could not read image", http.StatusBadRequest)
 		return
 	}
-	_, copyErr := io.Copy(output, file)
-	closeErr := output.Close()
-	if copyErr != nil || closeErr != nil {
-		_ = os.Remove(destination)
-		http.Error(w, "could not store image", http.StatusInternalServerError)
+	id, asset, path, err := embeddedImageAsset(data)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	element := Element{Kind: "image", Path: destination}
-	if err := s.apply(nativeEditorAction{Action: "add-element", Kind: "image", ElementData: &element}); err != nil {
-		_ = os.Remove(destination)
+	element := Element{Kind: "image", Path: path, AssetID: id}
+	if err := s.apply(nativeEditorAction{Action: "add-element", Kind: "image", ElementData: &element, AssetData: &asset}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -85,29 +74,33 @@ type nativeEditorState struct {
 	Resolved   []Slide    `json:"resolved"`
 	Masters    MasterDeck `json:"masters"`
 	MasterMode bool       `json:"masterMode,omitempty"`
+	Dirty      bool       `json:"dirty"`
+	Untitled   bool       `json:"untitled"`
 }
 
 type nativeEditorAction struct {
-	Action         string    `json:"action"`
-	Slide          int       `json:"slide,omitempty"`
-	Page           int       `json:"page,omitempty"`
-	Value          int       `json:"value,omitempty"`
-	Cols           int       `json:"cols,omitempty"`
-	Rows           int       `json:"rows,omitempty"`
-	BoxWidth       int       `json:"boxWidth,omitempty"`
-	BoxHeight      int       `json:"boxHeight,omitempty"`
-	Element        int       `json:"element,omitempty"`
-	Cursor         int       `json:"cursor,omitempty"`
-	SelectionStart int       `json:"selectionStart,omitempty"`
-	SelectionEnd   int       `json:"selectionEnd,omitempty"`
-	Kind           string    `json:"kind,omitempty"`
-	Level          int       `json:"level,omitempty"`
-	Name           string    `json:"name,omitempty"`
-	Notes          string    `json:"notes,omitempty"`
-	ElementData    *Element  `json:"elementData,omitempty"`
-	ElementIndices []int     `json:"elementIndices,omitempty"`
-	ElementsData   []Element `json:"elementsData,omitempty"`
-	SlideData      *Slide    `json:"slideData,omitempty"`
+	Action         string     `json:"action"`
+	Slide          int        `json:"slide,omitempty"`
+	Page           int        `json:"page,omitempty"`
+	Value          int        `json:"value,omitempty"`
+	Cols           int        `json:"cols,omitempty"`
+	Rows           int        `json:"rows,omitempty"`
+	BoxWidth       int        `json:"boxWidth,omitempty"`
+	BoxHeight      int        `json:"boxHeight,omitempty"`
+	Element        int        `json:"element,omitempty"`
+	Cursor         int        `json:"cursor,omitempty"`
+	SelectionStart int        `json:"selectionStart,omitempty"`
+	SelectionEnd   int        `json:"selectionEnd,omitempty"`
+	Kind           string     `json:"kind,omitempty"`
+	Level          int        `json:"level,omitempty"`
+	Name           string     `json:"name,omitempty"`
+	Path           string     `json:"path,omitempty"`
+	Notes          string     `json:"notes,omitempty"`
+	ElementData    *Element   `json:"elementData,omitempty"`
+	ElementIndices []int      `json:"elementIndices,omitempty"`
+	ElementsData   []Element  `json:"elementsData,omitempty"`
+	SlideData      *Slide     `json:"slideData,omitempty"`
+	AssetData      *DeckAsset `json:"assetData,omitempty"`
 }
 
 type nativeEditorCaret struct {
@@ -606,12 +599,21 @@ func (s *nativeEditorSession) handlePreview(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		target.Elements[action.Element] = *action.ElementData
+		frozenImage := action.Name == "frozen-image" && target.Elements[action.Element].Kind == "image"
+		if frozenImage {
+			target.Elements[action.Element].Query = setQueryValue(target.Elements[action.Element].Query, "keynope_freeze", "1")
+		}
 		cols, rows := action.Cols, action.Rows
 		if cols <= 0 || rows <= 0 {
 			cols, rows = authoredRenderSize(authoredTerminalWidth, authoredTerminalHeight)
 		}
 		preview := masterViewPreview(deck.Masters, currentMaster)
-		pages := exportSlidePages(preview, currentMaster, len(deck.Masters.Layouts)+1, cols, rows)
+		var pages []exportPage
+		if frozenImage {
+			pages = exportSlidePagesFrozen(preview, currentMaster, len(deck.Masters.Layouts)+1, cols, rows)
+		} else {
+			pages = exportSlidePages(preview, currentMaster, len(deck.Masters.Layouts)+1, cols, rows)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		writeNativeEditorPreview(w, action, preview, pages, cols, rows)
 		return
@@ -621,13 +623,22 @@ func (s *nativeEditorSession) handlePreview(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	deck.Slides[current].Elements[action.Element] = *action.ElementData
+	frozenImage := action.Name == "frozen-image" && deck.Slides[current].Elements[action.Element].Kind == "image"
+	if frozenImage {
+		deck.Slides[current].Elements[action.Element].Query = setQueryValue(deck.Slides[current].Elements[action.Element].Query, "keynope_freeze", "1")
+	}
 	resolved := deck.ResolvedSlides()
 	cols, rows := action.Cols, action.Rows
 	if cols <= 0 || rows <= 0 {
 		cols, rows = authoredRenderSize(authoredTerminalWidth, authoredTerminalHeight)
 	}
 	preview := resolved[current]
-	pages := exportSlidePages(preview, current, len(resolved), cols, rows)
+	var pages []exportPage
+	if frozenImage {
+		pages = exportSlidePagesFrozen(preview, current, len(resolved), cols, rows)
+	} else {
+		pages = exportSlidePages(preview, current, len(resolved), cols, rows)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	writeNativeEditorPreview(w, action, preview, pages, cols, rows)
 }
@@ -772,8 +783,17 @@ func (s *nativeEditorSession) handleWorkspace(w http.ResponseWriter, r *http.Req
 	_ = json.NewEncoder(w).Encode(pages)
 }
 
-func newNativeEditorSession(deckPath string, deck Deck) *nativeEditorSession {
-	return &nativeEditorSession{deck: deck, deckPath: deckPath, selected: -1, selection: map[int]bool{}, version: 1}
+func newNativeEditorSession(deckPath string, deck Deck, options ...bool) *nativeEditorSession {
+	isUntitled := len(options) > 0 && options[0]
+	dirtyOverride := len(options) > 1 && options[1]
+	return &nativeEditorSession{
+		deck: cloneDeck(deck), savedDeck: cloneDeck(deck), deckPath: deckPath, untitled: isUntitled, dirtyOverride: dirtyOverride,
+		selected: -1, selection: map[int]bool{}, version: 1,
+	}
+}
+
+func (s *nativeEditorSession) dirtyLocked() bool {
+	return s.untitled || s.dirtyOverride || !reflect.DeepEqual(s.deck, s.savedDeck)
 }
 
 func (s *nativeEditorSession) state() nativeEditorState {
@@ -797,7 +817,81 @@ func (s *nativeEditorSession) state() nativeEditorState {
 	return nativeEditorState{
 		Version: s.version, Path: s.deckPath, Current: current, Selected: s.selected, MasterMode: s.masterMode,
 		Selection: selection, Slides: slides, Resolved: resolved, Masters: s.deck.Masters,
+		Dirty: s.dirtyLocked(), Untitled: s.untitled,
 	}
+}
+
+type nativeEditorDocumentRequest struct {
+	Path string `json:"path"`
+}
+
+type nativeEditorDocument struct {
+	Content string `json:"content"`
+	Version int64  `json:"version"`
+}
+
+type nativeEditorExportRequest struct {
+	Path     string `json:"path"`
+	Existing string `json:"existing,omitempty"`
+}
+
+func (s *nativeEditorSession) handleDocument(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var request nativeEditorDocumentRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&request); err != nil || strings.TrimSpace(request.Path) == "" {
+		http.Error(w, "invalid save destination", http.StatusBadRequest)
+		return
+	}
+	s.mu.RLock()
+	deck, version := cloneDeck(s.deck), s.version
+	s.mu.RUnlock()
+	data, err := serializeDeck(request.Path, deck)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(nativeEditorDocument{Content: string(data), Version: version})
+}
+
+func (s *nativeEditorSession) handleExportDocument(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var request nativeEditorExportRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 12<<20)).Decode(&request); err != nil || strings.TrimSpace(request.Path) == "" {
+		http.Error(w, "invalid export destination", http.StatusBadRequest)
+		return
+	}
+	s.mu.RLock()
+	deck, sourcePath := cloneDeck(s.deck), s.deckPath
+	s.mu.RUnlock()
+	width, height := authoredRenderSize(80, 25)
+	content, err := exportHTMLDocument(sourcePath, deck.ResolvedSlides(), width, height, preservedExportHeadFromHTML(request.Existing), false)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"content": content})
+}
+
+func (s *nativeEditorSession) confirmSaved(path string, version int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if version != s.version {
+		return false
+	}
+	s.deckPath = path
+	s.savedDeck = cloneDeck(s.deck)
+	s.untitled = false
+	s.dirtyOverride = false
+	s.version++
+	return true
 }
 
 func (s *nativeEditorSession) handleState(w http.ResponseWriter, r *http.Request) {
@@ -829,12 +923,24 @@ func (s *nativeEditorSession) handleAction(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *nativeEditorSession) apply(action nativeEditorAction) error {
+	if action.Action == "confirm-save" {
+		if strings.TrimSpace(action.Path) == "" || !s.confirmSaved(action.Path, int64(action.Value)) {
+			return errInvalidEditorAction
+		}
+		return nil
+	}
 	if action.Action == "toggle-master-mode" || s.masterMode {
 		return s.applyMaster(action)
 	}
 	s.mu.Lock()
 	changed := false
 	presenterPage := 0
+	if s.companion != nil {
+		presenterSlide, page := s.companion.Position()
+		if presenterSlide == s.current {
+			presenterPage = page
+		}
+	}
 	before := Deck{}
 	if action.Action != "select-slide" && action.Action != "select-element" {
 		before = cloneDeck(s.deck)
@@ -847,6 +953,7 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			return errInvalidEditorAction
 		}
 		s.current, s.selected = action.Slide, -1
+		presenterPage = 0
 		s.selection = map[int]bool{}
 	case "select-element":
 		if action.Element < -1 || s.current < 0 || s.current >= slideCount || action.Element >= len(s.deck.Slides[s.current].Elements) {
@@ -885,10 +992,12 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.current = max(0, s.current-1)
 		s.selected = -1
 		s.selection = map[int]bool{}
+		presenterPage = 0
 	case "next-slide":
 		s.current = min(slideCount-1, s.current+1)
 		s.selected = -1
 		s.selection = map[int]bool{}
+		presenterPage = 0
 	case "add-slide":
 		insert := min(slideCount, s.current+1)
 		s.deck.Slides = append(s.deck.Slides, Slide{})
@@ -953,6 +1062,12 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			return errInvalidEditorAction
 		}
 		s.selected = insertElementAfter(&s.deck.Slides[s.current], s.selected, element)
+		if element.AssetID != "" && action.AssetData != nil {
+			if s.deck.Assets == nil {
+				s.deck.Assets = map[string]DeckAsset{}
+			}
+			s.deck.Assets[element.AssetID] = *action.AssetData
+		}
 		if element.Kind == "image" && action.ElementData != nil {
 			initializeInsertedImagePlacement(&s.deck.Slides[s.current], s.selected)
 		}
@@ -1175,11 +1290,6 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			}
 		}
 		changed = true
-	case "export":
-		resolved := s.deck.ResolvedSlides()
-		width, height := authoredRenderSize(80, 25)
-		s.mu.Unlock()
-		return exportHTML(s.deckPath, resolved, width, height)
 	case "undo":
 		s.selected = -1
 		s.selection = map[int]bool{}
@@ -1218,12 +1328,6 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 	deck := cloneDeck(s.deck)
 	current := s.current
 	companion := s.companion
-	if changed {
-		if err := saveDeck(s.deckPath, s.deck); err != nil {
-			s.mu.Unlock()
-			return fmt.Errorf("save presentation: %w", err)
-		}
-	}
 	s.mu.Unlock()
 	if companion != nil {
 		resolved := deck.ResolvedSlides()
@@ -1417,6 +1521,12 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			return errInvalidEditorAction
 		}
 		s.selected = insertElementAfter(target, s.selected, element)
+		if element.AssetID != "" && action.AssetData != nil {
+			if s.deck.Assets == nil {
+				s.deck.Assets = map[string]DeckAsset{}
+			}
+			s.deck.Assets[element.AssetID] = *action.AssetData
+		}
 		if element.Kind == "image" && action.ElementData != nil {
 			initializeInsertedImagePlacement(target, s.selected)
 		}
@@ -1619,12 +1729,6 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 	s.version++
 	deck := cloneDeck(s.deck)
 	companion := s.companion
-	if changed {
-		if err := saveDeck(s.deckPath, s.deck); err != nil {
-			s.mu.Unlock()
-			return fmt.Errorf("save presentation: %w", err)
-		}
-	}
 	s.mu.Unlock()
 	if changed && companion != nil {
 		companion.RefreshAllAsync(s.deckPath, deck.ResolvedSlides(), authoredTerminalWidth, authoredTerminalHeight)

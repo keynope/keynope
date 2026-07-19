@@ -60,6 +60,7 @@ $(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE
 	cp $(KEYNOPE_APP_WELCOME) $(KEYNOPE_APP)/Contents/Resources/Welcome.md
 	@mkdir -p $(KEYNOPE_APP)/Contents/Resources/EmojiLicenses
 	cp assets/emoji/OFL.txt assets/emoji/NOTICE.txt assets/emoji/*-LICENSE.txt $(KEYNOPE_APP)/Contents/Resources/EmojiLicenses/
+	cp LICENSE.txt $(KEYNOPE_APP)/Contents/Resources/EmojiLicenses/Keynope-LICENSE.txt
 	$(GO) build -o $(KEYNOPE_APP_ENGINE) .
 	$(SWIFTC) $(SWIFTFLAGS) -target $(SWIFT_TARGET) -O $(PRESENTER_FRAMEWORKS) $(PRESENTER_SRC) -o $(KEYNOPE_APP_EXECUTABLE)
 	$(CODESIGN) --force --options runtime --identifier sh.keynope.app.engine --entitlements $(KEYNOPE_APP_ENGINE_ENTITLEMENTS) --sign "$(CODESIGN_IDENTITY)" $(KEYNOPE_APP_ENGINE)
