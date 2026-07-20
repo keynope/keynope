@@ -27,6 +27,7 @@ KEYNOPE_APP_PRIVACY := app/PrivacyInfo.xcprivacy
 KEYNOPE_APP_WELCOME := app/Welcome.md
 KEYNOPE_APP_ICON := assets/KeynopeApp.icon
 KEYNOPE_APP_ICON_FILES := $(shell find $(KEYNOPE_APP_ICON) -type f)
+KEYNOPE_APP_ICON_FALLBACK := assets/KeynopeApp.icns
 KEYNOPE_APP_ICON_INFO := $(BIN_DIR)/KeynopeAppIconInfo.plist
 KEYNOPE_EMOJI_ASSETS := assets/emoji/keynope-emoji-glyphs.bin.gz assets/emoji/emoji-test.txt assets/emoji/OFL.txt assets/emoji/NOTICE.txt assets/emoji/NOTO-REGION-FLAGS-LICENSE.txt assets/emoji/UNICODE-LICENSE.txt
 KEYNOPE_VERSION := $(shell awk '/^\#\# [0-9]/{print $$2; exit}' CHANGELOG.md)
@@ -49,12 +50,13 @@ presenter: $(PRESENTER_SIGNATURE)
 
 app: $(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources
 
-$(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE_APP_INFO) $(KEYNOPE_APP_ENTITLEMENTS) $(KEYNOPE_APP_ENGINE_ENTITLEMENTS) $(KEYNOPE_APP_PRIVACY) $(KEYNOPE_APP_WELCOME) $(KEYNOPE_APP_ICON_FILES) $(PRESENTER_ICON) $(KEYNOPE_EMOJI_ASSETS) $(GO_SRC) sandbox_bridge_darwin.m go.mod go.sum CHANGELOG.md LICENSE.txt
+$(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE_APP_INFO) $(KEYNOPE_APP_ENTITLEMENTS) $(KEYNOPE_APP_ENGINE_ENTITLEMENTS) $(KEYNOPE_APP_PRIVACY) $(KEYNOPE_APP_WELCOME) $(KEYNOPE_APP_ICON_FILES) $(KEYNOPE_APP_ICON_FALLBACK) $(PRESENTER_ICON) $(KEYNOPE_EMOJI_ASSETS) $(GO_SRC) sandbox_bridge_darwin.m go.mod go.sum CHANGELOG.md LICENSE.txt
 	rm -rf $(KEYNOPE_APP)
 	@mkdir -p $(KEYNOPE_APP)/Contents/MacOS $(KEYNOPE_APP)/Contents/Helpers $(KEYNOPE_APP)/Contents/Resources
 	cp $(KEYNOPE_APP_INFO) $(KEYNOPE_APP)/Contents/Info.plist
 	$(PLUTIL) -replace CFBundleShortVersionString -string "$(KEYNOPE_VERSION)" $(KEYNOPE_APP)/Contents/Info.plist
 	$(ACTOOL) $(KEYNOPE_APP_ICON) --compile $(KEYNOPE_APP)/Contents/Resources --platform macosx --minimum-deployment-target $(MACOSX_DEPLOYMENT_TARGET) --app-icon KeynopeApp --output-partial-info-plist $(KEYNOPE_APP_ICON_INFO)
+	cp $(KEYNOPE_APP_ICON_FALLBACK) $(KEYNOPE_APP)/Contents/Resources/KeynopeApp.icns
 	cp $(PRESENTER_ICON) $(KEYNOPE_APP)/Contents/Resources/KeynopeMenuTemplate.png
 	cp $(KEYNOPE_APP_PRIVACY) $(KEYNOPE_APP)/Contents/Resources/PrivacyInfo.xcprivacy
 	cp $(KEYNOPE_APP_WELCOME) $(KEYNOPE_APP)/Contents/Resources/Welcome.md
