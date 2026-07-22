@@ -234,10 +234,10 @@ jobs:
 
           codesign --verify --deep --strict --verbose=4 dist/Keynope.app
           codesign -d --entitlements :- dist/Keynope.app > "$RUNNER_TEMP/signed-entitlements.plist"
-          test "$(plutil -extract com.apple.security.app-sandbox raw -o - "$RUNNER_TEMP/signed-entitlements.plist")" = "true"
-          test "$(plutil -extract com.apple.application-identifier raw -o - "$RUNNER_TEMP/signed-entitlements.plist")" = "${{ vars.APPLE_TEAM_ID }}.${{ vars.APP_BUNDLE_ID }}"
-          test "$(plutil -extract com.apple.developer.team-identifier raw -o - "$RUNNER_TEMP/signed-entitlements.plist")" = "${{ vars.APPLE_TEAM_ID }}"
-          if plutil -extract com.apple.security.get-task-allow raw -o - "$RUNNER_TEMP/signed-entitlements.plist" 2>/dev/null; then
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' "$RUNNER_TEMP/signed-entitlements.plist")" = "true"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.application-identifier' "$RUNNER_TEMP/signed-entitlements.plist")" = "${{ vars.APPLE_TEAM_ID }}.${{ vars.APP_BUNDLE_ID }}"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.team-identifier' "$RUNNER_TEMP/signed-entitlements.plist")" = "${{ vars.APPLE_TEAM_ID }}"
+          if /usr/libexec/PlistBuddy -c 'Print :com.apple.security.get-task-allow' "$RUNNER_TEMP/signed-entitlements.plist" >/dev/null 2>&1; then
             echo "Distribution app must not contain get-task-allow" >&2
             exit 1
           fi
