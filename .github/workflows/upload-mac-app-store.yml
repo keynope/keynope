@@ -199,6 +199,7 @@ jobs:
           fi
 
           cp "$profile" dist/Keynope.app/Contents/embedded.provisionprofile
+          chmod 644 dist/Keynope.app/Contents/embedded.provisionprofile
           cp app/Keynope.entitlements "$RUNNER_TEMP/KeynopeAppStore.entitlements"
           /usr/libexec/PlistBuddy \
             -c "Add :com.apple.application-identifier string $profile_app_id" \
@@ -245,6 +246,15 @@ jobs:
       - name: Build And Validate Installer Package
         shell: bash
         run: |
+          bad_permissions="$(find dist/Keynope.app \
+            \( -type f ! -perm -004 -o -type d ! -perm -001 \) \
+            -print)"
+          if [[ -n "$bad_permissions" ]]; then
+            echo "App bundle contains paths inaccessible to non-root users:" >&2
+            printf '%s\n' "$bad_permissions" >&2
+            exit 1
+          fi
+
           version="$(plutil -extract CFBundleShortVersionString raw -o - dist/Keynope.app/Contents/Info.plist)"
           package="dist/Keynope-${version}-Mac-App-Store.pkg"
           productbuild \
