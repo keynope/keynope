@@ -1,0 +1,311 @@
+name: Upload Mac App Store Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-app-store-upload
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build App Store App (${{ matrix.arch }})
+    if: github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            arch: arm64
+          - os: macos-15-intel
+            arch: x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Resolve Version And Build Number
+        shell: bash
+        run: |
+          heading_pattern='^[[:space:]]*##[[:space:]]+v?([0-9]+\.[0-9]+\.[0-9]+)([[:space:]]|$)'
+          version=""
+
+          while IFS= read -r line; do
+            if [[ "$line" =~ $heading_pattern ]]; then
+              version="${BASH_REMATCH[1]}"
+              break
+            fi
+          done < CHANGELOG.md
+
+          if [[ -z "$version" ]]; then
+            echo "Could not find semantic version heading in CHANGELOG.md" >&2
+            exit 1
+          fi
+
+          build_number="${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          plutil -replace CFBundleShortVersionString -string "$version" app/Info.plist
+          plutil -replace CFBundleVersion -string "$build_number" app/Info.plist
+          echo "APP_VERSION=$version" >> "$GITHUB_ENV"
+          echo "Building Keynope $version ($build_number)"
+
+      - name: Test
+        run: make test
+
+      - name: Build App
+        run: make app
+
+      - name: Verify Architecture And Bundle
+        shell: bash
+        run: |
+          test "$(lipo -archs bin/Keynope.app/Contents/MacOS/Keynope)" = "${{ matrix.arch }}"
+          test "$(lipo -archs bin/Keynope.app/Contents/Helpers/keynope-engine)" = "${{ matrix.arch }}"
+          test "$(plutil -extract CFBundleIdentifier raw -o - bin/Keynope.app/Contents/Info.plist)" = "sh.keynope.app"
+          test "$(plutil -extract CFBundleShortVersionString raw -o - bin/Keynope.app/Contents/Info.plist)" = "$APP_VERSION"
+          test "$(plutil -extract ITSAppUsesNonExemptEncryption raw -o - bin/Keynope.app/Contents/Info.plist)" = "false"
+          test -s bin/Keynope.app/Contents/Resources/KeynopeApp.icns
+
+      - name: Package Architecture
+        shell: bash
+        run: |
+          ditto -c -k --keepParent bin/Keynope.app "$RUNNER_TEMP/keynope-app-${{ matrix.arch }}.zip"
+
+      - name: Upload Architecture
+        uses: actions/upload-artifact@v7
+        with:
+          name: keynope-app-${{ matrix.arch }}
+          path: ${{ runner.temp }}/keynope-app-${{ matrix.arch }}.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  upload:
+    name: Sign, Package And Upload
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    environment: app-store
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download Architectures
+        uses: actions/download-artifact@v7
+        with:
+          pattern: keynope-app-*
+          path: artifacts
+
+      - name: Assemble Universal App
+        shell: bash
+        run: |
+          mkdir -p staging/arm64 staging/x86_64 dist
+          ditto -x -k artifacts/keynope-app-arm64/keynope-app-arm64.zip staging/arm64
+          ditto -x -k artifacts/keynope-app-x86_64/keynope-app-x86_64.zip staging/x86_64
+
+          cmp \
+            staging/arm64/Keynope.app/Contents/Info.plist \
+            staging/x86_64/Keynope.app/Contents/Info.plist
+
+          ditto staging/arm64/Keynope.app dist/Keynope.app
+          rm -rf dist/Keynope.app/Contents/_CodeSignature
+
+          lipo -create \
+            staging/arm64/Keynope.app/Contents/MacOS/Keynope \
+            staging/x86_64/Keynope.app/Contents/MacOS/Keynope \
+            -output dist/Keynope.app/Contents/MacOS/Keynope
+          lipo -create \
+            staging/arm64/Keynope.app/Contents/Helpers/keynope-engine \
+            staging/x86_64/Keynope.app/Contents/Helpers/keynope-engine \
+            -output dist/Keynope.app/Contents/Helpers/keynope-engine
+
+          lipo -verify_arch arm64 x86_64 dist/Keynope.app/Contents/MacOS/Keynope
+          lipo -verify_arch arm64 x86_64 dist/Keynope.app/Contents/Helpers/keynope-engine
+
+      - name: Import App Store Signing Material
+        shell: bash
+        env:
+          MAC_APP_DISTRIBUTION_P12: ${{ secrets.MAC_APP_DISTRIBUTION_P12 }}
+          MAC_APP_DISTRIBUTION_PASSWORD: ${{ secrets.MAC_APP_DISTRIBUTION_PASSWORD }}
+          MAC_INSTALLER_DISTRIBUTION_P12: ${{ secrets.MAC_INSTALLER_DISTRIBUTION_P12 }}
+          MAC_INSTALLER_DISTRIBUTION_PASSWORD: ${{ secrets.MAC_INSTALLER_DISTRIBUTION_PASSWORD }}
+          MAC_APP_STORE_PROVISIONING_PROFILE: ${{ secrets.MAC_APP_STORE_PROVISIONING_PROFILE }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: |
+          app_certificate="$RUNNER_TEMP/keynope-mac-app-distribution.p12"
+          installer_certificate="$RUNNER_TEMP/keynope-mac-installer-distribution.p12"
+          profile="$RUNNER_TEMP/Keynope.provisionprofile"
+          api_key_dir="$HOME/.appstoreconnect/private_keys"
+          api_key="$api_key_dir/AuthKey_${APPLE_API_KEY_ID}.p8"
+          keychain="$RUNNER_TEMP/keynope-app-store.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+
+          printf '%s' "$MAC_APP_DISTRIBUTION_P12" | /usr/bin/base64 -D > "$app_certificate"
+          printf '%s' "$MAC_INSTALLER_DISTRIBUTION_P12" | /usr/bin/base64 -D > "$installer_certificate"
+          printf '%s' "$MAC_APP_STORE_PROVISIONING_PROFILE" | /usr/bin/base64 -D > "$profile"
+          mkdir -p "$api_key_dir"
+          printf '%s' "$APPLE_API_KEY_P8" | /usr/bin/base64 -D > "$api_key"
+          chmod 600 "$app_certificate" "$installer_certificate" "$profile" "$api_key"
+
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$app_certificate" \
+            -k "$keychain" \
+            -P "$MAC_APP_DISTRIBUTION_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/productbuild \
+            -T /usr/bin/security
+          security import "$installer_certificate" \
+            -k "$keychain" \
+            -P "$MAC_INSTALLER_DISTRIBUTION_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/productbuild \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain" >/dev/null
+          security list-keychains -d user -s \
+            "$keychain" \
+            /System/Library/Keychains/SystemRootCertificates.keychain
+
+          code_signing_identities="$(security find-identity -v -p codesigning "$keychain" || true)"
+          basic_identities="$(security find-identity -v -p basic "$keychain" || true)"
+          app_identity="$(awk -F '"' '/3rd Party Mac Developer Application|Apple Distribution/ { print $2; exit }' <<< "$code_signing_identities")"
+          installer_identity="$(awk -F '"' '/3rd Party Mac Developer Installer/ { print $2; exit }' <<< "$basic_identities")"
+          if [[ -z "$app_identity" || -z "$installer_identity" ]]; then
+            echo "Expected Mac App Store application and installer identities" >&2
+            printf '%s\n' "$code_signing_identities" "$basic_identities" >&2
+            exit 1
+          fi
+
+          security cms -D -i "$profile" -o "$RUNNER_TEMP/profile.plist"
+          profile_app_id="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.application-identifier' "$RUNNER_TEMP/profile.plist")"
+          profile_team_id="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.team-identifier' "$RUNNER_TEMP/profile.plist")"
+          profile_expiration="$(plutil -extract ExpirationDate raw -o - "$RUNNER_TEMP/profile.plist")"
+          test "$profile_app_id" = "${{ vars.APPLE_TEAM_ID }}.${{ vars.APP_BUNDLE_ID }}"
+          test "$profile_team_id" = "${{ vars.APPLE_TEAM_ID }}"
+          if [[ "$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "$profile_expiration" '+%s')" -le "$(date '+%s')" ]]; then
+            echo "Mac App Store provisioning profile has expired" >&2
+            exit 1
+          fi
+
+          cp "$profile" dist/Keynope.app/Contents/embedded.provisionprofile
+          cp app/Keynope.entitlements "$RUNNER_TEMP/KeynopeAppStore.entitlements"
+          /usr/libexec/PlistBuddy \
+            -c "Add :com.apple.application-identifier string $profile_app_id" \
+            -c "Add :com.apple.developer.team-identifier string $profile_team_id" \
+            "$RUNNER_TEMP/KeynopeAppStore.entitlements"
+
+          echo "APP_SIGNING_IDENTITY=$app_identity" >> "$GITHUB_ENV"
+          echo "INSTALLER_SIGNING_IDENTITY=$installer_identity" >> "$GITHUB_ENV"
+          echo "APP_STORE_ENTITLEMENTS=$RUNNER_TEMP/KeynopeAppStore.entitlements" >> "$GITHUB_ENV"
+          echo "APP_STORE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          echo "APP_STORE_API_KEY=$api_key" >> "$GITHUB_ENV"
+
+      - name: Sign Universal App
+        shell: bash
+        run: |
+          codesign \
+            --force \
+            --options runtime \
+            --timestamp \
+            --keychain "$APP_STORE_KEYCHAIN" \
+            --identifier sh.keynope.app.engine \
+            --entitlements app/KeynopeEngine.entitlements \
+            --sign "$APP_SIGNING_IDENTITY" \
+            dist/Keynope.app/Contents/Helpers/keynope-engine
+
+          codesign \
+            --force \
+            --options runtime \
+            --timestamp \
+            --keychain "$APP_STORE_KEYCHAIN" \
+            --entitlements "$APP_STORE_ENTITLEMENTS" \
+            --sign "$APP_SIGNING_IDENTITY" \
+            dist/Keynope.app
+
+          codesign --verify --deep --strict --verbose=4 dist/Keynope.app
+          test "$(codesign -d --verbose=4 dist/Keynope.app 2>&1 | sed -n 's/^TeamIdentifier=//p')" = "${{ vars.APPLE_TEAM_ID }}"
+          codesign -d --entitlements "$RUNNER_TEMP/signed-entitlements.plist" dist/Keynope.app
+          test "$(plutil -extract com.apple.security.app-sandbox raw -o - "$RUNNER_TEMP/signed-entitlements.plist")" = "true"
+          test "$(plutil -extract com.apple.application-identifier raw -o - "$RUNNER_TEMP/signed-entitlements.plist")" = "${{ vars.APPLE_TEAM_ID }}.${{ vars.APP_BUNDLE_ID }}"
+          if plutil -extract com.apple.security.get-task-allow raw -o - "$RUNNER_TEMP/signed-entitlements.plist" 2>/dev/null; then
+            echo "Distribution app must not contain get-task-allow" >&2
+            exit 1
+          fi
+
+      - name: Build And Validate Installer Package
+        shell: bash
+        run: |
+          version="$(plutil -extract CFBundleShortVersionString raw -o - dist/Keynope.app/Contents/Info.plist)"
+          package="dist/Keynope-${version}-Mac-App-Store.pkg"
+          productbuild \
+            --component dist/Keynope.app /Applications \
+            --sign "$INSTALLER_SIGNING_IDENTITY" \
+            --keychain "$APP_STORE_KEYCHAIN" \
+            "$package"
+          pkgutil --check-signature "$package"
+          echo "APP_STORE_PACKAGE=$package" >> "$GITHUB_ENV"
+
+      - name: Upload Installer Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: keynope-mac-app-store-pkg
+          path: dist/*.pkg
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Validate With App Store Connect
+        shell: bash
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          xcrun altool \
+            --validate-app \
+            --type macos \
+            --file "$APP_STORE_PACKAGE" \
+            --apiKey "$APPLE_API_KEY_ID" \
+            --apiIssuer "$APPLE_API_ISSUER_ID"
+
+      - name: Upload To App Store Connect
+        shell: bash
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          xcrun altool \
+            --upload-app \
+            --type macos \
+            --file "$APP_STORE_PACKAGE" \
+            --apiKey "$APPLE_API_KEY_ID" \
+            --apiIssuer "$APPLE_API_ISSUER_ID"
+
+      - name: Remove Signing Material
+        if: always()
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/keynope-app-store.keychain-db" 2>/dev/null || true
+          rm -f \
+            "$RUNNER_TEMP/keynope-mac-app-distribution.p12" \
+            "$RUNNER_TEMP/keynope-mac-installer-distribution.p12" \
+            "$RUNNER_TEMP/Keynope.provisionprofile" \
+            "$RUNNER_TEMP/profile.plist" \
+            "$RUNNER_TEMP/KeynopeAppStore.entitlements" \
+            "$RUNNER_TEMP/signed-entitlements.plist" \
+            "$HOME/.appstoreconnect/private_keys"/AuthKey_*.p8

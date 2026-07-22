@@ -28,6 +28,8 @@
 	<string>public.app-category.productivity</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>NSHumanReadableCopyright</key>
 	<string>(c) 2026 Dennis Vink</string>
 	<key>NSScreenCaptureUsageDescription</key>
