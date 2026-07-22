@@ -130,8 +130,8 @@ jobs:
             staging/x86_64/Keynope.app/Contents/Helpers/keynope-engine \
             -output dist/Keynope.app/Contents/Helpers/keynope-engine
 
-          lipo -verify_arch arm64 x86_64 dist/Keynope.app/Contents/MacOS/Keynope
-          lipo -verify_arch arm64 x86_64 dist/Keynope.app/Contents/Helpers/keynope-engine
+          lipo dist/Keynope.app/Contents/MacOS/Keynope -verify_arch arm64 x86_64
+          lipo dist/Keynope.app/Contents/Helpers/keynope-engine -verify_arch arm64 x86_64
 
       - name: Import App Store Signing Material
         shell: bash
