@@ -89,8 +89,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  upload:
-    name: Sign, Package And Upload
+  package:
+    name: Sign And Package
     needs: build
     if: github.ref == 'refs/heads/main'
     environment: app-store
@@ -141,23 +141,17 @@ jobs:
           MAC_INSTALLER_DISTRIBUTION_P12: ${{ secrets.MAC_INSTALLER_DISTRIBUTION_P12 }}
           MAC_INSTALLER_DISTRIBUTION_PASSWORD: ${{ secrets.MAC_INSTALLER_DISTRIBUTION_PASSWORD }}
           MAC_APP_STORE_PROVISIONING_PROFILE: ${{ secrets.MAC_APP_STORE_PROVISIONING_PROFILE }}
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
         run: |
           app_certificate="$RUNNER_TEMP/keynope-mac-app-distribution.p12"
           installer_certificate="$RUNNER_TEMP/keynope-mac-installer-distribution.p12"
           profile="$RUNNER_TEMP/Keynope.provisionprofile"
-          api_key_dir="$HOME/.appstoreconnect/private_keys"
-          api_key="$api_key_dir/AuthKey_${APPLE_API_KEY_ID}.p8"
           keychain="$RUNNER_TEMP/keynope-app-store.keychain-db"
           keychain_password="$(openssl rand -hex 32)"
 
           printf '%s' "$MAC_APP_DISTRIBUTION_P12" | /usr/bin/base64 -D > "$app_certificate"
           printf '%s' "$MAC_INSTALLER_DISTRIBUTION_P12" | /usr/bin/base64 -D > "$installer_certificate"
           printf '%s' "$MAC_APP_STORE_PROVISIONING_PROFILE" | /usr/bin/base64 -D > "$profile"
-          mkdir -p "$api_key_dir"
-          printf '%s' "$APPLE_API_KEY_P8" | /usr/bin/base64 -D > "$api_key"
-          chmod 600 "$app_certificate" "$installer_certificate" "$profile" "$api_key"
+          chmod 600 "$app_certificate" "$installer_certificate" "$profile"
 
           security create-keychain -p "$keychain_password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
@@ -215,7 +209,6 @@ jobs:
           echo "INSTALLER_SIGNING_IDENTITY=$installer_identity" >> "$GITHUB_ENV"
           echo "APP_STORE_ENTITLEMENTS=$RUNNER_TEMP/KeynopeAppStore.entitlements" >> "$GITHUB_ENV"
           echo "APP_STORE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
-          echo "APP_STORE_API_KEY=$api_key" >> "$GITHUB_ENV"
 
       - name: Sign Universal App
         shell: bash
@@ -240,10 +233,10 @@ jobs:
             dist/Keynope.app
 
           codesign --verify --deep --strict --verbose=4 dist/Keynope.app
-          test "$(codesign -d --verbose=4 dist/Keynope.app 2>&1 | sed -n 's/^TeamIdentifier=//p')" = "${{ vars.APPLE_TEAM_ID }}"
           codesign -d --entitlements "$RUNNER_TEMP/signed-entitlements.plist" dist/Keynope.app
           test "$(plutil -extract com.apple.security.app-sandbox raw -o - "$RUNNER_TEMP/signed-entitlements.plist")" = "true"
           test "$(plutil -extract com.apple.application-identifier raw -o - "$RUNNER_TEMP/signed-entitlements.plist")" = "${{ vars.APPLE_TEAM_ID }}.${{ vars.APP_BUNDLE_ID }}"
+          test "$(plutil -extract com.apple.developer.team-identifier raw -o - "$RUNNER_TEMP/signed-entitlements.plist")" = "${{ vars.APPLE_TEAM_ID }}"
           if plutil -extract com.apple.security.get-task-allow raw -o - "$RUNNER_TEMP/signed-entitlements.plist" 2>/dev/null; then
             echo "Distribution app must not contain get-task-allow" >&2
             exit 1
@@ -269,6 +262,56 @@ jobs:
           path: dist/*.pkg
           if-no-files-found: error
           retention-days: 14
+
+      - name: Remove Signing Material
+        if: always()
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/keynope-app-store.keychain-db" 2>/dev/null || true
+          rm -f \
+            "$RUNNER_TEMP/keynope-mac-app-distribution.p12" \
+            "$RUNNER_TEMP/keynope-mac-installer-distribution.p12" \
+            "$RUNNER_TEMP/Keynope.provisionprofile" \
+            "$RUNNER_TEMP/profile.plist" \
+            "$RUNNER_TEMP/KeynopeAppStore.entitlements" \
+            "$RUNNER_TEMP/signed-entitlements.plist"
+
+  submit:
+    name: Validate And Upload To App Store Connect
+    needs: package
+    if: github.ref == 'refs/heads/main'
+    environment: release
+    runs-on: macos-14
+    timeout-minutes: 20
+
+    steps:
+      - name: Download Signed Installer
+        uses: actions/download-artifact@v7
+        with:
+          name: keynope-mac-app-store-pkg
+          path: dist
+
+      - name: Install App Store Connect API Key
+        shell: bash
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          test -n "$APPLE_API_KEY_P8"
+          test -n "$APPLE_API_KEY_ID"
+          test -n "$APPLE_API_ISSUER_ID"
+
+          api_key_dir="$HOME/.appstoreconnect/private_keys"
+          api_key="$api_key_dir/AuthKey_${APPLE_API_KEY_ID}.p8"
+          mkdir -p "$api_key_dir"
+          printf '%s' "$APPLE_API_KEY_P8" | /usr/bin/base64 -D > "$api_key"
+          chmod 600 "$api_key"
+          grep -q '^-----BEGIN PRIVATE KEY-----' "$api_key"
+
+          package="$(find dist -maxdepth 1 -type f -name '*.pkg' -print -quit)"
+          test -n "$package"
+          echo "APP_STORE_PACKAGE=$package" >> "$GITHUB_ENV"
 
       - name: Validate With App Store Connect
         shell: bash
@@ -296,16 +339,7 @@ jobs:
             --apiKey "$APPLE_API_KEY_ID" \
             --apiIssuer "$APPLE_API_ISSUER_ID"
 
-      - name: Remove Signing Material
+      - name: Remove App Store Connect API Key
         if: always()
         shell: bash
-        run: |
-          security delete-keychain "$RUNNER_TEMP/keynope-app-store.keychain-db" 2>/dev/null || true
-          rm -f \
-            "$RUNNER_TEMP/keynope-mac-app-distribution.p12" \
-            "$RUNNER_TEMP/keynope-mac-installer-distribution.p12" \
-            "$RUNNER_TEMP/Keynope.provisionprofile" \
-            "$RUNNER_TEMP/profile.plist" \
-            "$RUNNER_TEMP/KeynopeAppStore.entitlements" \
-            "$RUNNER_TEMP/signed-entitlements.plist" \
-            "$HOME/.appstoreconnect/private_keys"/AuthKey_*.p8
+        run: rm -f "$HOME/.appstoreconnect/private_keys"/AuthKey_*.p8
