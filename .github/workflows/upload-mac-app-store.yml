@@ -74,6 +74,8 @@ jobs:
           test "$(plutil -extract CFBundleIdentifier raw -o - bin/Keynope.app/Contents/Info.plist)" = "sh.keynope.app"
           test "$(plutil -extract CFBundleShortVersionString raw -o - bin/Keynope.app/Contents/Info.plist)" = "$APP_VERSION"
           test "$(plutil -extract ITSAppUsesNonExemptEncryption raw -o - bin/Keynope.app/Contents/Info.plist)" = "false"
+          test "$(plutil -extract CFBundleDocumentTypes.0.LSHandlerRank raw -o - bin/Keynope.app/Contents/Info.plist)" = "Alternate"
+          test -s bin/Keynope.app/Contents/Resources/Assets.car
           test -s bin/Keynope.app/Contents/Resources/KeynopeApp.icns
 
       - name: Package Architecture

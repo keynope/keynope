@@ -78,6 +78,7 @@ jobs:
           test "$(lipo -archs bin/KeynopePresenter.app/Contents/MacOS/KeynopePresenter)" = "${{ matrix.arch }}"
           test "$(lipo -archs bin/Keynope.app/Contents/MacOS/Keynope)" = "${{ matrix.arch }}"
           test "$(lipo -archs bin/Keynope.app/Contents/Helpers/keynope-engine)" = "${{ matrix.arch }}"
+          test -s bin/Keynope.app/Contents/Resources/Assets.car
           test -s bin/Keynope.app/Contents/Resources/KeynopeApp.icns
 
       - name: Package
@@ -208,6 +209,7 @@ jobs:
           test "$(lipo -archs bin/KeynopePresenter.app/Contents/MacOS/KeynopePresenter)" = "${{ matrix.arch }}"
           test "$(lipo -archs bin/Keynope.app/Contents/MacOS/Keynope)" = "${{ matrix.arch }}"
           test "$(lipo -archs bin/Keynope.app/Contents/Helpers/keynope-engine)" = "${{ matrix.arch }}"
+          test -s bin/Keynope.app/Contents/Resources/Assets.car
           test -s bin/Keynope.app/Contents/Resources/KeynopeApp.icns
 
       - name: Sign Distribution
@@ -326,6 +328,7 @@ jobs:
           codesign --verify --strict --verbose=4 "$verification_dir/$PACKAGE_NAME/keynope"
           codesign --verify --deep --strict --verbose=4 "$verification_dir/$PACKAGE_NAME/KeynopePresenter.app"
           codesign --verify --deep --strict --verbose=4 "$verification_dir/$PACKAGE_NAME/Keynope.app"
+          test -s "$verification_dir/$PACKAGE_NAME/Keynope.app/Contents/Resources/Assets.car"
           test -s "$verification_dir/$PACKAGE_NAME/Keynope.app/Contents/Resources/KeynopeApp.icns"
           xcrun stapler validate "$verification_dir/$PACKAGE_NAME/KeynopePresenter.app"
           xcrun stapler validate "$verification_dir/$PACKAGE_NAME/Keynope.app"
