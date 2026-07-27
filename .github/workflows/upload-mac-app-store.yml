@@ -240,6 +240,10 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' "$RUNNER_TEMP/signed-entitlements.plist")" = "true"
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.application-identifier' "$RUNNER_TEMP/signed-entitlements.plist")" = "${{ vars.APPLE_TEAM_ID }}.${{ vars.APP_BUNDLE_ID }}"
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.team-identifier' "$RUNNER_TEMP/signed-entitlements.plist")" = "${{ vars.APPLE_TEAM_ID }}"
+          if /usr/libexec/PlistBuddy -c 'Print :com.apple.security.files.downloads.read-write' "$RUNNER_TEMP/signed-entitlements.plist" >/dev/null 2>&1; then
+            echo "App Store build must not request unrestricted Downloads-folder access" >&2
+            exit 1
+          fi
           if /usr/libexec/PlistBuddy -c 'Print :com.apple.security.get-task-allow' "$RUNNER_TEMP/signed-entitlements.plist" >/dev/null 2>&1; then
             echo "Distribution app must not contain get-task-allow" >&2
             exit 1

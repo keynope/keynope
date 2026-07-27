@@ -4,6 +4,12 @@ All notable changes to `keynope` are documented in this file.
 
 This project follows semantic versioning.
 
+## 0.1.4
+
+Fixed:
+
+- Use user-selected file access for presentations in Downloads instead of requesting unrestricted Downloads-folder access.
+
 ## 0.1.3
 
 Fixed:

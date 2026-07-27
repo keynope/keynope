@@ -1619,7 +1619,7 @@ struct KeynopePresenterMain {
         if contains(deckURL, in: Bundle.main.bundleURL.standardizedFileURL) {
             return DeckAuthorization(path: deckURL.path, helperBookmark: nil)
         }
-        if try contains(deckURL, in: presentationsLibraryURL()) || contains(deckURL, in: downloadsDirectoryURL()) {
+        if try contains(deckURL, in: presentationsLibraryURL()) {
             stopAccessingDeckDirectory()
             return DeckAuthorization(path: deckURL.path, helperBookmark: nil)
         }
@@ -1744,10 +1744,6 @@ struct KeynopePresenterMain {
         let library = documents.appendingPathComponent("Keynope Presentations", isDirectory: true)
         try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
         return library
-    }
-
-    private static func downloadsDirectoryURL() -> URL {
-        FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
     }
 
     private static func contains(_ child: URL, in parent: URL) -> Bool {
