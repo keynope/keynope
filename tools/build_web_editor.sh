@@ -5,9 +5,14 @@ repo_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 output_dir=${1:-"$repo_dir/terraform/site/editor"}
 temporary_dir=$(mktemp -d)
 trap 'rm -rf "$temporary_dir"' EXIT
+welcome_source="$repo_dir/web/editor/Welcome.md"
 
 mkdir -p "$output_dir"
-cp "$repo_dir/app/Welcome.md" "$temporary_dir/Welcome.md"
+{
+  sed -n '1,2p' "$welcome_source"
+  sed -n '3p' "$repo_dir/app/Welcome.md"
+  sed -n '4,$p' "$welcome_source"
+} > "$temporary_dir/Welcome.md"
 
 (
   cd "$repo_dir"
@@ -32,7 +37,7 @@ awk '
   { print }
 ' "$temporary_dir/Welcome.html" > "$output_dir/index.html"
 
-cp "$repo_dir/app/Welcome.md" "$output_dir/Welcome.md"
+cp "$temporary_dir/Welcome.md" "$output_dir/Welcome.md"
 sed "s/__KEYNOPE_VERSION__/$version/g" "$repo_dir/web/editor/editor.js" > "$output_dir/editor.js"
 cp "$repo_dir/web/editor/editor.css" "$output_dir/editor.css"
 cp "$repo_dir/web/editor/service-worker.js" "$output_dir/service-worker.js"

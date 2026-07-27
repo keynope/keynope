@@ -286,7 +286,8 @@
     dirty = false;
     await clearDraft();
     document.title = 'Keynope — ' + currentName;
-    if (window.keynopeDidSave) window.keynopeDidSave();
+    const savedState = await response.json();
+    if (window.keynopeDidSave) window.keynopeDidSave(savedState);
   }
 
   async function exportHTML(openAfterExport = false, presentationWindow = null) {
@@ -382,9 +383,11 @@
     const mainMode = topbar.querySelector('.keynope-topbar-mode');
     const addSlide = mainMode && mainMode.querySelector('button');
     const save = topbar.querySelector('.keynope-save-button');
+    const importImage = topbar.querySelector('button[aria-label="Import image"]');
     if (addSlide) controls.appendChild(addSlide);
     controls.append(newButton, openButton);
     if (save) controls.appendChild(save);
+    if (importImage) controls.appendChild(importImage);
     topbar.insertBefore(controls, topbar.firstChild);
     return true;
   }

@@ -8449,10 +8449,16 @@ if (keynopeAppSurface) {
     await window.keynopeLoadWebWorkspace(workspace);
     await syncEditorState();
   };
-  window.keynopeDidSave = () => {
+  window.keynopeDidSave = savedState => {
     lastPublishedEditorDirty = null;
     showEditorSavedConfirmation();
-    syncEditorState();
+    if (savedState && Number.isInteger(savedState.version) && savedState.version >= editorStateVersion) {
+      editorState = savedState;
+      editorStateVersion = savedState.version;
+      renderEditorPanels();
+    } else {
+      syncEditorState();
+    }
   };
   window.keynopeDidExport = showEditorExportConfirmation;
   const toolbar = document.createElement('div');
