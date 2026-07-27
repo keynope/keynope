@@ -5893,6 +5893,9 @@ if (keynopeAppSurface) {
   }
   async function performEditorAction(action) {
     const selectionOnly = action.action === 'select-element';
+    if (!['select-element','update-slide-notes','confirm-save','start-timer','stop-timer'].includes(action.action)) {
+      editorMutationPreviewSequence++;
+    }
     const enteringMasters = action.action === 'toggle-master-mode' && editorState && !editorState.masterMode;
     if (enteringMasters) editorNormalPages = (deck.pages || []).slice();
     const response = await fetch('/api/editor/action', {
@@ -7155,6 +7158,7 @@ if (keynopeAppSurface) {
 	async function previewCanvasMutation(index, element, refreshOverlay = true, frozenImage = false) {
     const sequence = ++editorMutationPreviewSequence;
     const slide = editorState ? editorState.current : -1;
+    const stateVersion = editorState ? editorState.version : -1;
     try {
       const response = await fetch('/api/editor/preview', {
         method: 'POST',
@@ -7163,7 +7167,7 @@ if (keynopeAppSurface) {
       });
       if (!response.ok) return;
       const pages = await response.json();
-      if (sequence !== editorMutationPreviewSequence || !editorState || editorState.current !== slide) return;
+      if (sequence !== editorMutationPreviewSequence || !editorState || editorState.current !== slide || editorState.version !== stateVersion) return;
       replaceEditorPreviewPages(slide, pages);
       drawFrame();
       if (refreshOverlay) requestAnimationFrame(renderEditorCanvasOverlay);
@@ -8703,6 +8707,7 @@ if (keynopeAppSurface) {
     const index = editorState.selected;
     const slide = editorState.slides[editorState.current];
     const element = slide && slide.elements[index];
+    const elementID = element && element.id || '';
     const hit = canvasOverlay.querySelector('[data-element="' + index + '"]');
     if (!element || !hit) return false;
     const updated = {...element};
@@ -8713,8 +8718,8 @@ if (keynopeAppSurface) {
     query.set('left_pct', Math.max(0, Math.min(1, Number(query.get('left_pct') || renderedLeft) + dx / deck.cols)).toFixed(6));
     query.set('top', String(Math.max(0, Number(query.get('top') || renderedTop) + dy)));
     updated.query = query.toString();
-    previewCanvasMutation(index, updated);
-    editorAction({action: 'update-element', element: index, elementData: updated}).catch(() => {});
+    previewCanvasMutation(index, updated, false);
+    updateEditorElementByID(elementID, index, updated).catch(() => {});
     return true;
   }
   function cycleCanvasSelection(reverse) {

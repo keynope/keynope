@@ -1261,6 +1261,42 @@ func TestNativeEditorSelectionResolvesStaleIndexByElementID(t *testing.T) {
 	}
 }
 
+func TestNativeEditorStarterSelectionSurvivesVerticalReordering(t *testing.T) {
+	previousWidth, previousHeight := authoredTerminalWidth, authoredTerminalHeight
+	authoredTerminalWidth, authoredTerminalHeight = 245, 56
+	defer func() {
+		authoredTerminalWidth, authoredTerminalHeight = previousWidth, previousHeight
+	}()
+	session := newNativeEditorSession("Welcome.md", Deck{Slides: []Slide{{Elements: []Element{
+		{Kind: "heading", Level: 1, Text: "KEYNOPE", Query: "top=1&align=center"},
+		{Kind: "text-image", Text: "A", Query: "top=2&left_pct=0.179593"},
+		{Kind: "text-image", Text: "✨", Query: "top=2&left_pct=0.783673"},
+		{Kind: "text-image", Text: "😍", Query: "top=3&left_pct=0.020408"},
+	}}}})
+	state := session.state()
+	keynopeID := state.Slides[0].Elements[0].ID
+	identity := Element{ID: keynopeID}
+	if err := session.apply(nativeEditorAction{Action: "select-element", Element: 0, ElementData: &identity}); err != nil {
+		t.Fatal(err)
+	}
+	for _, top := range []string{"6", "11"} {
+		state = session.state()
+		selected := state.Selected
+		updated := state.Slides[0].Elements[selected]
+		updated.Query = setQueryValue(updated.Query, "top", top)
+		if err := session.apply(nativeEditorAction{Action: "update-element", Element: 0, ElementData: &updated}); err != nil {
+			t.Fatal(err)
+		}
+		state = session.state()
+		if state.Selected < 0 || state.Slides[0].Elements[state.Selected].ID != keynopeID {
+			t.Fatalf("moving KEYNOPE to top=%s selected index=%d elements=%#v", top, state.Selected, state.Slides[0].Elements)
+		}
+		if len(state.Selection) != 1 || state.Selection[0] != state.Selected {
+			t.Fatalf("moving KEYNOPE to top=%s selection=%v selected=%d", top, state.Selection, state.Selected)
+		}
+	}
+}
+
 func TestNativeEditorRefreshScopeAvoidsFullDeckReloadForElementMutations(t *testing.T) {
 	for _, action := range []string{"add-element", "duplicate-element", "paste-elements", "update-element", "update-elements", "convert-text-kind", "convert-selected-text-kind", "delete-element", "delete-selection", "move-element", "update-slide", "set-layout"} {
 		if got := nativeEditorRefreshScope(action); got != "slide" {
