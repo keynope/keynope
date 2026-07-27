@@ -8142,7 +8142,11 @@ if (keynopeAppSurface) {
             if (resizing) return;
             if (pendingCanvasSelection) clearTimeout(pendingCanvasSelection);
             pendingCanvasSelection = null;
-            if (event.shiftKey) editorAction({action: 'select-element', element: editorElementIndexByID(sourceElementID, index), name:'toggle', elementData:{id:sourceElementID}}).catch(() => {});
+            if (event.shiftKey) {
+              editorAction({action: 'select-element', element: editorElementIndexByID(sourceElementID, index), name:'toggle', elementData:{id:sourceElementID}}).catch(() => {});
+            } else {
+              refreshCanvasSelectionInPlace();
+            }
             return;
           }
           if (fittingText) {

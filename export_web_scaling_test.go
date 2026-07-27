@@ -253,6 +253,7 @@ func TestWebExportUsesPresentationCanvasRenderer(t *testing.T) {
 		"function updateEditorElementByID(id, fallback, element)",
 		"const sourceElementID = sourceElement.id || '';",
 		"activeCanvasDrag = dragToken;",
+		"} else {\n              refreshCanvasSelectionInPlace();\n            }\n            return;",
 		"hit.classList.toggle('active', hit === activeCanvasDrag.hit);",
 		"const element = {...sourceElement};",
 		"updateEditorElementByID(sourceElementID, currentIndex, element)",
