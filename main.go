@@ -1564,6 +1564,9 @@ func embeddedAssetPath(id string, asset DeckAsset) string {
 	if asset.MIME == "image/gif" {
 		ext = ".gif"
 	}
+	if runtime.GOOS == "js" {
+		return "keynope-asset:" + id + ext
+	}
 	return filepath.Join(imageCacheDirectory(), "embedded", id+ext)
 }
 
@@ -1642,6 +1645,10 @@ func makeDeckAsset(data []byte, mime string, width, height int) (string, DeckAss
 	id := hex.EncodeToString(hash[:])
 	asset := DeckAsset{MIME: mime, Width: width, Height: height, Data: append([]byte(nil), data...)}
 	path := embeddedAssetPath(id, asset)
+	registerEmbeddedStillAsset(id, asset)
+	if runtime.GOOS == "js" {
+		return id, asset, path, nil
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", DeckAsset{}, "", err
 	}
@@ -1659,6 +1666,15 @@ func materializeDeckAssets(deck *Deck) {
 		path := embeddedAssetPath(id, asset)
 		if len(asset.Frames) > 0 {
 			registerEmbeddedAnimatedAsset(id, asset)
+			visitDeckImages(deck, func(element *Element) {
+				if element.AssetID == id {
+					element.Path = path
+				}
+			})
+			continue
+		}
+		registerEmbeddedStillAsset(id, asset)
+		if runtime.GOOS == "js" {
 			visitDeckImages(deck, func(element *Element) {
 				if element.AssetID == id {
 					element.Path = path
@@ -19503,6 +19519,10 @@ var embeddedAnimatedAssets = struct {
 	sync.RWMutex
 	assets map[string]DeckAsset
 }{assets: map[string]DeckAsset{}}
+var embeddedStillAssets = struct {
+	sync.RWMutex
+	assets map[string]DeckAsset
+}{assets: map[string]DeckAsset{}}
 var prewarmingImageCache bool
 var fastImageRender bool
 
@@ -19523,6 +19543,29 @@ func embeddedAnimatedAsset(path string) (DeckAsset, bool) {
 	embeddedAnimatedAssets.RLock()
 	asset, ok := embeddedAnimatedAssets.assets[id]
 	embeddedAnimatedAssets.RUnlock()
+	return asset, ok
+}
+
+func registerEmbeddedStillAsset(id string, asset DeckAsset) {
+	if id == "" || len(asset.Data) == 0 || len(asset.Frames) > 0 {
+		return
+	}
+	embeddedStillAssets.Lock()
+	embeddedStillAssets.assets[id] = asset
+	embeddedStillAssets.Unlock()
+}
+
+func embeddedStillAsset(path string) (DeckAsset, bool) {
+	if !strings.HasPrefix(path, "keynope-asset:") {
+		return DeckAsset{}, false
+	}
+	id := strings.TrimPrefix(path, "keynope-asset:")
+	if ext := filepath.Ext(id); ext != "" {
+		id = strings.TrimSuffix(id, ext)
+	}
+	embeddedStillAssets.RLock()
+	asset, ok := embeddedStillAssets.assets[id]
+	embeddedStillAssets.RUnlock()
 	return asset, ok
 }
 
@@ -19621,6 +19664,23 @@ func loadDecodedStillImage(path string) image.Image {
 		decodedStillImageCacheMu.Unlock()
 		return img
 	}
+	if asset, ok := embeddedStillAsset(path); ok {
+		key := "embedded-still|" + path
+		decodedStillImageCacheMu.RLock()
+		cached := decodedStillImageCache[key]
+		decodedStillImageCacheMu.RUnlock()
+		if cached != nil {
+			return cached
+		}
+		img, err := png.Decode(bytes.NewReader(asset.Data))
+		if err != nil {
+			return nil
+		}
+		decodedStillImageCacheMu.Lock()
+		decodedStillImageCache[key] = img
+		decodedStillImageCacheMu.Unlock()
+		return img
+	}
 	info, err := os.Stat(path)
 	stamp := "missing"
 	if err == nil {
@@ -19694,7 +19754,9 @@ func renderUnicodeImage(img image.Image, b image.Rectangle, opts imageASCIIOptio
 func loadASCIIImageAnimation(path, query string, maxWidth, maxHeight int) *asciiImageAnimation {
 	opts := parseImageASCIIOptions(query)
 	cachePath := ""
-	if _, embedded := embeddedAnimatedAsset(path); !embedded {
+	_, embeddedAnimated := embeddedAnimatedAsset(path)
+	_, embeddedStill := embeddedStillAsset(path)
+	if !embeddedAnimated && !embeddedStill {
 		cachePath = asciiAnimationCachePath(path, query, maxWidth, maxHeight)
 		if cached := loadDiskASCIIAnimation(cachePath); cached != nil {
 			return cached
@@ -19908,6 +19970,13 @@ func decodeImageFrames(path string) []decodedImageFrame {
 			frames = append(frames, decodedImageFrame{image: decoded, delay: delay})
 		}
 		return frames
+	}
+	if asset, ok := embeddedStillAsset(path); ok {
+		decoded, err := png.Decode(bytes.NewReader(asset.Data))
+		if err != nil {
+			return nil
+		}
+		return []decodedImageFrame{{image: decoded, delay: 100 * time.Millisecond}}
 	}
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".gif" {

@@ -170,6 +170,30 @@ func TestEmbeddedImageAssetRoundTripsThroughMarkdown(t *testing.T) {
 	}
 }
 
+func TestEmbeddedStillImageRendersFromMemory(t *testing.T) {
+	var encoded bytes.Buffer
+	pixels := stdimage.NewNRGBA(stdimage.Rect(0, 0, 8, 4))
+	for y := 0; y < pixels.Bounds().Dy(); y++ {
+		for x := 0; x < pixels.Bounds().Dx(); x++ {
+			pixels.Set(x, y, color.NRGBA{R: uint8(30 + x*20), G: uint8(40 + y*30), B: 160, A: 255})
+		}
+	}
+	if err := png.Encode(&encoded, pixels); err != nil {
+		t.Fatal(err)
+	}
+	id := "memory-only-still"
+	asset := DeckAsset{MIME: "image/png", Width: 8, Height: 4, Data: encoded.Bytes()}
+	registerEmbeddedStillAsset(id, asset)
+	path := "keynope-asset:" + id + ".png"
+	decoded := loadDecodedStillImage(path)
+	if decoded == nil || decoded.Bounds().Dx() != 8 || decoded.Bounds().Dy() != 4 {
+		t.Fatalf("decoded embedded still image = %#v", decoded)
+	}
+	if rows := renderASCIIImage(path, "glyph=blocks", 16, 8); len(rows) == 0 {
+		t.Fatal("embedded still image did not render")
+	}
+}
+
 func TestEmbeddedAnimatedGIFStoresResizedFramesAndTimingInDeck(t *testing.T) {
 	palette := color.Palette{color.Transparent, color.RGBA{R: 255, A: 255}, color.RGBA{G: 255, A: 255}}
 	first := stdimage.NewPaletted(stdimage.Rect(0, 0, 768, 384), palette)
