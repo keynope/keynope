@@ -1,0 +1,35 @@
+.keynope-web-controls {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 5px;
+  padding-right: 2px;
+}
+.keynope-web-controls button {
+  height: 32px;
+  padding: 4px 8px;
+  border-color: #59616a;
+  color: #e4e8ec;
+  background: #25282b;
+  font: 700 9px/1 -apple-system, BlinkMacSystemFont, sans-serif;
+  letter-spacing: .08em;
+}
+.keynope-web-fatal {
+  display: grid;
+  min-height: 100%;
+  place-content: center;
+  gap: 16px;
+  padding: 24px;
+  color: #f3efe0;
+  background: #111;
+  text-align: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.keynope-web-fatal h1 { margin: 0; color: #ffd166; letter-spacing: .14em; }
+.keynope-web-fatal button {
+  justify-self: center;
+  padding: 9px 15px;
+  border: 1px solid #ffd166;
+  border-radius: 5px;
+  color: #ffd166;
+  background: transparent;
+}

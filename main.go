@@ -313,7 +313,7 @@ func init() {
 	}
 }
 
-func main() {
+func cliMain() {
 	args, ok := parseArgs(os.Args[1:])
 	if !ok {
 		fmt.Fprintln(os.Stderr, "usage: keynope [--export] [--classic] [--app] [deck.md] | keynope --licenses")
@@ -1722,6 +1722,11 @@ func parseDeck(path string) (Deck, error) {
 	if err != nil {
 		return Deck{}, err
 	}
+	return parseDeckData(path, data)
+}
+
+func parseDeckData(path string, data []byte) (Deck, error) {
+	parsedDeckElementOrderChanged = false
 	text := string(data)
 	assets, remainingAssets, err := decodeDeckAssets(text)
 	if err != nil {
@@ -8398,6 +8403,25 @@ if (keynopeAppSurface) {
       requestAnimationFrame(renderEditorCanvasOverlay);
     } catch (_err) {}
   }
+  window.keynopeLoadWebWorkspace = async workspace => {
+    if (!workspace || !Array.isArray(workspace.pages)) return;
+    editorNormalPages = null;
+    deck.cols = Number(workspace.cols) || deck.cols;
+    deck.rows = Number(workspace.rows) || deck.rows;
+    deck.pages = workspace.pages;
+    contentAnimationCache.clear();
+    const current = Number.isInteger(workspace.current) ? workspace.current : (editorState ? editorState.current : 0);
+    const next = deck.pages.findIndex(page => page.slide === current && page.page === 0);
+    pageIndex = next >= 0 ? next : 0;
+    render();
+    requestAnimationFrame(renderEditorCanvasOverlay);
+  };
+  window.keynopeReloadWebDocument = async workspace => {
+    editorStateVersion = -1;
+    editorState = null;
+    await window.keynopeLoadWebWorkspace(workspace);
+    await syncEditorState();
+  };
   window.keynopeDidSave = () => {
     lastPublishedEditorDirty = null;
     showEditorSavedConfirmation();
