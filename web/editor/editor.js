@@ -15,6 +15,7 @@
   let documentFileHandle = null;
   let currentName = 'Untitled.md';
   let runtimeReady;
+  let workspaceLoaded = false;
 
   function openDatabase() {
     return new Promise((resolve, reject) => {
@@ -60,6 +61,15 @@
         transaction.onerror = () => reject(transaction.error);
       });
     } catch (_) {}
+  }
+
+  function cancelled(error) {
+    return !!error && (error.name === 'AbortError' || /cancelled|canceled|user aborted/i.test(error.message || ''));
+  }
+
+  function reportFailure(prefix, error) {
+    if (cancelled(error)) return;
+    alert(prefix + '\n\n' + (error && error.message || error));
   }
 
   function responseFromEnvelope(raw) {
@@ -120,7 +130,16 @@
     const workspace = JSON.parse(envelope.body);
     if (state && Number.isInteger(state.current)) workspace.current = state.current;
     if (window.keynopeLoadWebWorkspace) await window.keynopeLoadWebWorkspace(workspace);
+    workspaceLoaded = true;
   }
+
+  const stateOnlyEditorActions = new Set([
+    'select-element',
+    'select-slide',
+    'navigate-presentation',
+    'update-slide-notes',
+    'confirm-save'
+  ]);
 
   runtimeReady = bootRuntime().catch(error => {
     document.body.innerHTML = '<main class="keynope-web-fatal"><h1>KEYNOPE</h1><p>' +
@@ -145,8 +164,17 @@
       raw = window.keynopeWasmRequest(method, target.pathname + target.search, body);
     }
     const envelope = JSON.parse(raw);
-    if (envelope.status >= 200 && envelope.status < 300 &&
-        (target.pathname === '/api/editor/action' || target.pathname === '/api/editor/upload' || target.pathname === '/api/editor/state')) {
+    let refresh = target.pathname === '/api/editor/upload' ||
+      (target.pathname === '/api/editor/state' && !workspaceLoaded);
+    if (target.pathname === '/api/editor/action') {
+      try {
+        const action = JSON.parse(typeof init.body === 'string' ? init.body : '{}').action || '';
+        refresh = !stateOnlyEditorActions.has(action);
+      } catch (_) {
+        refresh = true;
+      }
+    }
+    if (envelope.status >= 200 && envelope.status < 300 && refresh) {
       let state = null;
       try { state = JSON.parse(envelope.body); } catch (_) {}
       await refreshWorkspace(state);
@@ -240,10 +268,12 @@
     if (envelope.status !== 200) throw new Error(envelope.body || 'Could not open presentation');
     currentName = name;
     documentFileHandle = null;
+    workspaceLoaded = false;
     const workspaceEnvelope = JSON.parse(window.keynopeWasmWorkspace());
     const workspace = JSON.parse(workspaceEnvelope.body);
     workspace.current = 0;
     if (window.keynopeReloadWebDocument) await window.keynopeReloadWebDocument(workspace);
+    workspaceLoaded = true;
     document.title = 'Keynope — ' + currentName + (untitled ? ' *' : '');
   }
 
@@ -281,18 +311,68 @@
     controls.className = 'keynope-web-controls';
     const newButton = document.createElement('button');
     newButton.type = 'button';
-    newButton.textContent = 'NEW';
+    newButton.className = 'keynope-web-icon-button';
+    newButton.innerHTML = '<svg viewBox="0 0 800 800" aria-hidden="true"><path d="M145 70h350l160 160v500H145Z" fill="none" stroke="#fff" stroke-width="34" stroke-linejoin="round"/><path d="M495 70v160h160" fill="none" stroke="#fff" stroke-width="34" stroke-linejoin="round"/><circle cx="570" cy="595" r="125" fill="#181818" stroke="#fff" stroke-width="32"/><path d="M570 520v150M495 595h150" fill="none" stroke="#fff" stroke-width="34" stroke-linecap="round"/></svg>';
     newButton.title = 'New presentation';
+    newButton.setAttribute('aria-label', newButton.title);
     newButton.onclick = () => newPresentation().catch(error => alert(error.message || error));
     const openButton = document.createElement('button');
     openButton.type = 'button';
-    openButton.textContent = 'OPEN';
+    openButton.className = 'keynope-web-icon-button';
+    openButton.innerHTML = '<svg viewBox="0 0 800 800" aria-hidden="true"><path d="M90 205h245l70 75h305v385H90Z" fill="none" stroke="#fff" stroke-width="34" stroke-linejoin="round"/><path d="M90 280V135h255l70 75h210v70" fill="none" stroke="#9b9b9b" stroke-width="32" stroke-linejoin="round"/><path d="M300 470h245M465 390l80 80-80 80" fill="none" stroke="#fff" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     openButton.title = 'Open a Markdown presentation';
+    openButton.setAttribute('aria-label', openButton.title);
     openButton.onclick = openPresentation;
     controls.append(newButton, openButton);
     const save = topbar.querySelector('.keynope-save-button');
     topbar.insertBefore(controls, save ? save.nextSibling : topbar.firstChild);
     return true;
+  }
+
+  async function showAbout() {
+    const existing = document.querySelector('.keynope-web-about');
+    if (existing) {
+      existing.remove();
+      return;
+    }
+    const blocker = document.createElement('div');
+    blocker.className = 'keynope-web-about';
+    const dialog = document.createElement('section');
+    dialog.className = 'keynope-web-about-dialog';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-labelledby', 'keynope-web-about-title');
+    dialog.innerHTML = [
+      '<button class="keynope-web-about-close" type="button" aria-label="Close">×</button>',
+      '<img src="/keynope-logo.png" alt="">',
+      '<div class="keynope-web-about-heading"><h2 id="keynope-web-about-title">KEYNOPE</h2><p>Version __KEYNOPE_VERSION__ · Web Editor Beta</p></div>',
+      '<nav><a href="https://keynope.sh/" target="_blank" rel="noopener">◎ keynope.sh</a><a href="https://github.com/keynope/" target="_blank" rel="noopener">◆ GitHub</a></nav>',
+      '<p class="keynope-web-about-credit">© 2026 Dennis Vink · <a href="https://drvink.com" target="_blank" rel="noopener">drvink.com</a> · <a href="https://linkedin.com/in/drvink/" target="_blank" rel="noopener">LinkedIn</a></p>',
+      '<details><summary>Open-source licenses</summary><pre>Loading licenses…</pre></details>'
+    ].join('');
+    blocker.appendChild(dialog);
+    document.body.appendChild(blocker);
+    let escape;
+    const close = () => {
+      if (escape) removeEventListener('keydown', escape, true);
+      blocker.remove();
+    };
+    dialog.querySelector('.keynope-web-about-close').onclick = close;
+    blocker.addEventListener('pointerdown', event => {
+      if (event.target === blocker) close();
+    });
+    escape = event => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      close();
+    };
+    addEventListener('keydown', escape, true);
+    try {
+      const response = await nativeFetch(new URL('licenses.txt', baseURL));
+      dialog.querySelector('pre').textContent = response.ok ? await response.text() : 'License information is unavailable.';
+    } catch (_) {
+      dialog.querySelector('pre').textContent = 'License information is unavailable.';
+    }
   }
 
   const presenter = {
@@ -304,9 +384,9 @@
         clearTimeout(draftTimer);
         if (dirty) draftTimer = setTimeout(autosaveDraft, 750);
       } else if (action === 'save-presentation') {
-        savePresentation().catch(error => alert('Could not save presentation\n\n' + (error.message || error)));
+        savePresentation().catch(error => reportFailure('Could not save presentation', error));
       } else if (action === 'export-html') {
-        exportHTML(false).catch(error => alert('Could not export presentation\n\n' + (error.message || error)));
+        exportHTML(false).catch(error => reportFailure('Could not export presentation', error));
       } else if (action === 'show-main') {
         const presentationWindow = window.open('', '_blank');
         if (presentationWindow) {
@@ -317,7 +397,7 @@
           alert('Could not present\n\n' + (error.message || error));
         });
       } else if (action === 'show-about') {
-        window.open('https://keynope.sh/', '_blank', 'noopener');
+        showAbout();
       } else if (action === 'query-display-state') {
         if (window.keynopeSetExternalDisplayAvailable) window.keynopeSetExternalDisplayAvailable(false);
       }

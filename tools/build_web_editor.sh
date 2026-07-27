@@ -16,6 +16,7 @@ cp "$repo_dir/app/Welcome.md" "$temporary_dir/Welcome.md"
 )
 
 "$temporary_dir/keynope" --export "$temporary_dir/Welcome.md"
+version=$(awk '/^## [0-9]/{print $2; exit}' "$repo_dir/CHANGELOG.md")
 
 awk '
   /<title>Keynope Export<\/title>/ {
@@ -32,10 +33,11 @@ awk '
 ' "$temporary_dir/Welcome.html" > "$output_dir/index.html"
 
 cp "$repo_dir/app/Welcome.md" "$output_dir/Welcome.md"
-cp "$repo_dir/web/editor/editor.js" "$output_dir/editor.js"
+sed "s/__KEYNOPE_VERSION__/$version/g" "$repo_dir/web/editor/editor.js" > "$output_dir/editor.js"
 cp "$repo_dir/web/editor/editor.css" "$output_dir/editor.css"
 cp "$repo_dir/web/editor/service-worker.js" "$output_dir/service-worker.js"
 cp "$repo_dir/web/editor/manifest.webmanifest" "$output_dir/manifest.webmanifest"
+"$temporary_dir/keynope" --licenses > "$output_dir/licenses.txt"
 
 goroot=$(go env GOROOT)
 cp "$goroot/lib/wasm/wasm_exec.js" "$output_dir/wasm_exec.js"

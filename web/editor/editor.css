@@ -6,12 +6,90 @@
 }
 .keynope-web-controls button {
   height: 32px;
-  padding: 4px 8px;
   border-color: #59616a;
   color: #e4e8ec;
   background: #25282b;
-  font: 700 9px/1 -apple-system, BlinkMacSystemFont, sans-serif;
-  letter-spacing: .08em;
+}
+.keynope-web-controls button.keynope-web-icon-button {
+  display: inline-grid;
+  width: 32px;
+  min-width: 32px;
+  place-items: center;
+  padding: 4px;
+}
+.keynope-web-icon-button svg {
+  display: block;
+  width: 23px;
+  height: 23px;
+}
+.keynope-web-about {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0,0,0,.72);
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+.keynope-web-about-dialog {
+  position: relative;
+  display: grid;
+  grid-template-columns: 82px minmax(0,1fr);
+  gap: 16px 20px;
+  width: min(620px, 100%);
+  max-height: min(720px, calc(100vh - 48px));
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 24px;
+  border: 1px solid #5b6168;
+  border-radius: 12px;
+  color: #e8edf2;
+  background: #202124;
+  box-shadow: 0 24px 70px rgba(0,0,0,.72);
+  user-select: text;
+  -webkit-user-select: text;
+}
+.keynope-web-about-dialog > img {
+  width: 82px;
+  height: 82px;
+  border-radius: 18px;
+}
+.keynope-web-about-heading { align-self: center; }
+.keynope-web-about-heading h2 { margin: 0; font-size: 28px; letter-spacing: .08em; }
+.keynope-web-about-heading p { margin: 6px 0 0; color: #aeb4bb; }
+.keynope-web-about-dialog nav,
+.keynope-web-about-credit,
+.keynope-web-about-dialog details { grid-column: 1 / -1; }
+.keynope-web-about-dialog nav { display: flex; flex-wrap: wrap; gap: 9px; }
+.keynope-web-about-dialog a { color: #8dc8ff; }
+.keynope-web-about-credit { margin: 0; color: #bdc3c9; font-size: 13px; }
+.keynope-web-about-dialog details { border-top: 1px solid #4c5156; padding-top: 14px; }
+.keynope-web-about-dialog summary { cursor: pointer; font-weight: 700; }
+.keynope-web-about-dialog pre {
+  max-height: 320px;
+  overflow: auto;
+  margin: 14px 0 0;
+  padding: 12px;
+  border: 1px solid #42474c;
+  border-radius: 6px;
+  background: #121315;
+  color: #d8dde2;
+  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+}
+.keynope-web-about-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid #555;
+  border-radius: 50%;
+  color: #ddd;
+  background: #292929;
+  font-size: 21px;
 }
 .keynope-web-fatal {
   display: grid;

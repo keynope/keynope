@@ -1,9 +1,10 @@
-const CACHE = 'keynope-editor-v1';
+const CACHE = 'keynope-editor-v2';
 const ASSETS = [
   '/editor/',
   '/editor/editor.js',
   '/editor/editor.css',
   '/editor/Welcome.md',
+  '/editor/licenses.txt',
   '/editor/wasm_exec.js',
   '/editor/keynope-editor.wasm'
 ];

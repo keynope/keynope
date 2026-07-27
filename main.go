@@ -7902,10 +7902,8 @@ if (keynopeAppSurface) {
           if (!dx && !dy) {
             if (resizing) return;
             if (pendingCanvasSelection) clearTimeout(pendingCanvasSelection);
-            pendingCanvasSelection = setTimeout(() => {
-              pendingCanvasSelection = null;
-              editorAction({action: 'select-element', element: index, name: event.shiftKey ? 'toggle' : ''}).catch(() => {});
-            }, 240);
+            pendingCanvasSelection = null;
+            editorAction({action: 'select-element', element: index, name: event.shiftKey ? 'toggle' : ''}).catch(() => {});
             return;
           }
           if (fittingText) {
@@ -7930,7 +7928,13 @@ if (keynopeAppSurface) {
           }
           element.query = query.toString();
 		  previewCanvasMutation(index, element, true, canvasElementIsGIF(element));
-          editorAction({action: 'update-element', element: index, elementData: element}).catch(() => {});
+          editorAction({action: 'update-element', element: index, elementData: element})
+            .then(() => {
+              if (editorState && editorState.selected !== index) {
+                return editorAction({action: 'select-element', element: index});
+              }
+            })
+            .catch(() => {});
         };
 		hit.addEventListener('pointermove', move);
 		hit.addEventListener('pointerup', up);
