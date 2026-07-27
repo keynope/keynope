@@ -5871,6 +5871,7 @@ if (keynopeAppSurface) {
   let editorMutationPreviewSequence = 0;
   let editorTransparencyIconSequence = 0;
   let editorElementClipboard = [];
+  let editorActionQueue = Promise.resolve();
   let activeCanvasVisualMenu = null;
   let activeCanvasLinkDialog = null;
   let emojiPickerPanel = null;
@@ -5884,7 +5885,12 @@ if (keynopeAppSurface) {
     const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
     if (handler) handler.postMessage({action: 'editor-dirty-state', dirty});
   }
-  async function editorAction(action) {
+  function queueEditorOperation(operation) {
+    const pending = editorActionQueue.then(operation, operation);
+    editorActionQueue = pending.catch(() => {});
+    return pending;
+  }
+  async function performEditorAction(action) {
     const selectionOnly = action.action === 'select-element';
     const enteringMasters = action.action === 'toggle-master-mode' && editorState && !editorState.masterMode;
     if (enteringMasters) editorNormalPages = (deck.pages || []).slice();
@@ -5906,6 +5912,9 @@ if (keynopeAppSurface) {
       renderEditorPanels();
     }
     await syncEditorWorkspace();
+  }
+  function editorAction(action) {
+    return queueEditorOperation(() => performEditorAction(action));
   }
   const editorClipboardPrefix = 'keynope-elements:';
   function editorClipboardTextTarget(target) {
@@ -8668,16 +8677,19 @@ if (keynopeAppSurface) {
   }
   function cycleCanvasSelection(reverse) {
     if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return false;
-    const selectableKinds = new Set(['heading','text','text-image','bullet','code','shape','image','page-number']);
-    const indices = (editorState.slides[editorState.current].elements || [])
-      .map((element, index) => selectableKinds.has(element.kind) ? index : -1)
-      .filter(index => index >= 0);
-    if (!indices.length) return false;
-    const position = indices.indexOf(editorState.selected);
-    const next = position < 0
-      ? (reverse ? indices[indices.length - 1] : indices[0])
-      : indices[(position + (reverse ? -1 : 1) + indices.length) % indices.length];
-    editorAction({action: 'select-element', element: next}).catch(() => {});
+    queueEditorOperation(async () => {
+      if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return;
+      const selectableKinds = new Set(['heading','text','text-image','bullet','code','shape','image','page-number']);
+      const indices = (editorState.slides[editorState.current].elements || [])
+        .map((element, index) => selectableKinds.has(element.kind) ? index : -1)
+        .filter(index => index >= 0);
+      if (!indices.length) return;
+      const position = indices.indexOf(editorState.selected);
+      const next = position < 0
+        ? (reverse ? indices[indices.length - 1] : indices[0])
+        : indices[(position + (reverse ? -1 : 1) + indices.length) % indices.length];
+      await performEditorAction({action: 'select-element', element: next});
+    }).catch(() => {});
     return true;
   }
   addEventListener('keydown', e => {

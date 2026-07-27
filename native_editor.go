@@ -1123,17 +1123,34 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			return errInvalidEditorAction
 		}
 		updated := *action.ElementData
-		original := s.deck.Slides[s.current].Elements[action.Element]
+		elementIndex := action.Element
+		if updated.ID != "" && s.deck.Slides[s.current].Elements[elementIndex].ID != updated.ID {
+			for index, candidate := range s.deck.Slides[s.current].Elements {
+				if candidate.ID == updated.ID {
+					elementIndex = index
+					break
+				}
+			}
+		}
+		original := s.deck.Slides[s.current].Elements[elementIndex]
 		if updated.ID == "" {
 			updated.ID = original.ID
+		}
+		if original.ID != "" && updated.ID != original.ID {
+			s.mu.Unlock()
+			return errInvalidEditorAction
 		}
 		updated.Kind = strings.TrimSpace(updated.Kind)
 		if updated.Kind == "" {
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		s.deck.Slides[s.current].Elements[action.Element] = updated
-		s.selected, changed = action.Element, true
+		s.deck.Slides[s.current].Elements[elementIndex] = updated
+		if elementIndex != action.Element && s.selection[action.Element] {
+			delete(s.selection, action.Element)
+			s.selection[elementIndex] = true
+		}
+		s.selected, changed = elementIndex, true
 	case "update-elements":
 		if s.current < 0 || s.current >= slideCount || len(action.ElementIndices) == 0 || len(action.ElementIndices) != len(action.ElementsData) {
 			s.mu.Unlock()

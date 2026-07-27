@@ -1203,6 +1203,31 @@ func TestNativeEditorMutationCanonicalizesOrderAndRemapsSelection(t *testing.T) 
 	}
 }
 
+func TestNativeEditorUpdateResolvesStaleIndexByElementID(t *testing.T) {
+	deck := Deck{Slides: []Slide{{Elements: []Element{
+		{Kind: "text", Text: "First", Query: "top=2&left=2", ID: "first"},
+		{Kind: "text", Text: "Second", Query: "top=4&left=2", ID: "second"},
+	}}}}
+	session := newNativeEditorSession("deck.md", deck)
+	session.selected = 0
+	session.selection = map[int]bool{0: true}
+	updated := deck.Slides[0].Elements[1]
+	updated.Text = "Second edited"
+	if err := session.apply(nativeEditorAction{Action: "update-element", Element: 0, ElementData: &updated}); err != nil {
+		t.Fatal(err)
+	}
+	state := session.state()
+	if state.Slides[0].Elements[0].ID != "first" || state.Slides[0].Elements[0].Text != "First" {
+		t.Fatalf("stale index overwrote the wrong element: %#v", state.Slides[0].Elements)
+	}
+	if state.Slides[0].Elements[1].ID != "second" || state.Slides[0].Elements[1].Text != "Second edited" {
+		t.Fatalf("stable ID did not resolve updated element: %#v", state.Slides[0].Elements)
+	}
+	if state.Selected != 1 || !reflect.DeepEqual(state.Selection, []int{1}) {
+		t.Fatalf("resolved element selection = %d, %v", state.Selected, state.Selection)
+	}
+}
+
 func TestNativeEditorRefreshScopeAvoidsFullDeckReloadForElementMutations(t *testing.T) {
 	for _, action := range []string{"add-element", "duplicate-element", "paste-elements", "update-element", "update-elements", "convert-text-kind", "convert-selected-text-kind", "delete-element", "delete-selection", "move-element", "update-slide", "set-layout"} {
 		if got := nativeEditorRefreshScope(action); got != "slide" {
