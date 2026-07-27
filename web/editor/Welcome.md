@@ -8,16 +8,16 @@
 <!-- top=1 align=center render=text-image source=bitmap scale=4.00 text-size=20 header=#00ff80 glyph=blocks -->
 # KEYNOPE
 
-<!-- top=2 left_pct=0.179593 render=text-image source=bitmap scale=5.00 text-size=25 fg=#dcd8cb -->
-A
-
 <!-- top=2 left_pct=0.783673 transparent=1 render=text-image source=bitmap scale=5.00 text-size=25 -->
 ✨
 
 <!-- top=3 left_pct=0.020408 render=text-image source=bitmap scale=3.80 text-size=19 -->
 😍
 
-<!-- top=17 left_pct=0.306122 header=#ffbf00 -->
+<!-- top=3 left_pct=0.171429 render=text-image source=bitmap scale=5.00 text-size=25 fg=#dcd8cb glyph=ascii -->
+A
+
+<!-- top=17 left_pct=0.306122 render=text-image source=bitmap scale=2.00 text-size=10 header=#ffbf00 glyph=blocks -->
 ## PRESENTATION
 
 ---

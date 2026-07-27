@@ -5909,6 +5909,11 @@ if (keynopeAppSurface) {
     editorState = await response.json();
     keynopeEditorMasterMode = !!editorState.masterMode;
     editorStateVersion = editorState.version;
+    if (action.action === 'start-timer' || action.action === 'stop-timer') {
+      presenterTimerMode = editorState.timerMode || '';
+      presenterTimerInput = '';
+      presenterTimerEndMS = Number(editorState.timerEndMs || 0);
+    }
     if (selectionOnly) {
       renderEditorTopbar();
       refreshCanvasSelectionInPlace();
@@ -8569,7 +8574,12 @@ if (keynopeAppSurface) {
     const digits = String(presenterTimerInput || '').replace(/\D/g, '').slice(-4).padStart(4, '0');
     const seconds = Number(digits.slice(0, 2)) * 60 + Number(digits.slice(2));
     if (seconds <= 0) return;
-    editorAction({action: 'start-timer', value: seconds}).catch(() => {});
+    presenterTimerMode = 'running';
+    presenterTimerInput = '';
+    presenterTimerEndMS = Date.now() + seconds * 1000;
+    refreshEditorPresenterControls();
+    drawFrame();
+    editorAction({action: 'start-timer', value: seconds}).catch(() => cancelEditorTimerInput());
   }
   function cancelEditorTimerInput() {
     presenterTimerMode = '';
