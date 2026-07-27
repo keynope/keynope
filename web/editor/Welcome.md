@@ -5,11 +5,11 @@
 <!-- effect=explosion -->
 <!-- background=aurora -->
 
-<!-- top=1 left_pct=0.171429 render=text-image source=bitmap scale=5.00 text-size=25 fg=#dcd8cb -->
-A
-
 <!-- top=1 align=center render=text-image source=bitmap scale=4.00 text-size=20 header=#00ff80 glyph=blocks -->
 # KEYNOPE
+
+<!-- top=2 left_pct=0.179593 render=text-image source=bitmap scale=5.00 text-size=25 fg=#dcd8cb -->
+A
 
 <!-- top=2 left_pct=0.783673 transparent=1 render=text-image source=bitmap scale=5.00 text-size=25 -->
 ✨
