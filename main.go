@@ -170,10 +170,11 @@ type exportFrame struct {
 }
 
 type exportContentFrame struct {
-	Full   bool         `json:"full,omitempty"`
-	Lines  []exportLine `json:"lines,omitempty"`
-	Clear  []string     `json:"clear,omitempty"`
-	Update []exportLine `json:"update,omitempty"`
+	DelayMS int64        `json:"delayMs,omitempty"`
+	Full    bool         `json:"full,omitempty"`
+	Lines   []exportLine `json:"lines,omitempty"`
+	Clear   []string     `json:"clear,omitempty"`
+	Update  []exportLine `json:"update,omitempty"`
 }
 
 type exportLine struct {
@@ -2708,41 +2709,138 @@ type preservedExportHead struct {
 	Scripts []string
 }
 
-const exportEffectFrameCount = 90
+const exportAnimationTimelineLimit = 30 * time.Second
 
 func exportContentFrames(slide Slide, page, width, height, slideCount int) []exportContentFrame {
 	if !slideHasAnimatedImage(slide) {
 		return nil
 	}
+	timeline := exportAnimationTimeline(slide)
+	if len(timeline) < 2 {
+		return nil
+	}
 	exportImageAnimationMu.Lock()
 	defer exportImageAnimationMu.Unlock()
-	frames := make([]exportContentFrame, 0, exportEffectFrameCount)
-	seen := map[string]int{}
+	frames := make([]exportContentFrame, 0, len(timeline)-1)
 	previousLines := []exportLine(nil)
+	previousSignature := ""
 	previous := exportImageAnimationPosition
 	defer func() { exportImageAnimationPosition = previous }()
-	for frame := 0; frame < exportEffectFrameCount; frame++ {
-		position := time.Duration(frame) * 70 * time.Millisecond
+	for index := 0; index < len(timeline)-1; index++ {
+		position := timeline[index]
+		delay := timeline[index+1] - position
+		if delay <= 0 {
+			continue
+		}
 		exportImageAnimationPosition = &position
 		lines := displayLines(slide, width, height, page)
 		exported := exportLines(lines, slide, width, height, slideCount)
 		signature := exportFrameSignature(exported)
-		if previousIndex, ok := seen[signature]; ok {
-			if previousIndex == 0 && len(frames) > 1 {
-				break
-			}
+		if len(frames) > 0 && signature == previousSignature {
+			frames[len(frames)-1].DelayMS += delay.Milliseconds()
 			continue
 		}
-		seen[signature] = len(frames)
 		if len(frames) == 0 {
-			frames = append(frames, exportContentFrame{Full: true, Lines: exported})
+			frames = append(frames, exportContentFrame{DelayMS: delay.Milliseconds(), Full: true, Lines: exported})
 		} else {
 			clear, update := exportLineDelta(previousLines, exported)
-			frames = append(frames, exportContentFrame{Clear: clear, Update: update})
+			frames = append(frames, exportContentFrame{DelayMS: delay.Milliseconds(), Clear: clear, Update: update})
 		}
 		previousLines = exported
+		previousSignature = signature
 	}
 	return frames
+}
+
+func exportAnimationTimeline(slide Slide) []time.Duration {
+	var animations [][]time.Duration
+	seen := map[string]bool{}
+	for _, element := range slide.Elements {
+		if element.Kind != "image" || seen[element.Path] {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(element.Path))
+		if ext != ".gif" && ext != ".webp" {
+			continue
+		}
+		seen[element.Path] = true
+		decoded := decodeImageFrames(element.Path)
+		if len(decoded) < 2 {
+			continue
+		}
+		delays := make([]time.Duration, 0, len(decoded))
+		for _, frame := range decoded {
+			delay := frame.delay
+			if delay <= 0 {
+				delay = 100 * time.Millisecond
+			}
+			delays = append(delays, delay)
+		}
+		animations = append(animations, delays)
+	}
+	if len(animations) == 0 {
+		return nil
+	}
+	cycle := animationDuration(animations[0])
+	for _, animation := range animations[1:] {
+		cycle = durationLCM(cycle, animationDuration(animation), exportAnimationTimelineLimit)
+	}
+	if cycle <= 0 {
+		return nil
+	}
+	if cycle > exportAnimationTimelineLimit {
+		cycle = exportAnimationTimelineLimit
+	}
+	boundaries := map[time.Duration]bool{0: true, cycle: true}
+	for _, animation := range animations {
+		total := animationDuration(animation)
+		if total <= 0 {
+			continue
+		}
+		for start := time.Duration(0); start < cycle; start += total {
+			position := start
+			for _, delay := range animation {
+				if position >= cycle {
+					break
+				}
+				boundaries[position] = true
+				position += delay
+			}
+		}
+	}
+	timeline := make([]time.Duration, 0, len(boundaries))
+	for boundary := range boundaries {
+		timeline = append(timeline, boundary)
+	}
+	sort.Slice(timeline, func(i, j int) bool { return timeline[i] < timeline[j] })
+	return timeline
+}
+
+func animationDuration(delays []time.Duration) time.Duration {
+	var total time.Duration
+	for _, delay := range delays {
+		total += delay
+	}
+	return total
+}
+
+func durationLCM(left, right, limit time.Duration) time.Duration {
+	if left <= 0 {
+		return right
+	}
+	if right <= 0 {
+		return left
+	}
+	leftMS := left.Milliseconds()
+	rightMS := right.Milliseconds()
+	gcd := leftMS
+	for value := rightMS; value != 0; {
+		gcd, value = value, gcd%value
+	}
+	if gcd <= 0 || leftMS/gcd > limit.Milliseconds()/rightMS {
+		return limit + time.Millisecond
+	}
+	return time.Duration(leftMS/gcd*rightMS) * time.Millisecond
 }
 
 func exportLineDelta(previous, current []exportLine) ([]string, []exportLine) {
@@ -3890,7 +3988,9 @@ if (keynopeAppSurface) {
   document.title = 'Keynope';
 }
 let frame = 0;
-let contentAnimationFrame = 0;
+let contentAnimationElapsedMS = 0;
+let contentAnimationLastTickMS = performance.now();
+let contentAnimationPageIndex = -1;
 let contentAnimationCache = new Map();
 let canvasCell = 1;
 let canvasCharWidth = 1;
@@ -4914,7 +5014,10 @@ function decodedContentFrames(page) {
       for (const key of frame.clear || []) map.delete(key);
       for (const line of frame.update || []) map.set(lineKey(line), line);
     }
-    decoded.push({lines: Array.from(map.values())});
+    decoded.push({
+      lines: Array.from(map.values()),
+      delayMs: Math.max(1, Number(frame.delayMs) || 70)
+    });
   }
   contentAnimationCache.set(pageIndex, decoded);
   return decoded;
@@ -5456,11 +5559,42 @@ function presenterContentLinesFor(index, page) {
   if (!page) return [];
   if (index === pageIndex) {
     const contentFrames = decodedContentFrames(page);
-    if (contentFrames && contentFrames.length) return contentFrames[contentAnimationFrame % contentFrames.length].lines;
+    if (contentFrames && contentFrames.length) {
+      if (contentAnimationPageIndex !== index) {
+        contentAnimationPageIndex = index;
+        contentAnimationElapsedMS = 0;
+      }
+      const totalDelay = contentFrames.reduce((total, contentFrame) => total + contentFrame.delayMs, 0);
+      let position = totalDelay > 0 ? contentAnimationElapsedMS % totalDelay : 0;
+      for (const contentFrame of contentFrames) {
+        if (position < contentFrame.delayMs) return contentFrame.lines;
+        position -= contentFrame.delayMs;
+      }
+      return contentFrames[contentFrames.length - 1].lines;
+    }
   }
   return page.lines || [];
 }
+function contentAnimationWakeDelayMS() {
+  if (keynopeEditorSelectionActive) return 70;
+  const page = presenterPageAt(pageIndex);
+  const contentFrames = page ? decodedContentFrames(page) : null;
+  if (!contentFrames || !contentFrames.length) return 70;
+  const totalDelay = contentFrames.reduce((total, contentFrame) => total + contentFrame.delayMs, 0);
+  let position = totalDelay > 0 ? contentAnimationElapsedMS % totalDelay : 0;
+  for (const contentFrame of contentFrames) {
+    if (position < contentFrame.delayMs) {
+      return Math.max(1, Math.min(70, contentFrame.delayMs - position));
+    }
+    position -= contentFrame.delayMs;
+  }
+  return 70;
+}
 function tick() {
+  const tickStartedMS = performance.now();
+  const elapsedMS = Math.max(0, Math.min(1000, tickStartedMS - contentAnimationLastTickMS));
+  contentAnimationLastTickMS = tickStartedMS;
+  if (!keynopeEditorSelectionActive) contentAnimationElapsedMS += elapsedMS;
   try {
     drawFrame();
   } catch (_err) {
@@ -5473,9 +5607,8 @@ function tick() {
   }
   setTimeout(() => {
     frame++;
-    if (!keynopeEditorSelectionActive) contentAnimationFrame++;
     tick();
-  }, 70);
+  }, contentAnimationWakeDelayMS());
 }
 addEventListener('resize', () => { resize(); render(); });
 function activateLink(target) {

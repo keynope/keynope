@@ -254,6 +254,13 @@ func TestEmbeddedAnimatedGIFStoresResizedFramesAndTimingInDeck(t *testing.T) {
 	if len(pages) == 0 || len(pages[0].ContentFrames) != 0 {
 		t.Fatalf("frozen animation preview pages = %#v", pages)
 	}
+	animatedPages := exportSlidePages(slide, 0, 1, 80, 25)
+	if len(animatedPages) == 0 || len(animatedPages[0].ContentFrames) != 2 {
+		t.Fatalf("animated export frames = %#v", animatedPages)
+	}
+	if animatedPages[0].ContentFrames[0].DelayMS != 50 || animatedPages[0].ContentFrames[1].DelayMS != 120 {
+		t.Fatalf("animated export timing = %#v", animatedPages[0].ContentFrames)
+	}
 	deck := Deck{Slides: []Slide{slide}, Assets: map[string]DeckAsset{id: asset}}
 	destination := filepath.Join(t.TempDir(), "animated.md")
 	if err := saveDeck(destination, deck); err != nil {
