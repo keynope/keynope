@@ -1,4 +1,4 @@
-const CACHE = 'keynope-editor-v18';
+const CACHE = 'keynope-editor-v19';
 const ASSETS = [
   '/editor/',
   '/editor/editor.js',

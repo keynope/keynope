@@ -66,19 +66,20 @@ func (s *nativeEditorSession) handleUpload(w http.ResponseWriter, r *http.Reques
 }
 
 type nativeEditorState struct {
-	Version    int64      `json:"version"`
-	Path       string     `json:"path"`
-	Current    int        `json:"current"`
-	Selected   int        `json:"selected"`
-	Selection  []int      `json:"selection"`
-	Slides     []Slide    `json:"slides"`
-	Resolved   []Slide    `json:"resolved"`
-	Masters    MasterDeck `json:"masters"`
-	MasterMode bool       `json:"masterMode,omitempty"`
-	Dirty      bool       `json:"dirty"`
-	Untitled   bool       `json:"untitled"`
-	TimerMode  string     `json:"timerMode,omitempty"`
-	TimerEndMS int64      `json:"timerEndMs,omitempty"`
+	Version    int64               `json:"version"`
+	Path       string              `json:"path"`
+	Current    int                 `json:"current"`
+	Selected   int                 `json:"selected"`
+	Selection  []int               `json:"selection"`
+	Slides     []Slide             `json:"slides"`
+	Resolved   []Slide             `json:"resolved"`
+	Masters    MasterDeck          `json:"masters"`
+	Fonts      map[string]DeckFont `json:"fonts,omitempty"`
+	MasterMode bool                `json:"masterMode,omitempty"`
+	Dirty      bool                `json:"dirty"`
+	Untitled   bool                `json:"untitled"`
+	TimerMode  string              `json:"timerMode,omitempty"`
+	TimerEndMS int64               `json:"timerEndMs,omitempty"`
 }
 
 type nativeEditorAction struct {
@@ -104,6 +105,7 @@ type nativeEditorAction struct {
 	ElementsData   []Element  `json:"elementsData,omitempty"`
 	SlideData      *Slide     `json:"slideData,omitempty"`
 	AssetData      *DeckAsset `json:"assetData,omitempty"`
+	FontData       *DeckFont  `json:"fontData,omitempty"`
 }
 
 type nativeEditorCaret struct {
@@ -174,6 +176,26 @@ func (s *nativeEditorSession) handleEmojiCatalog(w http.ResponseWriter, r *http.
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "private, max-age=300")
 	_ = json.NewEncoder(w).Encode(nativeEditorEmojiCatalog{Groups: emojiCatalogGroups(), Items: items})
+}
+
+func (s *nativeEditorSession) handleDefaultFont(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	_ = json.NewEncoder(w).Encode(defaultEditableDeckFont())
+}
+
+func (s *nativeEditorSession) handleFontLibrary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(loadDeckFontLibrary())
 }
 
 func editorShapeName(name string) string {
@@ -798,6 +820,7 @@ func newNativeEditorSession(deckPath string, deck Deck, options ...bool) *native
 	isUntitled := len(options) > 0 && options[0]
 	dirtyOverride := len(options) > 1 && options[1]
 	deck = cloneDeck(deck)
+	registerDeckFonts(deck.Fonts)
 	ensureNativeEditorElementIDs(&deck)
 	return &nativeEditorSession{
 		deck: deck, savedDeck: cloneDeck(deck), deckPath: deckPath, untitled: isUntitled, dirtyOverride: dirtyOverride,
@@ -871,7 +894,7 @@ func (s *nativeEditorSession) state() nativeEditorState {
 	}
 	return nativeEditorState{
 		Version: s.version, Path: s.deckPath, Current: current, Selected: s.selected, MasterMode: s.masterMode,
-		Selection: selection, Slides: slides, Resolved: resolved, Masters: s.deck.Masters,
+		Selection: selection, Slides: slides, Resolved: resolved, Masters: s.deck.Masters, Fonts: cloneDeck(s.deck).Fonts,
 		Dirty: s.dirtyLocked(), Untitled: s.untitled, TimerMode: timerMode, TimerEndMS: timerEndMS,
 	}
 }
@@ -983,6 +1006,9 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			return errInvalidEditorAction
 		}
 		return nil
+	}
+	if action.Action == "upsert-font" || action.Action == "delete-font" || action.Action == "delete-library-font" {
+		return s.applyFontAction(action)
 	}
 	if action.Action == "toggle-master-mode" || s.masterMode {
 		return s.applyMaster(action)
@@ -1404,6 +1430,7 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 	}
 	s.version++
 	deck := cloneDeck(s.deck)
+	registerDeckFonts(deck.Fonts)
 	current := s.current
 	companion := s.companion
 	s.mu.Unlock()
@@ -1424,6 +1451,67 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		} else if action.Action == "stop-timer" {
 			companion.StopTimer()
 		}
+	}
+	return nil
+}
+
+func (s *nativeEditorSession) applyFontAction(action nativeEditorAction) error {
+	s.mu.Lock()
+	before := cloneDeck(s.deck)
+	switch action.Action {
+	case "upsert-font":
+		if action.FontData == nil {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		font, err := normalizeDeckFont(*action.FontData)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		if s.deck.Fonts == nil {
+			s.deck.Fonts = map[string]DeckFont{}
+		}
+		s.deck.Fonts[font.ID] = font
+		_ = storeDeckFontInLibrary(font)
+	case "delete-font":
+		id := normalizeDeckFontID(action.Name)
+		if id == "" || s.deck.Fonts[id].ID == "" {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		delete(s.deck.Fonts, id)
+		removeDeckFontReferences(&s.deck, id)
+		_ = removeDeckFontFromLibrary(id)
+	case "delete-library-font":
+		id := normalizeDeckFontID(action.Name)
+		if id == "" {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		if err := removeDeckFontFromLibrary(id); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.version++
+		s.mu.Unlock()
+		return nil
+	default:
+		s.mu.Unlock()
+		return errInvalidEditorAction
+	}
+	s.undo = append(s.undo, before)
+	if len(s.undo) > 100 {
+		s.undo = s.undo[len(s.undo)-100:]
+	}
+	s.redo = nil
+	s.version++
+	registerDeckFonts(s.deck.Fonts)
+	deck := cloneDeck(s.deck)
+	companion := s.companion
+	s.mu.Unlock()
+	if companion != nil {
+		companion.RefreshAllAsync(s.deckPath, deck.ResolvedSlides(), authoredTerminalWidth, authoredTerminalHeight)
 	}
 	return nil
 }
@@ -1819,6 +1907,7 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 	s.deck.Masters.Normalize()
 	s.version++
 	deck := cloneDeck(s.deck)
+	registerDeckFonts(deck.Fonts)
 	companion := s.companion
 	s.mu.Unlock()
 	if changed && companion != nil {

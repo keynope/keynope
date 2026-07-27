@@ -78,6 +78,10 @@ func wasmEditorHandler(path string) http.HandlerFunc {
 		return activeNativeEditor.handleNormalizeTextKind
 	case "/api/editor/emojis":
 		return activeNativeEditor.handleEmojiCatalog
+	case "/api/editor/fonts/default":
+		return activeNativeEditor.handleDefaultFont
+	case "/api/editor/fonts/library":
+		return activeNativeEditor.handleFontLibrary
 	case "/api/editor/workspace":
 		return activeNativeEditor.handleWorkspace
 	case "/api/editor/upload":

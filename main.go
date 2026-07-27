@@ -1750,6 +1750,11 @@ func parseDeckData(path string, data []byte) (Deck, error) {
 		return Deck{}, err
 	}
 	text = remainingAssets
+	fonts, remainingFonts, err := decodeDeckFonts(text)
+	if err != nil {
+		return Deck{}, err
+	}
+	text = remainingFonts
 	authoredTerminalWidth = 0
 	authoredTerminalHeight = 0
 	if match := keynopeMetaRE.FindStringSubmatch(text); match != nil {
@@ -1776,7 +1781,9 @@ func parseDeckData(path string, data []byte) (Deck, error) {
 			slides = append(slides, slide)
 		}
 	}
-	deck := Deck{Slides: slides, Masters: masters, Assets: assets}
+	deck := Deck{Slides: slides, Masters: masters, Assets: assets, Fonts: fonts}
+	registerDeckFonts(deck.Fonts)
+	storeDeckFontsInLibrary(deck.Fonts)
 	materializeDeckAssets(&deck)
 	return deck, nil
 }
@@ -1794,6 +1801,7 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 	}
 	deck = cloneDeck(deck)
 	pruneUnusedDeckAssets(&deck)
+	pruneUnusedDeckFonts(&deck)
 	visitDeckImages(&deck, func(element *Element) {
 		if element.AssetID != "" {
 			element.Path = "keynope-asset:" + element.AssetID
@@ -1811,6 +1819,12 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 		fmt.Fprintf(&out, "<!-- keynope width=%d height=%d -->\n\n", authoredTerminalWidth, authoredTerminalHeight)
 	}
 	if metadata, err := encodeDeckAssets(deck.Assets); err != nil {
+		return nil, err
+	} else if metadata != "" {
+		out.WriteString(metadata)
+		out.WriteString("\n\n")
+	}
+	if metadata, err := encodeDeckFonts(deck.Fonts); err != nil {
 		return nil, err
 	} else if metadata != "" {
 		out.WriteString(metadata)
@@ -2290,6 +2304,8 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int, la
 		mux.HandleFunc("/api/editor/fit-text", activeNativeEditor.handleFitText)
 		mux.HandleFunc("/api/editor/normalize-text-kind", activeNativeEditor.handleNormalizeTextKind)
 		mux.HandleFunc("/api/editor/emojis", activeNativeEditor.handleEmojiCatalog)
+		mux.HandleFunc("/api/editor/fonts/default", activeNativeEditor.handleDefaultFont)
+		mux.HandleFunc("/api/editor/fonts/library", activeNativeEditor.handleFontLibrary)
 		mux.HandleFunc("/api/editor/workspace", activeNativeEditor.handleWorkspace)
 		mux.HandleFunc("/api/editor/upload", activeNativeEditor.handleUpload)
 		mux.HandleFunc("/api/editor/document", activeNativeEditor.handleDocument)
@@ -3900,6 +3916,42 @@ button.keynope-shape-outline-button { display: inline-flex; align-items: center;
 .keynope-editor-field span { display: block; margin-bottom: 3px; color: #aaa; }
 .keynope-editor-field input, .keynope-editor-field textarea, .keynope-editor-field select { width: 100%; box-sizing: border-box; color: #eee; background: #111; border: 1px solid #555; border-radius: 4px; padding: 5px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .keynope-editor-field textarea { min-height: 70px; resize: vertical; }
+.keynope-font-button { position: relative; display: inline-grid !important; place-items: center; width: 34px !important; min-width: 34px !important; height: 30px; padding: 0 !important; font-weight: 700 !important; }
+.keynope-font-button::after { position: absolute; right: 2px; bottom: 1px; color: #9bcfff; content: "✎"; font-size: 9px; line-height: 1; }
+.keynope-font-select { min-width: 118px !important; max-width: 174px; }
+.keynope-font-editor { position: fixed; z-index: 90; inset: 18px; display: grid; grid-template-rows: auto minmax(0,1fr); overflow: hidden; color: #eee; background: #181818; border: 1px solid #666; border-radius: 8px; box-shadow: 0 18px 70px rgba(0,0,0,.72); font: 13px -apple-system,BlinkMacSystemFont,sans-serif; }
+.keynope-font-editor[hidden] { display: none; }
+.keynope-font-editor-header { display: flex; min-height: 48px; align-items: center; flex-wrap: wrap; gap: 7px; padding: 7px 10px; border-bottom: 1px solid #444; background: #202020; }
+.keynope-font-editor-header strong { margin-right: auto; color: #fff; font-size: 14px; }
+.keynope-font-editor button,.keynope-font-editor input,.keynope-font-editor select { color: #eee; background: #292929; border: 1px solid #555; border-radius: 5px; padding: 5px 8px; font: inherit; }
+.keynope-font-editor button:hover { border-color: #8a8a8a; }
+.keynope-font-editor button.active { border-color: #70b7ff; background: #244766; }
+.keynope-font-editor button.danger { margin-left: auto; color: #ffb0aa; border-color: #8d4741; }
+.keynope-font-editor-name { width: min(220px,25vw); background: #111 !important; }
+.keynope-font-editor-body { display: grid; min-height: 0; grid-template-columns: 190px minmax(0,1fr); }
+.keynope-font-glyph-sidebar { display: grid; min-height: 0; grid-template-rows: auto minmax(0,1fr); border-right: 1px solid #444; background: #1d1d1d; }
+.keynope-font-filter { margin: 9px; background: #111 !important; }
+.keynope-font-glyph-list { display: grid; align-content: start; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 4px; padding: 0 9px 9px; overflow: auto; }
+.keynope-font-glyph-list button { position: relative; aspect-ratio: 1; min-width: 0; padding: 0; font: 15px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-font-glyph-list button.empty::after { position: absolute; right: 3px; bottom: 3px; width: 4px; height: 4px; border-radius: 50%; background: #fb7185; content: ""; }
+.keynope-font-workspace { min-width: 0; padding: 12px; overflow: auto; }
+.keynope-font-glyph-heading { display: flex; align-items: center; justify-content: center; gap: 8px; margin: 0 0 12px; }
+.keynope-font-glyph-heading strong { min-width: 160px; text-align: center; }
+.keynope-font-faces { display: grid; align-items: start; grid-template-columns: repeat(2,minmax(300px,1fr)); gap: 12px; }
+.keynope-font-face { overflow: hidden; border: 1px solid #444; border-radius: 6px; background: #202020; }
+.keynope-font-face-head,.keynope-font-face-foot { display: flex; min-height: 42px; align-items: center; gap: 6px; padding: 6px 9px; }
+.keynope-font-face-head { border-bottom: 1px solid #444; }
+.keynope-font-face-head strong { margin-right: auto; }
+.keynope-font-dimensions { color: #aaa; font: 11px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-font-grid-wrap { display: grid; min-height: 300px; place-items: center; padding: 18px; overflow: auto; background-color: #121212; background-image: linear-gradient(45deg,#1a1a1a 25%,transparent 25%),linear-gradient(-45deg,#1a1a1a 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#1a1a1a 75%),linear-gradient(-45deg,transparent 75%,#1a1a1a 75%); background-position: 0 0,0 6px,6px -6px,-6px 0; background-size: 12px 12px; }
+.keynope-font-pixel-grid { display: grid; width: max-content; touch-action: none; border-top: 1px solid #555; border-left: 1px solid #555; user-select: none; }
+.keynope-font-pixel-grid button { width: 27px; height: 27px; border: 0; border-right: 1px solid #555; border-bottom: 1px solid #555; border-radius: 0; padding: 0; background: #292929; }
+.keynope-font-pixel-grid button.on { background: #f2f2ed; }
+.keynope-font-face-foot { border-top: 1px solid #444; }
+.keynope-font-preview { display: grid; gap: 1px; margin-right: auto; padding: 4px; border: 1px solid #555; background: #090909; }
+.keynope-font-preview span { width: 3px; height: 3px; background: #222; }
+.keynope-font-preview span.on { background: #f2f2ed; }
+@media (max-width:900px) { .keynope-font-editor { inset: 8px; } .keynope-font-editor-body { grid-template-columns: 150px minmax(0,1fr); } .keynope-font-faces { grid-template-columns: minmax(280px,1fr); } }
 .keynope-element-item { display: flex; width: 100%; justify-content: space-between; margin-bottom: 4px; }
 .keynope-element-item.active { border-color: #70b7ff; background: #244766; }
 .keynope-canvas-overlay { position: absolute; left: 50%; top: 50%; z-index: 12; transform: translate(-50%, -50%); pointer-events: none; }
@@ -6010,6 +6062,9 @@ if (keynopeAppSurface) {
   let activeCanvasLinkDialog = null;
   let emojiPickerPanel = null;
   let emojiPickerTarget = null;
+  let fontEditorDialog = null;
+  let defaultEditorFont = null;
+  let nativeEditorFontLibrary = null;
   let lastPublishedEditorDirty = null;
   function publishEditorDirtyState() {
     const dirty = !!(editorState && editorState.dirty);
@@ -6240,12 +6295,406 @@ if (keynopeAppSurface) {
   addElementIconButton('Add bullet point', 'bullet', '<circle cx="4" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="4" cy="14" r="1" fill="currentColor" stroke="none"/><path d="M8 6h9M8 14h9"/>');
   addElementIconButton('Add code', 'code', '<path d="M7 5 3 10l4 5M13 5l4 5-4 5M11 3 9 17"/>');
   addElementIconButton('Add emoji', 'text', '<circle cx="10" cy="10" r="7"/><circle cx="7.5" cy="8" r=".8" fill="currentColor" stroke="none"/><circle cx="12.5" cy="8" r=".8" fill="currentColor" stroke="none"/><path d="M6.5 11.5c1.5 2.5 5.5 2.5 7 0"/>', 0, button => openEmojiPicker(button, -1, 'add'));
+  const fontEditorButton = document.createElement('button');
+  fontEditorButton.type = 'button';
+  fontEditorButton.className = 'keynope-font-button';
+  fontEditorButton.textContent = 'Aa';
+  fontEditorButton.title = 'Font editor';
+  fontEditorButton.setAttribute('aria-label', 'Open font editor');
+  fontEditorButton.addEventListener('click', () => openFontEditor());
+  mainTopbar.appendChild(fontEditorButton);
   const addPageNumberButton = addElementIconButton('Show slide number', 'page-number', '<g transform="scale(.025)" fill="none" stroke-linejoin="round"><path d="M145 65h350l160 160v510H145Z" stroke="#fff" stroke-width="32"/><path d="M495 65v160h160" stroke="#fff" stroke-width="32"/><path d="M230 300h340M230 385h340M230 470h250" stroke="#9b9b9b" stroke-width="28" stroke-linecap="round"/><path d="M205 560h390" stroke="#fff" stroke-width="26" stroke-linecap="round"/><path d="m370 630 34-25v85M365 690h90" stroke="#fff" stroke-width="30" stroke-linecap="round"/></g>', 0, () => editorAction({action: 'toggle-page-number'}).catch(() => {}));
   addPageNumberButton.classList.add('keynope-page-number-button');
   const addPageNumberTag = document.createElement('span');
   addPageNumberTag.className = 'keynope-page-number-tag';
   addPageNumberButton.appendChild(addPageNumberTag);
   addPageNumberButton.hidden = true;
+  const fontClone = value => JSON.parse(JSON.stringify(value));
+  function fontLibrary() {
+    let local = {};
+    try { local = JSON.parse(localStorage.getItem('keynope-font-library-v1') || '{}') || {}; }
+    catch (_err) {}
+    return Object.assign({},nativeEditorFontLibrary || {},local);
+  }
+  function storeLibraryFont(font) {
+    try {
+      const fonts = fontLibrary();
+      fonts[font.id] = font;
+      localStorage.setItem('keynope-font-library-v1', JSON.stringify(fonts));
+    } catch (_err) {}
+  }
+  function removeLibraryFont(id) {
+    try {
+      const fonts = fontLibrary();
+      delete fonts[id];
+      localStorage.setItem('keynope-font-library-v1', JSON.stringify(fonts));
+    } catch (_err) {}
+    if (nativeEditorFontLibrary) delete nativeEditorFontLibrary[id];
+  }
+  function fontSlug(value) {
+    return String(value || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'font';
+  }
+  async function loadDefaultEditorFont() {
+    if (!defaultEditorFont) {
+      const response = await fetch('/api/editor/fonts/default');
+      if (!response.ok) throw new Error('Could not load the default font');
+      defaultEditorFont = await response.json();
+    }
+    return fontClone(defaultEditorFont);
+  }
+  async function loadNativeFontLibrary() {
+    if (nativeEditorFontLibrary) return;
+    try {
+      const response = await fetch('/api/editor/fonts/library');
+      nativeEditorFontLibrary = response.ok ? await response.json() : {};
+    } catch (_err) {
+      nativeEditorFontLibrary = {};
+    }
+  }
+  function closeFontEditor() {
+    if (fontEditorDialog) {
+      if (typeof fontEditorDialog._keynopeCleanup === 'function') fontEditorDialog._keynopeCleanup();
+      fontEditorDialog.remove();
+    }
+    fontEditorDialog = null;
+  }
+  async function openFontEditor(preferredID) {
+    closeFontEditor();
+    await loadNativeFontLibrary();
+    let base;
+    try { base = await loadDefaultEditorFont(); }
+    catch (error) { if (editorStatus) editorStatus.textContent = error.message; return; }
+    const deckFonts = editorState && editorState.fonts || {};
+    const libraryFonts = fontLibrary();
+    const firstID = preferredID && (deckFonts[preferredID] || libraryFonts[preferredID])
+      ? preferredID : Object.keys(deckFonts)[0] || '';
+    let font = firstID ? fontClone(deckFonts[firstID] || libraryFonts[firstID]) : fontClone(base);
+    if (!firstID) {
+      font.id = 'my-font-' + Date.now().toString(36);
+      font.name = 'My Font';
+    }
+    let character = 'A';
+    let history = [];
+    let future = [];
+    let painting = null;
+    const chars = Array.from({length:95}, (_, index) => String.fromCharCode(index + 32));
+    const aliases = {' ':'SPACE','"':'DOUBLE QUOTE',"'":'APOSTROPHE','\\':'BACKSLASH'};
+    aliases[String.fromCharCode(96)] = 'BACKTICK';
+    const dialog = document.createElement('section');
+    dialog.className = 'keynope-font-editor';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    const header = document.createElement('div');
+    header.className = 'keynope-font-editor-header';
+    const title = document.createElement('strong');
+    title.textContent = 'KEYNOPE FONT EDITOR';
+    const collection = document.createElement('select');
+    collection.title = 'Fonts in this deck and your library';
+    const name = document.createElement('input');
+    name.className = 'keynope-font-editor-name';
+    name.placeholder = 'Font name';
+    name.value = font.name;
+    const command = (label, titleText) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.title = titleText || label;
+      return button;
+    };
+    const undo = command('↶','Undo glyph edit');
+    const redo = command('↷','Redo glyph edit');
+    const create = command('New');
+    const duplicate = command('Clone');
+    const importFont = command('Import');
+    const importInput = document.createElement('input');
+    importInput.type = 'file';
+    importInput.accept = '.json,application/json';
+    importInput.hidden = true;
+    const exportFont = command('Export');
+    const saveFont = command('Save');
+    saveFont.className = 'active';
+    const deleteFont = command('Delete');
+    deleteFont.className = 'danger';
+    const close = command('Close');
+    header.append(title, collection, name, undo, redo, create, duplicate, importFont, importInput, exportFont, saveFont, deleteFont, close);
+    const body = document.createElement('div');
+    body.className = 'keynope-font-editor-body';
+    const sidebar = document.createElement('aside');
+    sidebar.className = 'keynope-font-glyph-sidebar';
+    const filter = document.createElement('input');
+    filter.type = 'search';
+    filter.placeholder = 'Find character';
+    filter.className = 'keynope-font-filter';
+    const glyphList = document.createElement('div');
+    glyphList.className = 'keynope-font-glyph-list';
+    sidebar.append(filter, glyphList);
+    const workspace = document.createElement('main');
+    workspace.className = 'keynope-font-workspace';
+    const glyphHeading = document.createElement('div');
+    glyphHeading.className = 'keynope-font-glyph-heading';
+    const previous = command('‹','Previous glyph');
+    const glyphName = document.createElement('strong');
+    const next = command('›','Next glyph');
+    const reset = command('Reset glyph');
+    glyphHeading.append(previous, glyphName, next, reset);
+    const faces = document.createElement('div');
+    faces.className = 'keynope-font-faces';
+    workspace.append(glyphHeading, faces);
+    body.append(sidebar, workspace);
+    dialog.append(header, body);
+    document.body.appendChild(dialog);
+    fontEditorDialog = dialog;
+    function normalizeRows(rows) {
+      const width = Math.max(1, ...(rows || []).map(row => Array.from(String(row)).length));
+      return Array.from({length:8}, (_, row) =>
+        Array.from(String(rows && rows[row] || '').padEnd(width,'.').slice(0,width),
+          pixel => pixel === '#' || pixel === '█' ? '#' : '.').join(''));
+    }
+    function checkpoint() {
+      history.push(fontClone(font));
+      if (history.length > 100) history.shift();
+      future = [];
+    }
+    function fillCollection() {
+      collection.replaceChildren();
+      for (const [label, fonts] of [['DECK',editorState && editorState.fonts || {}],['LIBRARY',fontLibrary()]]) {
+        const group = document.createElement('optgroup');
+        group.label = label;
+        for (const value of Object.values(fonts).sort((a,b) => String(a.name).localeCompare(String(b.name)))) {
+          if (!value) continue;
+          const option = document.createElement('option');
+          option.value = label + ':' + value.id;
+          option.textContent = value.name || value.id;
+          option.selected = value.id === font.id && (label === 'DECK' || !(editorState.fonts || {})[font.id]);
+          group.appendChild(option);
+        }
+        if (group.children.length) collection.appendChild(group);
+      }
+    }
+    function renderGlyphList() {
+      glyphList.replaceChildren();
+      const query = filter.value.toLowerCase();
+      for (const value of chars) {
+        const label = aliases[value] || value;
+        if (query && !label.toLowerCase().includes(query) && !String(value.charCodeAt(0)).includes(query)) continue;
+        const button = command(value === ' ' ? '␠' : value, label + ' · ASCII ' + value.charCodeAt(0));
+        button.classList.toggle('active', value === character);
+        button.classList.toggle('empty', ['normal','bold'].some(face => !(font[face]?.[value] || []).some(row => row.includes('#'))));
+        button.addEventListener('click', () => { character = value; render(); });
+        glyphList.appendChild(button);
+      }
+    }
+    function buildFace(face, label) {
+      const section = document.createElement('section');
+      section.className = 'keynope-font-face';
+      const head = document.createElement('div');
+      head.className = 'keynope-font-face-head';
+      const heading = document.createElement('strong');
+      heading.textContent = label;
+      const dimensions = document.createElement('span');
+      dimensions.className = 'keynope-font-dimensions';
+      const less = command('−','Remove rightmost column');
+      const more = command('+','Add a column');
+      head.append(heading, dimensions, less, more);
+      const wrap = document.createElement('div');
+      wrap.className = 'keynope-font-grid-wrap';
+      const grid = document.createElement('div');
+      grid.className = 'keynope-font-pixel-grid';
+      wrap.appendChild(grid);
+      const foot = document.createElement('div');
+      foot.className = 'keynope-font-face-foot';
+      const preview = document.createElement('div');
+      preview.className = 'keynope-font-preview';
+      const clear = command('Clear');
+      const invert = command('Invert');
+      foot.append(preview, clear, invert);
+      section.append(head, wrap, foot);
+      function setPixel(x, y, on) {
+        const rows = font[face][character];
+        const row = Array.from(rows[y]);
+        row[x] = on ? '#' : '.';
+        rows[y] = row.join('');
+        const cell = grid.querySelector('[data-x="' + x + '"][data-y="' + y + '"]');
+        if (cell) cell.classList.toggle('on', on);
+        const dot = preview.children[y * rows[0].length + x];
+        if (dot) dot.classList.toggle('on', on);
+        renderGlyphList();
+      }
+      function draw() {
+        font[face] = font[face] || {};
+        const rows = font[face][character] = normalizeRows(font[face][character]);
+        const width = rows[0].length;
+        dimensions.textContent = width + ' × 8';
+        grid.style.gridTemplateColumns = 'repeat(' + width + ',27px)';
+        preview.style.gridTemplateColumns = 'repeat(' + width + ',3px)';
+        grid.replaceChildren();
+        preview.replaceChildren();
+        rows.forEach((row,y) => Array.from(row).forEach((pixel,x) => {
+          const cell = command('','Pixel ' + (x+1) + ', ' + (y+1));
+          cell.classList.toggle('on', pixel === '#');
+          cell.dataset.x = x;
+          cell.dataset.y = y;
+          cell.addEventListener('pointerdown', event => {
+            event.preventDefault();
+            checkpoint();
+            painting = {face, on:rows[y][x] !== '#'};
+            setPixel(x,y,painting.on);
+          });
+          cell.addEventListener('pointerenter', () => {
+            if (painting && painting.face === face) setPixel(x,y,painting.on);
+          });
+          grid.appendChild(cell);
+          const dot = document.createElement('span');
+          dot.classList.toggle('on', pixel === '#');
+          preview.appendChild(dot);
+        }));
+      }
+      less.addEventListener('click', () => {
+        const rows = normalizeRows(font[face][character]);
+        if (rows[0].length <= 1) return;
+        checkpoint(); font[face][character] = rows.map(row => row.slice(0,-1)); render();
+      });
+      more.addEventListener('click', () => {
+        if (normalizeRows(font[face][character])[0].length >= 32) return;
+        checkpoint(); font[face][character] = normalizeRows(font[face][character]).map(row => row + '.'); render();
+      });
+      clear.addEventListener('click', () => {
+        checkpoint(); font[face][character] = normalizeRows(font[face][character]).map(row => '.'.repeat(row.length)); render();
+      });
+      invert.addEventListener('click', () => {
+        checkpoint(); font[face][character] = normalizeRows(font[face][character]).map(row => Array.from(row,pixel => pixel === '#' ? '.' : '#').join('')); render();
+      });
+      return {section,draw};
+    }
+    const normal = buildFace('normal','NORMAL');
+    const bold = buildFace('bold','BOLD');
+    faces.append(normal.section,bold.section);
+    function render() {
+      font.name = name.value || font.name || font.id;
+      glyphName.textContent = (aliases[character] || character) + ' · ASCII ' + character.charCodeAt(0);
+      undo.disabled = !history.length;
+      redo.disabled = !future.length;
+      deleteFont.disabled = !(editorState && editorState.fonts && editorState.fonts[font.id]) && !fontLibrary()[font.id];
+      renderGlyphList();
+      normal.draw();
+      bold.draw();
+      fillCollection();
+    }
+    function loadFont(value) {
+      font = fontClone(value);
+      name.value = font.name || font.id;
+      history = []; future = [];
+      render();
+    }
+    function move(delta) {
+      const index = chars.indexOf(character);
+      character = chars[(index + delta + chars.length) % chars.length];
+      render();
+    }
+    collection.addEventListener('change', () => {
+      const [group,id] = collection.value.split(':');
+      const selected = group === 'DECK' ? editorState.fonts?.[id] : fontLibrary()[id];
+      if (selected) loadFont(selected);
+    });
+    name.addEventListener('input', () => { font.name = name.value; });
+    filter.addEventListener('input', renderGlyphList);
+    previous.addEventListener('click', () => move(-1));
+    next.addEventListener('click', () => move(1));
+    undo.addEventListener('click', () => {
+      if (!history.length) return;
+      future.push(fontClone(font)); font = history.pop(); name.value = font.name; render();
+    });
+    redo.addEventListener('click', () => {
+      if (!future.length) return;
+      history.push(fontClone(font)); font = future.pop(); name.value = font.name; render();
+    });
+    reset.addEventListener('click', () => {
+      checkpoint();
+      font.normal[character] = fontClone(base.normal[character]);
+      font.bold[character] = fontClone(base.bold[character]);
+      render();
+    });
+    create.addEventListener('click', () => {
+      const fresh = fontClone(base);
+      fresh.id = 'my-font-' + Date.now().toString(36);
+      fresh.name = 'My Font';
+      loadFont(fresh);
+    });
+    duplicate.addEventListener('click', () => {
+      const copy = fontClone(font);
+      copy.id = fontSlug((font.name || font.id) + '-copy') + '-' + Date.now().toString(36);
+      copy.name = (font.name || font.id) + ' Copy';
+      loadFont(copy);
+    });
+    importFont.addEventListener('click', () => importInput.click());
+    importInput.addEventListener('change', async () => {
+      const file = importInput.files?.[0];
+      if (!file) return;
+      try {
+        const value = JSON.parse(await file.text());
+        if (!value.normal || !value.bold) throw new Error('Not a Keynope font');
+        value.id = fontSlug(value.id || value.name || file.name.replace(/\.[^.]+$/,''));
+        value.name = value.name || value.id;
+        loadFont(value);
+      } catch (error) {
+        if (editorStatus) editorStatus.textContent = 'Font import failed: ' + error.message;
+      }
+      importInput.value = '';
+    });
+    exportFont.addEventListener('click', () => {
+      font.name = name.value.trim() || font.name || font.id;
+      const blob = new Blob([JSON.stringify(font,null,2) + '\n'], {type:'application/json'});
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = fontSlug(font.name) + '.keynope-font.json';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href),1000);
+    });
+    saveFont.addEventListener('click', async () => {
+      font.name = name.value.trim() || font.name || font.id;
+      font.id = fontSlug(font.id || font.name);
+      try {
+        await editorAction({action:'upsert-font',fontData:font});
+        storeLibraryFont(font);
+        if (editorStatus) editorStatus.textContent = 'Saved font ' + font.name;
+        render();
+      } catch (_err) {}
+    });
+    deleteFont.addEventListener('click', async () => {
+      try {
+        if (editorState && editorState.fonts && editorState.fonts[font.id]) {
+          await editorAction({action:'delete-font',name:font.id});
+        } else {
+          await editorAction({action:'delete-library-font',name:font.id});
+        }
+        removeLibraryFont(font.id);
+        closeFontEditor();
+      } catch (_err) {}
+    });
+    close.addEventListener('click',closeFontEditor);
+    dialog.addEventListener('keydown', event => {
+      event.stopPropagation();
+      if (event.key === 'Escape') closeFontEditor();
+      else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault(); (event.shiftKey ? redo : undo).click();
+      } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'y') {
+        event.preventDefault(); redo.click();
+      } else if (event.key === 'ArrowLeft' && !event.target.matches('input')) {
+        event.preventDefault(); move(-1);
+      } else if (event.key === 'ArrowRight' && !event.target.matches('input')) {
+        event.preventDefault(); move(1);
+      }
+    });
+    const stopPainting = () => { painting = null; };
+    window.addEventListener('pointerup',stopPainting);
+    window.addEventListener('blur',stopPainting);
+    dialog._keynopeCleanup = () => {
+      window.removeEventListener('pointerup',stopPainting);
+      window.removeEventListener('blur',stopPainting);
+    };
+    render();
+    requestAnimationFrame(() => name.focus());
+  }
   const addShapeMenu = document.createElement('div');
   addShapeMenu.className = 'keynope-add-shape-menu';
   addShapeMenu.hidden = true;
@@ -7465,6 +7914,43 @@ if (keynopeAppSurface) {
     });
     return select;
   }
+  function canvasFontSelect(index, element) {
+    const query = new URLSearchParams(element.query || '');
+    const select = document.createElement('select');
+    select.className = 'keynope-font-select';
+    select.title = 'Text font';
+    select.setAttribute('aria-label', 'Text font');
+    const defaultOption = document.createElement('option');
+    defaultOption.value = '';
+    defaultOption.textContent = 'Font: Default';
+    defaultOption.selected = !query.get('font');
+    select.appendChild(defaultOption);
+    const fonts = editorState && editorState.fonts || {};
+    for (const font of Object.values(fonts).sort((a,b) => String(a.name).localeCompare(String(b.name)))) {
+      const option = document.createElement('option');
+      option.value = font.id;
+      option.textContent = font.name || font.id;
+      option.selected = query.get('font') === font.id;
+      select.appendChild(option);
+    }
+    select.addEventListener('pointerdown', event => event.stopPropagation());
+    select.addEventListener('change', event => {
+      event.stopPropagation();
+      updateCanvasElements(index, updated => ['heading','text','text-image','bullet','code'].includes(updated.kind), updated => {
+        const values = new URLSearchParams(updated.query || '');
+        if (select.value) values.set('font',select.value); else values.delete('font');
+        updated.query = values.toString();
+      });
+    });
+    return select;
+  }
+  function canvasFontEditorTool(element) {
+    const query = new URLSearchParams(element.query || '');
+    const button = canvasTool('Aa','keynope-font-button',() => openFontEditor(query.get('font') || ''));
+    button.title = 'Edit fonts';
+    button.setAttribute('aria-label','Open font editor');
+    return button;
+  }
   function canvasColourTool(index, element, renderedColour) {
     const query = new URLSearchParams(element.query || '');
     const colourKey = element.kind === 'heading' ? 'header' : 'fg';
@@ -7891,6 +8377,8 @@ if (keynopeAppSurface) {
         selectionTopbar.appendChild(rotate);
       }
       if (selectedElements.some(candidate => ['heading','text','text-image','bullet'].includes(candidate.kind))) selectionTopbar.appendChild(canvasStyleSelect(textIndex, textElement));
+      selectionTopbar.appendChild(canvasFontSelect(textIndex, textElement));
+      selectionTopbar.appendChild(canvasFontEditorTool(textElement));
       selectionTopbar.appendChild(canvasColourTool(textIndex, textElement, ''));
       if (selectedElements.length === 1) selectionTopbar.appendChild(canvasLinkTool(textIndex, query));
     }
@@ -9393,7 +9881,7 @@ func textPlacementComment(line string) (string, bool) {
 	}
 	values := url.Values{}
 	if parsed, err := url.ParseQuery(match[1]); err == nil {
-		for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "link", "slide", "master-clear"} {
+		for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "font", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "link", "slide", "master-clear"} {
 			for _, value := range parsed[key] {
 				addPlacementValue(values, key, value)
 			}
@@ -9480,6 +9968,10 @@ func addPlacementValue(values url.Values, key, value string) {
 		if parsed, err := strconv.Atoi(value); err == nil {
 			values.Set(key, strconv.Itoa(max(textSizeMin, min(textSizeMax, parsed))))
 		}
+	case "font":
+		if id := normalizeDeckFontID(value); id != "" && id != "default" {
+			values.Set("font", id)
+		}
 	case "fg", "color":
 		if _, ok := ansiFG(value); ok {
 			values.Set("fg", normalizeColourValue(value))
@@ -9541,7 +10033,7 @@ func placementCommentText(query string) string {
 		return query
 	}
 	var fields []string
-	for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "fg", "bg", "header", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "slide", "link", "master-clear"} {
+	for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "font", "fg", "bg", "header", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "slide", "link", "master-clear"} {
 		if value := values.Get(key); value != "" {
 			if key == "link" {
 				fields = append(fields, key+"="+url.QueryEscape(value))
@@ -16407,6 +16899,12 @@ func textImageScale(element Element) float64 {
 	if scale, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && scale > 0 {
 		return scale
 	}
+	if elementUsesDeckFont(element) && element.Kind == "heading" {
+		if element.Level == 1 {
+			return 4
+		}
+		return 2
+	}
 	return 1
 }
 
@@ -16421,6 +16919,12 @@ func textImageBulletItemCaretMetrics(element Element, current string, cursor, wi
 	contentWidth := max(1, width-prefixWidth)
 	glyphWidth := max(1, int(math.Ceil(4*scale)))
 	boldWidth := max(glyphWidth, int(math.Ceil(5*scale)))
+	if font, ok := elementDeckFont(element, false); ok {
+		glyphWidth = max(1, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/2)))
+	}
+	if font, ok := elementDeckFont(element, true); ok {
+		boldWidth = max(glyphWidth, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/2)))
+	}
 	runes := []rune(current)
 	cursor = max(0, min(cursor, len(runes)))
 	_, trailing := trimTrailingEditorSpaces(string(runes[:cursor]))
@@ -16670,7 +17174,7 @@ func editableRowsForElementPrefix(element Element, width, cursor int) []string {
 		copyElement.Text = text
 		return renderCodeBlockRows(copyElement, width)
 	}
-	if rendersAsTextImage(element) {
+	if rendersAsTextImage(element) || elementUsesDeckFont(element) {
 		return renderTextImageStyledSpans(element, width, parseMarkdownStyledSpansUntil(element.Text, cursor))
 	}
 	spans := parseMarkdownStyledSpansUntil(element.Text, cursor)
@@ -16714,18 +17218,21 @@ func codeCharsPerVisualLineForElement(element Element, width int) int {
 }
 
 func codeGlyphHeight(element Element) int {
-	if !rendersAsTextImage(element) {
+	if !rendersAsTextImage(element) && !elementUsesDeckFont(element) {
 		return 4
 	}
-	return max(1, len(renderBitmapTextImage("M", textImageScale(element))))
+	return max(1, len(renderBitmapTextImageForElement(element, "M", textImageScale(element))))
 }
 
 func editGlyphWidth(element Element) int {
-	if rendersAsTextImage(element) {
+	if rendersAsTextImage(element) || elementUsesDeckFont(element) {
 		values, _ := url.ParseQuery(element.Query)
 		scale := 1.0
 		if parsed, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && parsed > 0 {
 			scale = parsed
+		}
+		if font, ok := elementDeckFont(element, false); ok {
+			return max(1, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/2)))
 		}
 		if values.Get("source") == "bitmap" {
 			return max(1, int(math.Round(4*scale)))
@@ -16754,8 +17261,8 @@ func editGlyphHeight(element Element) int {
 	if element.Kind == "code" {
 		return codeGlyphHeight(element)
 	}
-	if rendersAsTextImage(element) {
-		return max(1, len(renderBitmapTextImage("M", textImageScale(element))))
+	if rendersAsTextImage(element) || elementUsesDeckFont(element) {
+		return max(1, len(renderBitmapTextImageForElement(element, "M", textImageScale(element))))
 	}
 	if element.Kind == "heading" && element.Level == 1 {
 		return 16
@@ -16774,7 +17281,14 @@ func editCursorColumn(element Element, prefixRows []string, cursor int) int {
 		return cursor * editGlyphWidth(element)
 	}
 	if element.Kind == "code" {
-		_, col := codeCursorLineCol(element.Text, cursor)
+		line, col := codeCursorLineCol(element.Text, cursor)
+		if elementUsesDeckFont(element) {
+			logicalLines := strings.Split(element.Text, "\n")
+			if line >= 0 && line < len(logicalLines) {
+				prefix := string([]rune(logicalLines[line])[:min(col, len([]rune(logicalLines[line])))])
+				return codeBlockPadX + maxLineDisplayWidth(renderBitmapTextImageForElement(element, prefix, textImageScale(element)))
+			}
+		}
 		return codeBlockPadX + col*editGlyphWidth(element)
 	}
 	return displayWidth(strings.TrimRight(prefixRows[len(prefixRows)-1], " "))
@@ -17534,7 +18048,7 @@ func renderElementRowsBase(element Element, width int) []string {
 	if element.Kind == "code" {
 		return renderCodeBlockRows(element, width)
 	}
-	if rendersAsTextImage(element) {
+	if rendersAsTextImage(element) || elementUsesDeckFont(element) {
 		return renderTextImageElement(element, width)
 	}
 	switch element.Kind {
@@ -17744,7 +18258,7 @@ func renderCodeBlockRows(element Element, width int) []string {
 
 func renderCodeGlyphRows(element Element, width int) []string {
 	glyphWidth := 4
-	if rendersAsTextImage(element) {
+	if rendersAsTextImage(element) || elementUsesDeckFont(element) {
 		glyphWidth = editGlyphWidth(element)
 	}
 	charsPerLine := max(1, width/max(1, glyphWidth))
@@ -17752,8 +18266,8 @@ func renderCodeGlyphRows(element Element, width int) []string {
 	for _, rawLine := range strings.Split(element.Text, "\n") {
 		chunks := fixedRuneChunks(rawLine, charsPerLine)
 		for _, chunk := range chunks {
-			if rendersAsTextImage(element) {
-				rows = append(rows, renderBitmapTextImage(chunk, textImageScale(element))...)
+			if rendersAsTextImage(element) || elementUsesDeckFont(element) {
+				rows = append(rows, renderBitmapTextImageForElement(element, chunk, textImageScale(element))...)
 			} else {
 				rows = append(rows, renderQuad(chunk)...)
 			}
@@ -17779,6 +18293,11 @@ func layoutElementRows(element Element, width int) []string {
 
 func rendersAsTextImage(element Element) bool {
 	return element.Kind == "text-image" || textRenderMode(element.Query) == "text-image"
+}
+
+func elementUsesDeckFont(element Element) bool {
+	_, ok := elementDeckFont(element, false)
+	return ok
 }
 
 func layout(slide Slide, width, height int) []Line {
@@ -19197,11 +19716,7 @@ func renderQuadPlainRaw(text string) []string {
 }
 
 func renderTextImageElement(element Element, width int) []string {
-	values, _ := url.ParseQuery(element.Query)
-	scale := 1.0
-	if parsed, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && parsed > 0 {
-		scale = parsed
-	}
+	scale := textImageScale(element)
 	if element.Kind == "bullet" {
 		return renderTextImageBulletElement(element, width, scale)
 	}
@@ -19215,7 +19730,7 @@ func renderTextImageElement(element Element, width int) []string {
 		rows = renderStyledBitmapTextImage(element, scale)
 	}
 	if len(rows) == 0 {
-		rows = renderBitmapTextImage(element.Text, scale)
+		rows = renderBitmapTextImageForElement(element, element.Text, scale)
 	}
 	for i, row := range rows {
 		if strings.Contains(row, "\033[") {
@@ -19231,14 +19746,10 @@ func renderTextImageElement(element Element, width int) []string {
 }
 
 func renderTextImageStyledSpans(element Element, width int, spans []styledTextSpan) []string {
-	values, _ := url.ParseQuery(element.Query)
-	scale := 1.0
-	if parsed, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && parsed > 0 {
-		scale = parsed
-	}
+	scale := textImageScale(element)
 	logicalLines := splitStyledSpanLines(spans)
 	var out []string
-	lineHeight := max(1, len(renderBitmapTextImage("M", scale)))
+	lineHeight := max(1, len(renderBitmapTextImageForElement(element, "M", scale)))
 	for _, line := range logicalLines {
 		rows := renderMarkdownBitmapTextImageSpans(element, line, scale)
 		if len(rows) == 0 && len(logicalLines) > 1 {
@@ -19265,6 +19776,12 @@ func renderTextImageBulletElement(element Element, width int, scale float64) []s
 	renderLine := func(text string, showMarker bool) {
 		normalWidth := max(1, int(math.Ceil(4*scale)))
 		boldWidth := max(normalWidth, int(math.Ceil(5*scale)))
+		if font, ok := elementDeckFont(element, false); ok {
+			normalWidth = max(1, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/2)))
+		}
+		if font, ok := elementDeckFont(element, true); ok {
+			boldWidth = max(normalWidth, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/2)))
+		}
 		chunks := wrapStyledSpans(parseMarkdownStyledSpans(text), contentWidth, normalWidth, boldWidth)
 		for chunkIndex, chunk := range chunks {
 			textElement := element
@@ -19312,7 +19829,12 @@ func renderMarkdownBitmapTextImageSpans(element Element, spans []styledTextSpan,
 		}
 		height := bitmapTextRowHeight(factor)
 		rows := renderTextWithEmoji(span.Text, height, func(text string) []string {
-			mask := scaledTextMaskWithFont(text, factor, font, glyphWidth)
+			var mask [][]bool
+			if deckFont, ok := elementDeckFont(element, span.Bold); ok {
+				mask = scaledDeckFontTextMask(text, factor, deckFont)
+			} else {
+				mask = scaledTextMaskWithFont(text, factor, font, glyphWidth)
+			}
 			if hasTextImageStyle(element.Query) {
 				return renderStyledBitmapTextMask(element, mask)
 			}
@@ -19399,7 +19921,7 @@ func hasTextImageStyle(query string) bool {
 func renderStyledBitmapTextImage(element Element, factor float64) []string {
 	height := bitmapTextRowHeight(factor)
 	return renderTextWithEmoji(element.Text, height, func(text string) []string {
-		mask := scaledC64TextMask(text, factor)
+		mask := scaledElementTextMask(element, text, factor, false)
 		if len(mask) == 0 || len(mask[0]) == 0 {
 			return nil
 		}
@@ -19457,6 +19979,17 @@ func renderBitmapTextImage(text string, factor float64) []string {
 	})
 }
 
+func renderBitmapTextImageForElement(element Element, text string, factor float64) []string {
+	height := bitmapTextRowHeight(factor)
+	return renderTextWithEmoji(text, height, func(chunk string) []string {
+		mask := scaledElementTextMask(element, chunk, factor, false)
+		if len(mask) == 0 {
+			return nil
+		}
+		return maskToQuadrants(mask)
+	})
+}
+
 func bitmapTextRowHeight(factor float64) int {
 	pixelHeight := max(1, int(math.Round(8*factor)))
 	return max(1, (pixelHeight+1)/2)
@@ -19466,25 +19999,18 @@ func scaledC64TextMask(text string, factor float64) [][]bool {
 	return scaledTextMaskWithFont(text, factor, c64FullFont, 8)
 }
 
+func scaledElementTextMask(element Element, text string, factor float64, bold bool) [][]bool {
+	if font, ok := elementDeckFont(element, bold); ok {
+		return scaledDeckFontTextMask(text, factor, font)
+	}
+	if bold {
+		return scaledTextMaskWithFont(text, factor, c64BoldFont, 10)
+	}
+	return scaledC64TextMask(text, factor)
+}
+
 func scaledTextMaskWithFont(text string, factor float64, font map[rune][]string, glyphWidth int) [][]bool {
-	mask := textMaskWithFont(text, font, glyphWidth)
-	if len(mask) == 0 || len(mask[0]) == 0 || factor <= 0 {
-		return nil
-	}
-	srcH := len(mask)
-	srcW := len(mask[0])
-	dstH := max(1, int(math.Round(float64(srcH)*factor)))
-	dstW := max(1, int(math.Round(float64(srcW)*factor)))
-	scaled := make([][]bool, dstH)
-	for y := 0; y < dstH; y++ {
-		sy := min(srcH-1, int(float64(y)/factor))
-		scaled[y] = make([]bool, dstW)
-		for x := 0; x < dstW; x++ {
-			sx := min(srcW-1, int(float64(x)/factor))
-			scaled[y][x] = mask[sy][sx]
-		}
-	}
-	return scaled
+	return scaleTextMask(textMaskWithFont(text, font, glyphWidth), factor)
 }
 
 func rotateMask(mask [][]bool, orientation string) [][]bool {

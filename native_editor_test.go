@@ -1468,3 +1468,53 @@ func TestNativeEditorUntitledUndoNeverClearsDirty(t *testing.T) {
 		t.Fatal("untitled deck must remain dirty after undoing to its starter state")
 	}
 }
+
+func TestNativeEditorFontLifecycle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	deck := Deck{Slides: []Slide{{Elements: []Element{{Kind: "text", Text: "A"}}}}}
+	session := newNativeEditorSession("Untitled.md", deck, true)
+	font := testDeckFont("arcade")
+	if err := session.apply(nativeEditorAction{Action: "upsert-font", FontData: &font}); err != nil {
+		t.Fatal(err)
+	}
+	state := session.state()
+	if state.Fonts["arcade"].Name != "Test Face" {
+		t.Fatalf("font missing from editor state: %#v", state.Fonts)
+	}
+	element := state.Slides[0].Elements[0]
+	element.Query = "font=arcade"
+	if err := session.apply(nativeEditorAction{Action: "update-element", Element: 0, ElementData: &element}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := serializeDeck("Untitled.md", session.deck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("keynope-fonts version=1")) || !bytes.Contains(data, []byte("font=arcade")) {
+		t.Fatalf("font was not embedded and referenced:\n%s", data)
+	}
+	if err := session.apply(nativeEditorAction{Action: "delete-font", Name: "arcade"}); err != nil {
+		t.Fatal(err)
+	}
+	state = session.state()
+	if len(state.Fonts) != 0 || strings.Contains(state.Slides[0].Elements[0].Query, "font=") {
+		t.Fatalf("font deletion left state behind: %#v / %q", state.Fonts, state.Slides[0].Elements[0].Query)
+	}
+}
+
+func TestNativeEditorDefaultFontEndpoint(t *testing.T) {
+	session := newNativeEditorSession("Untitled.md", Deck{Slides: []Slide{{}}}, true)
+	request := httptest.NewRequest(http.MethodGet, "/api/editor/fonts/default", nil)
+	response := httptest.NewRecorder()
+	session.handleDefaultFont(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var font DeckFont
+	if err := json.Unmarshal(response.Body.Bytes(), &font); err != nil {
+		t.Fatal(err)
+	}
+	if font.ID != "default" || len(font.Normal) != 95 || len(font.Bold) != 95 {
+		t.Fatalf("unexpected default font payload: id=%q normal=%d bold=%d", font.ID, len(font.Normal), len(font.Bold))
+	}
+}
