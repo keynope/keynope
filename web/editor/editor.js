@@ -38,6 +38,7 @@
   const draftKey = 'current';
   let dirty = false;
   let draftTimer = 0;
+  let draftRevision = 0;
   let documentFileHandle = null;
   let currentName = 'Untitled.md';
   let runtimeReady;
@@ -284,6 +285,8 @@
     });
     if (!response.ok) throw new Error((await response.text()).trim() || 'The presentation changed while saving');
     dirty = false;
+    draftRevision++;
+    clearTimeout(draftTimer);
     await clearDraft();
     document.title = 'Keynope — ' + currentName;
     const savedState = await response.json();
@@ -313,16 +316,19 @@
     if (window.keynopeDidExport) window.keynopeDidExport();
   }
 
-  async function autosaveDraft() {
-    if (!dirty) return;
+  async function autosaveDraft(revision = draftRevision) {
+    if (!dirty || revision !== draftRevision) return;
     try {
       const payload = await documentPayload(currentName);
+      if (!dirty || revision !== draftRevision) return;
       await writeDraft({markdown:payload.content, name:currentName, untitled:true, updated:Date.now()});
     } catch (_) {}
   }
 
   async function loadDocument(markdown, name, untitled) {
     await runtimeReady;
+    draftRevision++;
+    clearTimeout(draftTimer);
     const envelope = JSON.parse(window.keynopeWasmInit(markdown, name, untitled));
     if (envelope.status !== 200) throw new Error(envelope.body || 'Could not open presentation');
     currentName = name;
@@ -341,7 +347,8 @@
     const response = await nativeFetch(new URL('Welcome.md', baseURL), {cache:'no-store'});
     await loadDocument(await response.text(), 'Untitled.md', true);
     dirty = true;
-    await autosaveDraft();
+    const revision = ++draftRevision;
+    await autosaveDraft(revision);
   }
 
   function openPresentation() {
@@ -355,6 +362,7 @@
       try {
         await loadDocument(await file.text(), file.name, false);
         dirty = false;
+        draftRevision++;
         await clearDraft();
       } catch (error) {
         alert('Could not open presentation\n\n' + (error.message || error));
@@ -445,7 +453,8 @@
         dirty = !!message.dirty;
         document.title = 'Keynope — ' + currentName + (dirty ? ' *' : '');
         clearTimeout(draftTimer);
-        if (dirty) draftTimer = setTimeout(autosaveDraft, 750);
+        const revision = ++draftRevision;
+        if (dirty) draftTimer = setTimeout(() => autosaveDraft(revision), 250);
       } else if (action === 'save-presentation') {
         savePresentation().catch(error => reportFailure('Could not save presentation', error));
       } else if (action === 'export-html') {
@@ -472,8 +481,15 @@
 
   addEventListener('beforeunload', event => {
     if (!dirty) return;
+    autosaveDraft(draftRevision);
     event.preventDefault();
     event.returnValue = '';
+  });
+  addEventListener('pagehide', () => {
+    if (dirty) autosaveDraft(draftRevision);
+  });
+  addEventListener('visibilitychange', () => {
+    if (dirty && document.visibilityState === 'hidden') autosaveDraft(draftRevision);
   });
   addEventListener('DOMContentLoaded', () => {
     addWebControls();

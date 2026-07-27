@@ -6014,7 +6014,7 @@ if (keynopeAppSurface) {
   function publishEditorDirtyState() {
     const dirty = !!(editorState && editorState.dirty);
     saveButton.disabled = !dirty;
-    if (dirty === lastPublishedEditorDirty) return;
+    if (dirty === lastPublishedEditorDirty && !window.KEYNOPE_WEB_EDITOR) return;
     lastPublishedEditorDirty = dirty;
     const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
     if (handler) handler.postMessage({action: 'editor-dirty-state', dirty});
@@ -8721,8 +8721,13 @@ if (keynopeAppSurface) {
     refreshEditorPresenterControls();
     drawFrame();
   }
+  function stopEditorTimer() {
+    const running = presenterTimerMode === 'running';
+    cancelEditorTimerInput();
+    if (running) editorAction({action: 'stop-timer'}).catch(() => syncEditorState());
+  }
   timerButton.addEventListener('click', () => {
-    if (presenterTimerMode === 'running') editorAction({action: 'stop-timer'}).catch(() => {});
+    if (presenterTimerMode === 'running') stopEditorTimer();
     else if (presenterTimerMode === 'config') cancelEditorTimerInput();
     else openEditorTimer();
   });
@@ -8902,7 +8907,7 @@ if (keynopeAppSurface) {
     if (presenterTimerMode === 'running' && !e.metaKey && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
       e.stopImmediatePropagation();
-      if (e.key === 'Escape' || e.key.toLowerCase() === 'q') editorAction({action: 'stop-timer'}).catch(() => {});
+      if (e.key === 'Escape' || e.key.toLowerCase() === 'q') stopEditorTimer();
       return;
     }
     if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 's') {
@@ -8969,7 +8974,7 @@ if (keynopeAppSurface) {
     if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === '0') {
       e.preventDefault();
       e.stopImmediatePropagation();
-      if (presenterTimerMode === 'running') editorAction({action: 'stop-timer'}).catch(() => {});
+      if (presenterTimerMode === 'running') stopEditorTimer();
       else openEditorTimer();
       return;
     }

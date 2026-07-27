@@ -8,11 +8,7 @@ trap 'rm -rf "$temporary_dir"' EXIT
 welcome_source="$repo_dir/web/editor/Welcome.md"
 
 mkdir -p "$output_dir"
-{
-  sed -n '1,2p' "$welcome_source"
-  sed -n '3p' "$repo_dir/app/Welcome.md"
-  sed -n '4,$p' "$welcome_source"
-} > "$temporary_dir/Welcome.md"
+cp "$welcome_source" "$temporary_dir/Welcome.md"
 
 (
   cd "$repo_dir"
