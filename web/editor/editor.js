@@ -5,10 +5,33 @@
   window.KEYNOPE_WEB_EDITOR = true;
   const loading = document.createElement('div');
   loading.className = 'keynope-web-loading';
-  loading.innerHTML = '<div class="keynope-web-loading-logo">KEYNOPE</div><div class="keynope-web-loading-bar" aria-hidden="true"><span></span></div><div class="keynope-web-loading-label">LOADING EDITOR</div>';
+  const loadingLogo = document.createElement('pre');
+  loadingLogo.className = 'keynope-web-loading-logo';
+  loadingLogo.textContent = [
+    ' ▐███▌  ██▌ █████████ ▐██  ▐██  ▐██▌   ███  ▐██████  ▐███████▌  █████████',
+    ' ▝▀██▌  ██▌ ▀███▀▀▀▜█ ▐██  ▐██  ▐██▙▖  ███ ▄▟▛▀▀▀▜█▄ ▝▀██▛▀▀█▙▖ ▀███▀▀▀▜█',
+    '   ██▌  ██▌  ███   ▐█ ▐██  ▐██  ▐███▌  ███ ██▌   ▐██   ██▌  ██▌  ███   ▐█',
+    '   ██▌▐██▌   ███ █▌   ▐██  ▐██  ▐█████ ███ ██▌   ▐██   ██▌  ██▌  ███ █▌',
+    '   █████     █████▌    ▐█████   ▐██▌▐█████ ██▌   ▐██   ██████▌   █████▌',
+    '   ██▛▜█▄▖   ███▀█▌    ▝▀██▛▀   ▐██▌▝▀████ ██▌   ▐██   ██▛▀▀▀▘   ███▀█▌',
+    '   ██▌▝▀█▙▖  ███ ▀▘▗▄    ██▌    ▐██▌  ▀███ ██▌   ▐██   ██▌       ███ ▀▘▗▄',
+    '   ██▌  ██▌  ███   ▐█    ██▌    ▐██▌   ███ ██▌   ▐██   ██▌       ███   ▐█',
+    ' ▐███▌  ██▌ █████████  ▐█████   ▐██▌   ███  ▐██████  ▐████▌     █████████',
+    ' ▝▀▀▀▘  ▀▀▘ ▀▀▀▀▀▀▀▀▀  ▝▀▀▀▀▀   ▝▀▀▘   ▀▀▀  ▝▀▀▀▀▀▀  ▝▀▀▀▀▘     ▀▀▀▀▀▀▀▀▀'
+  ].join('\n');
+  loading.innerHTML = '<pre class="keynope-web-loading-bar" aria-hidden="true"></pre><div class="keynope-web-loading-label"></div>';
+  loading.prepend(loadingLogo);
   loading.setAttribute('role', 'status');
   loading.setAttribute('aria-live', 'polite');
   document.body.appendChild(loading);
+  const loadingBar = loading.querySelector('.keynope-web-loading-bar');
+  const loadingLabel = loading.querySelector('.keynope-web-loading-label');
+  function setLoadingProgress(value, label) {
+    const progress = Math.max(0, Math.min(20, Math.round(value)));
+    loadingBar.textContent = '█'.repeat(progress) + '░'.repeat(20 - progress);
+    loadingLabel.textContent = label;
+  }
+  setLoadingProgress(1, 'STARTING');
   const nativeFetch = window.fetch.bind(window);
   const baseURL = new URL('./', document.currentScript.src);
   const databaseName = 'keynope-web-editor';
@@ -21,6 +44,7 @@
   let workspaceLoaded = false;
   function finishLoading() {
     if (!loading.isConnected) return;
+    setLoadingProgress(20, 'READY');
     loading.classList.add('ready');
     setTimeout(() => loading.remove(), 220);
   }
@@ -89,6 +113,7 @@
   }
 
   async function loadScript(source) {
+    setLoadingProgress(2, 'LOADING RUNTIME');
     await new Promise((resolve, reject) => {
       const script = document.createElement('script');
       script.src = source;
@@ -99,6 +124,7 @@
   }
 
   async function waitForRuntime() {
+    setLoadingProgress(16, 'STARTING EDITOR');
     for (let attempt = 0; attempt < 500 && !window.keynopeWasmReady; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 10));
     }
@@ -106,6 +132,7 @@
   }
 
   async function initialDocument() {
+    setLoadingProgress(18, 'LOADING PRESENTATION');
     const draft = await readDraft();
     if (draft && typeof draft.markdown === 'string') return draft;
     const response = await nativeFetch(new URL('Welcome.md', baseURL), {cache: 'no-store'});
@@ -117,19 +144,41 @@
     await loadScript(new URL('wasm_exec.js', baseURL));
     const go = new Go();
     const wasmURL = new URL('keynope-editor.wasm', baseURL);
-    let result;
-    try {
-      result = await WebAssembly.instantiateStreaming(nativeFetch(wasmURL), go.importObject);
-    } catch (_) {
-      const response = await nativeFetch(wasmURL);
-      result = await WebAssembly.instantiate(await response.arrayBuffer(), go.importObject);
+    setLoadingProgress(4, 'LOADING EDITOR');
+    const response = await nativeFetch(wasmURL);
+    if (!response.ok) throw new Error('Could not load the Keynope editor');
+    const total = Number(response.headers.get('Content-Length')) || 0;
+    let bytes;
+    if (response.body && total > 0) {
+      const reader = response.body.getReader();
+      const chunks = [];
+      let loaded = 0;
+      while (true) {
+        const part = await reader.read();
+        if (part.done) break;
+        chunks.push(part.value);
+        loaded += part.value.byteLength;
+        const percent = Math.min(100, Math.round(loaded * 100 / total));
+        setLoadingProgress(4 + Math.floor(percent * 10 / 100), 'LOADING EDITOR · ' + percent + '%');
+      }
+      bytes = new Uint8Array(loaded);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+    } else {
+      bytes = new Uint8Array(await response.arrayBuffer());
     }
+    setLoadingProgress(14, 'COMPILING EDITOR');
+    const result = await WebAssembly.instantiate(bytes, go.importObject);
     go.run(result.instance);
     await waitForRuntime();
     const initial = await initialDocument();
     currentName = initial.name || 'Untitled.md';
     const envelope = JSON.parse(window.keynopeWasmInit(initial.markdown, currentName, initial.untitled !== false));
     if (envelope.status !== 200) throw new Error(envelope.body || 'Could not initialize Keynope');
+    setLoadingProgress(19, 'DRAWING WORKSPACE');
   }
 
   async function refreshWorkspace(state) {

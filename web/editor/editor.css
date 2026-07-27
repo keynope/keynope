@@ -7,16 +7,20 @@
   justify-items: center;
   gap: 14px;
   color: #f3efe0;
-  background: #111;
+  background: rgba(10, 10, 10, .74);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   transition: opacity 180ms ease;
 }
 .keynope-web-loading.ready { opacity: 0; pointer-events: none; }
-.keynope-web-loading-logo { color: #aaff00; font-size: clamp(26px, 5vw, 52px); font-weight: 800; letter-spacing: .14em; text-shadow: 0 0 14px rgba(170,255,0,.32); }
-.keynope-web-loading-bar { width: min(280px, 62vw); height: 10px; overflow: hidden; border: 2px solid #676d73; border-radius: 2px; background: #090909; }
-.keynope-web-loading-bar span { display: block; width: 38%; height: 100%; background: #70b7ff; animation: keynope-web-loading 1.05s ease-in-out infinite alternate; }
-.keynope-web-loading-label { color: #aeb4bb; font-size: 11px; letter-spacing: .18em; }
-@keyframes keynope-web-loading { from { transform: translateX(-105%); } to { transform: translateX(270%); } }
+.keynope-web-loading-logo {
+  margin: 0;
+  color: #aaff00;
+  font: clamp(4px, 1vw, 11px)/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre;
+  text-shadow: 0 0 10px rgba(170,255,0,.35);
+}
+.keynope-web-loading-bar { margin: 0; color: #70b7ff; font: clamp(12px, 1.8vw, 20px)/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; letter-spacing: .04em; text-shadow: 0 0 8px rgba(112,183,255,.4); }
+.keynope-web-loading-label { min-height: 1em; color: #d1d5da; font-size: 11px; letter-spacing: .18em; }
 
 .keynope-web-controls {
   display: flex;
