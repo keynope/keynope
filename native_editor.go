@@ -597,14 +597,16 @@ func (s *nativeEditorSession) handlePreview(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		target := masterSlideAt(&deck, currentMaster)
-		if action.Element < 0 || action.Element >= len(target.Elements) {
+		elementIndex := nativeEditorElementIndex(target.Elements, action.Element, action.ElementData.ID)
+		if elementIndex < 0 {
 			http.Error(w, errInvalidEditorAction.Error(), http.StatusBadRequest)
 			return
 		}
-		target.Elements[action.Element] = *action.ElementData
-		frozenImage := action.Name == "frozen-image" && target.Elements[action.Element].Kind == "image"
+		target.Elements[elementIndex] = *action.ElementData
+		action.Element = elementIndex
+		frozenImage := action.Name == "frozen-image" && target.Elements[elementIndex].Kind == "image"
 		if frozenImage {
-			target.Elements[action.Element].Query = setQueryValue(target.Elements[action.Element].Query, "keynope_freeze", "1")
+			target.Elements[elementIndex].Query = setQueryValue(target.Elements[elementIndex].Query, "keynope_freeze", "1")
 		}
 		cols, rows := action.Cols, action.Rows
 		if cols <= 0 || rows <= 0 {
@@ -621,14 +623,20 @@ func (s *nativeEditorSession) handlePreview(w http.ResponseWriter, r *http.Reque
 		writeNativeEditorPreview(w, action, preview, pages, cols, rows)
 		return
 	}
-	if action.ElementData == nil || current < 0 || current >= len(deck.Slides) || action.Element < 0 || action.Element >= len(deck.Slides[current].Elements) {
+	if action.ElementData == nil || current < 0 || current >= len(deck.Slides) {
 		http.Error(w, errInvalidEditorAction.Error(), http.StatusBadRequest)
 		return
 	}
-	deck.Slides[current].Elements[action.Element] = *action.ElementData
-	frozenImage := action.Name == "frozen-image" && deck.Slides[current].Elements[action.Element].Kind == "image"
+	elementIndex := nativeEditorElementIndex(deck.Slides[current].Elements, action.Element, action.ElementData.ID)
+	if elementIndex < 0 {
+		http.Error(w, errInvalidEditorAction.Error(), http.StatusBadRequest)
+		return
+	}
+	deck.Slides[current].Elements[elementIndex] = *action.ElementData
+	action.Element = elementIndex
+	frozenImage := action.Name == "frozen-image" && deck.Slides[current].Elements[elementIndex].Kind == "image"
 	if frozenImage {
-		deck.Slides[current].Elements[action.Element].Query = setQueryValue(deck.Slides[current].Elements[action.Element].Query, "keynope_freeze", "1")
+		deck.Slides[current].Elements[elementIndex].Query = setQueryValue(deck.Slides[current].Elements[elementIndex].Query, "keynope_freeze", "1")
 	}
 	resolved := deck.ResolvedSlides()
 	cols, rows := action.Cols, action.Rows
@@ -789,10 +797,50 @@ func (s *nativeEditorSession) handleWorkspace(w http.ResponseWriter, r *http.Req
 func newNativeEditorSession(deckPath string, deck Deck, options ...bool) *nativeEditorSession {
 	isUntitled := len(options) > 0 && options[0]
 	dirtyOverride := len(options) > 1 && options[1]
+	deck = cloneDeck(deck)
+	ensureNativeEditorElementIDs(&deck)
 	return &nativeEditorSession{
-		deck: cloneDeck(deck), savedDeck: cloneDeck(deck), deckPath: deckPath, untitled: isUntitled, dirtyOverride: dirtyOverride,
+		deck: deck, savedDeck: cloneDeck(deck), deckPath: deckPath, untitled: isUntitled, dirtyOverride: dirtyOverride,
 		selected: -1, selection: map[int]bool{}, version: 1,
 	}
+}
+
+func ensureNativeEditorElementIDs(deck *Deck) {
+	if deck == nil {
+		return
+	}
+	ensureSlide := func(slide *Slide) {
+		for index := range slide.Elements {
+			if slide.Elements[index].ID == "" {
+				slide.Elements[index].ID = newStableID("slide-element")
+			}
+		}
+	}
+	for index := range deck.Slides {
+		ensureSlide(&deck.Slides[index])
+	}
+	ensureSlide(&deck.Masters.Base.Slide)
+	for index := range deck.Masters.Layouts {
+		ensureSlide(&deck.Masters.Layouts[index].Slide)
+	}
+}
+
+func nativeEditorElementIndex(elements []Element, requested int, id string) int {
+	if id != "" {
+		if requested >= 0 && requested < len(elements) && elements[requested].ID == id {
+			return requested
+		}
+		for index := range elements {
+			if elements[index].ID == id {
+				return index
+			}
+		}
+		return -1
+	}
+	if requested >= 0 && requested < len(elements) {
+		return requested
+	}
+	return -1
 }
 
 func (s *nativeEditorSession) dirtyLocked() bool {
@@ -963,22 +1011,30 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		presenterPage = 0
 		s.selection = map[int]bool{}
 	case "select-element":
-		if action.Element < -1 || s.current < 0 || s.current >= slideCount || action.Element >= len(s.deck.Slides[s.current].Elements) {
+		if s.current < 0 || s.current >= slideCount {
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		if action.Name == "toggle" && action.Element >= 0 {
-			if s.selection[action.Element] {
-				delete(s.selection, action.Element)
+		elementIndex := action.Element
+		if action.ElementData != nil && action.ElementData.ID != "" {
+			elementIndex = nativeEditorElementIndex(s.deck.Slides[s.current].Elements, action.Element, action.ElementData.ID)
+		}
+		if elementIndex < -1 || elementIndex >= len(s.deck.Slides[s.current].Elements) {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		if action.Name == "toggle" && elementIndex >= 0 {
+			if s.selection[elementIndex] {
+				delete(s.selection, elementIndex)
 			} else {
-				s.selection[action.Element] = true
+				s.selection[elementIndex] = true
 			}
-			s.selected = action.Element
+			s.selected = elementIndex
 		} else {
-			s.selected = action.Element
+			s.selected = elementIndex
 			s.selection = map[int]bool{}
-			if action.Element >= 0 {
-				s.selection[action.Element] = true
+			if elementIndex >= 0 {
+				s.selection[elementIndex] = true
 			}
 		}
 	case "navigate-presentation":
@@ -1123,14 +1179,10 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			return errInvalidEditorAction
 		}
 		updated := *action.ElementData
-		elementIndex := action.Element
-		if updated.ID != "" && s.deck.Slides[s.current].Elements[elementIndex].ID != updated.ID {
-			for index, candidate := range s.deck.Slides[s.current].Elements {
-				if candidate.ID == updated.ID {
-					elementIndex = index
-					break
-				}
-			}
+		elementIndex := nativeEditorElementIndex(s.deck.Slides[s.current].Elements, action.Element, updated.ID)
+		if elementIndex < 0 {
+			s.mu.Unlock()
+			return errInvalidEditorAction
 		}
 		original := s.deck.Slides[s.current].Elements[elementIndex]
 		if updated.ID == "" {
@@ -1559,22 +1611,26 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		changed = true
 		s.selection = map[int]bool{s.selected: true}
 	case "select-element":
-		if action.Element < -1 || action.Element >= len(target.Elements) {
+		elementIndex := action.Element
+		if action.ElementData != nil && action.ElementData.ID != "" {
+			elementIndex = nativeEditorElementIndex(target.Elements, action.Element, action.ElementData.ID)
+		}
+		if elementIndex < -1 || elementIndex >= len(target.Elements) {
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		if action.Name == "toggle" && action.Element >= 0 {
-			if s.selection[action.Element] {
-				delete(s.selection, action.Element)
+		if action.Name == "toggle" && elementIndex >= 0 {
+			if s.selection[elementIndex] {
+				delete(s.selection, elementIndex)
 			} else {
-				s.selection[action.Element] = true
+				s.selection[elementIndex] = true
 			}
-			s.selected = action.Element
+			s.selected = elementIndex
 		} else {
-			s.selected = action.Element
+			s.selected = elementIndex
 			s.selection = map[int]bool{}
-			if action.Element >= 0 {
-				s.selection[action.Element] = true
+			if elementIndex >= 0 {
+				s.selection[elementIndex] = true
 			}
 		}
 	case "update-element":
@@ -1583,11 +1639,20 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			return errInvalidEditorAction
 		}
 		updated := *action.ElementData
-		if updated.ID == "" {
-			updated.ID = target.Elements[action.Element].ID
+		elementIndex := nativeEditorElementIndex(target.Elements, action.Element, updated.ID)
+		if elementIndex < 0 {
+			s.mu.Unlock()
+			return errInvalidEditorAction
 		}
-		target.Elements[action.Element] = updated
-		s.selected, changed = action.Element, true
+		if updated.ID == "" {
+			updated.ID = target.Elements[elementIndex].ID
+		}
+		target.Elements[elementIndex] = updated
+		if elementIndex != action.Element && s.selection[action.Element] {
+			delete(s.selection, action.Element)
+			s.selection[elementIndex] = true
+		}
+		s.selected, changed = elementIndex, true
 	case "update-elements":
 		if len(action.ElementIndices) == 0 || len(action.ElementIndices) != len(action.ElementsData) {
 			s.mu.Unlock()

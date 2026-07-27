@@ -1228,6 +1228,39 @@ func TestNativeEditorUpdateResolvesStaleIndexByElementID(t *testing.T) {
 	}
 }
 
+func TestNativeEditorSessionAssignsStableElementIDsWithoutBecomingDirty(t *testing.T) {
+	session := newNativeEditorSession("deck.md", Deck{Slides: []Slide{{Elements: []Element{
+		{Kind: "text", Text: "First"},
+		{Kind: "shape", Query: "shape=square"},
+	}}}})
+	state := session.state()
+	first := state.Slides[0].Elements[0].ID
+	second := state.Slides[0].Elements[1].ID
+	if first == "" || second == "" || first == second {
+		t.Fatalf("editor element IDs = %q, %q", first, second)
+	}
+	if state.Dirty {
+		t.Fatal("assigning internal editor IDs marked the deck dirty")
+	}
+}
+
+func TestNativeEditorSelectionResolvesStaleIndexByElementID(t *testing.T) {
+	session := newNativeEditorSession("deck.md", Deck{Slides: []Slide{{Elements: []Element{
+		{Kind: "text", Text: "First", ID: "first"},
+		{Kind: "text", Text: "Second", ID: "second"},
+	}}}})
+	session.deck.Slides[0].Elements[0], session.deck.Slides[0].Elements[1] =
+		session.deck.Slides[0].Elements[1], session.deck.Slides[0].Elements[0]
+	identity := Element{ID: "first"}
+	if err := session.apply(nativeEditorAction{Action: "select-element", Element: 0, ElementData: &identity}); err != nil {
+		t.Fatal(err)
+	}
+	state := session.state()
+	if state.Selected != 1 || !reflect.DeepEqual(state.Selection, []int{1}) {
+		t.Fatalf("stable-ID selection = %d, %v", state.Selected, state.Selection)
+	}
+}
+
 func TestNativeEditorRefreshScopeAvoidsFullDeckReloadForElementMutations(t *testing.T) {
 	for _, action := range []string{"add-element", "duplicate-element", "paste-elements", "update-element", "update-elements", "convert-text-kind", "convert-selected-text-kind", "delete-element", "delete-selection", "move-element", "update-slide", "set-layout"} {
 		if got := nativeEditorRefreshScope(action); got != "slide" {

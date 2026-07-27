@@ -5872,6 +5872,7 @@ if (keynopeAppSurface) {
   let editorTransparencyIconSequence = 0;
   let editorElementClipboard = [];
   let editorActionQueue = Promise.resolve();
+  let activeCanvasDrag = null;
   let activeCanvasVisualMenu = null;
   let activeCanvasLinkDialog = null;
   let emojiPickerPanel = null;
@@ -5915,6 +5916,23 @@ if (keynopeAppSurface) {
   }
   function editorAction(action) {
     return queueEditorOperation(() => performEditorAction(action));
+  }
+  function editorElementIndexByID(id, fallback = -1) {
+    const slide = editorState && editorState.slides && editorState.slides[editorState.current];
+    const elements = slide ? (slide.elements || []) : [];
+    if (id) {
+      const found = elements.findIndex(element => element.id === id);
+      if (found >= 0) return found;
+      return -1;
+    }
+    return fallback >= 0 && fallback < elements.length ? fallback : -1;
+  }
+  function updateEditorElementByID(id, fallback, element) {
+    return queueEditorOperation(async () => {
+      const currentIndex = editorElementIndexByID(id, fallback);
+      if (currentIndex < 0) throw new Error('Dragged element is no longer available');
+      await performEditorAction({action: 'update-element', element: currentIndex, elementData: element});
+    });
   }
   const editorClipboardPrefix = 'keynope-elements:';
   function editorClipboardTextTarget(target) {
@@ -7757,6 +7775,12 @@ if (keynopeAppSurface) {
 
   function refreshCanvasSelectionInPlace() {
     if (!editorState) return;
+    if (activeCanvasDrag) {
+      for (const hit of canvasOverlay.querySelectorAll('.keynope-canvas-element')) {
+        hit.classList.toggle('active', hit === activeCanvasDrag.hit);
+      }
+      return;
+    }
     const selected = new Set(editorState.selection || []);
     if (editorState.selected >= 0) selected.add(editorState.selected);
     for (const hit of canvasOverlay.querySelectorAll('.keynope-canvas-element')) {
@@ -7769,6 +7793,7 @@ if (keynopeAppSurface) {
 
   renderEditorCanvasOverlay = () => {
     if (!editorState || !deck.pages || !deck.pages.length) return;
+    if (activeCanvasDrag) return;
     const page = deck.pages[pageIndex];
     if (!page || page.slide !== editorState.current) return;
     canvasOverlay.style.width = presenterCanvas.style.width;
@@ -7837,6 +7862,7 @@ if (keynopeAppSurface) {
         const resizeCorner = resizeHandle ? resizeHandle.dataset.corner : '';
         const resizing = resizeCorner !== '';
         const sourceElement = {...editorState.slides[editorState.current].elements[index]};
+        const sourceElementID = sourceElement.id || '';
         const fittingText = resizing && ['heading','text','text-image','bullet','code'].includes(sourceElement.kind);
 		const resizingVisual = resizing && (sourceElement.kind === 'shape' || sourceElement.kind === 'image');
 		if (resizingVisual) keynopeEditorVisualResizeActive = true;
@@ -7847,7 +7873,22 @@ if (keynopeAppSurface) {
 		let pendingVisualPreview = null;
 		let visualPreviewFrame = 0;
 		let visualPreviewing = false;
+        const dragToken = {hit, pointerId:event.pointerId, elementID:sourceElementID};
+        activeCanvasDrag = dragToken;
+        hit.classList.add('active');
+        if (!event.shiftKey && editorState.selected !== index) {
+          editorState.selected = index;
+          editorState.selection = [index];
+          renderEditorTopbar();
+          refreshCanvasSelectionInPlace();
+          editorAction({action:'select-element', element:index, elementData:{id:sourceElementID}}).catch(() => {});
+        } else {
+          refreshCanvasSelectionInPlace();
+        }
         hit.setPointerCapture(event.pointerId);
+        const releaseDrag = () => {
+          if (activeCanvasDrag === dragToken) activeCanvasDrag = null;
+        };
         const resizedBounds = (dx, dy) => {
           let minX = start.minX, minY = start.minY, maxX = start.maxX, maxY = start.maxY;
           if (resizeCorner.includes('w')) minX = Math.min(maxX - 1, minX + dx);
@@ -7948,6 +7989,7 @@ if (keynopeAppSurface) {
 			if (resizingVisual) keynopeEditorVisualResizeActive = false;
           hit.removeEventListener('pointermove', move);
           hit.removeEventListener('pointerup', up);
+          releaseDrag();
           if (visualPreviewFrame) cancelAnimationFrame(visualPreviewFrame);
           visualPreviewFrame = 0;
           pendingVisualPreview = null;
@@ -7958,15 +8000,15 @@ if (keynopeAppSurface) {
             if (resizing) return;
             if (pendingCanvasSelection) clearTimeout(pendingCanvasSelection);
             pendingCanvasSelection = null;
-            editorAction({action: 'select-element', element: index, name: event.shiftKey ? 'toggle' : ''}).catch(() => {});
+            if (event.shiftKey) editorAction({action: 'select-element', element: editorElementIndexByID(sourceElementID, index), name:'toggle', elementData:{id:sourceElementID}}).catch(() => {});
             return;
           }
           if (fittingText) {
             const fitted = await finishTextFit(resizedBounds(dx, dy));
-            if (fitted) editorAction({action: 'update-element', element: index, elementData: fitted}).catch(() => {});
+            if (fitted) updateEditorElementByID(sourceElementID, index, fitted).catch(() => {});
             return;
           }
-          const element = {...editorState.slides[editorState.current].elements[index]};
+          const element = {...sourceElement};
           const query = new URLSearchParams(element.query || '');
 		if (resizing) {
 			const next = resizedBounds(dx, dy);
@@ -7982,17 +8024,17 @@ if (keynopeAppSurface) {
             query.set('top', String(Math.max(0, start.minY + dy)));
           }
           element.query = query.toString();
-		  previewCanvasMutation(index, element, true, canvasElementIsGIF(element));
-          const selectTarget = editorState && editorState.selected === index
-            ? Promise.resolve()
-            : editorAction({action: 'select-element', element: index});
-          selectTarget
-            .then(() => editorAction({action: 'update-element', element: index, elementData: element}))
-            .catch(() => {});
+          const currentIndex = editorElementIndexByID(sourceElementID, index);
+		  previewCanvasMutation(currentIndex, element, false, canvasElementIsGIF(element));
+          updateEditorElementByID(sourceElementID, currentIndex, element).catch(() => {});
         };
 		hit.addEventListener('pointermove', move);
 		hit.addEventListener('pointerup', up);
-		hit.addEventListener('pointercancel', () => { if (resizingVisual) keynopeEditorVisualResizeActive = false; }, {once:true});
+		hit.addEventListener('pointercancel', () => {
+          if (resizingVisual) keynopeEditorVisualResizeActive = false;
+          releaseDrag();
+          requestAnimationFrame(renderEditorCanvasOverlay);
+        }, {once:true});
       });
       if (index === editorState.selected) {
         appendCanvasResizeHandles(hit);
