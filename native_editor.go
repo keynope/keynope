@@ -28,6 +28,7 @@ type nativeEditorSession struct {
 	undo          []Deck
 	redo          []Deck
 	companion     *presenterCompanion
+	timerDeadline time.Time
 	masterMode    bool
 	currentMaster int
 }
@@ -76,6 +77,8 @@ type nativeEditorState struct {
 	MasterMode bool       `json:"masterMode,omitempty"`
 	Dirty      bool       `json:"dirty"`
 	Untitled   bool       `json:"untitled"`
+	TimerMode  string     `json:"timerMode,omitempty"`
+	TimerEndMS int64      `json:"timerEndMs,omitempty"`
 }
 
 type nativeEditorAction struct {
@@ -814,10 +817,14 @@ func (s *nativeEditorSession) state() nativeEditorState {
 		}
 		current = min(s.currentMaster, len(slides)-1)
 	}
+	timerMode, timerEndMS := "", int64(0)
+	if !s.timerDeadline.IsZero() {
+		timerMode, timerEndMS = "running", s.timerDeadline.UnixMilli()
+	}
 	return nativeEditorState{
 		Version: s.version, Path: s.deckPath, Current: current, Selected: s.selected, MasterMode: s.masterMode,
 		Selection: selection, Slides: slides, Resolved: resolved, Masters: s.deck.Masters,
-		Dirty: s.dirtyLocked(), Untitled: s.untitled,
+		Dirty: s.dirtyLocked(), Untitled: s.untitled, TimerMode: timerMode, TimerEndMS: timerEndMS,
 	}
 }
 
@@ -987,7 +994,9 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
+		s.timerDeadline = time.Now().Add(time.Duration(action.Value) * time.Second)
 	case "stop-timer":
+		s.timerDeadline = time.Time{}
 	case "previous-slide":
 		s.current = max(0, s.current-1)
 		s.selected = -1

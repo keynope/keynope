@@ -1,11 +1,14 @@
 (() => {
   'use strict';
 
-  const surfaceURL = new URL(location.href);
-  if (surfaceURL.searchParams.get('keynopeSurface') !== 'app') {
-    surfaceURL.searchParams.set('keynopeSurface', 'app');
-    history.replaceState(null, '', surfaceURL);
-  }
+  window.KEYNOPE_APP_SURFACE = true;
+  window.KEYNOPE_WEB_EDITOR = true;
+  const loading = document.createElement('div');
+  loading.className = 'keynope-web-loading';
+  loading.innerHTML = '<div class="keynope-web-loading-logo">KEYNOPE</div><div class="keynope-web-loading-bar" aria-hidden="true"><span></span></div><div class="keynope-web-loading-label">LOADING EDITOR</div>';
+  loading.setAttribute('role', 'status');
+  loading.setAttribute('aria-live', 'polite');
+  document.body.appendChild(loading);
   const nativeFetch = window.fetch.bind(window);
   const baseURL = new URL('./', document.currentScript.src);
   const databaseName = 'keynope-web-editor';
@@ -16,6 +19,11 @@
   let currentName = 'Untitled.md';
   let runtimeReady;
   let workspaceLoaded = false;
+  function finishLoading() {
+    if (!loading.isConnected) return;
+    loading.classList.add('ready');
+    setTimeout(() => loading.remove(), 220);
+  }
 
   function openDatabase() {
     return new Promise((resolve, reject) => {
@@ -131,14 +139,15 @@
     if (state && Number.isInteger(state.current)) workspace.current = state.current;
     if (window.keynopeLoadWebWorkspace) await window.keynopeLoadWebWorkspace(workspace);
     workspaceLoaded = true;
+    finishLoading();
   }
 
   const stateOnlyEditorActions = new Set([
     'select-element',
-    'select-slide',
-    'navigate-presentation',
     'update-slide-notes',
-    'confirm-save'
+    'confirm-save',
+    'start-timer',
+    'stop-timer'
   ]);
 
   runtimeReady = bootRuntime().catch(error => {
@@ -321,12 +330,13 @@
     openButton.title = 'Open a Markdown presentation';
     openButton.setAttribute('aria-label', openButton.title);
     openButton.onclick = openPresentation;
-    controls.append(newButton, openButton);
     const mainMode = topbar.querySelector('.keynope-topbar-mode');
     const addSlide = mainMode && mainMode.querySelector('button');
-    if (addSlide) controls.appendChild(addSlide);
     const save = topbar.querySelector('.keynope-save-button');
-    topbar.insertBefore(controls, save ? save.nextSibling : topbar.firstChild);
+    if (addSlide) controls.appendChild(addSlide);
+    controls.append(newButton, openButton);
+    if (save) controls.appendChild(save);
+    topbar.insertBefore(controls, topbar.firstChild);
     return true;
   }
 
@@ -347,7 +357,7 @@
       '<button class="keynope-web-about-close" type="button" aria-label="Close">×</button>',
       '<img src="/keynope-logo.png" alt="">',
       '<div class="keynope-web-about-heading"><h2 id="keynope-web-about-title">KEYNOPE</h2><p>Version __KEYNOPE_VERSION__ · Web Editor Beta</p></div>',
-      '<nav><a href="https://keynope.sh/" target="_blank" rel="noopener">◎ keynope.sh</a><a href="https://github.com/keynope/" target="_blank" rel="noopener">◆ GitHub</a></nav>',
+      '<nav><a href="https://keynope.sh/" target="_blank" rel="noopener">🌐 keynope.sh</a><a href="https://github.com/keynope/" target="_blank" rel="noopener">GitHub</a></nav>',
       '<p class="keynope-web-about-credit">© 2026 Dennis Vink · <a href="https://drvink.com" target="_blank" rel="noopener">drvink.com</a> · <a href="https://linkedin.com/in/drvink/" target="_blank" rel="noopener">LinkedIn</a></p>',
       '<details><summary>Open-source licenses</summary><pre>Loading licenses…</pre></details>'
     ].join('');

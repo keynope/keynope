@@ -3852,7 +3852,9 @@ const presenterTestCardBufferContext = presenterTestCardBuffer.getContext('2d');
 const effectLayer = document.getElementById('effect-layer');
 let contentLayer = document.getElementById('content-layer');
 const chromeLayer = document.getElementById('chrome-layer');
-const presenterSurface = new URLSearchParams(location.search).get('keynopeSurface') || 'external';
+const presenterSurface = window.KEYNOPE_APP_SURFACE
+  ? 'app'
+  : (new URLSearchParams(location.search).get('keynopeSurface') || 'external');
 const presenterMainSurface = presenterSurface === 'main';
 const keynopeAppSurface = presenterSurface === 'app';
 // Standalone HTML and live presentation share this renderer. Presenter state
@@ -8593,7 +8595,7 @@ if (keynopeAppSurface) {
     previousButton.hidden = masterMode;
     nextButton.hidden = masterMode;
     presentButton.hidden = masterMode || presenting;
-    externalButton.hidden = masterMode || presenting;
+    externalButton.hidden = !!window.KEYNOPE_WEB_EDITOR || masterMode || presenting;
     pauseButton.hidden = masterMode || !presenting;
     stopPresentationButton.hidden = masterMode || !presenting;
     aboutButton.hidden = false;

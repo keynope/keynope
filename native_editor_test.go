@@ -347,6 +347,10 @@ func TestNativeEditorControlsSharedPresenterTimer(t *testing.T) {
 	if mode != "running" || end < before+89_000 {
 		t.Fatalf("timer mode=%q end=%d before=%d", mode, end, before)
 	}
+	state := session.state()
+	if state.TimerMode != "running" || state.TimerEndMS < before+89_000 {
+		t.Fatalf("editor timer mode=%q end=%d before=%d", state.TimerMode, state.TimerEndMS, before)
+	}
 	if err := session.apply(nativeEditorAction{Action: "stop-timer"}); err != nil {
 		t.Fatal(err)
 	}
@@ -355,6 +359,10 @@ func TestNativeEditorControlsSharedPresenterTimer(t *testing.T) {
 	companion.mu.RUnlock()
 	if mode != "" || end != 0 {
 		t.Fatalf("stopped timer mode=%q end=%d", mode, end)
+	}
+	state = session.state()
+	if state.TimerMode != "" || state.TimerEndMS != 0 {
+		t.Fatalf("stopped editor timer mode=%q end=%d", state.TimerMode, state.TimerEndMS)
 	}
 }
 
