@@ -5867,6 +5867,7 @@ if (keynopeAppSurface) {
     if (handler) handler.postMessage({action: 'editor-dirty-state', dirty});
   }
   async function editorAction(action) {
+    const selectionOnly = action.action === 'select-element';
     const enteringMasters = action.action === 'toggle-master-mode' && editorState && !editorState.masterMode;
     if (enteringMasters) editorNormalPages = (deck.pages || []).slice();
     const response = await fetch('/api/editor/action', {
@@ -5880,7 +5881,12 @@ if (keynopeAppSurface) {
     editorState = await response.json();
     keynopeEditorMasterMode = !!editorState.masterMode;
     editorStateVersion = editorState.version;
-    renderEditorPanels();
+    if (selectionOnly) {
+      renderEditorTopbar();
+      refreshCanvasSelectionInPlace();
+    } else {
+      renderEditorPanels();
+    }
     await syncEditorWorkspace();
   }
   const editorClipboardPrefix = 'keynope-elements:';
@@ -7712,6 +7718,28 @@ if (keynopeAppSurface) {
     selectionTopbar.appendChild(canvasDeleteTool(index));
   }
 
+  function appendCanvasResizeHandles(hit) {
+    for (const corner of ['nw','ne','sw','se']) {
+      const handle = document.createElement('span');
+      handle.className = 'keynope-resize-handle ' + corner;
+      handle.dataset.corner = corner;
+      handle.setAttribute('aria-label', 'Resize from ' + corner);
+      hit.appendChild(handle);
+    }
+  }
+
+  function refreshCanvasSelectionInPlace() {
+    if (!editorState) return;
+    const selected = new Set(editorState.selection || []);
+    if (editorState.selected >= 0) selected.add(editorState.selected);
+    for (const hit of canvasOverlay.querySelectorAll('.keynope-canvas-element')) {
+      const index = Number(hit.dataset.element);
+      hit.classList.toggle('active', selected.has(index));
+      for (const handle of hit.querySelectorAll('.keynope-resize-handle')) handle.remove();
+      if (index === editorState.selected) appendCanvasResizeHandles(hit);
+    }
+  }
+
   renderEditorCanvasOverlay = () => {
     if (!editorState || !deck.pages || !deck.pages.length) return;
     const page = deck.pages[pageIndex];
@@ -7928,12 +7956,11 @@ if (keynopeAppSurface) {
           }
           element.query = query.toString();
 		  previewCanvasMutation(index, element, true, canvasElementIsGIF(element));
-          editorAction({action: 'update-element', element: index, elementData: element})
-            .then(() => {
-              if (editorState && editorState.selected !== index) {
-                return editorAction({action: 'select-element', element: index});
-              }
-            })
+          const selectTarget = editorState && editorState.selected === index
+            ? Promise.resolve()
+            : editorAction({action: 'select-element', element: index});
+          selectTarget
+            .then(() => editorAction({action: 'update-element', element: index, elementData: element}))
             .catch(() => {});
         };
 		hit.addEventListener('pointermove', move);
@@ -7941,13 +7968,7 @@ if (keynopeAppSurface) {
 		hit.addEventListener('pointercancel', () => { if (resizingVisual) keynopeEditorVisualResizeActive = false; }, {once:true});
       });
       if (index === editorState.selected) {
-        for (const corner of ['nw','ne','sw','se']) {
-          const handle = document.createElement('span');
-          handle.className = 'keynope-resize-handle ' + corner;
-          handle.dataset.corner = corner;
-          handle.setAttribute('aria-label', 'Resize from ' + corner);
-          hit.appendChild(handle);
-        }
+        appendCanvasResizeHandles(hit);
       }
       canvasOverlay.appendChild(hit);
     }
