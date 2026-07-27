@@ -4,6 +4,11 @@ Keynope is a terminal-native presentation tool. This repository is the source di
 
 ![Keynope main presentation screen](https://raw.githubusercontent.com/keynope/keynope/main/screenshots/kn1-keynope-main-screen.jpg)
 
+## App Store
+
+You can download and install Keynope from the Apple [App Store](https://apps.apple.com/us/app/keynope/id6793679625)
+Don't forget to give it a kick ass review.
+
 ## Quick install
 
 ```sh
