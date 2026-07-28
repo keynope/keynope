@@ -3,6 +3,7 @@
 
   window.KEYNOPE_APP_SURFACE = true;
   window.KEYNOPE_WEB_EDITOR = true;
+  document.documentElement.classList.add('keynope-web-booting');
   const loading = document.createElement('div');
   loading.className = 'keynope-web-loading';
   const loadingLogo = document.createElement('pre');
@@ -47,7 +48,10 @@
     if (!loading.isConnected) return;
     setLoadingProgress(20, 'READY');
     loading.classList.add('ready');
-    setTimeout(() => loading.remove(), 220);
+    setTimeout(() => {
+      loading.remove();
+      document.documentElement.classList.remove('keynope-web-booting');
+    }, 220);
   }
 
   function openDatabase() {

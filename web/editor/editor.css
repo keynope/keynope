@@ -11,6 +11,7 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   transition: opacity 180ms ease;
 }
+.keynope-web-booting #stage > * { visibility: hidden !important; }
 .keynope-web-loading.ready { opacity: 0; pointer-events: none; }
 .keynope-web-loading-logo {
   margin: 0;
