@@ -3948,11 +3948,13 @@ button.keynope-shape-outline-button { display: inline-flex; align-items: center;
 .keynope-font-dimensions { color: #aaa; font: 11px ui-monospace,SFMono-Regular,Menlo,monospace; }
 .keynope-font-grid-wrap { display: grid; min-height: 300px; place-items: center; padding: 18px; overflow: auto; background-color: #121212; background-image: linear-gradient(45deg,#1a1a1a 25%,transparent 25%),linear-gradient(-45deg,#1a1a1a 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#1a1a1a 75%),linear-gradient(-45deg,transparent 75%,#1a1a1a 75%); background-position: 0 0,0 6px,6px -6px,-6px 0; background-size: 12px 12px; }
 .keynope-font-pixel-grid { display: grid; width: max-content; touch-action: none; border-top: 1px solid #555; border-left: 1px solid #555; user-select: none; }
-.keynope-font-pixel-grid button { width: 27px; height: 27px; border: 0; border-right: 1px solid #555; border-bottom: 1px solid #555; border-radius: 0; padding: 0; color: #f2f2ed; background: #292929; font: 22px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-font-pixel-grid button { position: relative; width: 27px; height: 27px; overflow: hidden; border: 0; border-right: 1px solid #555; border-bottom: 1px solid #555; border-radius: 0; padding: 0; color: #f2f2ed; background: #292929; }
+.keynope-font-cell-glyph { position: absolute; inset: 0; display: grid; place-items: center; font: 23px/27px ui-monospace,SFMono-Regular,Menlo,monospace; transform: scale(1.56,1.14); transform-origin: center; pointer-events: none; }
 .keynope-font-pixel-grid button.on { background: #3a4147; }
 .keynope-font-face-foot { border-top: 1px solid #444; }
 .keynope-font-preview { display: grid; gap: 1px; margin-right: auto; padding: 4px; border: 1px solid #555; background: #090909; }
-.keynope-font-preview span { display: grid; width: 9px; height: 11px; place-items: center; color: #f2f2ed; background: #222; font: 9px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-font-preview span { position: relative; display: grid; width: 9px; height: 11px; overflow: hidden; place-items: center; color: #f2f2ed; background: #222; }
+.keynope-font-preview .keynope-font-cell-glyph { font-size: 10px; line-height: 11px; transform: scale(1.5,1.14); }
 .keynope-font-preview span.on { background: #30363b; }
 @media (max-width:900px) { .keynope-font-editor { inset: 8px; } .keynope-font-editor-body { grid-template-columns: 150px minmax(0,1fr); } .keynope-font-faces { grid-template-columns: minmax(280px,1fr); } }
 .keynope-element-item { display: flex; width: 100%; justify-content: space-between; margin-bottom: 4px; }
@@ -6557,12 +6559,14 @@ if (keynopeAppSurface) {
         rows[y] = row.join('');
         const cell = grid.querySelector('[data-x="' + x + '"][data-y="' + y + '"]');
         if (cell) {
-          cell.textContent = value === '.' ? '' : value;
+          const glyph = cell.querySelector('.keynope-font-cell-glyph');
+          if (glyph) glyph.textContent = value === '.' ? '' : value;
           cell.classList.toggle('on', value !== '.');
         }
         const dot = preview.children[y * rows[0].length + x];
         if (dot) {
-          dot.textContent = value === '.' ? '' : value;
+          const glyph = dot.querySelector('.keynope-font-cell-glyph');
+          if (glyph) glyph.textContent = value === '.' ? '' : value;
           dot.classList.toggle('on', value !== '.');
         }
         renderGlyphList();
@@ -6577,7 +6581,11 @@ if (keynopeAppSurface) {
         grid.replaceChildren();
         preview.replaceChildren();
         rows.forEach((row,y) => Array.from(row).forEach((pixel,x) => {
-          const cell = command(pixel === '.' ? '' : pixel,'Cell ' + (x+1) + ', ' + (y+1));
+          const cell = command('','Cell ' + (x+1) + ', ' + (y+1));
+          const cellGlyph = document.createElement('span');
+          cellGlyph.className = 'keynope-font-cell-glyph';
+          cellGlyph.textContent = pixel === '.' ? '' : pixel;
+          cell.appendChild(cellGlyph);
           cell.classList.toggle('on', pixel !== '.');
           cell.dataset.x = x;
           cell.dataset.y = y;
@@ -6592,7 +6600,10 @@ if (keynopeAppSurface) {
           });
           grid.appendChild(cell);
           const dot = document.createElement('span');
-          dot.textContent = pixel === '.' ? '' : pixel;
+          const previewGlyph = document.createElement('span');
+          previewGlyph.className = 'keynope-font-cell-glyph';
+          previewGlyph.textContent = pixel === '.' ? '' : pixel;
+          dot.appendChild(previewGlyph);
           dot.classList.toggle('on', pixel !== '.');
           preview.appendChild(dot);
         }));
@@ -6649,14 +6660,16 @@ if (keynopeAppSurface) {
     filter.addEventListener('input', renderGlyphList);
     previous.addEventListener('click', () => move(-1));
     next.addEventListener('click', () => move(1));
-    undo.addEventListener('click', () => {
+    function undoFontEdit() {
       if (!history.length) return;
       future.push(fontClone(font)); font = history.pop(); name.value = font.name; render();
-    });
-    redo.addEventListener('click', () => {
+    }
+    function redoFontEdit() {
       if (!future.length) return;
       history.push(fontClone(font)); font = future.pop(); name.value = font.name; render();
-    });
+    }
+    undo.addEventListener('click', undoFontEdit);
+    redo.addEventListener('click', redoFontEdit);
     reset.addEventListener('click', () => {
       checkpoint();
       font.normal[character] = fontClone(base.normal[character]);
@@ -6721,14 +6734,20 @@ if (keynopeAppSurface) {
       } catch (_err) {}
     });
     close.addEventListener('click',closeFontEditor);
+    const fontHistoryShortcut = event => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+      const key = event.key.toLowerCase();
+      if (key !== 'z' && key !== 'y') return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (key === 'y' || (key === 'z' && event.shiftKey)) redoFontEdit();
+      else undoFontEdit();
+    };
+    dialog.addEventListener('keydown', fontHistoryShortcut, true);
     dialog.addEventListener('keydown', event => {
       event.stopPropagation();
       if (event.key === 'Escape') closeFontEditor();
-      else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
-        event.preventDefault(); (event.shiftKey ? redo : undo).click();
-      } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'y') {
-        event.preventDefault(); redo.click();
-      } else if (event.key === 'ArrowLeft' && !event.target.matches('input')) {
+      else if (event.key === 'ArrowLeft' && !event.target.matches('input')) {
         event.preventDefault(); move(-1);
       } else if (event.key === 'ArrowRight' && !event.target.matches('input')) {
         event.preventDefault(); move(1);
@@ -6740,6 +6759,7 @@ if (keynopeAppSurface) {
     dialog._keynopeCleanup = () => {
       window.removeEventListener('pointerup',stopPainting);
       window.removeEventListener('blur',stopPainting);
+      dialog.removeEventListener('keydown',fontHistoryShortcut,true);
     };
     render();
     requestAnimationFrame(() => name.focus());
