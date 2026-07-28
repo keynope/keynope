@@ -3905,7 +3905,8 @@ html[data-keynope-app="true"][data-keynope-notes="true"] .keynope-speaker-notes 
 .keynope-editor-section h3 { margin: 0 0 7px; color: #fff; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
 .keynope-editor-actions { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 10px; }
 .keynope-editor-actions button.danger { color: #ffb0aa; border-color: #8d4741; }
-button.keynope-outline-large { min-width: 34px; padding-top: 1px; padding-bottom: 1px; font-size: 26px; line-height: 1; }
+button.keynope-outline-button { display: inline-grid; width: 30px; min-width: 30px; height: 30px; place-items: center; padding: 2px !important; }
+button.keynope-outline-large { font-size: 26px; line-height: 1; }
 button.keynope-shape-outline-button { display: inline-flex; align-items: center; justify-content: center; text-indent: 0; }
 .keynope-shape-outline-symbol { display: inline-block; transform: translateX(0); }
 .keynope-shape-outline-circle { transform: translateX(-4px); }
@@ -7835,6 +7836,7 @@ if (keynopeAppSurface) {
     }
     const outline = query.get('outline') || '';
     const button = canvasTool(label, outline ? 'active' : '', () => cycleCanvasOutline(index));
+    button.classList.add('keynope-outline-button');
     if (element.kind === 'image') {
       button.innerHTML = '<svg viewBox="0 0 800 600" aria-hidden="true"><path d="M391 74 C468 70 499 124 550 151 C609 182 667 191 680 250 C694 314 646 348 614 393 C580 441 572 503 511 520 C451 537 414 493 360 484 C297 473 245 518 196 477 C145 434 174 376 143 327 C114 279 119 217 169 188 C220 158 270 181 312 130 C335 102 356 78 391 74Z" fill="#9b9b9b" stroke="#fff" stroke-width="32" stroke-linejoin="round"/></svg>';
       button.classList.add('keynope-image-outline-button');
