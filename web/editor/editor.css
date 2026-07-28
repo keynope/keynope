@@ -29,6 +29,7 @@
   gap: 5px;
   padding-right: 2px;
 }
+.keynope-web-controls[hidden] { display: none; }
 .keynope-web-controls > .keynope-save-button {
   display: grid;
   width: 36px;

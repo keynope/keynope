@@ -8384,6 +8384,9 @@ if (keynopeAppSurface) {
     const shapeElement = shapeIndex == null ? null : slide.elements[shapeIndex];
     if (activeCanvasVisualMenu && (!element || activeCanvasVisualMenu.index !== index)) closeCanvasVisualMenu();
     const contextual = !suppressSelectionTopbar && (!!activeInlineEditor || !!element);
+    saveButton.hidden = contextual;
+    const webDocumentControls = topbar.querySelector('.keynope-web-controls');
+    if (webDocumentControls) webDocumentControls.hidden = contextual;
     mainTopbar.hidden = contextual;
     selectionTopbar.hidden = !contextual;
     selectionTopbar.replaceChildren();
