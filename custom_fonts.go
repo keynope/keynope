@@ -99,9 +99,6 @@ func normalizeDeckFontID(value string) string {
 func normalizeDeckFontFace(face map[string][]string, fallback map[rune][]string, fallbackWidth int, mode string) (map[string][]string, error) {
 	out := make(map[string][]string, 95)
 	rowCount := 8
-	if mode == deckFontModeCells {
-		rowCount = 4
-	}
 	for code := 32; code <= 126; code++ {
 		character := string(rune(code))
 		rows := face[character]
@@ -122,10 +119,7 @@ func normalizeDeckFontFace(face map[string][]string, fallback map[rune][]string,
 		if width > deckFontMaxGlyphWidth {
 			return nil, fmt.Errorf("%q is %d pixels wide; maximum is %d", character, width, deckFontMaxGlyphWidth)
 		}
-		normalized := make([]string, 8)
-		if mode == deckFontModeCells {
-			normalized = make([]string, rowCount)
-		}
+		normalized := make([]string, rowCount)
 		for rowIndex, row := range rows {
 			var line strings.Builder
 			for _, pixel := range row {
@@ -173,19 +167,15 @@ func builtinDeckFontGlyph(code int, fallback map[rune][]string, fallbackWidth in
 
 func builtinDeckCellFontGlyph(code int, fallback map[rune][]string, fallbackWidth int) []string {
 	pixels := builtinDeckFontGlyph(code, fallback, fallbackWidth)
-	width := (fallbackWidth + 1) / 2
-	rows := make([]string, 4)
-	for y := 0; y < 4; y++ {
+	rows := make([]string, 8)
+	for y := range rows {
 		var row strings.Builder
-		for x := 0; x < width; x++ {
-			on := func(py, px int) bool {
-				return py >= 0 && py < len(pixels) && px >= 0 && px < len(pixels[py]) && pixels[py][px] == '#'
+		for _, pixel := range pixels[y] {
+			if pixel == '#' {
+				row.WriteRune('█')
+			} else {
+				row.WriteByte('.')
 			}
-			cell := quadrantRune(on(y*2, x*2), on(y*2, x*2+1), on(y*2+1, x*2), on(y*2+1, x*2+1))
-			if cell == ' ' {
-				cell = '.'
-			}
-			row.WriteRune(cell)
 		}
 		rows[y] = row.String()
 	}

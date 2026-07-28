@@ -95,7 +95,7 @@ func TestBlockCellFontRoundTripAndRendering(t *testing.T) {
 	font := defaultEditableDeckCellFont()
 	font.ID = "block-cells"
 	font.Name = "Block Cells"
-	font.Normal["A"] = []string{"▀▄", "▖▗", "░▓", "▌▐"}
+	font.Normal["A"] = []string{"▀▄", "▖▗", "░▓", "▌▐", "▔▕", "▘▝", "▚▞", "█."}
 	metadata, err := encodeDeckFonts(map[string]DeckFont{font.ID: font})
 	if err != nil {
 		t.Fatal(err)
@@ -112,16 +112,18 @@ func TestBlockCellFontRoundTripAndRendering(t *testing.T) {
 		t.Fatalf("block cells changed during round trip: %#v", got)
 	}
 	face := compileDeckFontFace(decoded.Normal, true)
-	if got := renderScaledDeckCellFont("A", 1, face); !reflect.DeepEqual(got, font.Normal["A"]) {
-		t.Fatalf("native block rendering = %#v, want %#v", got, font.Normal["A"])
+	nativeRows := append([]string(nil), font.Normal["A"]...)
+	nativeRows[len(nativeRows)-1] = "█ "
+	if got := renderScaledDeckCellFont("A", 1, face); !reflect.DeepEqual(got, nativeRows) {
+		t.Fatalf("native block rendering = %#v, want %#v", got, nativeRows)
 	}
 	scaled := renderScaledDeckCellFont("A", 2, face)
-	if len(scaled) != 8 || utf8.RuneCountInString(scaled[0]) != 4 {
-		t.Fatalf("scaled block rendering is %dx%d, want 4x8", utf8.RuneCountInString(scaled[0]), len(scaled))
+	if len(scaled) != 16 || utf8.RuneCountInString(scaled[0]) != 4 {
+		t.Fatalf("scaled block rendering is %dx%d, want 4x16", utf8.RuneCountInString(scaled[0]), len(scaled))
 	}
 	registerDeckFonts(fonts)
 	elementRows := renderElementRows(Element{Kind: "text", Text: "A", Query: "font=block-cells"}, 40)
-	if !reflect.DeepEqual(elementRows, font.Normal["A"]) {
-		t.Fatalf("shared element rendering = %#v, want %#v", elementRows, font.Normal["A"])
+	if len(elementRows) != 4 || maxLineDisplayWidth(elementRows) != 1 {
+		t.Fatalf("shared element rendering is %dx%d, want the original 2x8 grid packed to 1x4: %#v", maxLineDisplayWidth(elementRows), len(elementRows), elementRows)
 	}
 }

@@ -6339,27 +6339,13 @@ if (keynopeAppSurface) {
   }
   const fontBlockBrushes = Array.from('▀▁▂▃▄▅▆▇█▉▊▋▌▍▎▏▐░▒▓▔▕▖▗▘▙▚▛▜▝▞▟');
   const fontBlockCells = new Set(fontBlockBrushes);
-  function fontQuadrantCell(upperLeft, upperRight, lowerLeft, lowerRight) {
-    const key = [upperLeft,upperRight,lowerLeft,lowerRight].map(Boolean).map(Number).join('');
-    return {
-      '0000':'.','1000':'▘','0100':'▝','0010':'▖','0001':'▗',
-      '1100':'▀','0011':'▄','1010':'▌','0101':'▐','1001':'▚',
-      '0110':'▞','1011':'▙','1110':'▛','1101':'▜','0111':'▟','1111':'█'
-    }[key] || '.';
-  }
   function fontFaceToCells(face) {
     const converted = {};
     for (const [character,sourceRows] of Object.entries(face || {})) {
       const rows = Array.from({length:8},(_,row) => Array.from(String(sourceRows?.[row] || '')));
       const width = Math.max(1,...rows.map(row => row.length));
-      converted[character] = Array.from({length:4},(_,cellY) => {
-        let line = '';
-        for (let cellX = 0; cellX < Math.ceil(width/2); cellX++) {
-          const on = (y,x) => ['#','█'].includes(rows[y]?.[x]);
-          line += fontQuadrantCell(on(cellY*2,cellX*2),on(cellY*2,cellX*2+1),on(cellY*2+1,cellX*2),on(cellY*2+1,cellX*2+1));
-        }
-        return line;
-      });
+      converted[character] = rows.map(row =>
+        Array.from({length:width},(_,column) => ['#','█'].includes(row[column]) ? '█' : '.').join(''));
     }
     return converted;
   }
@@ -6501,7 +6487,7 @@ if (keynopeAppSurface) {
     fontEditorDialog = dialog;
     function normalizeRows(rows) {
       const width = Math.max(1, ...(rows || []).map(row => Array.from(String(row)).length));
-      return Array.from({length:4}, (_, row) =>
+      return Array.from({length:8}, (_, row) =>
         Array.from(String(rows && rows[row] || '').padEnd(width,'.').slice(0,width),
           pixel => pixel === '#' ? '█' : fontBlockCells.has(pixel) ? pixel : '.').join(''));
     }
@@ -16983,19 +16969,11 @@ func textImageBulletItemCaretMetrics(element Element, current string, cursor, wi
 	contentWidth := max(1, width-prefixWidth)
 	glyphWidth := max(1, int(math.Ceil(4*scale)))
 	boldWidth := max(glyphWidth, int(math.Ceil(5*scale)))
-	if font, cells, ok := elementDeckFontDetails(element, false); ok {
-		divisor := 2.0
-		if cells {
-			divisor = 1
-		}
-		glyphWidth = max(1, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/divisor)))
+	if font, ok := elementDeckFont(element, false); ok {
+		glyphWidth = max(1, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/2)))
 	}
-	if font, cells, ok := elementDeckFontDetails(element, true); ok {
-		divisor := 2.0
-		if cells {
-			divisor = 1
-		}
-		boldWidth = max(glyphWidth, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/divisor)))
+	if font, ok := elementDeckFont(element, true); ok {
+		boldWidth = max(glyphWidth, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/2)))
 	}
 	runes := []rune(current)
 	cursor = max(0, min(cursor, len(runes)))
@@ -17303,12 +17281,8 @@ func editGlyphWidth(element Element) int {
 		if parsed, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && parsed > 0 {
 			scale = parsed
 		}
-		if font, cells, ok := elementDeckFontDetails(element, false); ok {
-			divisor := 2.0
-			if cells {
-				divisor = 1
-			}
-			return max(1, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/divisor)))
+		if font, ok := elementDeckFont(element, false); ok {
+			return max(1, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/2)))
 		}
 		if values.Get("source") == "bitmap" {
 			return max(1, int(math.Round(4*scale)))
@@ -19852,19 +19826,11 @@ func renderTextImageBulletElement(element Element, width int, scale float64) []s
 	renderLine := func(text string, showMarker bool) {
 		normalWidth := max(1, int(math.Ceil(4*scale)))
 		boldWidth := max(normalWidth, int(math.Ceil(5*scale)))
-		if font, cells, ok := elementDeckFontDetails(element, false); ok {
-			divisor := 2.0
-			if cells {
-				divisor = 1
-			}
-			normalWidth = max(1, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/divisor)))
+		if font, ok := elementDeckFont(element, false); ok {
+			normalWidth = max(1, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/2)))
 		}
-		if font, cells, ok := elementDeckFontDetails(element, true); ok {
-			divisor := 2.0
-			if cells {
-				divisor = 1
-			}
-			boldWidth = max(normalWidth, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/divisor)))
+		if font, ok := elementDeckFont(element, true); ok {
+			boldWidth = max(normalWidth, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/2)))
 		}
 		chunks := wrapStyledSpans(parseMarkdownStyledSpans(text), contentWidth, normalWidth, boldWidth)
 		for chunkIndex, chunk := range chunks {
@@ -19914,7 +19880,7 @@ func renderMarkdownBitmapTextImageSpans(element Element, spans []styledTextSpan,
 		height := bitmapTextRowHeight(factor)
 		rows := renderTextWithEmoji(span.Text, height, func(text string) []string {
 			if deckFont, cells, ok := elementDeckFontDetails(element, span.Bold); ok && cells {
-				return renderScaledDeckCellFont(text, factor, deckFont)
+				return renderScaledDeckCellFont(text, factor/2, deckFont)
 			}
 			var mask [][]bool
 			if deckFont, ok := elementDeckFont(element, span.Bold); ok {
@@ -20009,7 +19975,7 @@ func renderStyledBitmapTextImage(element Element, factor float64) []string {
 	height := bitmapTextRowHeight(factor)
 	return renderTextWithEmoji(element.Text, height, func(text string) []string {
 		if font, cells, ok := elementDeckFontDetails(element, false); ok && cells {
-			return renderScaledDeckCellFont(text, factor, font)
+			return renderScaledDeckCellFont(text, factor/2, font)
 		}
 		mask := scaledElementTextMask(element, text, factor, false)
 		if len(mask) == 0 || len(mask[0]) == 0 {
@@ -20073,7 +20039,7 @@ func renderBitmapTextImageForElement(element Element, text string, factor float6
 	height := bitmapTextRowHeight(factor)
 	return renderTextWithEmoji(text, height, func(chunk string) []string {
 		if font, cells, ok := elementDeckFontDetails(element, false); ok && cells {
-			return renderScaledDeckCellFont(chunk, factor, font)
+			return renderScaledDeckCellFont(chunk, factor/2, font)
 		}
 		mask := scaledElementTextMask(element, chunk, factor, false)
 		if len(mask) == 0 {
