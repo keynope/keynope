@@ -391,7 +391,8 @@
           fill="none" stroke="#9b9b9b" stroke-width="60" stroke-linecap="round"/>
         <path d="M145 485v180M55 575h180"
           fill="none" stroke="#ffffff" stroke-width="34" stroke-linecap="round"/>
-      </svg>`;
+      </svg>
+      <span class="keynope-web-icon-tag">NEW</span>`;
     newButton.title = 'New presentation';
     newButton.setAttribute('aria-label', newButton.title);
     newButton.onclick = () => newPresentation().catch(error => alert(error.message || error));
@@ -404,7 +405,8 @@
           fill="none" stroke="#9b9b9b" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
         <path d="M120 325h595q34 0 24 33L645 675q-8 28-38 28H145q-30 0-38-29L66 375q-7-50 54-50Z"
           fill="none" stroke="#ffffff" stroke-width="36" stroke-linejoin="round"/>
-      </svg>`;
+      </svg>
+      <span class="keynope-web-icon-tag">OPEN</span>`;
     openButton.title = 'Open a Markdown presentation';
     openButton.setAttribute('aria-label', openButton.title);
     openButton.onclick = openPresentation;
