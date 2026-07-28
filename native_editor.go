@@ -185,7 +185,7 @@ func (s *nativeEditorSession) handleDefaultFont(w http.ResponseWriter, r *http.R
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "private, max-age=3600")
-	_ = json.NewEncoder(w).Encode(defaultEditableDeckFont())
+	_ = json.NewEncoder(w).Encode(defaultEditableDeckCellFont())
 }
 
 func (s *nativeEditorSession) handleFontLibrary(w http.ResponseWriter, r *http.Request) {

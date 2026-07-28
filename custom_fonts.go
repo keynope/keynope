@@ -22,6 +22,7 @@ import (
 
 const deckFontsVersion = 1
 const deckFontMaxGlyphWidth = 32
+const deckFontModeCells = "cells"
 
 var keynopeFontsRE = regexp.MustCompile(`<!--\s*keynope-fonts\s+version=1\s+base64:([A-Za-z0-9+/=]+)\s*-->\s*`)
 
@@ -33,6 +34,7 @@ var (
 type compiledDeckFont struct {
 	normal map[rune][]string
 	bold   map[rune][]string
+	cells  bool
 }
 
 func cloneDeckFont(font DeckFont) DeckFont {
@@ -62,11 +64,15 @@ func normalizeDeckFont(font DeckFont) (DeckFont, error) {
 	if font.Name == "" {
 		font.Name = font.ID
 	}
-	normal, err := normalizeDeckFontFace(font.Normal, c64FullFont, 8)
+	font.Mode = strings.ToLower(strings.TrimSpace(font.Mode))
+	if font.Mode != "" && font.Mode != deckFontModeCells {
+		return DeckFont{}, fmt.Errorf("unsupported font mode %q", font.Mode)
+	}
+	normal, err := normalizeDeckFontFace(font.Normal, c64FullFont, 8, font.Mode)
 	if err != nil {
 		return DeckFont{}, fmt.Errorf("normal face: %w", err)
 	}
-	bold, err := normalizeDeckFontFace(font.Bold, c64BoldFont, 10)
+	bold, err := normalizeDeckFontFace(font.Bold, c64BoldFont, 10, font.Mode)
 	if err != nil {
 		return DeckFont{}, fmt.Errorf("bold face: %w", err)
 	}
@@ -90,16 +96,24 @@ func normalizeDeckFontID(value string) string {
 	return strings.Trim(out.String(), "-")
 }
 
-func normalizeDeckFontFace(face map[string][]string, fallback map[rune][]string, fallbackWidth int) (map[string][]string, error) {
+func normalizeDeckFontFace(face map[string][]string, fallback map[rune][]string, fallbackWidth int, mode string) (map[string][]string, error) {
 	out := make(map[string][]string, 95)
+	rowCount := 8
+	if mode == deckFontModeCells {
+		rowCount = 4
+	}
 	for code := 32; code <= 126; code++ {
 		character := string(rune(code))
 		rows := face[character]
 		if len(rows) == 0 {
-			rows = builtinDeckFontGlyph(code, fallback, fallbackWidth)
+			if mode == deckFontModeCells {
+				rows = builtinDeckCellFontGlyph(code, fallback, fallbackWidth)
+			} else {
+				rows = builtinDeckFontGlyph(code, fallback, fallbackWidth)
+			}
 		}
-		if len(rows) != 8 {
-			return nil, fmt.Errorf("%q must contain 8 rows", character)
+		if len(rows) != rowCount {
+			return nil, fmt.Errorf("%q must contain %d rows", character, rowCount)
 		}
 		width := 1
 		for _, row := range rows {
@@ -109,10 +123,24 @@ func normalizeDeckFontFace(face map[string][]string, fallback map[rune][]string,
 			return nil, fmt.Errorf("%q is %d pixels wide; maximum is %d", character, width, deckFontMaxGlyphWidth)
 		}
 		normalized := make([]string, 8)
+		if mode == deckFontModeCells {
+			normalized = make([]string, rowCount)
+		}
 		for rowIndex, row := range rows {
 			var line strings.Builder
 			for _, pixel := range row {
-				if pixel == '#' || pixel == '█' {
+				if mode == deckFontModeCells {
+					switch {
+					case pixel == '.' || pixel == ' ':
+						line.WriteByte('.')
+					case pixel == '#':
+						line.WriteRune('█')
+					case isDeckFontBlockCell(pixel):
+						line.WriteRune(pixel)
+					default:
+						line.WriteByte('.')
+					}
+				} else if pixel == '#' || pixel == '█' {
 					line.WriteByte('#')
 				} else {
 					line.WriteByte('.')
@@ -143,12 +171,47 @@ func builtinDeckFontGlyph(code int, fallback map[rune][]string, fallbackWidth in
 	return rows
 }
 
+func builtinDeckCellFontGlyph(code int, fallback map[rune][]string, fallbackWidth int) []string {
+	pixels := builtinDeckFontGlyph(code, fallback, fallbackWidth)
+	width := (fallbackWidth + 1) / 2
+	rows := make([]string, 4)
+	for y := 0; y < 4; y++ {
+		var row strings.Builder
+		for x := 0; x < width; x++ {
+			on := func(py, px int) bool {
+				return py >= 0 && py < len(pixels) && px >= 0 && px < len(pixels[py]) && pixels[py][px] == '#'
+			}
+			cell := quadrantRune(on(y*2, x*2), on(y*2, x*2+1), on(y*2+1, x*2), on(y*2+1, x*2+1))
+			if cell == ' ' {
+				cell = '.'
+			}
+			row.WriteRune(cell)
+		}
+		rows[y] = row.String()
+	}
+	return rows
+}
+
+func isDeckFontBlockCell(character rune) bool {
+	return character >= '\u2580' && character <= '\u259f'
+}
+
 func defaultEditableDeckFont() DeckFont {
 	font := DeckFont{ID: "default", Name: "Keynope Default", Normal: map[string][]string{}, Bold: map[string][]string{}}
 	for code := 32; code <= 126; code++ {
 		character := string(rune(code))
 		font.Normal[character] = builtinDeckFontGlyph(code, c64FullFont, 8)
 		font.Bold[character] = builtinDeckFontGlyph(code, c64BoldFont, 10)
+	}
+	return font
+}
+
+func defaultEditableDeckCellFont() DeckFont {
+	font := DeckFont{ID: "default", Name: "Keynope Default", Mode: deckFontModeCells, Normal: map[string][]string{}, Bold: map[string][]string{}}
+	for code := 32; code <= 126; code++ {
+		character := string(rune(code))
+		font.Normal[character] = builtinDeckCellFontGlyph(code, c64FullFont, 8)
+		font.Bold[character] = builtinDeckCellFontGlyph(code, c64BoldFont, 10)
 	}
 	return font
 }
@@ -276,8 +339,9 @@ func registerDeckFonts(fonts map[string]DeckFont) {
 			continue
 		}
 		compiled[normalized.ID] = compiledDeckFont{
-			normal: compileDeckFontFace(normalized.Normal),
-			bold:   compileDeckFontFace(normalized.Bold),
+			normal: compileDeckFontFace(normalized.Normal, normalized.Mode == deckFontModeCells),
+			bold:   compileDeckFontFace(normalized.Bold, normalized.Mode == deckFontModeCells),
+			cells:  normalized.Mode == deckFontModeCells,
 		}
 	}
 	deckFontRegistryMu.Lock()
@@ -378,13 +442,25 @@ func removeDeckFontFromLibrary(id string) error {
 	return err
 }
 
-func compileDeckFontFace(face map[string][]string) map[rune][]string {
+func compileDeckFontFace(face map[string][]string, cells bool) map[rune][]string {
 	out := make(map[rune][]string, len(face))
 	for character, rows := range face {
 		r, _ := utf8.DecodeRuneInString(character)
 		compiledRows := make([]string, len(rows))
 		for row, line := range rows {
 			compiledRows[row] = strings.Map(func(pixel rune) rune {
+				if cells {
+					if pixel == '.' || pixel == ' ' {
+						return ' '
+					}
+					if pixel == '#' {
+						return '█'
+					}
+					if isDeckFontBlockCell(pixel) {
+						return pixel
+					}
+					return ' '
+				}
 				if pixel == '#' || pixel == '█' {
 					return '█'
 				}
@@ -397,21 +473,26 @@ func compileDeckFontFace(face map[string][]string) map[rune][]string {
 }
 
 func elementDeckFont(element Element, bold bool) (map[rune][]string, bool) {
+	face, _, ok := elementDeckFontDetails(element, bold)
+	return face, ok
+}
+
+func elementDeckFontDetails(element Element, bold bool) (map[rune][]string, bool, bool) {
 	values, _ := url.ParseQuery(element.Query)
 	id := normalizeDeckFontID(values.Get("font"))
 	if id == "" || id == "default" {
-		return nil, false
+		return nil, false, false
 	}
 	deckFontRegistryMu.RLock()
 	font, ok := deckFontRegistry[id]
 	deckFontRegistryMu.RUnlock()
 	if !ok {
-		return nil, false
+		return nil, false, false
 	}
 	if bold {
-		return font.bold, true
+		return font.bold, font.cells, true
 	}
-	return font.normal, true
+	return font.normal, font.cells, true
 }
 
 func deckFontGlyphWidth(face map[rune][]string, character rune) int {
@@ -435,7 +516,11 @@ func deckFontMaxWidth(face map[rune][]string) int {
 }
 
 func renderDeckFontRaw(text string, face map[rune][]string) []string {
-	rows := make([]string, 8)
+	height := 0
+	for _, glyph := range face {
+		height = max(height, len(glyph))
+	}
+	rows := make([]string, max(1, height))
 	for _, character := range text {
 		glyph := face[character]
 		if glyph == nil {
@@ -451,6 +536,134 @@ func renderDeckFontRaw(text string, face map[rune][]string) []string {
 		}
 	}
 	return rows
+}
+
+func deckFontBlockCellPattern(character rune) [64]bool {
+	var pattern [64]bool
+	set := func(x, y int) {
+		if x >= 0 && x < 8 && y >= 0 && y < 8 {
+			pattern[y*8+x] = true
+		}
+	}
+	fill := func(x0, y0, x1, y1 int) {
+		for y := y0; y < y1; y++ {
+			for x := x0; x < x1; x++ {
+				set(x, y)
+			}
+		}
+	}
+	switch {
+	case character == '█' || character == '#':
+		fill(0, 0, 8, 8)
+	case character == '▀':
+		fill(0, 0, 8, 4)
+	case character >= '▁' && character <= '▇':
+		rows := int(character - '▁' + 1)
+		fill(0, 8-rows, 8, 8)
+	case character >= '▉' && character <= '▏':
+		columns := 8 - int(character-'▉')
+		fill(0, 0, columns, 8)
+	case character == '▐':
+		fill(4, 0, 8, 8)
+	case character == '▔':
+		fill(0, 0, 8, 1)
+	case character == '▕':
+		fill(7, 0, 8, 8)
+	case character >= '░' && character <= '▓':
+		threshold := map[rune]int{'░': 4, '▒': 8, '▓': 12}[character]
+		bayer := [16]int{0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5}
+		for y := 0; y < 8; y++ {
+			for x := 0; x < 8; x++ {
+				if bayer[(y%4)*4+x%4] < threshold {
+					set(x, y)
+				}
+			}
+		}
+	case character >= '▖' && character <= '▟':
+		quadrants := map[rune][4]bool{
+			'▖': {false, false, true, false},
+			'▗': {false, false, false, true},
+			'▘': {true, false, false, false},
+			'▙': {true, false, true, true},
+			'▚': {true, false, false, true},
+			'▛': {true, true, true, false},
+			'▜': {true, true, false, true},
+			'▝': {false, true, false, false},
+			'▞': {false, true, true, false},
+			'▟': {false, true, true, true},
+		}[character]
+		if quadrants[0] {
+			fill(0, 0, 4, 4)
+		}
+		if quadrants[1] {
+			fill(4, 0, 8, 4)
+		}
+		if quadrants[2] {
+			fill(0, 4, 4, 8)
+		}
+		if quadrants[3] {
+			fill(4, 4, 8, 8)
+		}
+	}
+	return pattern
+}
+
+func nearestDeckFontBlockCell(pattern [64]bool) rune {
+	best, bestDistance := ' ', 65
+	candidates := append([]rune{' '}, []rune("▀▁▂▃▄▅▆▇█▉▊▋▌▍▎▏▐░▒▓▔▕▖▗▘▙▚▛▜▝▞▟")...)
+	for _, candidate := range candidates {
+		value := deckFontBlockCellPattern(candidate)
+		distance := 0
+		for index := range pattern {
+			if pattern[index] != value[index] {
+				distance++
+			}
+		}
+		if distance < bestDistance {
+			best, bestDistance = candidate, distance
+		}
+	}
+	return best
+}
+
+func renderScaledDeckCellFont(text string, factor float64, face map[rune][]string) []string {
+	raw := renderDeckFontRaw(text, face)
+	if len(raw) == 0 {
+		return nil
+	}
+	sourceHeight, sourceWidth := len(raw), maxLineDisplayWidth(raw)
+	if sourceWidth == 0 {
+		return raw
+	}
+	if math.Abs(factor-1) < 0.0001 {
+		return raw
+	}
+	source := make([][]rune, sourceHeight)
+	for row := range raw {
+		source[row] = []rune(padRunes(raw[row], sourceWidth))
+	}
+	targetHeight := max(1, int(math.Round(float64(sourceHeight)*factor)))
+	targetWidth := max(1, int(math.Round(float64(sourceWidth)*factor)))
+	out := make([]string, targetHeight)
+	for targetY := 0; targetY < targetHeight; targetY++ {
+		var row strings.Builder
+		for targetX := 0; targetX < targetWidth; targetX++ {
+			var sampled [64]bool
+			for microY := 0; microY < 8; microY++ {
+				sourceMicroY := min(sourceHeight*8-1, (targetY*8+microY)*sourceHeight/targetHeight)
+				sourceCellY, sourceCellMicroY := sourceMicroY/8, sourceMicroY%8
+				for microX := 0; microX < 8; microX++ {
+					sourceMicroX := min(sourceWidth*8-1, (targetX*8+microX)*sourceWidth/targetWidth)
+					sourceCellX, sourceCellMicroX := sourceMicroX/8, sourceMicroX%8
+					sourcePattern := deckFontBlockCellPattern(source[sourceCellY][sourceCellX])
+					sampled[microY*8+microX] = sourcePattern[sourceCellMicroY*8+sourceCellMicroX]
+				}
+			}
+			row.WriteRune(nearestDeckFontBlockCell(sampled))
+		}
+		out[targetY] = row.String()
+	}
+	return out
 }
 
 func deckFontTextMask(text string, face map[rune][]string) [][]bool {

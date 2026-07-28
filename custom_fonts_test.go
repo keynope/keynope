@@ -4,8 +4,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func testDeckFont(id string) DeckFont {
@@ -48,7 +50,7 @@ func TestCustomFontUsesVariableGlyphWidths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	face := compileDeckFontFace(font.Normal)
+	face := compileDeckFontFace(font.Normal, false)
 	mask := deckFontTextMask("IW", face)
 	if len(mask) != 8 || len(mask[0]) != 6 {
 		t.Fatalf("mask dimensions were %dx%d, want 6x8", len(mask[0]), len(mask))
@@ -86,5 +88,40 @@ func TestDeckFontLibraryUsesCompressedFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("library font still exists: %v", err)
+	}
+}
+
+func TestBlockCellFontRoundTripAndRendering(t *testing.T) {
+	font := defaultEditableDeckCellFont()
+	font.ID = "block-cells"
+	font.Name = "Block Cells"
+	font.Normal["A"] = []string{"▀▄", "▖▗", "░▓", "▌▐"}
+	metadata, err := encodeDeckFonts(map[string]DeckFont{font.ID: font})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fonts, _, err := decodeDeckFonts(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := fonts[font.ID]
+	if decoded.Mode != deckFontModeCells {
+		t.Fatalf("font mode = %q, want %q", decoded.Mode, deckFontModeCells)
+	}
+	if got := decoded.Normal["A"]; !reflect.DeepEqual(got, font.Normal["A"]) {
+		t.Fatalf("block cells changed during round trip: %#v", got)
+	}
+	face := compileDeckFontFace(decoded.Normal, true)
+	if got := renderScaledDeckCellFont("A", 1, face); !reflect.DeepEqual(got, font.Normal["A"]) {
+		t.Fatalf("native block rendering = %#v, want %#v", got, font.Normal["A"])
+	}
+	scaled := renderScaledDeckCellFont("A", 2, face)
+	if len(scaled) != 8 || utf8.RuneCountInString(scaled[0]) != 4 {
+		t.Fatalf("scaled block rendering is %dx%d, want 4x8", utf8.RuneCountInString(scaled[0]), len(scaled))
+	}
+	registerDeckFonts(fonts)
+	elementRows := renderElementRows(Element{Kind: "text", Text: "A", Query: "font=block-cells"}, 40)
+	if !reflect.DeepEqual(elementRows, font.Normal["A"]) {
+		t.Fatalf("shared element rendering = %#v, want %#v", elementRows, font.Normal["A"])
 	}
 }

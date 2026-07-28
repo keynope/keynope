@@ -40,6 +40,7 @@ type Deck struct {
 type DeckFont struct {
 	ID     string              `json:"id"`
 	Name   string              `json:"name"`
+	Mode   string              `json:"mode,omitempty"`
 	Normal map[string][]string `json:"normal"`
 	Bold   map[string][]string `json:"bold"`
 }
