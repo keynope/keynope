@@ -378,13 +378,33 @@
     controls.className = 'keynope-web-controls';
     const newButton = document.createElement('button');
     newButton.type = 'button';
-    newButton.textContent = 'New';
+    newButton.className = 'keynope-web-icon-button';
+    newButton.innerHTML = `
+      <svg viewBox="0 0 800 800" aria-hidden="true">
+        <rect x="180" y="90" width="500" height="82" rx="20"
+          fill="none" stroke="#ffffff" stroke-width="30"/>
+        <path d="M215 175v330h430V175M430 505v145M430 555 330 650M430 555l100 95"
+          fill="none" stroke="#ffffff" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M300 275h260M300 350h260"
+          fill="none" stroke="#9b9b9b" stroke-width="28" stroke-linecap="round"/>
+        <path d="M145 485v180M55 575h180"
+          fill="none" stroke="#9b9b9b" stroke-width="60" stroke-linecap="round"/>
+        <path d="M145 485v180M55 575h180"
+          fill="none" stroke="#ffffff" stroke-width="34" stroke-linecap="round"/>
+      </svg>`;
     newButton.title = 'New presentation';
     newButton.setAttribute('aria-label', newButton.title);
     newButton.onclick = () => newPresentation().catch(error => alert(error.message || error));
     const openButton = document.createElement('button');
     openButton.type = 'button';
-    openButton.textContent = 'Open';
+    openButton.className = 'keynope-web-icon-button';
+    openButton.innerHTML = `
+      <svg viewBox="0 0 800 800" aria-hidden="true">
+        <path d="M95 490V190Q95 150 135 150h205l75 85h250q40 0 40 40v75"
+          fill="none" stroke="#9b9b9b" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M120 325h595q34 0 24 33L645 675q-8 28-38 28H145q-30 0-38-29L66 375q-7-50 54-50Z"
+          fill="none" stroke="#ffffff" stroke-width="36" stroke-linejoin="round"/>
+      </svg>`;
     openButton.title = 'Open a Markdown presentation';
     openButton.setAttribute('aria-label', openButton.title);
     openButton.onclick = openPresentation;
