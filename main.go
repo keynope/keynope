@@ -3970,7 +3970,18 @@ button.keynope-shape-outline-button { display: inline-flex; align-items: center;
 .keynope-resize-handle.se { right: -6px; bottom: -6px; cursor: nwse-resize; }
 .keynope-colour-tool { position: relative; overflow: hidden; display: grid; width: 28px; min-width: 28px; place-items: center; padding: 4px 0; box-sizing: border-box; border-radius: 4px; color: #e9edf1; background: #343940; font: 11px -apple-system, BlinkMacSystemFont, sans-serif; }
 .keynope-colour-tool::after { content: ''; position: absolute; left: 7px; right: 7px; bottom: 4px; height: 3px; border-radius: 2px; background: var(--keynope-tool-colour, #fff); pointer-events: none; }
-.keynope-colour-tool input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.keynope-colour-picker { position: fixed; z-index: 520; display: grid; width: 252px; box-sizing: border-box; gap: 9px; padding: 10px; border: 1px solid #626a72; border-radius: 8px; color: #edf1f3; background: #1b1e21; box-shadow: 0 14px 42px rgba(0,0,0,.72); font: 12px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-colour-grid { display: grid; grid-template-columns: repeat(8,24px); gap: 4px; }
+.keynope-colour-swatch { width: 24px; min-width: 24px; height: 24px; padding: 0; border: 1px solid #59616a; border-radius: 3px; background: var(--keynope-swatch); }
+.keynope-colour-swatch:hover { border-color: #fff; transform: translateY(-1px); }
+.keynope-colour-swatch.active { outline: 2px solid #ffd166; outline-offset: 1px; }
+.keynope-colour-picker-controls { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 6px; }
+.keynope-colour-picker-controls input { min-width: 0; box-sizing: border-box; border: 1px solid #59616a; border-radius: 4px; padding: 5px 7px; color: #edf1f3; background: #101214; font: inherit; }
+.keynope-colour-picker-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.keynope-colour-picker-actions button,.keynope-colour-picker-controls button { border: 1px solid #59616a; border-radius: 4px; padding: 5px 8px; color: #edf1f3; background: #292d31; font: inherit; }
+.keynope-colour-picker-native { position: fixed; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.keynope-colour-field-button { display: grid; width: 100%; grid-template-columns: 18px minmax(0,1fr); align-items: center; gap: 7px; box-sizing: border-box; border: 1px solid #555; border-radius: 4px; padding: 5px 7px; color: #eee; background: #111; font: 12px ui-monospace,SFMono-Regular,Menlo,monospace; text-align: left; }
+.keynope-colour-field-swatch { width: 16px; height: 16px; margin: 0 !important; border: 1px solid #777; border-radius: 3px; background: var(--keynope-field-colour); }
 .keynope-inline-capture { position: absolute; left: 0; top: 0; z-index: 30; width: 1px; height: 1px; margin: 0; padding: 0; opacity: 0; border: 0; resize: none; pointer-events: none; }
 html[data-keynope-app="true"] .keynope-editor-topbar, html[data-keynope-app="true"] .keynope-editor-panel { display: flex; }
 html[data-keynope-app="true"] .keynope-editor-panel { display: block; }
@@ -6216,19 +6227,147 @@ if (keynopeAppSurface) {
     wrapper.append(caption, select);
     parent.appendChild(wrapper);
   }
+  let activeKeynopeColourPicker = null;
+  const keynopeColourPalette = (() => {
+    const levels = [0,85,170,255];
+    const values = [];
+    for (const red of levels) for (const green of levels) for (const blue of levels) {
+      values.push({red,green,blue,hex:'#' + [red,green,blue].map(value => value.toString(16).padStart(2,'0')).join('')});
+    }
+    values.sort((left,right) =>
+      (299*left.red + 587*left.green + 114*left.blue) - (299*right.red + 587*right.green + 114*right.blue)
+      || left.red-right.red || left.green-right.green || left.blue-right.blue);
+    return values;
+  })();
+  function keynopeNormaliseColour(value, fallback = '#ffffff') {
+    const match = /^#?([0-9a-f]{6})$/i.exec(String(value || '').trim());
+    return match ? '#' + match[1].toLowerCase() : fallback;
+  }
+  function closeKeynopeColourPicker() {
+    if (activeKeynopeColourPicker) activeKeynopeColourPicker.close();
+  }
+  function openKeynopeColourPicker(anchor, current, changed, closed) {
+    closeKeynopeColourPicker();
+    let value = keynopeNormaliseColour(current);
+    const picker = document.createElement('div');
+    picker.className = 'keynope-colour-picker';
+    picker.setAttribute('role','dialog');
+    picker.setAttribute('aria-label','Pick color');
+    const grid = document.createElement('div');
+    grid.className = 'keynope-colour-grid';
+    const controls = document.createElement('div');
+    controls.className = 'keynope-colour-picker-controls';
+    const field = document.createElement('input');
+    field.type = 'text';
+    field.value = value;
+    field.maxLength = 7;
+    field.setAttribute('aria-label','HTML color');
+    const apply = document.createElement('button');
+    apply.type = 'button';
+    apply.textContent = 'Apply';
+    const actions = document.createElement('div');
+    actions.className = 'keynope-colour-picker-actions';
+    const pick = document.createElement('button');
+    pick.type = 'button';
+    pick.textContent = 'Pick color';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    const nativeInput = document.createElement('input');
+    nativeInput.type = 'color';
+    nativeInput.value = value;
+    nativeInput.className = 'keynope-colour-picker-native';
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      document.removeEventListener('pointerdown',outside,true);
+      picker.remove();
+      if (activeKeynopeColourPicker?.picker === picker) activeKeynopeColourPicker = null;
+      if (closed) closed();
+    };
+    const choose = selected => {
+      const normalized = keynopeNormaliseColour(selected,'');
+      if (!normalized) return;
+      value = normalized;
+      changed(value);
+      finish();
+    };
+    const outside = event => {
+      if (!picker.contains(event.target) && event.target !== anchor) finish();
+    };
+    for (const colour of keynopeColourPalette) {
+      const swatch = document.createElement('button');
+      swatch.type = 'button';
+      swatch.className = 'keynope-colour-swatch';
+      swatch.style.setProperty('--keynope-swatch',colour.hex);
+      swatch.title = colour.hex;
+      swatch.setAttribute('aria-label',colour.hex);
+      swatch.classList.toggle('active',colour.hex === value);
+      swatch.addEventListener('click',() => choose(colour.hex));
+      grid.appendChild(swatch);
+    }
+    apply.addEventListener('click',() => choose(field.value));
+    field.addEventListener('keydown',event => {
+      if (event.key === 'Enter') { event.preventDefault(); choose(field.value); }
+    });
+    pick.addEventListener('click',async () => {
+      if ('EyeDropper' in window) {
+        try {
+          const result = await new window.EyeDropper().open();
+          choose(result.sRGBHex);
+        } catch (_err) {}
+      } else {
+        nativeInput.value = value;
+        nativeInput.click();
+      }
+    });
+    nativeInput.addEventListener('change',() => choose(nativeInput.value));
+    cancel.addEventListener('click',finish);
+    picker.addEventListener('pointerdown',event => event.stopPropagation());
+    picker.addEventListener('keydown',event => {
+      event.stopPropagation();
+      if (event.key === 'Escape') { event.preventDefault(); finish(); }
+    });
+    controls.append(field,apply);
+    actions.append(pick,cancel,nativeInput);
+    picker.append(grid,controls,actions);
+    document.body.appendChild(picker);
+    const anchorRect = anchor.getBoundingClientRect();
+    const pickerRect = picker.getBoundingClientRect();
+    picker.style.left = Math.max(8,Math.min(innerWidth-pickerRect.width-8,anchorRect.left)) + 'px';
+    const below = anchorRect.bottom + 6;
+    picker.style.top = (below + pickerRect.height <= innerHeight-8 ? below : Math.max(8,anchorRect.top-pickerRect.height-6)) + 'px';
+    document.addEventListener('pointerdown',outside,true);
+    activeKeynopeColourPicker = {picker,close:finish};
+    field.focus();
+    field.select();
+  }
   function editorColor(parent, label, value, fallback, changed) {
-    const wrapper = document.createElement('label');
+    const wrapper = document.createElement('div');
     wrapper.className = 'keynope-editor-field';
     const caption = document.createElement('span');
     caption.textContent = label;
-    const input = document.createElement('input');
-    input.type = 'color';
     const rgb = /^(?:38|48);2;(\d+);(\d+);(\d+)$/.exec(value || '');
-    input.value = /^#[0-9a-f]{6}$/i.test(value || '') ? value : rgb
+    let colour = /^#[0-9a-f]{6}$/i.test(value || '') ? value : rgb
       ? '#' + rgb.slice(1).map(part => Math.max(0, Math.min(255, Number(part))).toString(16).padStart(2, '0')).join('')
       : fallback;
-    input.addEventListener('input', () => changed(input.value));
-    wrapper.append(caption, input);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'keynope-colour-field-button';
+    button.innerHTML = '<span class="keynope-colour-field-swatch"></span><span>Pick color</span>';
+    button.title = 'Pick color';
+    button.setAttribute('aria-label','Pick color for ' + label.toLowerCase());
+    button.style.setProperty('--keynope-field-colour',colour);
+    button.addEventListener('click',event => {
+      event.stopPropagation();
+      openKeynopeColourPicker(button,colour,next => {
+        colour = next;
+        button.style.setProperty('--keynope-field-colour',colour);
+        changed(colour);
+      });
+    });
+    wrapper.append(caption, button);
     parent.appendChild(wrapper);
   }
   const topbar = document.createElement('div');
@@ -7284,38 +7423,33 @@ if (keynopeAppSurface) {
     editor.dispatchEvent(new Event('input', {bubbles:true}));
   }
   function inlineSelectionColourTool() {
-    const label = document.createElement('label');
-    label.className = 'keynope-colour-tool';
-    label.textContent = 'A';
-    label.title = 'Colour selected text';
-    label.setAttribute('aria-label', label.title);
-    label.style.setProperty('--keynope-tool-colour', '#55aaff');
-    const input = document.createElement('input');
-    input.type = 'color';
-    input.value = '#55aaff';
-    input.setAttribute('aria-label', 'Choose selection colour');
-    input.addEventListener('pointerdown', event => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'keynope-colour-tool';
+    button.textContent = 'A';
+    button.title = 'Pick color';
+    button.setAttribute('aria-label', button.title);
+    button.style.setProperty('--keynope-tool-colour', '#55aaff');
+    button.addEventListener('pointerdown', event => {
       event.stopPropagation();
       if (!activeInlineEditor) return;
       activeInlineEditor.savedSelection = {start:activeInlineEditor.editor.selectionStart || 0, end:activeInlineEditor.editor.selectionEnd || 0};
       activeInlineEditor.suspendBlur = true;
     });
-    input.addEventListener('change', event => {
+    button.addEventListener('click', event => {
       event.stopPropagation();
       const active = activeInlineEditor;
       if (!active) return;
-      applyInlineSelectionColour(input.value, active.savedSelection);
-      active.suspendBlur = false;
-      active.editor.focus();
+      openKeynopeColourPicker(button,'#55aaff',colour => {
+        button.style.setProperty('--keynope-tool-colour',colour);
+        applyInlineSelectionColour(colour,active.savedSelection);
+      },() => {
+        if (!activeInlineEditor) return;
+        activeInlineEditor.suspendBlur = false;
+        activeInlineEditor.editor.focus();
+      });
     });
-    input.addEventListener('blur', () => {
-      const active = activeInlineEditor;
-      if (!active || !active.suspendBlur) return;
-      active.suspendBlur = false;
-      active.editor.focus();
-    });
-    label.appendChild(input);
-    return label;
+    return button;
   }
   async function beginInlineEdit(index, hit) {
     const transition = ++inlineEditTransitionSequence;
@@ -8026,33 +8160,28 @@ if (keynopeAppSurface) {
     const query = new URLSearchParams(element.query || '');
     const colourKey = element.kind === 'heading' ? 'header' : 'fg';
     const colour = /^#[0-9a-f]{6}$/i.test(query.get(colourKey) || '') ? query.get(colourKey) : (/^#[0-9a-f]{6}$/i.test(renderedColour || '') ? renderedColour : '#ffffff');
-    const label = document.createElement('span');
-    label.className = 'keynope-colour-tool';
-    label.title = 'Text colour';
-    label.setAttribute('aria-label', 'Text colour');
-    label.textContent = 'A';
-    label.style.setProperty('--keynope-tool-colour', colour);
-    const input = document.createElement('input');
-    input.type = 'color';
-    input.value = colour;
-    input.setAttribute('aria-label', 'Choose text colour');
-    input.addEventListener('pointerdown', event => event.stopPropagation());
-    input.addEventListener('input', event => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'keynope-colour-tool';
+    button.title = 'Pick color';
+    button.setAttribute('aria-label', button.title);
+    button.textContent = 'A';
+    button.style.setProperty('--keynope-tool-colour', colour);
+    button.addEventListener('pointerdown', event => event.stopPropagation());
+    button.addEventListener('click', event => {
       event.stopPropagation();
-      label.style.setProperty('--keynope-tool-colour', input.value);
-    });
-    input.addEventListener('change', event => {
-      event.stopPropagation();
-      updateCanvasElements(index, updated => ['heading','text','text-image','bullet','code','shape','page-number'].includes(updated.kind), updated => {
-        const values = new URLSearchParams(updated.query || '');
-        const key = updated.kind === 'heading' ? 'header' : 'fg';
-        values.set(key, input.value);
-        if (key === 'header') values.delete('fg');
-        updated.query = values.toString();
+      openKeynopeColourPicker(button,colour,next => {
+        button.style.setProperty('--keynope-tool-colour',next);
+        updateCanvasElements(index, updated => ['heading','text','text-image','bullet','code','shape','page-number'].includes(updated.kind), updated => {
+          const values = new URLSearchParams(updated.query || '');
+          const key = updated.kind === 'heading' ? 'header' : 'fg';
+          values.set(key,next);
+          if (key === 'header') values.delete('fg');
+          updated.query = values.toString();
+        });
       });
     });
-    label.appendChild(input);
-    return label;
+    return button;
   }
   function setCanvasAlignment(index, alignment) {
     updateCanvasElements(index, element => ['heading','text','text-image','bullet','code','shape','image','page-number'].includes(element.kind), element => {
