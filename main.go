@@ -6470,11 +6470,11 @@ if (keynopeAppSurface) {
     const brushes = document.createElement('div');
     brushes.className = 'keynope-font-brushes';
     brushes.setAttribute('role','toolbar');
-    for (const value of ['.',...fontBlockBrushes]) {
+    for (const value of fontBlockBrushes) {
       const button = document.createElement('button');
       button.type = 'button';
-      button.textContent = value === '.' ? '·' : value;
-      button.setAttribute('aria-label',value === '.' ? 'Empty brush' : 'Paint with ' + value);
+      button.textContent = value;
+      button.setAttribute('aria-label','Paint with ' + value);
       button.classList.toggle('active',value === brush);
       button.addEventListener('click',() => {
         brush = value;
@@ -6592,7 +6592,8 @@ if (keynopeAppSurface) {
           cell.addEventListener('pointerdown', event => {
             event.preventDefault();
             checkpoint();
-            painting = {face, value:brush};
+            const current = Array.from(font[face][character][y] || '')[x] || '.';
+            painting = {face, value:current === brush ? '.' : brush};
             setPixel(x,y,painting.value);
           });
           cell.addEventListener('pointerenter', () => {
