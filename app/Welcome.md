@@ -4,7 +4,7 @@
 
 <!-- layout=layout-9456b14efba5 -->
 
-<!-- top=2 left_pct=0.253061 width=122 height=1 fg=#555555 shape=square -->
+<!-- top=2 left_pct=0.248980 width=123 height=1 fg=#555555 shape=square -->
 [shape:square]
 
 <!-- top=3 left_pct=0.244898 width=2 height=19 fg=#555555 shape=square -->
