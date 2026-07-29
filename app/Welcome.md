@@ -28,9 +28,6 @@
 <!-- top=22 left_pct=0.187755 width=76 height=6 fg=#333333 shape=square outline=dark -->
 [shape:square]
 
-<!-- top=22 left_pct=0.253061 width=123 height=1 fg=#555555 shape=square -->
-[shape:square]
-
 <!-- top=22 left_pct=0.510206 width=76 height=6 fg=#333333 shape=square outline=dark -->
 [shape:square]
 
@@ -43,13 +40,10 @@ https://keynope.sh
 <!-- top=31 align=center -->
 This is your example introduction slide
 
-<!-- top=36 left_pct=0.179592 -->
-
-
 ---
 <!-- layout=title -->
 
-<!-- left_pct=0.000000 render=text-image source=bitmap scale=4.00 text-size=20 header=#ffffaa glyph=blocks outline=dark -->
+<!-- left_pct=0.000000 render=text-image source=bitmap scale=4.00 text-size=20 header=#55aa55 glyph=blocks outline=dark -->
 # Demo Slide
 
 <!-- top=1 left_pct=0.677551 -->
@@ -65,7 +59,7 @@ echo "Hello World"
 <!-- top=25 left_pct=0.016328 -->
 Some paragraph with [color=#55aa00]your[/color] slide text
 
-<!-- top=26 left_pct=0.636735 width=72 height=25 fg=#ff5500 shape=circle -->
+<!-- top=26 left_pct=0.640817 width=72 height=25 fg=#ff5500 shape=circle outline=dark -->
 [shape:circle]
 
 <!-- top=30 left_pct=0.081632 gradient-start=#0055aa gradient-end=#ff0055 gradient-dir=diagonal -->
