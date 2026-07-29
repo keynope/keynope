@@ -26,7 +26,7 @@ func TestLegacyDeckParsesWithoutMasters(t *testing.T) {
 	}
 }
 
-func TestStarterDeckSeedsDefaultMastersAndBoundTitleSlots(t *testing.T) {
+func TestStarterDeckUsesBundledWelcomePresentation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "starter.md")
 	if err := os.WriteFile(path, []byte(starterDeckMarkdown(120, 40)), 0o644); err != nil {
 		t.Fatal(err)
@@ -35,11 +35,11 @@ func TestStarterDeckSeedsDefaultMastersAndBoundTitleSlots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(deck.Masters.Layouts) != 4 || len(deck.Slides) != 1 || deck.Slides[0].LayoutID != "title-subtitle" {
+	if len(deck.Masters.Layouts) != 6 || len(deck.Slides) != 2 || deck.Slides[0].LayoutID != "layout-9456b14efba5" || deck.Slides[1].LayoutID != "title" {
 		t.Fatalf("starter deck = %#v", deck)
 	}
-	if len(deck.Slides[0].Elements) < 2 || deck.Slides[0].Elements[0].MasterSlotID != "title-subtitle-title" || deck.Slides[0].Elements[1].MasterSlotID != "title-subtitle-subtitle" {
-		t.Fatalf("starter bindings = %#v", deck.Slides[0].Elements)
+	if len(deck.Slides[0].Elements) < 5 || deck.Slides[0].Elements[4].Text != "*KEYNOPE*" {
+		t.Fatalf("starter welcome slide = %#v", deck.Slides[0].Elements)
 	}
 }
 

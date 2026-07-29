@@ -1,0 +1,165 @@
+.keynope-web-loading {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 14px;
+  color: #f3efe0;
+  background: rgba(10, 10, 10, .74);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  transition: opacity 180ms ease;
+}
+.keynope-web-booting #stage > * { visibility: hidden !important; }
+.keynope-web-loading.ready { opacity: 0; pointer-events: none; }
+.keynope-web-loading-logo {
+  margin: 0;
+  color: #aaff00;
+  font: clamp(4px, 1vw, 11px)/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre;
+  text-shadow: 0 0 10px rgba(170,255,0,.35);
+}
+.keynope-web-loading-bar { margin: 0; color: #70b7ff; font: clamp(12px, 1.8vw, 20px)/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; letter-spacing: .04em; text-shadow: 0 0 8px rgba(112,183,255,.4); }
+.keynope-web-loading-label { min-height: 1em; color: #d1d5da; font-size: 11px; letter-spacing: .18em; }
+
+.keynope-web-controls {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 5px;
+  padding-right: 2px;
+}
+.keynope-web-controls[hidden] { display: none; }
+.keynope-web-controls > .keynope-save-button {
+  display: grid;
+  width: 36px;
+  min-width: 36px;
+  place-items: center;
+  padding: 4px;
+}
+.keynope-web-controls > .keynope-save-button svg { display: block; width: 22px; height: 22px; }
+.keynope-web-controls button {
+  height: 32px;
+  border-color: #59616a;
+  color: #e4e8ec;
+  background: #25282b;
+}
+.keynope-web-controls button.keynope-web-icon-button {
+  position: relative;
+  display: inline-grid;
+  width: 32px;
+  min-width: 32px;
+  place-items: center;
+  padding: 4px;
+  overflow: visible;
+}
+.keynope-web-icon-button svg {
+  display: block;
+  width: 23px;
+  height: 23px;
+  transform: translateY(-2px);
+}
+.keynope-web-icon-tag {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  padding: 0 3px;
+  border: 1px solid #59616a;
+  border-radius: 3px;
+  color: #d8dee5;
+  background: #151719;
+  box-shadow: 0 1px 2px rgba(0,0,0,.7);
+  font: 700 6px/8px -apple-system, BlinkMacSystemFont, sans-serif;
+  letter-spacing: .05em;
+  line-height: 8px;
+}
+.keynope-web-about {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0,0,0,.72);
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+.keynope-web-about-dialog {
+  position: relative;
+  display: grid;
+  grid-template-columns: 82px minmax(0,1fr);
+  gap: 16px 20px;
+  width: min(620px, 100%);
+  max-height: min(720px, calc(100vh - 48px));
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 24px;
+  border: 1px solid #5b6168;
+  border-radius: 12px;
+  color: #e8edf2;
+  background: #202124;
+  box-shadow: 0 24px 70px rgba(0,0,0,.72);
+  user-select: text;
+  -webkit-user-select: text;
+}
+.keynope-web-about-dialog > img {
+  width: 82px;
+  height: 82px;
+  border-radius: 18px;
+}
+.keynope-web-about-heading { align-self: center; }
+.keynope-web-about-heading h2 { margin: 0; font-size: 28px; letter-spacing: .08em; }
+.keynope-web-about-heading p { margin: 6px 0 0; color: #aeb4bb; }
+.keynope-web-about-dialog nav,
+.keynope-web-about-credit,
+.keynope-web-about-dialog details { grid-column: 1 / -1; }
+.keynope-web-about-dialog nav { display: flex; flex-wrap: wrap; gap: 9px; }
+.keynope-web-about-dialog a { color: #8dc8ff; }
+.keynope-web-about-credit { margin: 0; color: #bdc3c9; font-size: 13px; }
+.keynope-web-about-dialog details { border-top: 1px solid #4c5156; padding-top: 14px; }
+.keynope-web-about-dialog summary { cursor: pointer; font-weight: 700; }
+.keynope-web-about-dialog pre {
+  max-height: 320px;
+  overflow: auto;
+  margin: 14px 0 0;
+  padding: 12px;
+  border: 1px solid #42474c;
+  border-radius: 6px;
+  background: #121315;
+  color: #d8dde2;
+  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+}
+.keynope-web-about-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid #555;
+  border-radius: 50%;
+  color: #ddd;
+  background: #292929;
+  font-size: 21px;
+}
+.keynope-web-fatal {
+  display: grid;
+  min-height: 100%;
+  place-content: center;
+  gap: 16px;
+  padding: 24px;
+  color: #f3efe0;
+  background: #111;
+  text-align: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.keynope-web-fatal h1 { margin: 0; color: #ffd166; letter-spacing: .14em; }
+.keynope-web-fatal button {
+  justify-self: center;
+  padding: 9px 15px;
+  border: 1px solid #ffd166;
+  border-radius: 5px;
+  color: #ffd166;
+  background: transparent;
+}

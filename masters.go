@@ -34,6 +34,17 @@ type Deck struct {
 	Slides  []Slide
 	Masters MasterDeck
 	Assets  map[string]DeckAsset
+	Fonts   map[string]DeckFont
+}
+
+type DeckFont struct {
+	ID           string              `json:"id"`
+	Name         string              `json:"name"`
+	Mode         string              `json:"mode,omitempty"`
+	Height       int                 `json:"height,omitempty"`
+	FigletLayout int                 `json:"figletLayout,omitempty"`
+	Normal       map[string][]string `json:"normal"`
+	Bold         map[string][]string `json:"bold"`
 }
 
 type DeckAsset struct {
@@ -358,6 +369,12 @@ func cloneDeck(deck Deck) Deck {
 				}
 			}
 			out.Assets[id] = asset
+		}
+	}
+	if len(deck.Fonts) > 0 {
+		out.Fonts = make(map[string]DeckFont, len(deck.Fonts))
+		for id, font := range deck.Fonts {
+			out.Fonts[id] = cloneDeckFont(font)
 		}
 	}
 	return out
@@ -903,7 +920,7 @@ func encodeQueryStable(values url.Values) string {
 
 func isMasterOverrideQueryKey(key string) bool {
 	switch key {
-	case "top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "link", "slide":
+	case "top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "font", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "link", "slide":
 		return true
 	default:
 		return false

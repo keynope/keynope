@@ -170,6 +170,30 @@ func TestEmbeddedImageAssetRoundTripsThroughMarkdown(t *testing.T) {
 	}
 }
 
+func TestEmbeddedStillImageRendersFromMemory(t *testing.T) {
+	var encoded bytes.Buffer
+	pixels := stdimage.NewNRGBA(stdimage.Rect(0, 0, 8, 4))
+	for y := 0; y < pixels.Bounds().Dy(); y++ {
+		for x := 0; x < pixels.Bounds().Dx(); x++ {
+			pixels.Set(x, y, color.NRGBA{R: uint8(30 + x*20), G: uint8(40 + y*30), B: 160, A: 255})
+		}
+	}
+	if err := png.Encode(&encoded, pixels); err != nil {
+		t.Fatal(err)
+	}
+	id := "memory-only-still"
+	asset := DeckAsset{MIME: "image/png", Width: 8, Height: 4, Data: encoded.Bytes()}
+	registerEmbeddedStillAsset(id, asset)
+	path := "keynope-asset:" + id + ".png"
+	decoded := loadDecodedStillImage(path)
+	if decoded == nil || decoded.Bounds().Dx() != 8 || decoded.Bounds().Dy() != 4 {
+		t.Fatalf("decoded embedded still image = %#v", decoded)
+	}
+	if rows := renderASCIIImage(path, "glyph=blocks", 16, 8); len(rows) == 0 {
+		t.Fatal("embedded still image did not render")
+	}
+}
+
 func TestEmbeddedAnimatedGIFStoresResizedFramesAndTimingInDeck(t *testing.T) {
 	palette := color.Palette{color.Transparent, color.RGBA{R: 255, A: 255}, color.RGBA{G: 255, A: 255}}
 	first := stdimage.NewPaletted(stdimage.Rect(0, 0, 768, 384), palette)
@@ -229,6 +253,13 @@ func TestEmbeddedAnimatedGIFStoresResizedFramesAndTimingInDeck(t *testing.T) {
 	pages := exportSlidePagesFrozen(frozen, 0, 1, 80, 25)
 	if len(pages) == 0 || len(pages[0].ContentFrames) != 0 {
 		t.Fatalf("frozen animation preview pages = %#v", pages)
+	}
+	animatedPages := exportSlidePages(slide, 0, 1, 80, 25)
+	if len(animatedPages) == 0 || len(animatedPages[0].ContentFrames) != 2 {
+		t.Fatalf("animated export frames = %#v", animatedPages)
+	}
+	if animatedPages[0].ContentFrames[0].DelayMS != 50 || animatedPages[0].ContentFrames[1].DelayMS != 120 {
+		t.Fatalf("animated export timing = %#v", animatedPages[0].ContentFrames)
 	}
 	deck := Deck{Slides: []Slide{slide}, Assets: map[string]DeckAsset{id: asset}}
 	destination := filepath.Join(t.TempDir(), "animated.md")
@@ -347,6 +378,10 @@ func TestNativeEditorControlsSharedPresenterTimer(t *testing.T) {
 	if mode != "running" || end < before+89_000 {
 		t.Fatalf("timer mode=%q end=%d before=%d", mode, end, before)
 	}
+	state := session.state()
+	if state.TimerMode != "running" || state.TimerEndMS < before+89_000 {
+		t.Fatalf("editor timer mode=%q end=%d before=%d", state.TimerMode, state.TimerEndMS, before)
+	}
 	if err := session.apply(nativeEditorAction{Action: "stop-timer"}); err != nil {
 		t.Fatal(err)
 	}
@@ -355,6 +390,10 @@ func TestNativeEditorControlsSharedPresenterTimer(t *testing.T) {
 	companion.mu.RUnlock()
 	if mode != "" || end != 0 {
 		t.Fatalf("stopped timer mode=%q end=%d", mode, end)
+	}
+	state = session.state()
+	if state.TimerMode != "" || state.TimerEndMS != 0 {
+		t.Fatalf("stopped editor timer mode=%q end=%d", state.TimerMode, state.TimerEndMS)
 	}
 }
 
@@ -1171,6 +1210,100 @@ func TestNativeEditorMutationCanonicalizesOrderAndRemapsSelection(t *testing.T) 
 	}
 }
 
+func TestNativeEditorUpdateResolvesStaleIndexByElementID(t *testing.T) {
+	deck := Deck{Slides: []Slide{{Elements: []Element{
+		{Kind: "text", Text: "First", Query: "top=2&left=2", ID: "first"},
+		{Kind: "text", Text: "Second", Query: "top=4&left=2", ID: "second"},
+	}}}}
+	session := newNativeEditorSession("deck.md", deck)
+	session.selected = 0
+	session.selection = map[int]bool{0: true}
+	updated := deck.Slides[0].Elements[1]
+	updated.Text = "Second edited"
+	if err := session.apply(nativeEditorAction{Action: "update-element", Element: 0, ElementData: &updated}); err != nil {
+		t.Fatal(err)
+	}
+	state := session.state()
+	if state.Slides[0].Elements[0].ID != "first" || state.Slides[0].Elements[0].Text != "First" {
+		t.Fatalf("stale index overwrote the wrong element: %#v", state.Slides[0].Elements)
+	}
+	if state.Slides[0].Elements[1].ID != "second" || state.Slides[0].Elements[1].Text != "Second edited" {
+		t.Fatalf("stable ID did not resolve updated element: %#v", state.Slides[0].Elements)
+	}
+	if state.Selected != 1 || !reflect.DeepEqual(state.Selection, []int{1}) {
+		t.Fatalf("resolved element selection = %d, %v", state.Selected, state.Selection)
+	}
+}
+
+func TestNativeEditorSessionAssignsStableElementIDsWithoutBecomingDirty(t *testing.T) {
+	session := newNativeEditorSession("deck.md", Deck{Slides: []Slide{{Elements: []Element{
+		{Kind: "text", Text: "First"},
+		{Kind: "shape", Query: "shape=square"},
+	}}}})
+	state := session.state()
+	first := state.Slides[0].Elements[0].ID
+	second := state.Slides[0].Elements[1].ID
+	if first == "" || second == "" || first == second {
+		t.Fatalf("editor element IDs = %q, %q", first, second)
+	}
+	if state.Dirty {
+		t.Fatal("assigning internal editor IDs marked the deck dirty")
+	}
+}
+
+func TestNativeEditorSelectionResolvesStaleIndexByElementID(t *testing.T) {
+	session := newNativeEditorSession("deck.md", Deck{Slides: []Slide{{Elements: []Element{
+		{Kind: "text", Text: "First", ID: "first"},
+		{Kind: "text", Text: "Second", ID: "second"},
+	}}}})
+	session.deck.Slides[0].Elements[0], session.deck.Slides[0].Elements[1] =
+		session.deck.Slides[0].Elements[1], session.deck.Slides[0].Elements[0]
+	identity := Element{ID: "first"}
+	if err := session.apply(nativeEditorAction{Action: "select-element", Element: 0, ElementData: &identity}); err != nil {
+		t.Fatal(err)
+	}
+	state := session.state()
+	if state.Selected != 1 || !reflect.DeepEqual(state.Selection, []int{1}) {
+		t.Fatalf("stable-ID selection = %d, %v", state.Selected, state.Selection)
+	}
+}
+
+func TestNativeEditorStarterSelectionSurvivesVerticalReordering(t *testing.T) {
+	previousWidth, previousHeight := authoredTerminalWidth, authoredTerminalHeight
+	authoredTerminalWidth, authoredTerminalHeight = 245, 56
+	defer func() {
+		authoredTerminalWidth, authoredTerminalHeight = previousWidth, previousHeight
+	}()
+	session := newNativeEditorSession("Welcome.md", Deck{Slides: []Slide{{Elements: []Element{
+		{Kind: "heading", Level: 1, Text: "KEYNOPE", Query: "top=1&align=center"},
+		{Kind: "text-image", Text: "A", Query: "top=2&left_pct=0.179593"},
+		{Kind: "text-image", Text: "✨", Query: "top=2&left_pct=0.783673"},
+		{Kind: "text-image", Text: "😍", Query: "top=3&left_pct=0.020408"},
+	}}}})
+	state := session.state()
+	keynopeID := state.Slides[0].Elements[0].ID
+	identity := Element{ID: keynopeID}
+	if err := session.apply(nativeEditorAction{Action: "select-element", Element: 0, ElementData: &identity}); err != nil {
+		t.Fatal(err)
+	}
+	for _, top := range []string{"6", "11"} {
+		state = session.state()
+		selected := state.Selected
+		updated := state.Slides[0].Elements[selected]
+		updated.Query = setQueryValue(updated.Query, "top", top)
+		if err := session.apply(nativeEditorAction{Action: "update-element", Element: 0, ElementData: &updated}); err != nil {
+			t.Fatal(err)
+		}
+		state = session.state()
+		if state.Selected < 0 || state.Slides[0].Elements[state.Selected].ID != keynopeID {
+			t.Fatalf("moving KEYNOPE to top=%s selected index=%d elements=%#v", top, state.Selected, state.Slides[0].Elements)
+		}
+		if len(state.Selection) != 1 || state.Selection[0] != state.Selected {
+			t.Fatalf("moving KEYNOPE to top=%s selection=%v selected=%d", top, state.Selection, state.Selected)
+		}
+	}
+}
+
 func TestNativeEditorRefreshScopeAvoidsFullDeckReloadForElementMutations(t *testing.T) {
 	for _, action := range []string{"add-element", "duplicate-element", "paste-elements", "update-element", "update-elements", "convert-text-kind", "convert-selected-text-kind", "delete-element", "delete-selection", "move-element", "update-slide", "set-layout"} {
 		if got := nativeEditorRefreshScope(action); got != "slide" {
@@ -1333,5 +1466,55 @@ func TestNativeEditorUntitledUndoNeverClearsDirty(t *testing.T) {
 	}
 	if !session.state().Dirty || !session.state().Untitled {
 		t.Fatal("untitled deck must remain dirty after undoing to its starter state")
+	}
+}
+
+func TestNativeEditorFontLifecycle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	deck := Deck{Slides: []Slide{{Elements: []Element{{Kind: "text", Text: "A"}}}}}
+	session := newNativeEditorSession("Untitled.md", deck, true)
+	font := testDeckFont("arcade")
+	if err := session.apply(nativeEditorAction{Action: "upsert-font", FontData: &font}); err != nil {
+		t.Fatal(err)
+	}
+	state := session.state()
+	if state.Fonts["arcade"].Name != "Test Face" {
+		t.Fatalf("font missing from editor state: %#v", state.Fonts)
+	}
+	element := state.Slides[0].Elements[0]
+	element.Query = "font=arcade"
+	if err := session.apply(nativeEditorAction{Action: "update-element", Element: 0, ElementData: &element}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := serializeDeck("Untitled.md", session.deck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("keynope-fonts version=1")) || !bytes.Contains(data, []byte("font=arcade")) {
+		t.Fatalf("font was not embedded and referenced:\n%s", data)
+	}
+	if err := session.apply(nativeEditorAction{Action: "delete-font", Name: "arcade"}); err != nil {
+		t.Fatal(err)
+	}
+	state = session.state()
+	if len(state.Fonts) != 0 || strings.Contains(state.Slides[0].Elements[0].Query, "font=") {
+		t.Fatalf("font deletion left state behind: %#v / %q", state.Fonts, state.Slides[0].Elements[0].Query)
+	}
+}
+
+func TestNativeEditorDefaultFontEndpoint(t *testing.T) {
+	session := newNativeEditorSession("Untitled.md", Deck{Slides: []Slide{{}}}, true)
+	request := httptest.NewRequest(http.MethodGet, "/api/editor/fonts/default", nil)
+	response := httptest.NewRecorder()
+	session.handleDefaultFont(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var font DeckFont
+	if err := json.Unmarshal(response.Body.Bytes(), &font); err != nil {
+		t.Fatal(err)
+	}
+	if font.ID != "default" || len(font.Normal) != 95 || len(font.Bold) != 95 {
+		t.Fatalf("unexpected default font payload: id=%q normal=%d bold=%d", font.ID, len(font.Normal), len(font.Bold))
 	}
 }

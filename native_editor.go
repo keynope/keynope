@@ -28,6 +28,7 @@ type nativeEditorSession struct {
 	undo          []Deck
 	redo          []Deck
 	companion     *presenterCompanion
+	timerDeadline time.Time
 	masterMode    bool
 	currentMaster int
 }
@@ -65,17 +66,20 @@ func (s *nativeEditorSession) handleUpload(w http.ResponseWriter, r *http.Reques
 }
 
 type nativeEditorState struct {
-	Version    int64      `json:"version"`
-	Path       string     `json:"path"`
-	Current    int        `json:"current"`
-	Selected   int        `json:"selected"`
-	Selection  []int      `json:"selection"`
-	Slides     []Slide    `json:"slides"`
-	Resolved   []Slide    `json:"resolved"`
-	Masters    MasterDeck `json:"masters"`
-	MasterMode bool       `json:"masterMode,omitempty"`
-	Dirty      bool       `json:"dirty"`
-	Untitled   bool       `json:"untitled"`
+	Version    int64               `json:"version"`
+	Path       string              `json:"path"`
+	Current    int                 `json:"current"`
+	Selected   int                 `json:"selected"`
+	Selection  []int               `json:"selection"`
+	Slides     []Slide             `json:"slides"`
+	Resolved   []Slide             `json:"resolved"`
+	Masters    MasterDeck          `json:"masters"`
+	Fonts      map[string]DeckFont `json:"fonts,omitempty"`
+	MasterMode bool                `json:"masterMode,omitempty"`
+	Dirty      bool                `json:"dirty"`
+	Untitled   bool                `json:"untitled"`
+	TimerMode  string              `json:"timerMode,omitempty"`
+	TimerEndMS int64               `json:"timerEndMs,omitempty"`
 }
 
 type nativeEditorAction struct {
@@ -101,6 +105,7 @@ type nativeEditorAction struct {
 	ElementsData   []Element  `json:"elementsData,omitempty"`
 	SlideData      *Slide     `json:"slideData,omitempty"`
 	AssetData      *DeckAsset `json:"assetData,omitempty"`
+	FontData       *DeckFont  `json:"fontData,omitempty"`
 }
 
 type nativeEditorCaret struct {
@@ -171,6 +176,26 @@ func (s *nativeEditorSession) handleEmojiCatalog(w http.ResponseWriter, r *http.
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "private, max-age=300")
 	_ = json.NewEncoder(w).Encode(nativeEditorEmojiCatalog{Groups: emojiCatalogGroups(), Items: items})
+}
+
+func (s *nativeEditorSession) handleDefaultFont(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	_ = json.NewEncoder(w).Encode(defaultEditableDeckCellFont())
+}
+
+func (s *nativeEditorSession) handleFontLibrary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(loadDeckFontLibrary())
 }
 
 func editorShapeName(name string) string {
@@ -594,14 +619,16 @@ func (s *nativeEditorSession) handlePreview(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		target := masterSlideAt(&deck, currentMaster)
-		if action.Element < 0 || action.Element >= len(target.Elements) {
+		elementIndex := nativeEditorElementIndex(target.Elements, action.Element, action.ElementData.ID)
+		if elementIndex < 0 {
 			http.Error(w, errInvalidEditorAction.Error(), http.StatusBadRequest)
 			return
 		}
-		target.Elements[action.Element] = *action.ElementData
-		frozenImage := action.Name == "frozen-image" && target.Elements[action.Element].Kind == "image"
+		target.Elements[elementIndex] = *action.ElementData
+		action.Element = elementIndex
+		frozenImage := action.Name == "frozen-image" && target.Elements[elementIndex].Kind == "image"
 		if frozenImage {
-			target.Elements[action.Element].Query = setQueryValue(target.Elements[action.Element].Query, "keynope_freeze", "1")
+			target.Elements[elementIndex].Query = setQueryValue(target.Elements[elementIndex].Query, "keynope_freeze", "1")
 		}
 		cols, rows := action.Cols, action.Rows
 		if cols <= 0 || rows <= 0 {
@@ -618,14 +645,20 @@ func (s *nativeEditorSession) handlePreview(w http.ResponseWriter, r *http.Reque
 		writeNativeEditorPreview(w, action, preview, pages, cols, rows)
 		return
 	}
-	if action.ElementData == nil || current < 0 || current >= len(deck.Slides) || action.Element < 0 || action.Element >= len(deck.Slides[current].Elements) {
+	if action.ElementData == nil || current < 0 || current >= len(deck.Slides) {
 		http.Error(w, errInvalidEditorAction.Error(), http.StatusBadRequest)
 		return
 	}
-	deck.Slides[current].Elements[action.Element] = *action.ElementData
-	frozenImage := action.Name == "frozen-image" && deck.Slides[current].Elements[action.Element].Kind == "image"
+	elementIndex := nativeEditorElementIndex(deck.Slides[current].Elements, action.Element, action.ElementData.ID)
+	if elementIndex < 0 {
+		http.Error(w, errInvalidEditorAction.Error(), http.StatusBadRequest)
+		return
+	}
+	deck.Slides[current].Elements[elementIndex] = *action.ElementData
+	action.Element = elementIndex
+	frozenImage := action.Name == "frozen-image" && deck.Slides[current].Elements[elementIndex].Kind == "image"
 	if frozenImage {
-		deck.Slides[current].Elements[action.Element].Query = setQueryValue(deck.Slides[current].Elements[action.Element].Query, "keynope_freeze", "1")
+		deck.Slides[current].Elements[elementIndex].Query = setQueryValue(deck.Slides[current].Elements[elementIndex].Query, "keynope_freeze", "1")
 	}
 	resolved := deck.ResolvedSlides()
 	cols, rows := action.Cols, action.Rows
@@ -656,14 +689,15 @@ func writeNativeEditorPreview(w http.ResponseWriter, action nativeEditorAction, 
 			break
 		}
 	}
-	caret := editorCaretForElement(preview, elementIndex, action.Cursor, cols, rows, action.Page)
+	visualPreview := visualFontScaledSlide(preview)
+	caret := editorCaretForElement(visualPreview, elementIndex, action.Cursor, cols, rows, action.Page)
 	response := nativeEditorInlinePreview{Pages: pages, Caret: caret}
 	if action.SelectionStart != action.SelectionEnd {
-		start := editorCaretForElement(preview, elementIndex, min(action.SelectionStart, action.SelectionEnd), cols, rows, action.Page)
-		end := editorCaretForElement(preview, elementIndex, max(action.SelectionStart, action.SelectionEnd), cols, rows, action.Page)
+		start := editorCaretForElement(visualPreview, elementIndex, min(action.SelectionStart, action.SelectionEnd), cols, rows, action.Page)
+		end := editorCaretForElement(visualPreview, elementIndex, max(action.SelectionStart, action.SelectionEnd), cols, rows, action.Page)
 		response.SelectionStart = &start
 		response.SelectionEnd = &end
-		response.SelectionRows = editorSelectionRows(preview, elementIndex, start, end, cols, rows, action.Page)
+		response.SelectionRows = editorSelectionRows(visualPreview, elementIndex, start, end, cols, rows, action.Page)
 	}
 	_ = json.NewEncoder(w).Encode(response)
 }
@@ -786,10 +820,51 @@ func (s *nativeEditorSession) handleWorkspace(w http.ResponseWriter, r *http.Req
 func newNativeEditorSession(deckPath string, deck Deck, options ...bool) *nativeEditorSession {
 	isUntitled := len(options) > 0 && options[0]
 	dirtyOverride := len(options) > 1 && options[1]
+	deck = cloneDeck(deck)
+	registerDeckFonts(deck.Fonts)
+	ensureNativeEditorElementIDs(&deck)
 	return &nativeEditorSession{
-		deck: cloneDeck(deck), savedDeck: cloneDeck(deck), deckPath: deckPath, untitled: isUntitled, dirtyOverride: dirtyOverride,
+		deck: deck, savedDeck: cloneDeck(deck), deckPath: deckPath, untitled: isUntitled, dirtyOverride: dirtyOverride,
 		selected: -1, selection: map[int]bool{}, version: 1,
 	}
+}
+
+func ensureNativeEditorElementIDs(deck *Deck) {
+	if deck == nil {
+		return
+	}
+	ensureSlide := func(slide *Slide) {
+		for index := range slide.Elements {
+			if slide.Elements[index].ID == "" {
+				slide.Elements[index].ID = newStableID("slide-element")
+			}
+		}
+	}
+	for index := range deck.Slides {
+		ensureSlide(&deck.Slides[index])
+	}
+	ensureSlide(&deck.Masters.Base.Slide)
+	for index := range deck.Masters.Layouts {
+		ensureSlide(&deck.Masters.Layouts[index].Slide)
+	}
+}
+
+func nativeEditorElementIndex(elements []Element, requested int, id string) int {
+	if id != "" {
+		if requested >= 0 && requested < len(elements) && elements[requested].ID == id {
+			return requested
+		}
+		for index := range elements {
+			if elements[index].ID == id {
+				return index
+			}
+		}
+		return -1
+	}
+	if requested >= 0 && requested < len(elements) {
+		return requested
+	}
+	return -1
 }
 
 func (s *nativeEditorSession) dirtyLocked() bool {
@@ -814,10 +889,14 @@ func (s *nativeEditorSession) state() nativeEditorState {
 		}
 		current = min(s.currentMaster, len(slides)-1)
 	}
+	timerMode, timerEndMS := "", int64(0)
+	if !s.timerDeadline.IsZero() {
+		timerMode, timerEndMS = "running", s.timerDeadline.UnixMilli()
+	}
 	return nativeEditorState{
 		Version: s.version, Path: s.deckPath, Current: current, Selected: s.selected, MasterMode: s.masterMode,
-		Selection: selection, Slides: slides, Resolved: resolved, Masters: s.deck.Masters,
-		Dirty: s.dirtyLocked(), Untitled: s.untitled,
+		Selection: selection, Slides: slides, Resolved: resolved, Masters: s.deck.Masters, Fonts: cloneDeck(s.deck).Fonts,
+		Dirty: s.dirtyLocked(), Untitled: s.untitled, TimerMode: timerMode, TimerEndMS: timerEndMS,
 	}
 }
 
@@ -929,6 +1008,9 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		}
 		return nil
 	}
+	if action.Action == "upsert-font" || action.Action == "delete-font" || action.Action == "delete-library-font" {
+		return s.applyFontAction(action)
+	}
 	if action.Action == "toggle-master-mode" || s.masterMode {
 		return s.applyMaster(action)
 	}
@@ -956,22 +1038,30 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		presenterPage = 0
 		s.selection = map[int]bool{}
 	case "select-element":
-		if action.Element < -1 || s.current < 0 || s.current >= slideCount || action.Element >= len(s.deck.Slides[s.current].Elements) {
+		if s.current < 0 || s.current >= slideCount {
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		if action.Name == "toggle" && action.Element >= 0 {
-			if s.selection[action.Element] {
-				delete(s.selection, action.Element)
+		elementIndex := action.Element
+		if action.ElementData != nil && action.ElementData.ID != "" {
+			elementIndex = nativeEditorElementIndex(s.deck.Slides[s.current].Elements, action.Element, action.ElementData.ID)
+		}
+		if elementIndex < -1 || elementIndex >= len(s.deck.Slides[s.current].Elements) {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		if action.Name == "toggle" && elementIndex >= 0 {
+			if s.selection[elementIndex] {
+				delete(s.selection, elementIndex)
 			} else {
-				s.selection[action.Element] = true
+				s.selection[elementIndex] = true
 			}
-			s.selected = action.Element
+			s.selected = elementIndex
 		} else {
-			s.selected = action.Element
+			s.selected = elementIndex
 			s.selection = map[int]bool{}
-			if action.Element >= 0 {
-				s.selection[action.Element] = true
+			if elementIndex >= 0 {
+				s.selection[elementIndex] = true
 			}
 		}
 	case "navigate-presentation":
@@ -987,7 +1077,9 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
+		s.timerDeadline = time.Now().Add(time.Duration(action.Value) * time.Second)
 	case "stop-timer":
+		s.timerDeadline = time.Time{}
 	case "previous-slide":
 		s.current = max(0, s.current-1)
 		s.selected = -1
@@ -1114,17 +1206,30 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			return errInvalidEditorAction
 		}
 		updated := *action.ElementData
-		original := s.deck.Slides[s.current].Elements[action.Element]
+		elementIndex := nativeEditorElementIndex(s.deck.Slides[s.current].Elements, action.Element, updated.ID)
+		if elementIndex < 0 {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		original := s.deck.Slides[s.current].Elements[elementIndex]
 		if updated.ID == "" {
 			updated.ID = original.ID
+		}
+		if original.ID != "" && updated.ID != original.ID {
+			s.mu.Unlock()
+			return errInvalidEditorAction
 		}
 		updated.Kind = strings.TrimSpace(updated.Kind)
 		if updated.Kind == "" {
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		s.deck.Slides[s.current].Elements[action.Element] = updated
-		s.selected, changed = action.Element, true
+		s.deck.Slides[s.current].Elements[elementIndex] = updated
+		if elementIndex != action.Element && s.selection[action.Element] {
+			delete(s.selection, action.Element)
+			s.selection[elementIndex] = true
+		}
+		s.selected, changed = elementIndex, true
 	case "update-elements":
 		if s.current < 0 || s.current >= slideCount || len(action.ElementIndices) == 0 || len(action.ElementIndices) != len(action.ElementsData) {
 			s.mu.Unlock()
@@ -1326,6 +1431,7 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 	}
 	s.version++
 	deck := cloneDeck(s.deck)
+	registerDeckFonts(deck.Fonts)
 	current := s.current
 	companion := s.companion
 	s.mu.Unlock()
@@ -1346,6 +1452,67 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		} else if action.Action == "stop-timer" {
 			companion.StopTimer()
 		}
+	}
+	return nil
+}
+
+func (s *nativeEditorSession) applyFontAction(action nativeEditorAction) error {
+	s.mu.Lock()
+	before := cloneDeck(s.deck)
+	switch action.Action {
+	case "upsert-font":
+		if action.FontData == nil {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		font, err := normalizeDeckFont(*action.FontData)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		if s.deck.Fonts == nil {
+			s.deck.Fonts = map[string]DeckFont{}
+		}
+		s.deck.Fonts[font.ID] = font
+		_ = storeDeckFontInLibrary(font)
+	case "delete-font":
+		id := normalizeDeckFontID(action.Name)
+		if id == "" || s.deck.Fonts[id].ID == "" {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		delete(s.deck.Fonts, id)
+		removeDeckFontReferences(&s.deck, id)
+		_ = removeDeckFontFromLibrary(id)
+	case "delete-library-font":
+		id := normalizeDeckFontID(action.Name)
+		if id == "" {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		if err := removeDeckFontFromLibrary(id); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.version++
+		s.mu.Unlock()
+		return nil
+	default:
+		s.mu.Unlock()
+		return errInvalidEditorAction
+	}
+	s.undo = append(s.undo, before)
+	if len(s.undo) > 100 {
+		s.undo = s.undo[len(s.undo)-100:]
+	}
+	s.redo = nil
+	s.version++
+	registerDeckFonts(s.deck.Fonts)
+	deck := cloneDeck(s.deck)
+	companion := s.companion
+	s.mu.Unlock()
+	if companion != nil {
+		companion.RefreshAllAsync(s.deckPath, deck.ResolvedSlides(), authoredTerminalWidth, authoredTerminalHeight)
 	}
 	return nil
 }
@@ -1533,22 +1700,26 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		changed = true
 		s.selection = map[int]bool{s.selected: true}
 	case "select-element":
-		if action.Element < -1 || action.Element >= len(target.Elements) {
+		elementIndex := action.Element
+		if action.ElementData != nil && action.ElementData.ID != "" {
+			elementIndex = nativeEditorElementIndex(target.Elements, action.Element, action.ElementData.ID)
+		}
+		if elementIndex < -1 || elementIndex >= len(target.Elements) {
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		if action.Name == "toggle" && action.Element >= 0 {
-			if s.selection[action.Element] {
-				delete(s.selection, action.Element)
+		if action.Name == "toggle" && elementIndex >= 0 {
+			if s.selection[elementIndex] {
+				delete(s.selection, elementIndex)
 			} else {
-				s.selection[action.Element] = true
+				s.selection[elementIndex] = true
 			}
-			s.selected = action.Element
+			s.selected = elementIndex
 		} else {
-			s.selected = action.Element
+			s.selected = elementIndex
 			s.selection = map[int]bool{}
-			if action.Element >= 0 {
-				s.selection[action.Element] = true
+			if elementIndex >= 0 {
+				s.selection[elementIndex] = true
 			}
 		}
 	case "update-element":
@@ -1557,11 +1728,20 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			return errInvalidEditorAction
 		}
 		updated := *action.ElementData
-		if updated.ID == "" {
-			updated.ID = target.Elements[action.Element].ID
+		elementIndex := nativeEditorElementIndex(target.Elements, action.Element, updated.ID)
+		if elementIndex < 0 {
+			s.mu.Unlock()
+			return errInvalidEditorAction
 		}
-		target.Elements[action.Element] = updated
-		s.selected, changed = action.Element, true
+		if updated.ID == "" {
+			updated.ID = target.Elements[elementIndex].ID
+		}
+		target.Elements[elementIndex] = updated
+		if elementIndex != action.Element && s.selection[action.Element] {
+			delete(s.selection, action.Element)
+			s.selection[elementIndex] = true
+		}
+		s.selected, changed = elementIndex, true
 	case "update-elements":
 		if len(action.ElementIndices) == 0 || len(action.ElementIndices) != len(action.ElementsData) {
 			s.mu.Unlock()
@@ -1728,6 +1908,7 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 	s.deck.Masters.Normalize()
 	s.version++
 	deck := cloneDeck(s.deck)
+	registerDeckFonts(deck.Fonts)
 	companion := s.companion
 	s.mu.Unlock()
 	if changed && companion != nil {

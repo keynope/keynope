@@ -1,0 +1,15 @@
+{
+  "name": "Keynope Web Editor",
+  "short_name": "Keynope",
+  "start_url": "/editor/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#181818",
+  "icons": [
+    {
+      "src": "/keynope-logo.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

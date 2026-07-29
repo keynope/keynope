@@ -170,10 +170,11 @@ type exportFrame struct {
 }
 
 type exportContentFrame struct {
-	Full   bool         `json:"full,omitempty"`
-	Lines  []exportLine `json:"lines,omitempty"`
-	Clear  []string     `json:"clear,omitempty"`
-	Update []exportLine `json:"update,omitempty"`
+	DelayMS int64        `json:"delayMs,omitempty"`
+	Full    bool         `json:"full,omitempty"`
+	Lines   []exportLine `json:"lines,omitempty"`
+	Clear   []string     `json:"clear,omitempty"`
+	Update  []exportLine `json:"update,omitempty"`
 }
 
 type exportLine struct {
@@ -313,7 +314,7 @@ func init() {
 	}
 }
 
-func main() {
+func cliMain() {
 	args, ok := parseArgs(os.Args[1:])
 	if !ok {
 		fmt.Fprintln(os.Stderr, "usage: keynope [--export] [--classic] [--app] [deck.md] | keynope --licenses")
@@ -885,56 +886,9 @@ func createStarterDeck(path string) (string, error) {
 }
 
 func starterDeckMarkdown(width, height int) string {
-	charsPerLine := max(24, min(72, (width-8)/4))
-	reservedRows := 18
-	lineCount := max(2, min(6, (height-reservedRows)/4))
-	lines := loremLines(charsPerLine, lineCount)
-	var out strings.Builder
-	fmt.Fprintf(&out, "<!-- keynope width=%d height=%d -->\n\n", width, height)
-	if metadata, err := encodeMasterDeckMetadata(defaultMasterDeck()); err == nil {
-		out.WriteString(metadata)
-		out.WriteString("\n\n")
-	}
-	out.WriteString("<!-- layout=title-subtitle -->\n\n")
-	out.WriteString("<!-- master-slot=title-subtitle-title -->\n")
-	out.WriteString("# Title\n\n")
-	out.WriteString("<!-- master-slot=title-subtitle-subtitle -->\n")
-	out.WriteString("## Subtitle\n\n")
-	for _, line := range lines {
-		out.WriteString(line)
-		out.WriteByte('\n')
-	}
-	return out.String()
-}
-
-func loremLines(charsPerLine, lineCount int) []string {
-	words := strings.Fields("Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua Ut enim ad minim veniam quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat")
-	var lines []string
-	var line strings.Builder
-	for len(lines) < lineCount {
-		for _, word := range words {
-			if line.Len() == 0 {
-				line.WriteString(word)
-				continue
-			}
-			if line.Len()+1+len(word) > charsPerLine {
-				lines = append(lines, line.String())
-				line.Reset()
-				if len(lines) >= lineCount {
-					return lines
-				}
-			}
-			if line.Len() > 0 {
-				line.WriteByte(' ')
-			}
-			line.WriteString(word)
-		}
-		if line.Len() > 0 {
-			lines = append(lines, line.String())
-			line.Reset()
-		}
-	}
-	return lines[:lineCount]
+	_ = width
+	_ = height
+	return bundledStarterDeckMarkdown
 }
 
 func inferExportSize(slides []Slide) (int, int) {
@@ -1564,6 +1518,9 @@ func embeddedAssetPath(id string, asset DeckAsset) string {
 	if asset.MIME == "image/gif" {
 		ext = ".gif"
 	}
+	if runtime.GOOS == "js" {
+		return "keynope-asset:" + id + ext
+	}
 	return filepath.Join(imageCacheDirectory(), "embedded", id+ext)
 }
 
@@ -1642,6 +1599,10 @@ func makeDeckAsset(data []byte, mime string, width, height int) (string, DeckAss
 	id := hex.EncodeToString(hash[:])
 	asset := DeckAsset{MIME: mime, Width: width, Height: height, Data: append([]byte(nil), data...)}
 	path := embeddedAssetPath(id, asset)
+	registerEmbeddedStillAsset(id, asset)
+	if runtime.GOOS == "js" {
+		return id, asset, path, nil
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", DeckAsset{}, "", err
 	}
@@ -1659,6 +1620,15 @@ func materializeDeckAssets(deck *Deck) {
 		path := embeddedAssetPath(id, asset)
 		if len(asset.Frames) > 0 {
 			registerEmbeddedAnimatedAsset(id, asset)
+			visitDeckImages(deck, func(element *Element) {
+				if element.AssetID == id {
+					element.Path = path
+				}
+			})
+			continue
+		}
+		registerEmbeddedStillAsset(id, asset)
+		if runtime.GOOS == "js" {
 			visitDeckImages(deck, func(element *Element) {
 				if element.AssetID == id {
 					element.Path = path
@@ -1722,12 +1692,22 @@ func parseDeck(path string) (Deck, error) {
 	if err != nil {
 		return Deck{}, err
 	}
+	return parseDeckData(path, data)
+}
+
+func parseDeckData(path string, data []byte) (Deck, error) {
+	parsedDeckElementOrderChanged = false
 	text := string(data)
 	assets, remainingAssets, err := decodeDeckAssets(text)
 	if err != nil {
 		return Deck{}, err
 	}
 	text = remainingAssets
+	fonts, remainingFonts, err := decodeDeckFonts(text)
+	if err != nil {
+		return Deck{}, err
+	}
+	text = remainingFonts
 	authoredTerminalWidth = 0
 	authoredTerminalHeight = 0
 	if match := keynopeMetaRE.FindStringSubmatch(text); match != nil {
@@ -1754,7 +1734,9 @@ func parseDeck(path string) (Deck, error) {
 			slides = append(slides, slide)
 		}
 	}
-	deck := Deck{Slides: slides, Masters: masters, Assets: assets}
+	deck := Deck{Slides: slides, Masters: masters, Assets: assets, Fonts: fonts}
+	registerDeckFonts(deck.Fonts)
+	storeDeckFontsInLibrary(deck.Fonts)
 	materializeDeckAssets(&deck)
 	return deck, nil
 }
@@ -1772,6 +1754,7 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 	}
 	deck = cloneDeck(deck)
 	pruneUnusedDeckAssets(&deck)
+	pruneUnusedDeckFonts(&deck)
 	visitDeckImages(&deck, func(element *Element) {
 		if element.AssetID != "" {
 			element.Path = "keynope-asset:" + element.AssetID
@@ -1789,6 +1772,12 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 		fmt.Fprintf(&out, "<!-- keynope width=%d height=%d -->\n\n", authoredTerminalWidth, authoredTerminalHeight)
 	}
 	if metadata, err := encodeDeckAssets(deck.Assets); err != nil {
+		return nil, err
+	} else if metadata != "" {
+		out.WriteString(metadata)
+		out.WriteString("\n\n")
+	}
+	if metadata, err := encodeDeckFonts(deck.Fonts); err != nil {
 		return nil, err
 	} else if metadata != "" {
 		out.WriteString(metadata)
@@ -2147,6 +2136,7 @@ func exportSlidePagesFrozen(slide Slide, slideIndex, slideCount, cols, rows int)
 }
 
 func exportSlidePagesMode(slide Slide, slideIndex, slideCount, cols, rows int, frozenImages bool) []exportPage {
+	slide = visualFontScaledSlide(slide)
 	pageCount := slidePageCount(slide, cols, rows)
 	pages := make([]exportPage, 0, pageCount)
 	for page := 0; page < pageCount; page++ {
@@ -2173,6 +2163,19 @@ func exportSlidePagesMode(slide Slide, slideIndex, slideCount, cols, rows int, f
 		})
 	}
 	return pages
+}
+
+func visualFontScaledSlide(slide Slide) Slide {
+	slide.Elements = append([]Element(nil), slide.Elements...)
+	for index := range slide.Elements {
+		if _, mode, _, ok := elementDeckFontRenderDetails(slide.Elements[index], false); !ok || mode != deckFontModeFiglet {
+			continue
+		}
+		values, _ := url.ParseQuery(slide.Elements[index].Query)
+		values.Set("keynope_figlet_visual", "1")
+		slide.Elements[index].Query = values.Encode()
+	}
+	return slide
 }
 
 func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int, launchHelper bool) (*presenterCompanion, error) {
@@ -2268,6 +2271,8 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int, la
 		mux.HandleFunc("/api/editor/fit-text", activeNativeEditor.handleFitText)
 		mux.HandleFunc("/api/editor/normalize-text-kind", activeNativeEditor.handleNormalizeTextKind)
 		mux.HandleFunc("/api/editor/emojis", activeNativeEditor.handleEmojiCatalog)
+		mux.HandleFunc("/api/editor/fonts/default", activeNativeEditor.handleDefaultFont)
+		mux.HandleFunc("/api/editor/fonts/library", activeNativeEditor.handleFontLibrary)
 		mux.HandleFunc("/api/editor/workspace", activeNativeEditor.handleWorkspace)
 		mux.HandleFunc("/api/editor/upload", activeNativeEditor.handleUpload)
 		mux.HandleFunc("/api/editor/document", activeNativeEditor.handleDocument)
@@ -2687,41 +2692,138 @@ type preservedExportHead struct {
 	Scripts []string
 }
 
-const exportEffectFrameCount = 90
+const exportAnimationTimelineLimit = 30 * time.Second
 
 func exportContentFrames(slide Slide, page, width, height, slideCount int) []exportContentFrame {
 	if !slideHasAnimatedImage(slide) {
 		return nil
 	}
+	timeline := exportAnimationTimeline(slide)
+	if len(timeline) < 2 {
+		return nil
+	}
 	exportImageAnimationMu.Lock()
 	defer exportImageAnimationMu.Unlock()
-	frames := make([]exportContentFrame, 0, exportEffectFrameCount)
-	seen := map[string]int{}
+	frames := make([]exportContentFrame, 0, len(timeline)-1)
 	previousLines := []exportLine(nil)
+	previousSignature := ""
 	previous := exportImageAnimationPosition
 	defer func() { exportImageAnimationPosition = previous }()
-	for frame := 0; frame < exportEffectFrameCount; frame++ {
-		position := time.Duration(frame) * 70 * time.Millisecond
+	for index := 0; index < len(timeline)-1; index++ {
+		position := timeline[index]
+		delay := timeline[index+1] - position
+		if delay <= 0 {
+			continue
+		}
 		exportImageAnimationPosition = &position
 		lines := displayLines(slide, width, height, page)
 		exported := exportLines(lines, slide, width, height, slideCount)
 		signature := exportFrameSignature(exported)
-		if previousIndex, ok := seen[signature]; ok {
-			if previousIndex == 0 && len(frames) > 1 {
-				break
-			}
+		if len(frames) > 0 && signature == previousSignature {
+			frames[len(frames)-1].DelayMS += delay.Milliseconds()
 			continue
 		}
-		seen[signature] = len(frames)
 		if len(frames) == 0 {
-			frames = append(frames, exportContentFrame{Full: true, Lines: exported})
+			frames = append(frames, exportContentFrame{DelayMS: delay.Milliseconds(), Full: true, Lines: exported})
 		} else {
 			clear, update := exportLineDelta(previousLines, exported)
-			frames = append(frames, exportContentFrame{Clear: clear, Update: update})
+			frames = append(frames, exportContentFrame{DelayMS: delay.Milliseconds(), Clear: clear, Update: update})
 		}
 		previousLines = exported
+		previousSignature = signature
 	}
 	return frames
+}
+
+func exportAnimationTimeline(slide Slide) []time.Duration {
+	var animations [][]time.Duration
+	seen := map[string]bool{}
+	for _, element := range slide.Elements {
+		if element.Kind != "image" || seen[element.Path] {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(element.Path))
+		if ext != ".gif" && ext != ".webp" {
+			continue
+		}
+		seen[element.Path] = true
+		decoded := decodeImageFrames(element.Path)
+		if len(decoded) < 2 {
+			continue
+		}
+		delays := make([]time.Duration, 0, len(decoded))
+		for _, frame := range decoded {
+			delay := frame.delay
+			if delay <= 0 {
+				delay = 100 * time.Millisecond
+			}
+			delays = append(delays, delay)
+		}
+		animations = append(animations, delays)
+	}
+	if len(animations) == 0 {
+		return nil
+	}
+	cycle := animationDuration(animations[0])
+	for _, animation := range animations[1:] {
+		cycle = durationLCM(cycle, animationDuration(animation), exportAnimationTimelineLimit)
+	}
+	if cycle <= 0 {
+		return nil
+	}
+	if cycle > exportAnimationTimelineLimit {
+		cycle = exportAnimationTimelineLimit
+	}
+	boundaries := map[time.Duration]bool{0: true, cycle: true}
+	for _, animation := range animations {
+		total := animationDuration(animation)
+		if total <= 0 {
+			continue
+		}
+		for start := time.Duration(0); start < cycle; start += total {
+			position := start
+			for _, delay := range animation {
+				if position >= cycle {
+					break
+				}
+				boundaries[position] = true
+				position += delay
+			}
+		}
+	}
+	timeline := make([]time.Duration, 0, len(boundaries))
+	for boundary := range boundaries {
+		timeline = append(timeline, boundary)
+	}
+	sort.Slice(timeline, func(i, j int) bool { return timeline[i] < timeline[j] })
+	return timeline
+}
+
+func animationDuration(delays []time.Duration) time.Duration {
+	var total time.Duration
+	for _, delay := range delays {
+		total += delay
+	}
+	return total
+}
+
+func durationLCM(left, right, limit time.Duration) time.Duration {
+	if left <= 0 {
+		return right
+	}
+	if right <= 0 {
+		return left
+	}
+	leftMS := left.Milliseconds()
+	rightMS := right.Milliseconds()
+	gcd := leftMS
+	for value := rightMS; value != 0; {
+		gcd, value = value, gcd%value
+	}
+	if gcd <= 0 || leftMS/gcd > limit.Milliseconds()/rightMS {
+		return limit + time.Millisecond
+	}
+	return time.Duration(leftMS/gcd*rightMS) * time.Millisecond
 }
 
 func exportLineDelta(previous, current []exportLine) ([]string, []exportLine) {
@@ -3770,7 +3872,8 @@ html[data-keynope-app="true"][data-keynope-notes="true"] .keynope-speaker-notes 
 .keynope-editor-section h3 { margin: 0 0 7px; color: #fff; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
 .keynope-editor-actions { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 10px; }
 .keynope-editor-actions button.danger { color: #ffb0aa; border-color: #8d4741; }
-button.keynope-outline-large { min-width: 34px; padding-top: 1px; padding-bottom: 1px; font-size: 26px; line-height: 1; }
+button.keynope-outline-button { display: inline-grid; width: 30px; min-width: 30px; height: 30px; place-items: center; padding: 2px !important; }
+button.keynope-outline-large { font-size: 26px; line-height: 1; }
 button.keynope-shape-outline-button { display: inline-flex; align-items: center; justify-content: center; text-indent: 0; }
 .keynope-shape-outline-symbol { display: inline-block; transform: translateX(0); }
 .keynope-shape-outline-circle { transform: translateX(-4px); }
@@ -3781,6 +3884,55 @@ button.keynope-shape-outline-button { display: inline-flex; align-items: center;
 .keynope-editor-field span { display: block; margin-bottom: 3px; color: #aaa; }
 .keynope-editor-field input, .keynope-editor-field textarea, .keynope-editor-field select { width: 100%; box-sizing: border-box; color: #eee; background: #111; border: 1px solid #555; border-radius: 4px; padding: 5px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .keynope-editor-field textarea { min-height: 70px; resize: vertical; }
+.keynope-font-button { position: relative; display: inline-grid !important; place-items: center; width: 34px !important; min-width: 34px !important; height: 30px; padding: 0 !important; font-weight: 700 !important; }
+.keynope-font-button::after { position: absolute; right: 2px; bottom: 1px; color: #9bcfff; content: "✎"; font-size: 9px; line-height: 1; }
+.keynope-font-select { min-width: 118px !important; max-width: 174px; }
+.keynope-text-effect-select { min-width: 88px !important; max-width: 108px; }
+.keynope-text-effect-button svg { display: block; width: 22px; height: 22px; }
+.keynope-text-effect-dropdown { position: fixed; z-index: 96; display: grid; min-width: 112px; gap: 4px; padding: 6px; color: #eee; background: #202124; border: 1px solid #5b6168; border-radius: 7px; box-shadow: 0 12px 32px rgba(0,0,0,.55); }
+.keynope-text-effect-dropdown button { min-height: 28px; padding: 4px 9px; text-align: left; color: inherit; background: #292929; border: 1px solid #555; border-radius: 5px; font: 12px -apple-system,BlinkMacSystemFont,sans-serif; }
+.keynope-text-effect-dropdown button:hover { border-color: #70b7ff; background: #303b45; }
+.keynope-text-effect-dropdown button.active { border-color: #70b7ff; background: #244766; }
+.keynope-effect-colour-tool { width: 28px !important; min-width: 28px !important; padding: 0 !important; font-weight: 800 !important; }
+.keynope-font-editor { position: fixed; z-index: 90; inset: 18px; display: grid; grid-template-rows: auto minmax(0,1fr); overflow: hidden; color: #eee; background: #181818; border: 1px solid #666; border-radius: 8px; box-shadow: 0 18px 70px rgba(0,0,0,.72); font: 13px -apple-system,BlinkMacSystemFont,sans-serif; }
+.keynope-font-editor[hidden] { display: none; }
+.keynope-font-editor-header { display: flex; min-height: 48px; align-items: center; flex-wrap: wrap; gap: 7px; padding: 7px 10px; border-bottom: 1px solid #444; background: #202020; }
+.keynope-font-editor-header strong { margin-right: auto; color: #fff; font-size: 14px; }
+.keynope-font-editor button,.keynope-font-editor input,.keynope-font-editor select { color: #eee; background: #292929; border: 1px solid #555; border-radius: 5px; padding: 5px 8px; font: inherit; }
+.keynope-font-editor button:hover { border-color: #8a8a8a; }
+.keynope-font-editor button.active { border-color: #70b7ff; background: #244766; }
+.keynope-font-editor button.danger { margin-left: auto; color: #ffb0aa; border-color: #8d4741; }
+.keynope-font-editor-name { width: min(220px,25vw); background: #111 !important; }
+.keynope-font-editor-body { display: grid; min-height: 0; grid-template-columns: 190px minmax(0,1fr); }
+.keynope-font-glyph-sidebar { display: grid; min-height: 0; grid-template-rows: auto minmax(0,1fr); border-right: 1px solid #444; background: #1d1d1d; }
+.keynope-font-filter { margin: 9px; background: #111 !important; }
+.keynope-font-glyph-list { display: grid; align-content: start; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 4px; padding: 0 9px 9px; overflow: auto; }
+.keynope-font-glyph-list button { position: relative; aspect-ratio: 1; min-width: 0; padding: 0; font: 15px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-font-glyph-list button.empty::after { position: absolute; right: 3px; bottom: 3px; width: 4px; height: 4px; border-radius: 50%; background: #fb7185; content: ""; }
+.keynope-font-workspace { min-width: 0; padding: 12px; overflow: auto; }
+.keynope-font-glyph-heading { display: flex; align-items: center; justify-content: center; gap: 8px; margin: 0 0 12px; }
+.keynope-font-glyph-heading strong { min-width: 160px; text-align: center; }
+.keynope-font-brushes { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; margin: 0 auto 12px; padding: 7px; border: 1px solid #444; border-radius: 6px; background: #151515; }
+.keynope-font-brushes button { display: grid; width: 28px; min-width: 28px; height: 28px; place-items: center; padding: 0; font: 20px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-font-brushes input { width: 54px; height: 28px; padding: 2px 5px; text-align: center; font: 16px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-font-faces { display: grid; align-items: start; grid-template-columns: repeat(2,minmax(300px,1fr)); gap: 12px; }
+.keynope-font-face { overflow: hidden; border: 1px solid #444; border-radius: 6px; background: #202020; }
+.keynope-font-face-head,.keynope-font-face-foot { display: flex; min-height: 42px; align-items: center; gap: 6px; padding: 6px 9px; }
+.keynope-font-face-head { border-bottom: 1px solid #444; }
+.keynope-font-face-head strong { margin-right: auto; }
+.keynope-font-dimensions { color: #aaa; font: 11px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-font-grid-wrap { display: grid; min-height: 300px; place-items: center; padding: 18px; overflow: auto; background-color: #121212; background-image: linear-gradient(45deg,#1a1a1a 25%,transparent 25%),linear-gradient(-45deg,#1a1a1a 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#1a1a1a 75%),linear-gradient(-45deg,transparent 75%,#1a1a1a 75%); background-position: 0 0,0 6px,6px -6px,-6px 0; background-size: 12px 12px; }
+.keynope-font-pixel-grid { display: grid; width: max-content; touch-action: none; border-top: 1px solid #555; border-left: 1px solid #555; user-select: none; }
+.keynope-font-pixel-grid button { position: relative; width: 27px; height: 27px; overflow: hidden; border: 0; border-right: 1px solid #555; border-bottom: 1px solid #555; border-radius: 0; padding: 0; color: #f2f2ed; background: #292929; }
+.keynope-font-cell-glyph { position: absolute; inset: 0; display: grid; place-items: center; font: 23px/27px ui-monospace,SFMono-Regular,Menlo,monospace; transform: scale(1.56,1.14); transform-origin: center; pointer-events: none; }
+.keynope-font-editor.figlet .keynope-font-cell-glyph { transform: none; }
+.keynope-font-pixel-grid button.on { background: #3a4147; }
+.keynope-font-face-foot { border-top: 1px solid #444; }
+.keynope-font-preview { display: grid; gap: 1px; margin-right: auto; padding: 4px; border: 1px solid #555; background: #090909; }
+.keynope-font-preview span { position: relative; display: grid; width: 9px; height: 11px; overflow: hidden; place-items: center; color: #f2f2ed; background: #222; }
+.keynope-font-preview .keynope-font-cell-glyph { font-size: 10px; line-height: 11px; transform: scale(1.5,1.14); }
+.keynope-font-preview span.on { background: #30363b; }
+@media (max-width:900px) { .keynope-font-editor { inset: 8px; } .keynope-font-editor-body { grid-template-columns: 150px minmax(0,1fr); } .keynope-font-faces { grid-template-columns: minmax(280px,1fr); } }
 .keynope-element-item { display: flex; width: 100%; justify-content: space-between; margin-bottom: 4px; }
 .keynope-element-item.active { border-color: #70b7ff; background: #244766; }
 .keynope-canvas-overlay { position: absolute; left: 50%; top: 50%; z-index: 12; transform: translate(-50%, -50%); pointer-events: none; }
@@ -3794,7 +3946,18 @@ button.keynope-shape-outline-button { display: inline-flex; align-items: center;
 .keynope-resize-handle.se { right: -6px; bottom: -6px; cursor: nwse-resize; }
 .keynope-colour-tool { position: relative; overflow: hidden; display: grid; width: 28px; min-width: 28px; place-items: center; padding: 4px 0; box-sizing: border-box; border-radius: 4px; color: #e9edf1; background: #343940; font: 11px -apple-system, BlinkMacSystemFont, sans-serif; }
 .keynope-colour-tool::after { content: ''; position: absolute; left: 7px; right: 7px; bottom: 4px; height: 3px; border-radius: 2px; background: var(--keynope-tool-colour, #fff); pointer-events: none; }
-.keynope-colour-tool input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.keynope-colour-picker { position: fixed; z-index: 520; display: grid; width: 252px; box-sizing: border-box; gap: 9px; padding: 10px; border: 1px solid #626a72; border-radius: 8px; color: #edf1f3; background: #1b1e21; box-shadow: 0 14px 42px rgba(0,0,0,.72); font: 12px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-colour-grid { display: grid; grid-template-columns: repeat(8,24px); gap: 4px; }
+.keynope-colour-swatch { width: 24px; min-width: 24px; height: 24px; padding: 0; border: 1px solid #59616a; border-radius: 3px; background: var(--keynope-swatch); }
+.keynope-colour-swatch:hover { border-color: #fff; transform: translateY(-1px); }
+.keynope-colour-swatch.active { outline: 2px solid #ffd166; outline-offset: 1px; }
+.keynope-colour-picker-controls { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 6px; }
+.keynope-colour-picker-controls input { min-width: 0; box-sizing: border-box; border: 1px solid #59616a; border-radius: 4px; padding: 5px 7px; color: #edf1f3; background: #101214; font: inherit; }
+.keynope-colour-picker-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.keynope-colour-picker-actions button,.keynope-colour-picker-controls button { border: 1px solid #59616a; border-radius: 4px; padding: 5px 8px; color: #edf1f3; background: #292d31; font: inherit; }
+.keynope-colour-picker-native { position: fixed; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.keynope-colour-field-button { display: grid; width: 100%; grid-template-columns: 18px minmax(0,1fr); align-items: center; gap: 7px; box-sizing: border-box; border: 1px solid #555; border-radius: 4px; padding: 5px 7px; color: #eee; background: #111; font: 12px ui-monospace,SFMono-Regular,Menlo,monospace; text-align: left; }
+.keynope-colour-field-swatch { width: 16px; height: 16px; margin: 0 !important; border: 1px solid #777; border-radius: 3px; background: var(--keynope-field-colour); }
 .keynope-inline-capture { position: absolute; left: 0; top: 0; z-index: 30; width: 1px; height: 1px; margin: 0; padding: 0; opacity: 0; border: 0; resize: none; pointer-events: none; }
 html[data-keynope-app="true"] .keynope-editor-topbar, html[data-keynope-app="true"] .keynope-editor-panel { display: flex; }
 html[data-keynope-app="true"] .keynope-editor-panel { display: block; }
@@ -3847,7 +4010,9 @@ const presenterTestCardBufferContext = presenterTestCardBuffer.getContext('2d');
 const effectLayer = document.getElementById('effect-layer');
 let contentLayer = document.getElementById('content-layer');
 const chromeLayer = document.getElementById('chrome-layer');
-const presenterSurface = new URLSearchParams(location.search).get('keynopeSurface') || 'external';
+const presenterSurface = window.KEYNOPE_APP_SURFACE
+  ? 'app'
+  : (new URLSearchParams(location.search).get('keynopeSurface') || 'external');
 const presenterMainSurface = presenterSurface === 'main';
 const keynopeAppSurface = presenterSurface === 'app';
 // Standalone HTML and live presentation share this renderer. Presenter state
@@ -3860,6 +4025,7 @@ let editorCanvasCaret = null;
 let editorExportConfirmation = null;
 let keynopeEditorMasterMode = false;
 let keynopeEditorSelectionActive = false;
+let keynopeEditorTextEditActive = false;
 let keynopeEditorVisualResizeActive = false;
 if (keynopeAppSurface) {
   document.documentElement.setAttribute('data-keynope-app', 'true');
@@ -3867,7 +4033,9 @@ if (keynopeAppSurface) {
   document.title = 'Keynope';
 }
 let frame = 0;
-let contentAnimationFrame = 0;
+let contentAnimationElapsedMS = 0;
+let contentAnimationLastTickMS = performance.now();
+let contentAnimationPageIndex = -1;
 let contentAnimationCache = new Map();
 let canvasCell = 1;
 let canvasCharWidth = 1;
@@ -4891,7 +5059,10 @@ function decodedContentFrames(page) {
       for (const key of frame.clear || []) map.delete(key);
       for (const line of frame.update || []) map.set(lineKey(line), line);
     }
-    decoded.push({lines: Array.from(map.values())});
+    decoded.push({
+      lines: Array.from(map.values()),
+      delayMs: Math.max(1, Number(frame.delayMs) || 70)
+    });
   }
   contentAnimationCache.set(pageIndex, decoded);
   return decoded;
@@ -5433,11 +5604,42 @@ function presenterContentLinesFor(index, page) {
   if (!page) return [];
   if (index === pageIndex) {
     const contentFrames = decodedContentFrames(page);
-    if (contentFrames && contentFrames.length) return contentFrames[contentAnimationFrame % contentFrames.length].lines;
+    if (contentFrames && contentFrames.length) {
+      if (contentAnimationPageIndex !== index) {
+        contentAnimationPageIndex = index;
+        contentAnimationElapsedMS = 0;
+      }
+      const totalDelay = contentFrames.reduce((total, contentFrame) => total + contentFrame.delayMs, 0);
+      let position = totalDelay > 0 ? contentAnimationElapsedMS % totalDelay : 0;
+      for (const contentFrame of contentFrames) {
+        if (position < contentFrame.delayMs) return contentFrame.lines;
+        position -= contentFrame.delayMs;
+      }
+      return contentFrames[contentFrames.length - 1].lines;
+    }
   }
   return page.lines || [];
 }
+function contentAnimationWakeDelayMS() {
+  if (keynopeEditorSelectionActive) return 70;
+  const page = presenterPageAt(pageIndex);
+  const contentFrames = page ? decodedContentFrames(page) : null;
+  if (!contentFrames || !contentFrames.length) return 70;
+  const totalDelay = contentFrames.reduce((total, contentFrame) => total + contentFrame.delayMs, 0);
+  let position = totalDelay > 0 ? contentAnimationElapsedMS % totalDelay : 0;
+  for (const contentFrame of contentFrames) {
+    if (position < contentFrame.delayMs) {
+      return Math.max(1, Math.min(70, contentFrame.delayMs - position));
+    }
+    position -= contentFrame.delayMs;
+  }
+  return 70;
+}
 function tick() {
+  const tickStartedMS = performance.now();
+  const elapsedMS = Math.max(0, Math.min(1000, tickStartedMS - contentAnimationLastTickMS));
+  contentAnimationLastTickMS = tickStartedMS;
+  if (!keynopeEditorSelectionActive && !keynopeEditorTextEditActive) contentAnimationElapsedMS += elapsedMS;
   try {
     drawFrame();
   } catch (_err) {
@@ -5449,10 +5651,9 @@ function tick() {
     }
   }
   setTimeout(() => {
-    frame++;
-    if (!keynopeEditorSelectionActive) contentAnimationFrame++;
+    if (!keynopeEditorTextEditActive) frame++;
     tick();
-  }, 70);
+  }, contentAnimationWakeDelayMS());
 }
 addEventListener('resize', () => { resize(); render(); });
 function activateLink(target) {
@@ -5848,20 +6049,35 @@ if (keynopeAppSurface) {
   let editorMutationPreviewSequence = 0;
   let editorTransparencyIconSequence = 0;
   let editorElementClipboard = [];
+  let editorActionQueue = Promise.resolve();
+  let activeCanvasDrag = null;
   let activeCanvasVisualMenu = null;
+  let activeCanvasTextEffectDropdown = null;
   let activeCanvasLinkDialog = null;
   let emojiPickerPanel = null;
   let emojiPickerTarget = null;
+  let fontEditorDialog = null;
+  let defaultEditorFont = null;
+  let nativeEditorFontLibrary = null;
   let lastPublishedEditorDirty = null;
   function publishEditorDirtyState() {
     const dirty = !!(editorState && editorState.dirty);
     saveButton.disabled = !dirty;
-    if (dirty === lastPublishedEditorDirty) return;
+    if (dirty === lastPublishedEditorDirty && !window.KEYNOPE_WEB_EDITOR) return;
     lastPublishedEditorDirty = dirty;
     const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
     if (handler) handler.postMessage({action: 'editor-dirty-state', dirty});
   }
-  async function editorAction(action) {
+  function queueEditorOperation(operation) {
+    const pending = editorActionQueue.then(operation, operation);
+    editorActionQueue = pending.catch(() => {});
+    return pending;
+  }
+  async function performEditorAction(action) {
+    const selectionOnly = action.action === 'select-element';
+    if (!['select-element','update-slide-notes','confirm-save','start-timer','stop-timer'].includes(action.action)) {
+      editorMutationPreviewSequence++;
+    }
     const enteringMasters = action.action === 'toggle-master-mode' && editorState && !editorState.masterMode;
     if (enteringMasters) editorNormalPages = (deck.pages || []).slice();
     const response = await fetch('/api/editor/action', {
@@ -5875,8 +6091,38 @@ if (keynopeAppSurface) {
     editorState = await response.json();
     keynopeEditorMasterMode = !!editorState.masterMode;
     editorStateVersion = editorState.version;
-    renderEditorPanels();
+    if (action.action === 'start-timer' || action.action === 'stop-timer') {
+      presenterTimerMode = editorState.timerMode || '';
+      presenterTimerInput = '';
+      presenterTimerEndMS = Number(editorState.timerEndMs || 0);
+    }
+    if (selectionOnly) {
+      renderEditorTopbar();
+      refreshCanvasSelectionInPlace();
+    } else {
+      renderEditorPanels();
+    }
     await syncEditorWorkspace();
+  }
+  function editorAction(action) {
+    return queueEditorOperation(() => performEditorAction(action));
+  }
+  function editorElementIndexByID(id, fallback = -1) {
+    const slide = editorState && editorState.slides && editorState.slides[editorState.current];
+    const elements = slide ? (slide.elements || []) : [];
+    if (id) {
+      const found = elements.findIndex(element => element.id === id);
+      if (found >= 0) return found;
+      return -1;
+    }
+    return fallback >= 0 && fallback < elements.length ? fallback : -1;
+  }
+  function updateEditorElementByID(id, fallback, element) {
+    return queueEditorOperation(async () => {
+      const currentIndex = editorElementIndexByID(id, fallback);
+      if (currentIndex < 0) throw new Error('Dragged element is no longer available');
+      await performEditorAction({action: 'update-element', element: currentIndex, elementData: element});
+    });
   }
   const editorClipboardPrefix = 'keynope-elements:';
   function editorClipboardTextTarget(target) {
@@ -5959,19 +6205,147 @@ if (keynopeAppSurface) {
     wrapper.append(caption, select);
     parent.appendChild(wrapper);
   }
+  let activeKeynopeColourPicker = null;
+  const keynopeColourPalette = (() => {
+    const levels = [0,85,170,255];
+    const values = [];
+    for (const red of levels) for (const green of levels) for (const blue of levels) {
+      values.push({red,green,blue,hex:'#' + [red,green,blue].map(value => value.toString(16).padStart(2,'0')).join('')});
+    }
+    values.sort((left,right) =>
+      (299*left.red + 587*left.green + 114*left.blue) - (299*right.red + 587*right.green + 114*right.blue)
+      || left.red-right.red || left.green-right.green || left.blue-right.blue);
+    return values;
+  })();
+  function keynopeNormaliseColour(value, fallback = '#ffffff') {
+    const match = /^#?([0-9a-f]{6})$/i.exec(String(value || '').trim());
+    return match ? '#' + match[1].toLowerCase() : fallback;
+  }
+  function closeKeynopeColourPicker() {
+    if (activeKeynopeColourPicker) activeKeynopeColourPicker.close();
+  }
+  function openKeynopeColourPicker(anchor, current, changed, closed) {
+    closeKeynopeColourPicker();
+    let value = keynopeNormaliseColour(current);
+    const picker = document.createElement('div');
+    picker.className = 'keynope-colour-picker';
+    picker.setAttribute('role','dialog');
+    picker.setAttribute('aria-label','Pick color');
+    const grid = document.createElement('div');
+    grid.className = 'keynope-colour-grid';
+    const controls = document.createElement('div');
+    controls.className = 'keynope-colour-picker-controls';
+    const field = document.createElement('input');
+    field.type = 'text';
+    field.value = value;
+    field.maxLength = 7;
+    field.setAttribute('aria-label','HTML color');
+    const apply = document.createElement('button');
+    apply.type = 'button';
+    apply.textContent = 'Apply';
+    const actions = document.createElement('div');
+    actions.className = 'keynope-colour-picker-actions';
+    const pick = document.createElement('button');
+    pick.type = 'button';
+    pick.textContent = 'Pick color';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    const nativeInput = document.createElement('input');
+    nativeInput.type = 'color';
+    nativeInput.value = value;
+    nativeInput.className = 'keynope-colour-picker-native';
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      document.removeEventListener('pointerdown',outside,true);
+      picker.remove();
+      if (activeKeynopeColourPicker?.picker === picker) activeKeynopeColourPicker = null;
+      if (closed) closed();
+    };
+    const choose = selected => {
+      const normalized = keynopeNormaliseColour(selected,'');
+      if (!normalized) return;
+      value = normalized;
+      changed(value);
+      finish();
+    };
+    const outside = event => {
+      if (!picker.contains(event.target) && event.target !== anchor) finish();
+    };
+    for (const colour of keynopeColourPalette) {
+      const swatch = document.createElement('button');
+      swatch.type = 'button';
+      swatch.className = 'keynope-colour-swatch';
+      swatch.style.setProperty('--keynope-swatch',colour.hex);
+      swatch.title = colour.hex;
+      swatch.setAttribute('aria-label',colour.hex);
+      swatch.classList.toggle('active',colour.hex === value);
+      swatch.addEventListener('click',() => choose(colour.hex));
+      grid.appendChild(swatch);
+    }
+    apply.addEventListener('click',() => choose(field.value));
+    field.addEventListener('keydown',event => {
+      if (event.key === 'Enter') { event.preventDefault(); choose(field.value); }
+    });
+    pick.addEventListener('click',async () => {
+      if ('EyeDropper' in window) {
+        try {
+          const result = await new window.EyeDropper().open();
+          choose(result.sRGBHex);
+        } catch (_err) {}
+      } else {
+        nativeInput.value = value;
+        nativeInput.click();
+      }
+    });
+    nativeInput.addEventListener('change',() => choose(nativeInput.value));
+    cancel.addEventListener('click',finish);
+    picker.addEventListener('pointerdown',event => event.stopPropagation());
+    picker.addEventListener('keydown',event => {
+      event.stopPropagation();
+      if (event.key === 'Escape') { event.preventDefault(); finish(); }
+    });
+    controls.append(field,apply);
+    actions.append(pick,cancel,nativeInput);
+    picker.append(grid,controls,actions);
+    document.body.appendChild(picker);
+    const anchorRect = anchor.getBoundingClientRect();
+    const pickerRect = picker.getBoundingClientRect();
+    picker.style.left = Math.max(8,Math.min(innerWidth-pickerRect.width-8,anchorRect.left)) + 'px';
+    const below = anchorRect.bottom + 6;
+    picker.style.top = (below + pickerRect.height <= innerHeight-8 ? below : Math.max(8,anchorRect.top-pickerRect.height-6)) + 'px';
+    document.addEventListener('pointerdown',outside,true);
+    activeKeynopeColourPicker = {picker,close:finish};
+    field.focus();
+    field.select();
+  }
   function editorColor(parent, label, value, fallback, changed) {
-    const wrapper = document.createElement('label');
+    const wrapper = document.createElement('div');
     wrapper.className = 'keynope-editor-field';
     const caption = document.createElement('span');
     caption.textContent = label;
-    const input = document.createElement('input');
-    input.type = 'color';
     const rgb = /^(?:38|48);2;(\d+);(\d+);(\d+)$/.exec(value || '');
-    input.value = /^#[0-9a-f]{6}$/i.test(value || '') ? value : rgb
+    let colour = /^#[0-9a-f]{6}$/i.test(value || '') ? value : rgb
       ? '#' + rgb.slice(1).map(part => Math.max(0, Math.min(255, Number(part))).toString(16).padStart(2, '0')).join('')
       : fallback;
-    input.addEventListener('input', () => changed(input.value));
-    wrapper.append(caption, input);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'keynope-colour-field-button';
+    button.innerHTML = '<span class="keynope-colour-field-swatch"></span><span>Pick color</span>';
+    button.title = 'Pick color';
+    button.setAttribute('aria-label','Pick color for ' + label.toLowerCase());
+    button.style.setProperty('--keynope-field-colour',colour);
+    button.addEventListener('click',event => {
+      event.stopPropagation();
+      openKeynopeColourPicker(button,colour,next => {
+        colour = next;
+        button.style.setProperty('--keynope-field-colour',colour);
+        changed(colour);
+      });
+    });
+    wrapper.append(caption, button);
     parent.appendChild(wrapper);
   }
   const topbar = document.createElement('div');
@@ -6043,12 +6417,686 @@ if (keynopeAppSurface) {
   addElementIconButton('Add bullet point', 'bullet', '<circle cx="4" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="4" cy="14" r="1" fill="currentColor" stroke="none"/><path d="M8 6h9M8 14h9"/>');
   addElementIconButton('Add code', 'code', '<path d="M7 5 3 10l4 5M13 5l4 5-4 5M11 3 9 17"/>');
   addElementIconButton('Add emoji', 'text', '<circle cx="10" cy="10" r="7"/><circle cx="7.5" cy="8" r=".8" fill="currentColor" stroke="none"/><circle cx="12.5" cy="8" r=".8" fill="currentColor" stroke="none"/><path d="M6.5 11.5c1.5 2.5 5.5 2.5 7 0"/>', 0, button => openEmojiPicker(button, -1, 'add'));
+  const fontEditorButton = document.createElement('button');
+  fontEditorButton.type = 'button';
+  fontEditorButton.className = 'keynope-font-button';
+  fontEditorButton.textContent = 'Aa';
+  fontEditorButton.title = 'Font editor';
+  fontEditorButton.setAttribute('aria-label', 'Open font editor');
+  fontEditorButton.addEventListener('click', () => openFontEditor());
+  mainTopbar.appendChild(fontEditorButton);
   const addPageNumberButton = addElementIconButton('Show slide number', 'page-number', '<g transform="scale(.025)" fill="none" stroke-linejoin="round"><path d="M145 65h350l160 160v510H145Z" stroke="#fff" stroke-width="32"/><path d="M495 65v160h160" stroke="#fff" stroke-width="32"/><path d="M230 300h340M230 385h340M230 470h250" stroke="#9b9b9b" stroke-width="28" stroke-linecap="round"/><path d="M205 560h390" stroke="#fff" stroke-width="26" stroke-linecap="round"/><path d="m370 630 34-25v85M365 690h90" stroke="#fff" stroke-width="30" stroke-linecap="round"/></g>', 0, () => editorAction({action: 'toggle-page-number'}).catch(() => {}));
   addPageNumberButton.classList.add('keynope-page-number-button');
   const addPageNumberTag = document.createElement('span');
   addPageNumberTag.className = 'keynope-page-number-tag';
   addPageNumberButton.appendChild(addPageNumberTag);
   addPageNumberButton.hidden = true;
+  const fontClone = value => JSON.parse(JSON.stringify(value));
+  function fontLibrary() {
+    let local = {};
+    try { local = JSON.parse(localStorage.getItem('keynope-font-library-v1') || '{}') || {}; }
+    catch (_err) {}
+    return Object.assign({},nativeEditorFontLibrary || {},local);
+  }
+  function storeLibraryFont(font) {
+    try {
+      const fonts = fontLibrary();
+      fonts[font.id] = font;
+      localStorage.setItem('keynope-font-library-v1', JSON.stringify(fonts));
+    } catch (_err) {}
+  }
+  function removeLibraryFont(id) {
+    try {
+      const fonts = fontLibrary();
+      delete fonts[id];
+      localStorage.setItem('keynope-font-library-v1', JSON.stringify(fonts));
+    } catch (_err) {}
+    if (nativeEditorFontLibrary) delete nativeEditorFontLibrary[id];
+  }
+  function fontSlug(value) {
+    return String(value || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'font';
+  }
+  const fontBlockBrushes = Array.from('▀▁▂▃▄▅▆▇█▉▊▋▌▍▎▏▐░▒▓▔▕▖▗▘▙▚▛▜▝▞▟');
+  const fontBlockCells = new Set(fontBlockBrushes);
+  const figletBrushes = Array.from(new Set([
+    ...Array.from("!#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\\\]^_" + String.fromCharCode(34,96) + "abcdefghijklmnopqrstuvwxyz{|}~│─┌┐└┘├┤┬┴┼╔╗╚╝═║╠╣╦╩╬"),
+    ...fontBlockBrushes
+  ]));
+  function validFigletBrush(value) {
+    const values = Array.from(String(value || ''));
+    if (values.length !== 1 || /\s/.test(values[0])) return false;
+    const code = values[0].codePointAt(0);
+    return !(code >= 0x1f000 && code <= 0x1faff) && !(code >= 0x2600 && code <= 0x27bf);
+  }
+  function fontFaceToCells(face) {
+    const converted = {};
+    for (const [character,sourceRows] of Object.entries(face || {})) {
+      const rows = Array.from({length:8},(_,row) => Array.from(String(sourceRows?.[row] || '')));
+      const width = Math.max(1,...rows.map(row => row.length));
+      converted[character] = rows.map(row =>
+        Array.from({length:width},(_,column) => ['#','█'].includes(row[column]) ? '█' : '.').join(''));
+    }
+    return converted;
+  }
+  function fontToCellMode(value) {
+    const converted = fontClone(value);
+    if (converted.mode === 'figlet') return converted;
+    if (converted.mode !== 'cells') {
+      converted.normal = fontFaceToCells(converted.normal);
+      converted.bold = fontFaceToCells(converted.bold);
+      converted.mode = 'cells';
+    }
+    return converted;
+  }
+  function parseFIGletFont(source, filename) {
+    const lines = String(source || '').replace(/\r\n?/g,'\n').replace(/^\uFEFF/,'').split('\n');
+    const header = (lines.shift() || '').trim().split(/\s+/);
+    if (header.length < 6 || !header[0].startsWith('flf2a') || Array.from(header[0]).length !== 6) {
+      throw new Error('Not a FIGlet 2 font');
+    }
+    const hardblank = Array.from(header[0])[5];
+    const height = Number(header[1]);
+    const comments = Number(header[5]);
+    if (!Number.isInteger(height) || height < 1 || height > 32) throw new Error('Unsupported FIGlet height');
+    if (!Number.isInteger(comments) || comments < 0) throw new Error('Invalid FIGlet comments');
+    lines.splice(0,comments);
+    const normal = {};
+    let endmark = '';
+    for (let code=32;code<=126;code++) {
+      const rows = [];
+      for (let row=0;row<height;row++) {
+        let line = lines.shift();
+        if (line == null) throw new Error('FIGlet font ends inside glyph ' + String.fromCharCode(code));
+        const cells = Array.from(line);
+        if (!endmark) endmark = cells[cells.length-1] || '';
+        if (!endmark || cells[cells.length-1] !== endmark) throw new Error('Missing FIGlet endmark');
+        while (cells[cells.length-1] === endmark) cells.pop();
+        rows.push(cells.map(cell => cell === hardblank ? ' ' : validFigletBrush(cell) ? cell : ' ').join(''));
+      }
+      normal[String.fromCharCode(code)] = rows;
+    }
+    const rawName = String(filename || 'Imported FIGlet').replace(/\.(?:flf|tlf)$/i,'').replace(/_/g,' ').trim();
+    const name = rawName || 'Imported FIGlet';
+    return {
+      id:fontSlug(name), name, mode:'figlet', height,
+      figletLayout:Number(header[7] ?? header[4]) || 0,
+      normal, bold:fontClone(normal)
+    };
+  }
+  async function loadDefaultEditorFont() {
+    if (!defaultEditorFont) {
+      const response = await fetch('/api/editor/fonts/default');
+      if (!response.ok) throw new Error('Could not load the default font');
+      defaultEditorFont = fontToCellMode(await response.json());
+    }
+    return fontClone(defaultEditorFont);
+  }
+  async function loadNativeFontLibrary() {
+    if (nativeEditorFontLibrary) return;
+    try {
+      const response = await fetch('/api/editor/fonts/library');
+      nativeEditorFontLibrary = response.ok ? await response.json() : {};
+    } catch (_err) {
+      nativeEditorFontLibrary = {};
+    }
+  }
+  function closeFontEditor() {
+    if (fontEditorDialog) {
+      if (typeof fontEditorDialog._keynopeCleanup === 'function') fontEditorDialog._keynopeCleanup();
+      fontEditorDialog.remove();
+    }
+    fontEditorDialog = null;
+  }
+  async function openFontEditor(preferredID) {
+    closeFontEditor();
+    await loadNativeFontLibrary();
+    let base;
+    try { base = await loadDefaultEditorFont(); }
+    catch (error) { if (editorStatus) editorStatus.textContent = error.message; return; }
+    const deckFonts = editorState && editorState.fonts || {};
+    const libraryFonts = fontLibrary();
+    const firstID = preferredID && (deckFonts[preferredID] || libraryFonts[preferredID])
+      ? preferredID : '';
+    base = fontToCellMode(base);
+    const keynopeDefaultFont = () => {
+      const value = fontClone(base);
+      value.id = 'keynope';
+      value.name = 'Keynope';
+      return value;
+    };
+    let font = firstID ? fontToCellMode(deckFonts[firstID] || libraryFonts[firstID]) : keynopeDefaultFont();
+    let character = 'A';
+    let history = [];
+    let future = [];
+    let painting = null;
+    let brush = '█';
+    let loadedBaseline = fontClone(font);
+    let pendingImportSave = null;
+    let importConfirmation = null;
+    const chars = Array.from({length:95}, (_, index) => String.fromCharCode(index + 32));
+    const aliases = {' ':'SPACE','"':'DOUBLE QUOTE',"'":'APOSTROPHE','\\':'BACKSLASH'};
+    aliases[String.fromCharCode(96)] = 'BACKTICK';
+    const dialog = document.createElement('section');
+    dialog.className = 'keynope-font-editor';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    const header = document.createElement('div');
+    header.className = 'keynope-font-editor-header';
+    const title = document.createElement('strong');
+    title.textContent = 'KEYNOPE FONT EDITOR';
+    const collection = document.createElement('select');
+    collection.title = 'Fonts in this deck and your library';
+    const name = document.createElement('input');
+    name.className = 'keynope-font-editor-name';
+    name.placeholder = 'Font name';
+    name.value = font.name;
+    const command = (label, titleText) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.title = titleText || label;
+      return button;
+    };
+    const undo = command('↶','Undo glyph edit');
+    const redo = command('↷','Redo glyph edit');
+    const create = command('New');
+    const duplicate = command('Clone');
+    const importFont = command('Import');
+    const importInput = document.createElement('input');
+    importInput.type = 'file';
+    importInput.accept = '.json,.flf,.tlf,application/json,text/plain';
+    importInput.hidden = true;
+    const exportFont = command('Export');
+    const saveFont = command('Save');
+    saveFont.className = 'active';
+    const deleteFont = command('Delete');
+    deleteFont.className = 'danger';
+    const close = command('Close');
+    header.append(title, collection, name, undo, redo, create, duplicate, importFont, importInput, exportFont, saveFont, deleteFont, close);
+    const body = document.createElement('div');
+    body.className = 'keynope-font-editor-body';
+    const sidebar = document.createElement('aside');
+    sidebar.className = 'keynope-font-glyph-sidebar';
+    const filter = document.createElement('input');
+    filter.type = 'search';
+    filter.placeholder = 'Find character';
+    filter.className = 'keynope-font-filter';
+    const glyphList = document.createElement('div');
+    glyphList.className = 'keynope-font-glyph-list';
+    sidebar.append(filter, glyphList);
+    const workspace = document.createElement('main');
+    workspace.className = 'keynope-font-workspace';
+    const glyphHeading = document.createElement('div');
+    glyphHeading.className = 'keynope-font-glyph-heading';
+    const previous = command('‹','Previous glyph');
+    const glyphName = document.createElement('strong');
+    const next = command('›','Next glyph');
+    const reset = command('Reset glyph');
+    glyphHeading.append(previous, glyphName, next, reset);
+    const faces = document.createElement('div');
+    faces.className = 'keynope-font-faces';
+    const brushes = document.createElement('div');
+    brushes.className = 'keynope-font-brushes';
+    brushes.setAttribute('role','toolbar');
+    function renderBrushes() {
+      brushes.replaceChildren();
+      const values = font.mode === 'figlet'
+        ? Array.from(new Set([...figletBrushes,...Object.values(font.normal || {}).flatMap(rows => rows.flatMap(row => Array.from(row))).filter(validFigletBrush)]))
+        : fontBlockBrushes;
+      if (font.mode === 'figlet' && !validFigletBrush(brush)) brush = '#';
+      if (font.mode !== 'figlet' && !fontBlockCells.has(brush)) brush = '█';
+      for (const value of values) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = value;
+        button.setAttribute('aria-label','Paint with ' + value);
+        button.classList.toggle('active',value === brush);
+        button.addEventListener('click',() => {
+          brush = value;
+          renderBrushes();
+        });
+        brushes.appendChild(button);
+      }
+      if (font.mode === 'figlet') {
+        const custom = document.createElement('input');
+        custom.type = 'text';
+        custom.inputMode = 'text';
+        custom.placeholder = 'Glyph';
+        custom.title = 'Use another non-emoji character';
+        custom.setAttribute('aria-label','Custom FIGlet brush');
+        custom.addEventListener('input',() => {
+          const value = Array.from(custom.value).pop() || '';
+          custom.value = value;
+          if (validFigletBrush(value)) { brush = value; renderBrushes(); }
+        });
+        brushes.appendChild(custom);
+      }
+    }
+    workspace.append(glyphHeading, brushes, faces);
+    body.append(sidebar, workspace);
+    dialog.append(header, body);
+    document.body.appendChild(dialog);
+    fontEditorDialog = dialog;
+    function normalizeRows(rows) {
+      if (font.mode === 'figlet') {
+        const height = Math.max(1,Math.min(32,Number(font.height) || (rows || []).length || 1));
+        const width = Math.max(1, ...(rows || []).map(row => Array.from(String(row)).length));
+        return Array.from({length:height}, (_, row) => {
+          const values = Array.from(String(rows && rows[row] || ''));
+          return Array.from({length:width},(_,column) => validFigletBrush(values[column]) ? values[column] : ' ').join('');
+        });
+      }
+      const width = Math.max(1, ...(rows || []).map(row => Array.from(String(row)).length));
+      return Array.from({length:8}, (_, row) =>
+        Array.from(String(rows && rows[row] || '').padEnd(width,'.').slice(0,width),
+          pixel => pixel === '#' ? '█' : fontBlockCells.has(pixel) ? pixel : '.').join(''));
+    }
+    function checkpoint() {
+      history.push(fontClone(font));
+      if (history.length > 100) history.shift();
+      future = [];
+    }
+    function fillCollection() {
+      collection.replaceChildren();
+      const defaults = document.createElement('optgroup');
+      defaults.label = 'DEFAULT';
+      const keynope = document.createElement('option');
+      keynope.value = 'DEFAULT:keynope';
+      keynope.textContent = 'Keynope (Default)';
+      keynope.selected = font.id === 'keynope' && !(editorState && editorState.fonts && editorState.fonts.keynope) && !fontLibrary().keynope;
+      defaults.appendChild(keynope);
+      collection.appendChild(defaults);
+      for (const [label, fonts] of [['DECK',editorState && editorState.fonts || {}],['LIBRARY',fontLibrary()]]) {
+        const group = document.createElement('optgroup');
+        group.label = label;
+        for (const value of Object.values(fonts).sort((a,b) => String(a.name).localeCompare(String(b.name)))) {
+          if (!value) continue;
+          const option = document.createElement('option');
+          option.value = label + ':' + value.id;
+          option.textContent = value.name || value.id;
+          option.selected = value.id === font.id && (label === 'DECK' || !(editorState.fonts || {})[font.id]);
+          group.appendChild(option);
+        }
+        if (group.children.length) collection.appendChild(group);
+      }
+    }
+    function renderGlyphList() {
+      glyphList.replaceChildren();
+      const query = filter.value.toLowerCase();
+      for (const value of chars) {
+        const label = aliases[value] || value;
+        if (query && !label.toLowerCase().includes(query) && !String(value.charCodeAt(0)).includes(query)) continue;
+        const button = command(value === ' ' ? '␠' : value, label + ' · ASCII ' + value.charCodeAt(0));
+        button.classList.toggle('active', value === character);
+        const emptyCell = font.mode === 'figlet' ? ' ' : '.';
+        button.classList.toggle('empty', ['normal','bold'].some(face => !(font[face]?.[value] || []).some(row => Array.from(row).some(pixel => pixel !== emptyCell))));
+        button.addEventListener('click', () => { character = value; render(); });
+        glyphList.appendChild(button);
+      }
+    }
+    function buildFace(face, label) {
+      const section = document.createElement('section');
+      section.className = 'keynope-font-face';
+      const head = document.createElement('div');
+      head.className = 'keynope-font-face-head';
+      const heading = document.createElement('strong');
+      heading.textContent = label;
+      const dimensions = document.createElement('span');
+      dimensions.className = 'keynope-font-dimensions';
+      const less = command('−','Remove rightmost column');
+      const more = command('+','Add a column');
+      head.append(heading, dimensions, less, more);
+      const wrap = document.createElement('div');
+      wrap.className = 'keynope-font-grid-wrap';
+      const grid = document.createElement('div');
+      grid.className = 'keynope-font-pixel-grid';
+      wrap.appendChild(grid);
+      const foot = document.createElement('div');
+      foot.className = 'keynope-font-face-foot';
+      const preview = document.createElement('div');
+      preview.className = 'keynope-font-preview';
+      const clear = command('Clear');
+      const invert = command('Invert');
+      foot.append(preview, clear, invert);
+      section.append(head, wrap, foot);
+      function setPixel(x, y, value) {
+        const rows = font[face][character];
+        const row = Array.from(rows[y]);
+        row[x] = value;
+        rows[y] = row.join('');
+        const cell = grid.querySelector('[data-x="' + x + '"][data-y="' + y + '"]');
+        if (cell) {
+          const glyph = cell.querySelector('.keynope-font-cell-glyph');
+          const emptyCell = font.mode === 'figlet' ? ' ' : '.';
+          if (glyph) glyph.textContent = value === emptyCell ? '' : value;
+          cell.classList.toggle('on', value !== emptyCell);
+        }
+        const dot = preview.children[y * rows[0].length + x];
+        if (dot) {
+          const glyph = dot.querySelector('.keynope-font-cell-glyph');
+          const emptyCell = font.mode === 'figlet' ? ' ' : '.';
+          if (glyph) glyph.textContent = value === emptyCell ? '' : value;
+          dot.classList.toggle('on', value !== emptyCell);
+        }
+        if (font.mode === 'figlet' && face === 'normal') font.bold = fontClone(font.normal);
+        renderGlyphList();
+      }
+      function draw() {
+        invert.hidden = font.mode === 'figlet';
+        heading.textContent = font.mode === 'figlet' ? 'FIGLET' : label;
+        font[face] = font[face] || {};
+        const rows = font[face][character] = normalizeRows(font[face][character]);
+        const width = rows[0].length;
+        const height = rows.length;
+        const emptyCell = font.mode === 'figlet' ? ' ' : '.';
+        dimensions.textContent = width + ' × ' + height;
+        grid.style.gridTemplateColumns = 'repeat(' + width + ',27px)';
+        preview.style.gridTemplateColumns = 'repeat(' + width + ',9px)';
+        grid.replaceChildren();
+        preview.replaceChildren();
+        rows.forEach((row,y) => Array.from(row).forEach((pixel,x) => {
+          const cell = command('','Cell ' + (x+1) + ', ' + (y+1));
+          const cellGlyph = document.createElement('span');
+          cellGlyph.className = 'keynope-font-cell-glyph';
+          cellGlyph.textContent = pixel === emptyCell ? '' : pixel;
+          cell.appendChild(cellGlyph);
+          cell.classList.toggle('on', pixel !== emptyCell);
+          cell.dataset.x = x;
+          cell.dataset.y = y;
+          cell.addEventListener('pointerdown', event => {
+            event.preventDefault();
+            checkpoint();
+            const current = Array.from(font[face][character][y] || '')[x] || emptyCell;
+            painting = {face, value:current === brush ? emptyCell : brush};
+            setPixel(x,y,painting.value);
+          });
+          cell.addEventListener('pointerenter', () => {
+            if (painting && painting.face === face) setPixel(x,y,painting.value);
+          });
+          grid.appendChild(cell);
+          const dot = document.createElement('span');
+          const previewGlyph = document.createElement('span');
+          previewGlyph.className = 'keynope-font-cell-glyph';
+          previewGlyph.textContent = pixel === emptyCell ? '' : pixel;
+          dot.appendChild(previewGlyph);
+          dot.classList.toggle('on', pixel !== emptyCell);
+          preview.appendChild(dot);
+        }));
+      }
+      less.addEventListener('click', () => {
+        const rows = normalizeRows(font[face][character]);
+        if (rows[0].length <= 1) return;
+        checkpoint(); font[face][character] = rows.map(row => Array.from(row).slice(0,-1).join(''));
+        if (font.mode === 'figlet' && face === 'normal') font.bold = fontClone(font.normal);
+        render();
+      });
+      more.addEventListener('click', () => {
+        const maximum = font.mode === 'figlet' ? 128 : 32;
+        const emptyCell = font.mode === 'figlet' ? ' ' : '.';
+        if (normalizeRows(font[face][character])[0].length >= maximum) return;
+        checkpoint(); font[face][character] = normalizeRows(font[face][character]).map(row => row + emptyCell);
+        if (font.mode === 'figlet' && face === 'normal') font.bold = fontClone(font.normal);
+        render();
+      });
+      clear.addEventListener('click', () => {
+        const emptyCell = font.mode === 'figlet' ? ' ' : '.';
+        checkpoint(); font[face][character] = normalizeRows(font[face][character]).map(row => emptyCell.repeat(Array.from(row).length));
+        if (font.mode === 'figlet' && face === 'normal') font.bold = fontClone(font.normal);
+        render();
+      });
+      invert.addEventListener('click', () => {
+        const inverse = {'.':'█','█':'.','▀':'▄','▄':'▀','▁':'▔','▔':'▁','▂':'▆','▆':'▂','▃':'▅','▅':'▃','▇':'▔','▉':'▕','▕':'▉','▊':'▎','▎':'▊','▋':'▍','▍':'▋','▌':'▐','▐':'▌','░':'▓','▓':'░','▒':'▒','▖':'▝','▝':'▖','▗':'▘','▘':'▗','▙':'▝','▚':'▞','▛':'▗','▜':'▖','▞':'▚','▟':'▘'};
+        checkpoint(); font[face][character] = normalizeRows(font[face][character]).map(row => Array.from(row,pixel => inverse[pixel] || '.').join('')); render();
+      });
+      return {section,draw};
+    }
+    const normal = buildFace('normal','NORMAL');
+    const bold = buildFace('bold','BOLD');
+    faces.append(normal.section,bold.section);
+    function render() {
+      font.name = name.value || font.name || font.id;
+      title.textContent = font.mode === 'figlet' ? 'KEYNOPE FIGLET EDITOR' : 'KEYNOPE FONT EDITOR';
+      dialog.classList.toggle('figlet',font.mode === 'figlet');
+      glyphName.textContent = (aliases[character] || character) + ' · ASCII ' + character.charCodeAt(0);
+      undo.disabled = !history.length;
+      redo.disabled = !future.length;
+      const embeddedFont = !!(editorState && editorState.fonts && editorState.fonts[font.id]);
+      deleteFont.disabled = !embeddedFont && !fontLibrary()[font.id];
+      renderGlyphList();
+      normal.draw();
+      bold.section.hidden = font.mode === 'figlet';
+      if (font.mode !== 'figlet') bold.draw();
+      renderBrushes();
+      fillCollection();
+    }
+    function loadFont(value, renderNow = true) {
+      font = fontToCellMode(value);
+      loadedBaseline = fontClone(font);
+      name.value = font.name || font.id;
+      history = []; future = [];
+      if (renderNow) render();
+    }
+    async function persistCurrentFont(statusText) {
+      font.name = name.value.trim() || font.name || font.id;
+      font.id = fontSlug(font.id || font.name);
+      await editorAction({action:'upsert-font',fontData:font});
+      storeLibraryFont(font);
+      loadedBaseline = fontClone(font);
+      render();
+      if (editorStatus) editorStatus.textContent = statusText + font.name;
+    }
+    function currentFontSnapshot() {
+      const snapshot = fontClone(font);
+      snapshot.name = name.value.trim() || snapshot.name || snapshot.id;
+      return snapshot;
+    }
+    function currentFontIsDirty() {
+      return JSON.stringify(currentFontSnapshot()) !== JSON.stringify(loadedBaseline);
+    }
+    function requestImportPicker() {
+      painting = null;
+      importInput.value = '';
+      try {
+        if (typeof importInput.showPicker === 'function') {
+          importInput.showPicker();
+          return;
+        }
+      } catch (_err) {}
+      importInput.click();
+    }
+    function closeImportConfirmation() {
+      if (!importConfirmation) return;
+      importConfirmation.remove();
+      importConfirmation = null;
+    }
+    function confirmFontImport() {
+      painting = null;
+      if (!currentFontIsDirty()) {
+        requestImportPicker();
+        return;
+      }
+      closeImportConfirmation();
+      const blocker = document.createElement('div');
+      blocker.className = 'keynope-modal-blocker';
+      blocker.setAttribute('role','presentation');
+      const prompt = document.createElement('section');
+      prompt.className = 'keynope-link-dialog keynope-discard-dialog';
+      prompt.setAttribute('role','alertdialog');
+      prompt.setAttribute('aria-modal','true');
+      const heading = document.createElement('h3');
+      heading.textContent = 'Save font changes?';
+      const message = document.createElement('p');
+      message.textContent = 'This font has unsaved edits. Save them before importing another font?';
+      const actions = document.createElement('div');
+      actions.className = 'keynope-editor-actions';
+      const save = command('Save');
+      const discard = command("Don't Save");
+      const cancel = command('Cancel');
+      const proceed = saveFirst => {
+        closeImportConfirmation();
+        pendingImportSave = saveFirst
+          ? persistCurrentFont('Saved font ').then(() => null, error => error)
+          : null;
+        requestImportPicker();
+      };
+      save.addEventListener('click',() => proceed(true));
+      discard.addEventListener('click',() => proceed(false));
+      cancel.addEventListener('click',closeImportConfirmation);
+      actions.append(save,discard,cancel);
+      prompt.append(heading,message,actions);
+      blocker.appendChild(prompt);
+      blocker.addEventListener('pointerdown',event => event.stopPropagation());
+      blocker.addEventListener('keydown',event => {
+        event.stopPropagation();
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeImportConfirmation();
+        }
+      });
+      document.body.appendChild(blocker);
+      importConfirmation = blocker;
+      requestAnimationFrame(() => save.focus());
+    }
+    function move(delta) {
+      const index = chars.indexOf(character);
+      character = chars[(index + delta + chars.length) % chars.length];
+      render();
+    }
+    collection.addEventListener('change', () => {
+      const [group,id] = collection.value.split(':');
+      const selected = group === 'DEFAULT' ? keynopeDefaultFont()
+        : group === 'DECK' ? editorState.fonts?.[id] : fontLibrary()[id];
+      if (selected) loadFont(selected);
+    });
+    name.addEventListener('input', () => { font.name = name.value; });
+    filter.addEventListener('input', renderGlyphList);
+    previous.addEventListener('click', () => move(-1));
+    next.addEventListener('click', () => move(1));
+    function undoFontEdit() {
+      if (!history.length) return;
+      future.push(fontClone(font)); font = history.pop(); name.value = font.name; render();
+    }
+    function redoFontEdit() {
+      if (!future.length) return;
+      history.push(fontClone(font)); font = future.pop(); name.value = font.name; render();
+    }
+    undo.addEventListener('click', undoFontEdit);
+    redo.addEventListener('click', redoFontEdit);
+    reset.addEventListener('click', () => {
+      checkpoint();
+      font.normal[character] = fontClone(loadedBaseline.normal[character]);
+      font.bold[character] = fontClone(loadedBaseline.bold[character]);
+      render();
+    });
+    create.addEventListener('click', () => {
+      const fresh = fontClone(base);
+      fresh.id = 'my-font-' + Date.now().toString(36);
+      fresh.name = 'My Font';
+      loadFont(fresh);
+    });
+    duplicate.addEventListener('click', () => {
+      const copy = fontClone(font);
+      copy.id = fontSlug((font.name || font.id) + '-copy') + '-' + Date.now().toString(36);
+      copy.name = (font.name || font.id) + ' Copy';
+      loadFont(copy);
+    });
+    importFont.addEventListener('pointerdown', event => {
+      painting = null;
+      event.stopPropagation();
+    });
+    importFont.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      confirmFontImport();
+    });
+    importInput.addEventListener('change', async () => {
+      const file = importInput.files?.[0];
+      if (!file) {
+        pendingImportSave = null;
+        return;
+      }
+      try {
+        if (pendingImportSave) {
+          const saveError = await pendingImportSave;
+          if (saveError) throw saveError;
+        }
+        pendingImportSave = null;
+        const source = await file.text();
+        if (source.trimStart().startsWith('flf2a')) {
+          loadFont(parseFIGletFont(source,file.name),false);
+          await persistCurrentFont('Imported and saved FIGlet font ');
+        } else {
+          const value = JSON.parse(source);
+          if (!value.normal || !value.bold) throw new Error('Not a Keynope font');
+          value.id = fontSlug(value.id || value.name || file.name.replace(/\.[^.]+$/,''));
+          value.name = value.name || value.id;
+          loadFont(fontToCellMode(value),false);
+          await persistCurrentFont('Imported and saved Keynope font ');
+        }
+      } catch (error) {
+        pendingImportSave = null;
+        render();
+        if (editorStatus) editorStatus.textContent = 'Font import failed: ' + error.message;
+      }
+      importInput.value = '';
+    });
+    exportFont.addEventListener('click', () => {
+      font.name = name.value.trim() || font.name || font.id;
+      const blob = new Blob([JSON.stringify(font,null,2) + '\n'], {type:'application/json'});
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = fontSlug(font.name) + '.keynope-font.json';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href),1000);
+    });
+    saveFont.addEventListener('click', async () => {
+      try {
+        await persistCurrentFont('Saved font ');
+      } catch (_err) {}
+    });
+    deleteFont.addEventListener('click', async () => {
+      try {
+        if (editorState && editorState.fonts && editorState.fonts[font.id]) {
+          await editorAction({action:'delete-font',name:font.id});
+        } else {
+          await editorAction({action:'delete-library-font',name:font.id});
+        }
+        removeLibraryFont(font.id);
+        closeFontEditor();
+      } catch (_err) {}
+    });
+    close.addEventListener('click',closeFontEditor);
+    const fontHistoryShortcut = event => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+      const key = event.key.toLowerCase();
+      if (key !== 'z' && key !== 'y') return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (key === 'y' || (key === 'z' && event.shiftKey)) redoFontEdit();
+      else undoFontEdit();
+    };
+    dialog.addEventListener('keydown', fontHistoryShortcut, true);
+    dialog.addEventListener('keydown', event => {
+      event.stopPropagation();
+      if (event.key === 'Escape') closeFontEditor();
+      else if (event.key === 'ArrowLeft' && !event.target.matches('input')) {
+        event.preventDefault(); move(-1);
+      } else if (event.key === 'ArrowRight' && !event.target.matches('input')) {
+        event.preventDefault(); move(1);
+      }
+    });
+    const stopPainting = () => { painting = null; };
+    window.addEventListener('pointerup',stopPainting);
+    window.addEventListener('blur',stopPainting);
+    dialog._keynopeCleanup = () => {
+      closeImportConfirmation();
+      window.removeEventListener('pointerup',stopPainting);
+      window.removeEventListener('blur',stopPainting);
+      dialog.removeEventListener('keydown',fontHistoryShortcut,true);
+    };
+    render();
+    requestAnimationFrame(() => name.focus());
+  }
   const addShapeMenu = document.createElement('div');
   addShapeMenu.className = 'keynope-add-shape-menu';
   addShapeMenu.hidden = true;
@@ -6568,38 +7616,33 @@ if (keynopeAppSurface) {
     editor.dispatchEvent(new Event('input', {bubbles:true}));
   }
   function inlineSelectionColourTool() {
-    const label = document.createElement('label');
-    label.className = 'keynope-colour-tool';
-    label.textContent = 'A';
-    label.title = 'Colour selected text';
-    label.setAttribute('aria-label', label.title);
-    label.style.setProperty('--keynope-tool-colour', '#55aaff');
-    const input = document.createElement('input');
-    input.type = 'color';
-    input.value = '#55aaff';
-    input.setAttribute('aria-label', 'Choose selection colour');
-    input.addEventListener('pointerdown', event => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'keynope-colour-tool';
+    button.textContent = 'A';
+    button.title = 'Pick color';
+    button.setAttribute('aria-label', button.title);
+    button.style.setProperty('--keynope-tool-colour', '#55aaff');
+    button.addEventListener('pointerdown', event => {
       event.stopPropagation();
       if (!activeInlineEditor) return;
       activeInlineEditor.savedSelection = {start:activeInlineEditor.editor.selectionStart || 0, end:activeInlineEditor.editor.selectionEnd || 0};
       activeInlineEditor.suspendBlur = true;
     });
-    input.addEventListener('change', event => {
+    button.addEventListener('click', event => {
       event.stopPropagation();
       const active = activeInlineEditor;
       if (!active) return;
-      applyInlineSelectionColour(input.value, active.savedSelection);
-      active.suspendBlur = false;
-      active.editor.focus();
+      openKeynopeColourPicker(button,'#55aaff',colour => {
+        button.style.setProperty('--keynope-tool-colour',colour);
+        applyInlineSelectionColour(colour,active.savedSelection);
+      },() => {
+        if (!activeInlineEditor) return;
+        activeInlineEditor.suspendBlur = false;
+        activeInlineEditor.editor.focus();
+      });
     });
-    input.addEventListener('blur', () => {
-      const active = activeInlineEditor;
-      if (!active || !active.suspendBlur) return;
-      active.suspendBlur = false;
-      active.editor.focus();
-    });
-    label.appendChild(input);
-    return label;
+    return button;
   }
   async function beginInlineEdit(index, hit) {
     const transition = ++inlineEditTransitionSequence;
@@ -6656,6 +7699,7 @@ if (keynopeAppSurface) {
         discardDialog = null;
       }
       activeInlineEditor = null;
+      keynopeEditorTextEditActive = false;
       suppressSelectionTopbar = true;
       const text = save ? normalizedText(editor.value) : editor.value;
       editor.remove();
@@ -6763,6 +7807,7 @@ if (keynopeAppSurface) {
       previewEditorText(index, {...element, text:editor.value}, cursor, selectionStart, selectionEnd, sequence);
     };
     activeInlineEditor = {element: index, finish, editor};
+    keynopeEditorTextEditActive = true;
     renderEditorTopbar();
     editor.addEventListener('input', () => {
       cleanupInlineEditorEmptyColorTags(editor);
@@ -7099,6 +8144,7 @@ if (keynopeAppSurface) {
 	async function previewCanvasMutation(index, element, refreshOverlay = true, frozenImage = false) {
     const sequence = ++editorMutationPreviewSequence;
     const slide = editorState ? editorState.current : -1;
+    const stateVersion = editorState ? editorState.version : -1;
     try {
       const response = await fetch('/api/editor/preview', {
         method: 'POST',
@@ -7107,7 +8153,7 @@ if (keynopeAppSurface) {
       });
       if (!response.ok) return;
       const pages = await response.json();
-      if (sequence !== editorMutationPreviewSequence || !editorState || editorState.current !== slide) return;
+      if (sequence !== editorMutationPreviewSequence || !editorState || editorState.current !== slide || editorState.version !== stateVersion) return;
       replaceEditorPreviewPages(slide, pages);
       drawFrame();
       if (refreshOverlay) requestAnimationFrame(renderEditorCanvasOverlay);
@@ -7123,8 +8169,15 @@ if (keynopeAppSurface) {
     return response.json();
   }
   function canvasTextNativeSize(element) {
+    if (canvasElementUsesFIGletFont(element)) return 0;
     if (element.kind === 'heading') return Number(element.level || 1) === 1 ? 20 : 10;
     return 0;
+  }
+  function canvasElementUsesFIGletFont(element) {
+    const id = new URLSearchParams(element && element.query || '').get('font') || '';
+    if (!id) return false;
+    const font = editorState && editorState.fonts && editorState.fonts[id] || fontLibrary()[id];
+    return !!font && font.mode === 'figlet';
   }
   function canvasTextSize(element) {
     const query = new URLSearchParams(element.query || '');
@@ -7188,6 +8241,7 @@ if (keynopeAppSurface) {
     }
     const outline = query.get('outline') || '';
     const button = canvasTool(label, outline ? 'active' : '', () => cycleCanvasOutline(index));
+    button.classList.add('keynope-outline-button');
     if (element.kind === 'image') {
       button.innerHTML = '<svg viewBox="0 0 800 600" aria-hidden="true"><path d="M391 74 C468 70 499 124 550 151 C609 182 667 191 680 250 C694 314 646 348 614 393 C580 441 572 503 511 520 C451 537 414 493 360 484 C297 473 245 518 196 477 C145 434 174 376 143 327 C114 279 119 217 169 188 C220 158 270 181 312 130 C335 102 356 78 391 74Z" fill="#9b9b9b" stroke="#fff" stroke-width="32" stroke-linejoin="round"/></svg>';
       button.classList.add('keynope-image-outline-button');
@@ -7267,37 +8321,238 @@ if (keynopeAppSurface) {
     });
     return select;
   }
+  function canvasFontSelect(index, element) {
+    const query = new URLSearchParams(element.query || '');
+    const select = document.createElement('select');
+    select.className = 'keynope-font-select';
+    select.title = 'Text font';
+    select.setAttribute('aria-label', 'Text font');
+    const defaultOption = document.createElement('option');
+    defaultOption.value = '';
+    defaultOption.textContent = 'Font: Default';
+    defaultOption.selected = !query.get('font');
+    select.appendChild(defaultOption);
+    const fonts = Object.assign({},editorState && editorState.fonts || {});
+    for (const font of Object.values(fonts).sort((a,b) => String(a.name).localeCompare(String(b.name)))) {
+      const option = document.createElement('option');
+      option.value = font.id;
+      option.textContent = font.name || font.id;
+      option.selected = query.get('font') === font.id;
+      select.appendChild(option);
+    }
+    select.addEventListener('pointerdown', event => event.stopPropagation());
+    select.addEventListener('change', event => {
+      event.stopPropagation();
+      updateCanvasElements(index, updated => ['heading','text','text-image','bullet','code'].includes(updated.kind), updated => {
+        const values = new URLSearchParams(updated.query || '');
+        if (select.value) values.set('font',select.value); else values.delete('font');
+        updated.query = values.toString();
+      });
+    });
+    return select;
+  }
+  function canvasFontEditorTool(element) {
+    const query = new URLSearchParams(element.query || '');
+    const button = canvasTool('Aa','keynope-font-button',() => openFontEditor(query.get('font') || ''));
+    button.title = 'Edit fonts';
+    button.setAttribute('aria-label','Open font editor');
+    return button;
+  }
+  function canvasTextEffectCompatible(element) {
+    return ['heading','text','text-image','bullet','page-number','image'].includes(element.kind);
+  }
+  function canvasTextBaseColour(element) {
+    const query = new URLSearchParams(element.query || '');
+    const value = element.kind === 'heading'
+      ? query.get('header') || query.get('fg')
+      : query.get('fg');
+    return /^#[0-9a-f]{6}$/i.test(value || '') ? value : '#ffffff';
+  }
+  function canvasTextEffectColourTool(index, element, key, label, fallback) {
+    const query = new URLSearchParams(element.query || '');
+    const colour = /^#[0-9a-f]{6}$/i.test(query.get(key) || '') ? query.get(key) : fallback;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'keynope-colour-tool keynope-effect-colour-tool';
+    button.title = label;
+    button.setAttribute('aria-label',label);
+    button.textContent = key === 'gradient-start' ? '1' : key === 'gradient-end' ? '2' : 'S';
+    button.style.setProperty('--keynope-tool-colour',colour);
+    button.addEventListener('pointerdown',event => event.stopPropagation());
+    button.addEventListener('click',event => {
+      event.stopPropagation();
+      openKeynopeColourPicker(button,colour,next => {
+        button.style.setProperty('--keynope-tool-colour',next);
+        updateCanvasElements(index,canvasTextEffectCompatible,updated => {
+          const values = new URLSearchParams(updated.query || '');
+          values.set(key,next);
+          updated.query = values.toString();
+        });
+      });
+    });
+    return button;
+  }
+  const gradientIconSVG = '<svg viewBox="0 0 153.9087972215293 159.1406475216288" aria-hidden="true"><g stroke-linecap="round" transform="translate(10 10) rotate(0 66.95439861076466 69.5703237608144)"><path d="M32 0 C54.83 0, 77.65 0, 101.91 0 M32 0 C49.87 0, 67.74 0, 101.91 0 M101.91 0 C123.24 0, 133.91 10.67, 133.91 32 M101.91 0 C123.24 0, 133.91 10.67, 133.91 32 M133.91 32 C133.91 61.32, 133.91 90.63, 133.91 107.14 M133.91 32 C133.91 52.53, 133.91 73.06, 133.91 107.14 M133.91 107.14 C133.91 128.47, 123.24 139.14, 101.91 139.14 M133.91 107.14 C133.91 128.47, 123.24 139.14, 101.91 139.14 M101.91 139.14 C85.86 139.14, 69.81 139.14, 32 139.14 M101.91 139.14 C76.21 139.14, 50.5 139.14, 32 139.14 M32 139.14 C10.67 139.14, 0 128.47, 0 107.14 M32 139.14 C10.67 139.14, 0 128.47, 0 107.14 M0 107.14 C0 79.77, 0 52.4, 0 32 M0 107.14 C0 79.55, 0 51.95, 0 32 M0 32 C0 10.67, 10.67 0, 32 0 M0 32 C0 10.67, 10.67 0, 32 0" stroke="#d3d3d3" stroke-width="4" fill="none"/></g><g stroke-linecap="round"><g transform="translate(99.56732649987043 18.600751810497513) rotate(0 18.276489738915757 16.610009651855705)"><path d="M0 0 C6.09 5.54, 30.46 27.68, 36.55 33.22 M0 0 C6.09 5.54, 30.46 27.68, 36.55 33.22" stroke="#d3d3d3" stroke-width="4" fill="none"/></g></g><g stroke-linecap="round"><g transform="translate(57.02634018713866 17.352570961663673) rotate(0 39.78359379052495 36.81349621600677)"><path d="M0 0 C13.26 12.27, 66.31 61.36, 79.57 73.63 M0 0 C13.26 12.27, 66.31 61.36, 79.57 73.63" stroke="#aeb7c5" stroke-width="4" fill="none"/></g></g><g stroke-linecap="round"><g transform="translate(22.30262091719692 22.236777738976002) rotate(0 56.08036307862187 52.95416222051432)"><path d="M0 0 C18.69 17.65, 93.47 88.26, 112.16 105.91 M0 0 C18.69 17.65, 93.47 88.26, 112.16 105.91" stroke="#a9c1e1" stroke-width="4" fill="none"/></g></g><g stroke-linecap="round"><g transform="translate(18.62230509217602 58.98864254259888) rotate(0 40.796714438985646 39.685383115418915)"><path d="M0 0 C13.6 13.23, 67.99 66.14, 81.59 79.37 M0 0 C13.6 13.23, 67.99 66.14, 81.59 79.37" stroke="#98b5ff" stroke-width="4" fill="none"/></g></g><g stroke-linecap="round"><g transform="translate(19.840085440606344 105.6915625531426) rotate(0 18.276489738915757 16.610009651855705)"><path d="M0 0 C6.09 5.54, 30.46 27.68, 36.55 33.22 M0 0 C6.09 5.54, 30.46 27.68, 36.55 33.22" stroke="#7e8c9f" stroke-width="4" fill="none"/></g></g></svg>';
+  const gradientIconSVGUpdated = '<svg viewBox="0 0 153.9087972215293 159.1406475216288" aria-hidden="true"><g stroke-linecap="round" transform="translate(10 10) rotate(0 66.95439861076466 69.5703237608144)"><path d="M32 0 C54.83 0, 77.65 0, 101.91 0 M32 0 C49.87 0, 67.74 0, 101.91 0 M101.91 0 C123.24 0, 133.91 10.67, 133.91 32 M101.91 0 C123.24 0, 133.91 10.67, 133.91 32 M133.91 32 C133.91 61.32, 133.91 90.63, 133.91 107.14 M133.91 32 C133.91 52.53, 133.91 73.06, 133.91 107.14 M133.91 107.14 C133.91 128.47, 123.24 139.14, 101.91 139.14 M133.91 107.14 C133.91 128.47, 123.24 139.14, 101.91 139.14 M101.91 139.14 C85.86 139.14, 69.81 139.14, 32 139.14 M101.91 139.14 C76.21 139.14, 50.5 139.14, 32 139.14 M32 139.14 C10.67 139.14, 0 128.47, 0 107.14 M32 139.14 C10.67 139.14, 0 128.47, 0 107.14 M0 107.14 C0 79.77, 0 52.4, 0 32 M0 107.14 C0 79.55, 0 51.95, 0 32 M0 32 C0 10.67, 10.67 0, 32 0 M0 32 C0 10.67, 10.67 0, 32 0" stroke="#d3d3d3" stroke-width="4" fill="none"/></g><g stroke-linecap="round" transform="translate(17.62625447491814 110.17259558529452) rotate(43.08751673172199 27.011324539939437 5.338315233372214)"><path d="M0 0 L54.02 0 L54.02 10.68 L0 10.68" stroke="none" stroke-width="0" fill="#3a5392"/><path d="M0 0 C13.41 0, 26.81 0, 54.02 0 M0 0 C17.13 0, 34.26 0, 54.02 0 M54.02 0 C54.02 3.96, 54.02 7.93, 54.02 10.68 M54.02 0 C54.02 3.9, 54.02 7.79, 54.02 10.68 M54.02 10.68 C32.45 10.68, 10.88 10.68, 0 10.68 M54.02 10.68 C39.59 10.68, 25.15 10.68, 0 10.68 M0 10.68 C0 8.19, 0 5.7, 0 0 M0 10.68 C0 7.75, 0 4.83, 0 0" stroke="#ededed00" stroke-width="2" fill="none"/></g><g stroke-linecap="round" transform="translate(7.566397009479033 85.60613862164871) rotate(43.08751673172199 56.933438022769224 6.300258240863599)"><path d="M0 0 L113.87 0 L113.87 12.6 L0 12.6" stroke="none" stroke-width="0" fill="#326eb7"/><path d="M0 0 C23.08 0, 46.16 0, 113.87 0 M0 0 C35.05 0, 70.1 0, 113.87 0 M113.87 0 C113.87 4.64, 113.87 9.29, 113.87 12.6 M113.87 0 C113.87 2.66, 113.87 5.33, 113.87 12.6 M113.87 12.6 C69.55 12.6, 25.24 12.6, 0 12.6 M113.87 12.6 C80.36 12.6, 46.86 12.6, 0 12.6 M0 12.6 C0 9, 0 5.41, 0 0 M0 12.6 C0 9.65, 0 6.7, 0 0" stroke="#ededed00" stroke-width="2" fill="none"/></g><g stroke-linecap="round" transform="translate(20.420155546049273 62.732283887705194) rotate(43.08751673172199 63.270123077228845 6.162671542806919)"><path d="M0 0 L126.54 0 L126.54 12.33 L0 12.33" stroke="none" stroke-width="0" fill="#a797ff"/><path d="M0 0 C31.91 0, 63.82 0, 126.54 0 M0 0 C42.53 0, 85.06 0, 126.54 0 M126.54 0 C126.54 4.62, 126.54 9.23, 126.54 12.33 M126.54 0 C126.54 4.65, 126.54 9.3, 126.54 12.33 M126.54 12.33 C101.05 12.33, 75.56 12.33, 0 12.33 M126.54 12.33 C100.55 12.33, 74.55 12.33, 0 12.33 M0 12.33 C0 8.02, 0 3.71, 0 0 M0 12.33 C0 7.44, 0 2.56, 0 0" stroke="#ededed00" stroke-width="2" fill="none"/></g><g stroke-linecap="round" transform="translate(63.73648998932754 43.32131056054317) rotate(43.08751673172199 40.70384275507729 6.366686316751725)"><path d="M0 0 L81.41 0 L81.41 12.73 L0 12.73" stroke="none" stroke-width="0" fill="#a954be"/><path d="M0 0 C20.96 0, 41.92 0, 81.41 0 M0 0 C17.3 0, 34.6 0, 81.41 0 M81.41 0 C81.41 2.87, 81.41 5.74, 81.41 12.73 M81.41 0 C81.41 3.77, 81.41 7.54, 81.41 12.73 M81.41 12.73 C53.53 12.73, 25.65 12.73, 0 12.73 M81.41 12.73 C50.34 12.73, 19.27 12.73, 0 12.73 M0 12.73 C0 9.12, 0 5.51, 0 0 M0 12.73 C0 8.87, 0 5, 0 0" stroke="#ededed00" stroke-width="2" fill="none"/></g><g stroke-linecap="round" transform="translate(107.92600432535778 24.785304486144582) rotate(43.08751673172199 14.449976120419933 5.419813935548689)"><path d="M0 0 L28.9 0 L28.9 10.84 L0 10.84" stroke="none" stroke-width="0" fill="#e28af8"/><path d="M0 0 C8.29 0, 16.57 0, 28.9 0 M0 0 C10.01 0, 20.02 0, 28.9 0 M28.9 0 C28.9 3.78, 28.9 7.55, 28.9 10.84 M28.9 0 C28.9 2.81, 28.9 5.62, 28.9 10.84 M28.9 10.84 C19.41 10.84, 9.91 10.84, 0 10.84 M28.9 10.84 C20.02 10.84, 11.15 10.84, 0 10.84 M0 10.84 C0 7.66, 0 4.47, 0 0 M0 10.84 C0 8.49, 0 6.14, 0 0" stroke="#ededed00" stroke-width="2" fill="none"/></g><g stroke-linecap="round" transform="translate(19.585928800421016 128.97159008246564) rotate(43.08751673172199 7.255875885249793 3.3891711946313023)"><path d="M0 0 L14.51 0 L14.51 6.78 L0 6.78" stroke="none" stroke-width="0" fill="#342e50"/><path d="M0 0 C3.13 0, 6.26 0, 14.51 0 M0 0 C4.85 0, 9.7 0, 14.51 0 M14.51 0 C14.51 1.74, 14.51 3.48, 14.51 6.78 M14.51 0 C14.51 2.14, 14.51 4.28, 14.51 6.78 M14.51 6.78 C9.61 6.78, 4.71 6.78, 0 6.78 M14.51 6.78 C9.06 6.78, 3.62 6.78, 0 6.78 M0 6.78 C0 4.82, 0 2.87, 0 0 M0 6.78 C0 5.39, 0 4.01, 0 0" stroke="#ededed00" stroke-width="2" fill="none"/></g></svg>';
+  const shadowIconSVG = '<svg viewBox="0 0 163.13853308832267 159.1406475216288" aria-hidden="true"><g stroke-linecap="round" transform="translate(10 10) rotate(0 71.56926654416134 69.5703237608144)"><path d="M32 0 C57.84 0, 83.68 0, 111.14 0 M32 0 C52.23 0, 72.46 0, 111.14 0 M111.14 0 C132.47 0, 143.14 10.67, 143.14 32 M111.14 0 C132.47 0, 143.14 10.67, 143.14 32 M143.14 32 C143.14 61.32, 143.14 90.63, 143.14 107.14 M143.14 32 C143.14 52.53, 143.14 73.06, 143.14 107.14 M143.14 107.14 C143.14 128.47, 132.47 139.14, 111.14 139.14 M143.14 107.14 C143.14 128.47, 132.47 139.14, 111.14 139.14 M111.14 139.14 C92.97 139.14, 74.81 139.14, 32 139.14 M111.14 139.14 C82.04 139.14, 52.94 139.14, 32 139.14 M32 139.14 C10.67 139.14, 0 128.47, 0 107.14 M32 139.14 C10.67 139.14, 0 128.47, 0 107.14 M0 107.14 C0 79.77, 0 52.4, 0 32 M0 107.14 C0 79.55, 0 51.95, 0 32 M0 32 C0 10.67, 10.67 0, 32 0 M0 32 C0 10.67, 10.67 0, 32 0" stroke="#d3d3d3" stroke-width="4" fill="none"/></g><g stroke-linecap="round" transform="translate(82.0625244307123 71.18881275449843) rotate(279.66502197747724 20.237998533453037 37.87154105411523)"><path d="M21 0 L40.48 38 L21 75.74 L0 38" stroke="none" stroke-width="0" fill="#b3b3b3" fill-rule="evenodd"/><path d="M21 0 C25.75 9.27, 30.5 18.53, 40.48 38 M21 0 C25.91 9.59, 30.83 19.17, 40.48 38 M40.48 38 C35.26 48.1, 30.05 58.2, 21 75.74 M40.48 38 C32.93 52.61, 25.39 67.23, 21 75.74 M21 75.74 C14.76 64.53, 8.52 53.32, 0 38 M21 75.74 C12.85 61.1, 4.7 46.45, 0 38 M0 38 C5.07 28.82, 10.15 19.64, 21 0 M0 38 C6.4 26.42, 12.8 14.83, 21 0" stroke="#b7bcc1" stroke-width="2" fill="none"/></g><g stroke-linecap="round" transform="translate(25.19226172631261 25.187629560892788) rotate(0 38.29781640926376 37.87154105411523)"><path d="M39 0 C53.12 14.27, 67.24 28.54, 76.6 38 M39 0 C47.31 8.4, 55.61 16.79, 76.6 38 M76.6 38 C67 47.64, 57.4 57.27, 39 75.74 M76.6 38 C68.5 46.12, 60.41 54.25, 39 75.74 M39 75.74 C27.92 65.02, 16.85 54.3, 0 38 M39 75.74 C24.64 61.85, 10.28 47.95, 0 38 M0 38 C11.21 27.08, 22.42 16.16, 39 0 M0 38 C8.74 29.48, 17.48 20.97, 39 0" stroke="#d3d3d3" stroke-width="4" fill="none"/></g></svg>';
+  function closeCanvasTextEffectDropdown() {
+    if (!activeCanvasTextEffectDropdown) return;
+    document.removeEventListener('pointerdown',activeCanvasTextEffectDropdown.dismiss,true);
+    activeCanvasTextEffectDropdown.menu.remove();
+    activeCanvasTextEffectDropdown = null;
+  }
+  function openCanvasTextEffectDropdown(anchor, options, current, onSelect) {
+    closeCanvasTextEffectDropdown();
+    const menu = document.createElement('div');
+    menu.className = 'keynope-text-effect-dropdown';
+    menu.setAttribute('role','menu');
+    for (const [value,label] of options) {
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.textContent = label;
+      option.classList.toggle('active',value === current);
+      option.setAttribute('role','menuitemradio');
+      option.setAttribute('aria-checked',value === current ? 'true' : 'false');
+      option.addEventListener('click',event => {
+        event.stopPropagation();
+        closeCanvasTextEffectDropdown();
+        onSelect(value);
+      });
+      menu.appendChild(option);
+    }
+    document.body.appendChild(menu);
+    menu.addEventListener('keydown',event => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeCanvasTextEffectDropdown();
+      anchor.focus();
+    });
+    const anchorRect = anchor.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    menu.style.left = Math.max(8,Math.min(innerWidth-menuRect.width-8,anchorRect.left)) + 'px';
+    menu.style.top = Math.max(8,Math.min(innerHeight-menuRect.height-8,anchorRect.bottom+6)) + 'px';
+    const dismiss = event => {
+      if (!menu.contains(event.target) && event.target !== anchor) closeCanvasTextEffectDropdown();
+    };
+    activeCanvasTextEffectDropdown = {anchor,menu,dismiss};
+    document.addEventListener('pointerdown',dismiss,true);
+    menu.firstElementChild?.focus();
+  }
+  function squareCanvasEffectIcon(button,whiteAllStrokes) {
+    const svg = button.querySelector('svg');
+    if (!svg) return;
+    const viewBox = (svg.getAttribute('viewBox') || '').trim().split(/\s+/).map(Number);
+    if (viewBox.length !== 4 || viewBox.some(value => !Number.isFinite(value))) return;
+    svg.firstElementChild?.remove();
+    const frame = document.createElementNS('http://www.w3.org/2000/svg','rect');
+    frame.setAttribute('x',String(viewBox[0]+10));
+    frame.setAttribute('y',String(viewBox[1]+10));
+    frame.setAttribute('width',String(viewBox[2]-20));
+    frame.setAttribute('height',String(viewBox[3]-20));
+    frame.setAttribute('fill','none');
+    frame.setAttribute('stroke','#ffffff');
+    frame.setAttribute('stroke-width','4');
+    svg.insertBefore(frame,svg.firstChild);
+    if (!whiteAllStrokes) return;
+    svg.querySelectorAll('[stroke]').forEach(part => {
+      if (part.getAttribute('stroke') !== 'none') part.setAttribute('stroke','#ffffff');
+    });
+  }
+  function canvasTextGradientTools(container,index,element) {
+    const query = new URLSearchParams(element.query || '');
+    const active = !!query.get('gradient-start') && !!query.get('gradient-end');
+    const direction = query.get('gradient-dir') || 'horizontal';
+    let toggle;
+    toggle = canvasTool('', (active ? 'active ' : '') + 'keynope-icon-button keynope-text-effect-button', () => {
+      const baseColour = canvasTextBaseColour(element);
+      openCanvasTextEffectDropdown(toggle,[['','Off'],['horizontal','Horizontal'],['vertical','Vertical'],['diagonal','Diagonal']],active ? direction : '',value => {
+        updateCanvasElements(index,canvasTextEffectCompatible,updated => {
+          const values = new URLSearchParams(updated.query || '');
+          if (!value) {
+            values.delete('gradient-start');
+            values.delete('gradient-end');
+          } else {
+            if (!values.get('gradient-start')) values.set('gradient-start',baseColour);
+            if (!values.get('gradient-end')) values.set('gradient-end','#55ffff');
+            values.set('gradient-dir',value);
+          }
+          updated.query = values.toString();
+        });
+      });
+    });
+    toggle.innerHTML = gradientIconSVGUpdated;
+    squareCanvasEffectIcon(toggle,false);
+    toggle.title = active ? 'Change gradient' : 'Add gradient';
+    toggle.setAttribute('aria-label',toggle.title);
+    toggle.setAttribute('aria-pressed',active ? 'true' : 'false');
+    container.appendChild(toggle);
+    if (active) {
+      container.appendChild(canvasTextEffectColourTool(index,element,'gradient-start','Pick gradient start colour',canvasTextBaseColour(element)));
+      container.appendChild(canvasTextEffectColourTool(index,element,'gradient-end','Pick gradient end colour','#55ffff'));
+    }
+  }
+  function canvasTextShadowTools(container,index,element) {
+    const query = new URLSearchParams(element.query || '');
+    const shadow = query.get('shadow') || '';
+    let button;
+    button = canvasTool('', (shadow ? 'active ' : '') + 'keynope-icon-button keynope-text-effect-button', () => {
+      openCanvasTextEffectDropdown(button,[['','Off'],['soft','Soft'],['solid','Hard']],shadow,value => {
+        updateCanvasElements(index,canvasTextEffectCompatible,updated => {
+          const values = new URLSearchParams(updated.query || '');
+          if (!value) {
+            values.delete('shadow');
+            values.delete('shadow-color');
+            values.delete('shadow-x');
+            values.delete('shadow-y');
+          } else {
+            values.set('shadow',value);
+            if (!values.get('shadow-color')) values.set('shadow-color','#ffffff');
+            if (!values.get('shadow-x')) values.set('shadow-x','1');
+            if (!values.get('shadow-y')) values.set('shadow-y','1');
+          }
+          updated.query = values.toString();
+        });
+      });
+    });
+    button.innerHTML = shadowIconSVG;
+    squareCanvasEffectIcon(button,true);
+    button.title = shadow ? 'Change shadow' : 'Add shadow';
+    button.setAttribute('aria-label',button.title);
+    button.setAttribute('aria-pressed',shadow ? 'true' : 'false');
+    container.appendChild(button);
+    if (shadow) container.appendChild(canvasTextEffectColourTool(index,element,'shadow-color','Pick shadow colour','#ffffff'));
+  }
+  function appendCanvasTypographyEffectTools(container,index,element) {
+    canvasTextGradientTools(container,index,element);
+    canvasTextShadowTools(container,index,element);
+  }
   function canvasColourTool(index, element, renderedColour) {
     const query = new URLSearchParams(element.query || '');
     const colourKey = element.kind === 'heading' ? 'header' : 'fg';
     const colour = /^#[0-9a-f]{6}$/i.test(query.get(colourKey) || '') ? query.get(colourKey) : (/^#[0-9a-f]{6}$/i.test(renderedColour || '') ? renderedColour : '#ffffff');
-    const label = document.createElement('span');
-    label.className = 'keynope-colour-tool';
-    label.title = 'Text colour';
-    label.setAttribute('aria-label', 'Text colour');
-    label.textContent = 'A';
-    label.style.setProperty('--keynope-tool-colour', colour);
-    const input = document.createElement('input');
-    input.type = 'color';
-    input.value = colour;
-    input.setAttribute('aria-label', 'Choose text colour');
-    input.addEventListener('pointerdown', event => event.stopPropagation());
-    input.addEventListener('input', event => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'keynope-colour-tool';
+    button.title = 'Pick color';
+    button.setAttribute('aria-label', button.title);
+    button.textContent = 'A';
+    button.style.setProperty('--keynope-tool-colour', colour);
+    button.addEventListener('pointerdown', event => event.stopPropagation());
+    button.addEventListener('click', event => {
       event.stopPropagation();
-      label.style.setProperty('--keynope-tool-colour', input.value);
-    });
-    input.addEventListener('change', event => {
-      event.stopPropagation();
-      updateCanvasElements(index, updated => ['heading','text','text-image','bullet','code','shape','page-number'].includes(updated.kind), updated => {
-        const values = new URLSearchParams(updated.query || '');
-        const key = updated.kind === 'heading' ? 'header' : 'fg';
-        values.set(key, input.value);
-        if (key === 'header') values.delete('fg');
-        updated.query = values.toString();
+      openKeynopeColourPicker(button,colour,next => {
+        button.style.setProperty('--keynope-tool-colour',next);
+        updateCanvasElements(index, updated => ['heading','text','text-image','bullet','code','shape','page-number'].includes(updated.kind), updated => {
+          const values = new URLSearchParams(updated.query || '');
+          const key = updated.kind === 'heading' ? 'header' : 'fg';
+          values.set(key,next);
+          if (key === 'header') values.delete('fg');
+          updated.query = values.toString();
+        });
       });
     });
-    label.appendChild(input);
-    return label;
+    return button;
   }
   function setCanvasAlignment(index, alignment) {
     updateCanvasElements(index, element => ['heading','text','text-image','bullet','code','shape','image','page-number'].includes(element.kind), element => {
@@ -7602,6 +8857,7 @@ if (keynopeAppSurface) {
     return button;
   }
   function renderEditorTopbar() {
+    closeCanvasTextEffectDropdown();
     publishEditorDirtyState();
     const slide = editorState && editorState.slides && editorState.slides[editorState.current];
     const masterPageNumberMode = slide ? (slide.pageNumber || '') : '';
@@ -7629,6 +8885,9 @@ if (keynopeAppSurface) {
     const shapeElement = shapeIndex == null ? null : slide.elements[shapeIndex];
     if (activeCanvasVisualMenu && (!element || activeCanvasVisualMenu.index !== index)) closeCanvasVisualMenu();
     const contextual = !suppressSelectionTopbar && (!!activeInlineEditor || !!element);
+    saveButton.hidden = contextual;
+    const webDocumentControls = topbar.querySelector('.keynope-web-controls');
+    if (webDocumentControls) webDocumentControls.hidden = contextual;
     mainTopbar.hidden = contextual;
     selectionTopbar.hidden = !contextual;
     selectionTopbar.replaceChildren();
@@ -7693,7 +8952,10 @@ if (keynopeAppSurface) {
         selectionTopbar.appendChild(rotate);
       }
       if (selectedElements.some(candidate => ['heading','text','text-image','bullet'].includes(candidate.kind))) selectionTopbar.appendChild(canvasStyleSelect(textIndex, textElement));
+      selectionTopbar.appendChild(canvasFontSelect(textIndex, textElement));
+      selectionTopbar.appendChild(canvasFontEditorTool(textElement));
       selectionTopbar.appendChild(canvasColourTool(textIndex, textElement, ''));
+      if (selectedElements.some(canvasTextEffectCompatible)) appendCanvasTypographyEffectTools(selectionTopbar,textIndex,textElement);
       if (selectedElements.length === 1) selectionTopbar.appendChild(canvasLinkTool(textIndex, query));
     }
     if (!selectedText && shapeElement) selectionTopbar.appendChild(canvasColourTool(shapeIndex, shapeElement, ''));
@@ -7707,8 +8969,37 @@ if (keynopeAppSurface) {
     selectionTopbar.appendChild(canvasDeleteTool(index));
   }
 
+  function appendCanvasResizeHandles(hit) {
+    for (const corner of ['nw','ne','sw','se']) {
+      const handle = document.createElement('span');
+      handle.className = 'keynope-resize-handle ' + corner;
+      handle.dataset.corner = corner;
+      handle.setAttribute('aria-label', 'Resize from ' + corner);
+      hit.appendChild(handle);
+    }
+  }
+
+  function refreshCanvasSelectionInPlace() {
+    if (!editorState) return;
+    if (activeCanvasDrag) {
+      for (const hit of canvasOverlay.querySelectorAll('.keynope-canvas-element')) {
+        hit.classList.toggle('active', hit === activeCanvasDrag.hit);
+      }
+      return;
+    }
+    const selected = new Set(editorState.selection || []);
+    if (editorState.selected >= 0) selected.add(editorState.selected);
+    for (const hit of canvasOverlay.querySelectorAll('.keynope-canvas-element')) {
+      const index = Number(hit.dataset.element);
+      hit.classList.toggle('active', selected.has(index));
+      for (const handle of hit.querySelectorAll('.keynope-resize-handle')) handle.remove();
+      if (index === editorState.selected) appendCanvasResizeHandles(hit);
+    }
+  }
+
   renderEditorCanvasOverlay = () => {
     if (!editorState || !deck.pages || !deck.pages.length) return;
+    if (activeCanvasDrag) return;
     const page = deck.pages[pageIndex];
     if (!page || page.slide !== editorState.current) return;
     canvasOverlay.style.width = presenterCanvas.style.width;
@@ -7777,6 +9068,7 @@ if (keynopeAppSurface) {
         const resizeCorner = resizeHandle ? resizeHandle.dataset.corner : '';
         const resizing = resizeCorner !== '';
         const sourceElement = {...editorState.slides[editorState.current].elements[index]};
+        const sourceElementID = sourceElement.id || '';
         const fittingText = resizing && ['heading','text','text-image','bullet','code'].includes(sourceElement.kind);
 		const resizingVisual = resizing && (sourceElement.kind === 'shape' || sourceElement.kind === 'image');
 		if (resizingVisual) keynopeEditorVisualResizeActive = true;
@@ -7787,7 +9079,22 @@ if (keynopeAppSurface) {
 		let pendingVisualPreview = null;
 		let visualPreviewFrame = 0;
 		let visualPreviewing = false;
+        const dragToken = {hit, pointerId:event.pointerId, elementID:sourceElementID};
+        activeCanvasDrag = dragToken;
+        hit.classList.add('active');
+        if (!event.shiftKey && editorState.selected !== index) {
+          editorState.selected = index;
+          editorState.selection = [index];
+          renderEditorTopbar();
+          refreshCanvasSelectionInPlace();
+          editorAction({action:'select-element', element:index, elementData:{id:sourceElementID}}).catch(() => {});
+        } else {
+          refreshCanvasSelectionInPlace();
+        }
         hit.setPointerCapture(event.pointerId);
+        const releaseDrag = () => {
+          if (activeCanvasDrag === dragToken) activeCanvasDrag = null;
+        };
         const resizedBounds = (dx, dy) => {
           let minX = start.minX, minY = start.minY, maxX = start.maxX, maxY = start.maxY;
           if (resizeCorner.includes('w')) minX = Math.min(maxX - 1, minX + dx);
@@ -7888,6 +9195,7 @@ if (keynopeAppSurface) {
 			if (resizingVisual) keynopeEditorVisualResizeActive = false;
           hit.removeEventListener('pointermove', move);
           hit.removeEventListener('pointerup', up);
+          releaseDrag();
           if (visualPreviewFrame) cancelAnimationFrame(visualPreviewFrame);
           visualPreviewFrame = 0;
           pendingVisualPreview = null;
@@ -7897,18 +9205,20 @@ if (keynopeAppSurface) {
           if (!dx && !dy) {
             if (resizing) return;
             if (pendingCanvasSelection) clearTimeout(pendingCanvasSelection);
-            pendingCanvasSelection = setTimeout(() => {
-              pendingCanvasSelection = null;
-              editorAction({action: 'select-element', element: index, name: event.shiftKey ? 'toggle' : ''}).catch(() => {});
-            }, 240);
+            pendingCanvasSelection = null;
+            if (event.shiftKey) {
+              editorAction({action: 'select-element', element: editorElementIndexByID(sourceElementID, index), name:'toggle', elementData:{id:sourceElementID}}).catch(() => {});
+            } else {
+              refreshCanvasSelectionInPlace();
+            }
             return;
           }
           if (fittingText) {
             const fitted = await finishTextFit(resizedBounds(dx, dy));
-            if (fitted) editorAction({action: 'update-element', element: index, elementData: fitted}).catch(() => {});
+            if (fitted) updateEditorElementByID(sourceElementID, index, fitted).catch(() => {});
             return;
           }
-          const element = {...editorState.slides[editorState.current].elements[index]};
+          const element = {...sourceElement};
           const query = new URLSearchParams(element.query || '');
 		if (resizing) {
 			const next = resizedBounds(dx, dy);
@@ -7924,21 +9234,20 @@ if (keynopeAppSurface) {
             query.set('top', String(Math.max(0, start.minY + dy)));
           }
           element.query = query.toString();
-		  previewCanvasMutation(index, element, true, canvasElementIsGIF(element));
-          editorAction({action: 'update-element', element: index, elementData: element}).catch(() => {});
+          const currentIndex = editorElementIndexByID(sourceElementID, index);
+		  previewCanvasMutation(currentIndex, element, false, canvasElementIsGIF(element));
+          updateEditorElementByID(sourceElementID, currentIndex, element).catch(() => {});
         };
 		hit.addEventListener('pointermove', move);
 		hit.addEventListener('pointerup', up);
-		hit.addEventListener('pointercancel', () => { if (resizingVisual) keynopeEditorVisualResizeActive = false; }, {once:true});
+		hit.addEventListener('pointercancel', () => {
+          if (resizingVisual) keynopeEditorVisualResizeActive = false;
+          releaseDrag();
+          requestAnimationFrame(renderEditorCanvasOverlay);
+        }, {once:true});
       });
       if (index === editorState.selected) {
-        for (const corner of ['nw','ne','sw','se']) {
-          const handle = document.createElement('span');
-          handle.className = 'keynope-resize-handle ' + corner;
-          handle.dataset.corner = corner;
-          handle.setAttribute('aria-label', 'Resize from ' + corner);
-          hit.appendChild(handle);
-        }
+        appendCanvasResizeHandles(hit);
       }
       canvasOverlay.appendChild(hit);
     }
@@ -8054,6 +9363,7 @@ if (keynopeAppSurface) {
     if (rotatableText) actions.appendChild(canvasTool('⟳', '', () => rotateCanvasText(index)));
     if (selectedText && element.kind !== 'code') actions.appendChild(canvasStyleSelect(index, element));
     if (selectedText || element.kind === 'shape') actions.appendChild(canvasColourTool(index, element, ''));
+    if (canvasTextEffectCompatible(element)) appendCanvasTypographyEffectTools(actions,index,element);
     if (selectedText) actions.appendChild(canvasLinkTool(index, query));
     if (element.kind === 'shape') appendCanvasShapeKindTools(actions, index, query);
     actions.appendChild(canvasOutlineTool(index, element, query));
@@ -8398,10 +9708,35 @@ if (keynopeAppSurface) {
       requestAnimationFrame(renderEditorCanvasOverlay);
     } catch (_err) {}
   }
-  window.keynopeDidSave = () => {
+  window.keynopeLoadWebWorkspace = async workspace => {
+    if (!workspace || !Array.isArray(workspace.pages)) return;
+    editorNormalPages = null;
+    deck.cols = Number(workspace.cols) || deck.cols;
+    deck.rows = Number(workspace.rows) || deck.rows;
+    deck.pages = workspace.pages;
+    contentAnimationCache.clear();
+    const current = Number.isInteger(workspace.current) ? workspace.current : (editorState ? editorState.current : 0);
+    const next = deck.pages.findIndex(page => page.slide === current && page.page === 0);
+    pageIndex = next >= 0 ? next : 0;
+    render();
+    requestAnimationFrame(renderEditorCanvasOverlay);
+  };
+  window.keynopeReloadWebDocument = async workspace => {
+    editorStateVersion = -1;
+    editorState = null;
+    await window.keynopeLoadWebWorkspace(workspace);
+    await syncEditorState();
+  };
+  window.keynopeDidSave = savedState => {
     lastPublishedEditorDirty = null;
     showEditorSavedConfirmation();
-    syncEditorState();
+    if (savedState && Number.isInteger(savedState.version) && savedState.version >= editorStateVersion) {
+      editorState = savedState;
+      editorStateVersion = savedState.version;
+      renderEditorPanels();
+    } else {
+      syncEditorState();
+    }
   };
   window.keynopeDidExport = showEditorExportConfirmation;
   const toolbar = document.createElement('div');
@@ -8441,7 +9776,12 @@ if (keynopeAppSurface) {
     const digits = String(presenterTimerInput || '').replace(/\D/g, '').slice(-4).padStart(4, '0');
     const seconds = Number(digits.slice(0, 2)) * 60 + Number(digits.slice(2));
     if (seconds <= 0) return;
-    editorAction({action: 'start-timer', value: seconds}).catch(() => {});
+    presenterTimerMode = 'running';
+    presenterTimerInput = '';
+    presenterTimerEndMS = Date.now() + seconds * 1000;
+    refreshEditorPresenterControls();
+    drawFrame();
+    editorAction({action: 'start-timer', value: seconds}).catch(() => cancelEditorTimerInput());
   }
   function cancelEditorTimerInput() {
     presenterTimerMode = '';
@@ -8450,8 +9790,13 @@ if (keynopeAppSurface) {
     refreshEditorPresenterControls();
     drawFrame();
   }
+  function stopEditorTimer() {
+    const running = presenterTimerMode === 'running';
+    cancelEditorTimerInput();
+    if (running) editorAction({action: 'stop-timer'}).catch(() => syncEditorState());
+  }
   timerButton.addEventListener('click', () => {
-    if (presenterTimerMode === 'running') editorAction({action: 'stop-timer'}).catch(() => {});
+    if (presenterTimerMode === 'running') stopEditorTimer();
     else if (presenterTimerMode === 'config') cancelEditorTimerInput();
     else openEditorTimer();
   });
@@ -8544,7 +9889,7 @@ if (keynopeAppSurface) {
     previousButton.hidden = masterMode;
     nextButton.hidden = masterMode;
     presentButton.hidden = masterMode || presenting;
-    externalButton.hidden = masterMode || presenting;
+    externalButton.hidden = !!window.KEYNOPE_WEB_EDITOR || masterMode || presenting;
     pauseButton.hidden = masterMode || !presenting;
     stopPresentationButton.hidden = masterMode || !presenting;
     aboutButton.hidden = false;
@@ -8579,6 +9924,7 @@ if (keynopeAppSurface) {
     const index = editorState.selected;
     const slide = editorState.slides[editorState.current];
     const element = slide && slide.elements[index];
+    const elementID = element && element.id || '';
     const hit = canvasOverlay.querySelector('[data-element="' + index + '"]');
     if (!element || !hit) return false;
     const updated = {...element};
@@ -8589,22 +9935,25 @@ if (keynopeAppSurface) {
     query.set('left_pct', Math.max(0, Math.min(1, Number(query.get('left_pct') || renderedLeft) + dx / deck.cols)).toFixed(6));
     query.set('top', String(Math.max(0, Number(query.get('top') || renderedTop) + dy)));
     updated.query = query.toString();
-    previewCanvasMutation(index, updated);
-    editorAction({action: 'update-element', element: index, elementData: updated}).catch(() => {});
+    previewCanvasMutation(index, updated, false);
+    updateEditorElementByID(elementID, index, updated).catch(() => {});
     return true;
   }
   function cycleCanvasSelection(reverse) {
     if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return false;
-    const selectableKinds = new Set(['heading','text','text-image','bullet','code','shape','image','page-number']);
-    const indices = (editorState.slides[editorState.current].elements || [])
-      .map((element, index) => selectableKinds.has(element.kind) ? index : -1)
-      .filter(index => index >= 0);
-    if (!indices.length) return false;
-    const position = indices.indexOf(editorState.selected);
-    const next = position < 0
-      ? (reverse ? indices[indices.length - 1] : indices[0])
-      : indices[(position + (reverse ? -1 : 1) + indices.length) % indices.length];
-    editorAction({action: 'select-element', element: next}).catch(() => {});
+    queueEditorOperation(async () => {
+      if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return;
+      const selectableKinds = new Set(['heading','text','text-image','bullet','code','shape','image','page-number']);
+      const indices = (editorState.slides[editorState.current].elements || [])
+        .map((element, index) => selectableKinds.has(element.kind) ? index : -1)
+        .filter(index => index >= 0);
+      if (!indices.length) return;
+      const position = indices.indexOf(editorState.selected);
+      const next = position < 0
+        ? (reverse ? indices[indices.length - 1] : indices[0])
+        : indices[(position + (reverse ? -1 : 1) + indices.length) % indices.length];
+      await performEditorAction({action: 'select-element', element: next});
+    }).catch(() => {});
     return true;
   }
   addEventListener('keydown', e => {
@@ -8627,7 +9976,7 @@ if (keynopeAppSurface) {
     if (presenterTimerMode === 'running' && !e.metaKey && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
       e.stopImmediatePropagation();
-      if (e.key === 'Escape' || e.key.toLowerCase() === 'q') editorAction({action: 'stop-timer'}).catch(() => {});
+      if (e.key === 'Escape' || e.key.toLowerCase() === 'q') stopEditorTimer();
       return;
     }
     if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 's') {
@@ -8694,7 +10043,7 @@ if (keynopeAppSurface) {
     if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === '0') {
       e.preventDefault();
       e.stopImmediatePropagation();
-      if (presenterTimerMode === 'running') editorAction({action: 'stop-timer'}).catch(() => {});
+      if (presenterTimerMode === 'running') stopEditorTimer();
       else openEditorTimer();
       return;
     }
@@ -9109,7 +10458,7 @@ func textPlacementComment(line string) (string, bool) {
 	}
 	values := url.Values{}
 	if parsed, err := url.ParseQuery(match[1]); err == nil {
-		for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "link", "slide", "master-clear"} {
+		for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "font", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "link", "slide", "master-clear"} {
 			for _, value := range parsed[key] {
 				addPlacementValue(values, key, value)
 			}
@@ -9196,6 +10545,10 @@ func addPlacementValue(values url.Values, key, value string) {
 		if parsed, err := strconv.Atoi(value); err == nil {
 			values.Set(key, strconv.Itoa(max(textSizeMin, min(textSizeMax, parsed))))
 		}
+	case "font":
+		if id := normalizeDeckFontID(value); id != "" && id != "default" {
+			values.Set("font", id)
+		}
 	case "fg", "color":
 		if _, ok := ansiFG(value); ok {
 			values.Set("fg", normalizeColourValue(value))
@@ -9207,6 +10560,24 @@ func addPlacementValue(values url.Values, key, value string) {
 	case "header":
 		if _, ok := ansiFG(value); ok {
 			values.Set("header", normalizeColourValue(value))
+		}
+	case "gradient-start", "gradient-end", "shadow-color":
+		if _, ok := ansiFG(value); ok {
+			values.Set(key, normalizeColourValue(value))
+		}
+	case "gradient-dir":
+		switch strings.ToLower(value) {
+		case "horizontal", "vertical", "diagonal":
+			values.Set("gradient-dir", strings.ToLower(value))
+		}
+	case "shadow":
+		switch strings.ToLower(value) {
+		case "soft", "solid":
+			values.Set("shadow", strings.ToLower(value))
+		}
+	case "shadow-x", "shadow-y":
+		if parsed, err := strconv.Atoi(value); err == nil {
+			values.Set(key, strconv.Itoa(clampInt(parsed, -4, 4)))
 		}
 	case "glyph":
 		switch strings.ToLower(value) {
@@ -9257,7 +10628,7 @@ func placementCommentText(query string) string {
 		return query
 	}
 	var fields []string
-	for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "fg", "bg", "header", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "slide", "link", "master-clear"} {
+	for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "font", "fg", "bg", "header", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "slide", "link", "master-clear"} {
 		if value := values.Get(key); value != "" {
 			if key == "link" {
 				fields = append(fields, key+"="+url.QueryEscape(value))
@@ -16120,8 +17491,23 @@ func bulletCaretMetrics(element Element, width, cursor int) (int, int, int) {
 
 func textImageScale(element Element) float64 {
 	values, _ := url.ParseQuery(element.Query)
+	if _, mode, _, ok := elementDeckFontRenderDetails(element, false); ok && mode == deckFontModeFiglet {
+		if values.Get("keynope_figlet_visual") != "1" {
+			return 1
+		}
+		if scale, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && scale > 0 {
+			return scale
+		}
+		return 1
+	}
 	if scale, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && scale > 0 {
 		return scale
+	}
+	if elementUsesDeckFont(element) && element.Kind == "heading" {
+		if element.Level == 1 {
+			return 4
+		}
+		return 2
 	}
 	return 1
 }
@@ -16137,6 +17523,12 @@ func textImageBulletItemCaretMetrics(element Element, current string, cursor, wi
 	contentWidth := max(1, width-prefixWidth)
 	glyphWidth := max(1, int(math.Ceil(4*scale)))
 	boldWidth := max(glyphWidth, int(math.Ceil(5*scale)))
+	if width, ok := scaledDeckFontGlyphWidth(element, false, scale); ok {
+		glyphWidth = width
+	}
+	if width, ok := scaledDeckFontGlyphWidth(element, true, scale); ok {
+		boldWidth = max(glyphWidth, width)
+	}
 	runes := []rune(current)
 	cursor = max(0, min(cursor, len(runes)))
 	_, trailing := trimTrailingEditorSpaces(string(runes[:cursor]))
@@ -16386,7 +17778,7 @@ func editableRowsForElementPrefix(element Element, width, cursor int) []string {
 		copyElement.Text = text
 		return renderCodeBlockRows(copyElement, width)
 	}
-	if rendersAsTextImage(element) {
+	if rendersAsTextImage(element) || elementUsesDeckFont(element) {
 		return renderTextImageStyledSpans(element, width, parseMarkdownStyledSpansUntil(element.Text, cursor))
 	}
 	spans := parseMarkdownStyledSpansUntil(element.Text, cursor)
@@ -16430,18 +17822,21 @@ func codeCharsPerVisualLineForElement(element Element, width int) int {
 }
 
 func codeGlyphHeight(element Element) int {
-	if !rendersAsTextImage(element) {
+	if !rendersAsTextImage(element) && !elementUsesDeckFont(element) {
 		return 4
 	}
-	return max(1, len(renderBitmapTextImage("M", textImageScale(element))))
+	return max(1, len(renderBitmapTextImageForElement(element, "M", textImageScale(element))))
 }
 
 func editGlyphWidth(element Element) int {
-	if rendersAsTextImage(element) {
+	if rendersAsTextImage(element) || elementUsesDeckFont(element) {
 		values, _ := url.ParseQuery(element.Query)
 		scale := 1.0
 		if parsed, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && parsed > 0 {
 			scale = parsed
+		}
+		if width, ok := scaledDeckFontGlyphWidth(element, false, scale); ok {
+			return width
 		}
 		if values.Get("source") == "bitmap" {
 			return max(1, int(math.Round(4*scale)))
@@ -16470,8 +17865,8 @@ func editGlyphHeight(element Element) int {
 	if element.Kind == "code" {
 		return codeGlyphHeight(element)
 	}
-	if rendersAsTextImage(element) {
-		return max(1, len(renderBitmapTextImage("M", textImageScale(element))))
+	if rendersAsTextImage(element) || elementUsesDeckFont(element) {
+		return max(1, len(renderBitmapTextImageForElement(element, "M", textImageScale(element))))
 	}
 	if element.Kind == "heading" && element.Level == 1 {
 		return 16
@@ -16490,7 +17885,14 @@ func editCursorColumn(element Element, prefixRows []string, cursor int) int {
 		return cursor * editGlyphWidth(element)
 	}
 	if element.Kind == "code" {
-		_, col := codeCursorLineCol(element.Text, cursor)
+		line, col := codeCursorLineCol(element.Text, cursor)
+		if elementUsesDeckFont(element) {
+			logicalLines := strings.Split(element.Text, "\n")
+			if line >= 0 && line < len(logicalLines) {
+				prefix := string([]rune(logicalLines[line])[:min(col, len([]rune(logicalLines[line])))])
+				return codeBlockPadX + maxLineDisplayWidth(renderBitmapTextImageForElement(element, prefix, textImageScale(element)))
+			}
+		}
 		return codeBlockPadX + col*editGlyphWidth(element)
 	}
 	return displayWidth(strings.TrimRight(prefixRows[len(prefixRows)-1], " "))
@@ -16921,6 +18323,9 @@ func textSize(element Element) int {
 		}
 		return sizeFromLegacyScale(values.Get("source"), scale)
 	}
+	if _, mode, _, ok := elementDeckFontRenderDetails(element, false); ok && mode == deckFontModeFiglet {
+		return textSizeNormal
+	}
 	if element.Kind == "heading" {
 		if element.Level == 1 {
 			return textSizeTitle
@@ -16978,6 +18383,9 @@ func ensureTextImageRender(element *Element) {
 }
 
 func nativeTextSize(element Element) int {
+	if _, mode, _, ok := elementDeckFontRenderDetails(element, false); ok && mode == deckFontModeFiglet {
+		return textSizeNormal
+	}
 	if element.Kind == "heading" {
 		if element.Level == 1 {
 			return textSizeTitle
@@ -17239,10 +18647,13 @@ func shiftCursorKeys(cursor map[int]int, start, delta int) {
 
 func renderElementRows(element Element, width int) []string {
 	orientation := textOrientation(element)
+	var rows []string
 	if !isRotatableTextElement(element) || orientation == "" {
-		return renderElementRowsBase(element, width)
+		rows = renderElementRowsBase(element, width)
+	} else {
+		rows = renderRotatedTextImageElement(element, width, orientation)
 	}
-	return renderRotatedTextImageElement(element, width, orientation)
+	return padTextRowsForShadow(element, rows)
 }
 
 func renderElementRowsBase(element Element, width int) []string {
@@ -17250,7 +18661,7 @@ func renderElementRowsBase(element Element, width int) []string {
 	if element.Kind == "code" {
 		return renderCodeBlockRows(element, width)
 	}
-	if rendersAsTextImage(element) {
+	if rendersAsTextImage(element) || elementUsesDeckFont(element) {
 		return renderTextImageElement(element, width)
 	}
 	switch element.Kind {
@@ -17460,7 +18871,7 @@ func renderCodeBlockRows(element Element, width int) []string {
 
 func renderCodeGlyphRows(element Element, width int) []string {
 	glyphWidth := 4
-	if rendersAsTextImage(element) {
+	if rendersAsTextImage(element) || elementUsesDeckFont(element) {
 		glyphWidth = editGlyphWidth(element)
 	}
 	charsPerLine := max(1, width/max(1, glyphWidth))
@@ -17468,8 +18879,8 @@ func renderCodeGlyphRows(element Element, width int) []string {
 	for _, rawLine := range strings.Split(element.Text, "\n") {
 		chunks := fixedRuneChunks(rawLine, charsPerLine)
 		for _, chunk := range chunks {
-			if rendersAsTextImage(element) {
-				rows = append(rows, renderBitmapTextImage(chunk, textImageScale(element))...)
+			if rendersAsTextImage(element) || elementUsesDeckFont(element) {
+				rows = append(rows, renderBitmapTextImageForElement(element, chunk, textImageScale(element))...)
 			} else {
 				rows = append(rows, renderQuad(chunk)...)
 			}
@@ -17495,6 +18906,11 @@ func layoutElementRows(element Element, width int) []string {
 
 func rendersAsTextImage(element Element) bool {
 	return element.Kind == "text-image" || textRenderMode(element.Query) == "text-image"
+}
+
+func elementUsesDeckFont(element Element) bool {
+	_, ok := elementDeckFont(element, false)
+	return ok
 }
 
 func layout(slide Slide, width, height int) []Line {
@@ -17574,6 +18990,7 @@ func layout(slide Slide, width, height int) []Line {
 			}
 			maxImageRows = constrainedElementHeight(imageElement, maxImageRows)
 			rows := renderImageElementRows(imageElement, maxImageWidth, maxImageRows)
+			rows = padTextRowsForShadow(imageElement, rows)
 			imageWidth := maxLineDisplayWidth(rows)
 			row := placementTopRow(placement, height, len(rows), currentRow)
 			col := 0
@@ -17690,7 +19107,8 @@ func layout(slide Slide, width, height int) []Line {
 	}
 	lines := append(masterBackLines, masterFrontLines...)
 	lines = append(lines, backLines...)
-	return append(lines, frontLines...)
+	lines = append(lines, frontLines...)
+	return applyTextElementEffects(lines, slide)
 }
 
 func renderImagePlaceholderRows(element Element, maxWidth, maxHeight int) []string {
@@ -18913,11 +20331,7 @@ func renderQuadPlainRaw(text string) []string {
 }
 
 func renderTextImageElement(element Element, width int) []string {
-	values, _ := url.ParseQuery(element.Query)
-	scale := 1.0
-	if parsed, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && parsed > 0 {
-		scale = parsed
-	}
+	scale := textImageScale(element)
 	if element.Kind == "bullet" {
 		return renderTextImageBulletElement(element, width, scale)
 	}
@@ -18931,7 +20345,7 @@ func renderTextImageElement(element Element, width int) []string {
 		rows = renderStyledBitmapTextImage(element, scale)
 	}
 	if len(rows) == 0 {
-		rows = renderBitmapTextImage(element.Text, scale)
+		rows = renderBitmapTextImageForElement(element, element.Text, scale)
 	}
 	for i, row := range rows {
 		if strings.Contains(row, "\033[") {
@@ -18947,14 +20361,10 @@ func renderTextImageElement(element Element, width int) []string {
 }
 
 func renderTextImageStyledSpans(element Element, width int, spans []styledTextSpan) []string {
-	values, _ := url.ParseQuery(element.Query)
-	scale := 1.0
-	if parsed, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && parsed > 0 {
-		scale = parsed
-	}
+	scale := textImageScale(element)
 	logicalLines := splitStyledSpanLines(spans)
 	var out []string
-	lineHeight := max(1, len(renderBitmapTextImage("M", scale)))
+	lineHeight := max(1, len(renderBitmapTextImageForElement(element, "M", scale)))
 	for _, line := range logicalLines {
 		rows := renderMarkdownBitmapTextImageSpans(element, line, scale)
 		if len(rows) == 0 && len(logicalLines) > 1 {
@@ -18981,6 +20391,12 @@ func renderTextImageBulletElement(element Element, width int, scale float64) []s
 	renderLine := func(text string, showMarker bool) {
 		normalWidth := max(1, int(math.Ceil(4*scale)))
 		boldWidth := max(normalWidth, int(math.Ceil(5*scale)))
+		if width, ok := scaledDeckFontGlyphWidth(element, false, scale); ok {
+			normalWidth = width
+		}
+		if width, ok := scaledDeckFontGlyphWidth(element, true, scale); ok {
+			boldWidth = max(normalWidth, width)
+		}
 		chunks := wrapStyledSpans(parseMarkdownStyledSpans(text), contentWidth, normalWidth, boldWidth)
 		for chunkIndex, chunk := range chunks {
 			textElement := element
@@ -19028,7 +20444,20 @@ func renderMarkdownBitmapTextImageSpans(element Element, spans []styledTextSpan,
 		}
 		height := bitmapTextRowHeight(factor)
 		rows := renderTextWithEmoji(span.Text, height, func(text string) []string {
-			mask := scaledTextMaskWithFont(text, factor, font, glyphWidth)
+			if deckFont, mode, layout, ok := elementDeckFontRenderDetails(element, span.Bold); ok {
+				if mode == deckFontModeCells {
+					return renderScaledDeckCellFont(text, factor/2, deckFont)
+				}
+				if mode == deckFontModeFiglet {
+					return renderScaledDeckFigletFont(text, factor, deckFont, layout)
+				}
+			}
+			var mask [][]bool
+			if deckFont, ok := elementDeckFont(element, span.Bold); ok {
+				mask = scaledDeckFontTextMask(text, factor, deckFont)
+			} else {
+				mask = scaledTextMaskWithFont(text, factor, font, glyphWidth)
+			}
 			if hasTextImageStyle(element.Query) {
 				return renderStyledBitmapTextMask(element, mask)
 			}
@@ -19115,7 +20544,15 @@ func hasTextImageStyle(query string) bool {
 func renderStyledBitmapTextImage(element Element, factor float64) []string {
 	height := bitmapTextRowHeight(factor)
 	return renderTextWithEmoji(element.Text, height, func(text string) []string {
-		mask := scaledC64TextMask(text, factor)
+		if font, mode, layout, ok := elementDeckFontRenderDetails(element, false); ok {
+			if mode == deckFontModeCells {
+				return renderScaledDeckCellFont(text, factor/2, font)
+			}
+			if mode == deckFontModeFiglet {
+				return renderScaledDeckFigletFont(text, factor, font, layout)
+			}
+		}
+		mask := scaledElementTextMask(element, text, factor, false)
 		if len(mask) == 0 || len(mask[0]) == 0 {
 			return nil
 		}
@@ -19173,6 +20610,25 @@ func renderBitmapTextImage(text string, factor float64) []string {
 	})
 }
 
+func renderBitmapTextImageForElement(element Element, text string, factor float64) []string {
+	height := bitmapTextRowHeight(factor)
+	return renderTextWithEmoji(text, height, func(chunk string) []string {
+		if font, mode, layout, ok := elementDeckFontRenderDetails(element, false); ok {
+			if mode == deckFontModeCells {
+				return renderScaledDeckCellFont(chunk, factor/2, font)
+			}
+			if mode == deckFontModeFiglet {
+				return renderScaledDeckFigletFont(chunk, factor, font, layout)
+			}
+		}
+		mask := scaledElementTextMask(element, chunk, factor, false)
+		if len(mask) == 0 {
+			return nil
+		}
+		return maskToQuadrants(mask)
+	})
+}
+
 func bitmapTextRowHeight(factor float64) int {
 	pixelHeight := max(1, int(math.Round(8*factor)))
 	return max(1, (pixelHeight+1)/2)
@@ -19182,25 +20638,18 @@ func scaledC64TextMask(text string, factor float64) [][]bool {
 	return scaledTextMaskWithFont(text, factor, c64FullFont, 8)
 }
 
+func scaledElementTextMask(element Element, text string, factor float64, bold bool) [][]bool {
+	if font, ok := elementDeckFont(element, bold); ok {
+		return scaledDeckFontTextMask(text, factor, font)
+	}
+	if bold {
+		return scaledTextMaskWithFont(text, factor, c64BoldFont, 10)
+	}
+	return scaledC64TextMask(text, factor)
+}
+
 func scaledTextMaskWithFont(text string, factor float64, font map[rune][]string, glyphWidth int) [][]bool {
-	mask := textMaskWithFont(text, font, glyphWidth)
-	if len(mask) == 0 || len(mask[0]) == 0 || factor <= 0 {
-		return nil
-	}
-	srcH := len(mask)
-	srcW := len(mask[0])
-	dstH := max(1, int(math.Round(float64(srcH)*factor)))
-	dstW := max(1, int(math.Round(float64(srcW)*factor)))
-	scaled := make([][]bool, dstH)
-	for y := 0; y < dstH; y++ {
-		sy := min(srcH-1, int(float64(y)/factor))
-		scaled[y] = make([]bool, dstW)
-		for x := 0; x < dstW; x++ {
-			sx := min(srcW-1, int(float64(x)/factor))
-			scaled[y][x] = mask[sy][sx]
-		}
-	}
-	return scaled
+	return scaleTextMask(textMaskWithFont(text, font, glyphWidth), factor)
 }
 
 func rotateMask(mask [][]bool, orientation string) [][]bool {
@@ -19446,6 +20895,10 @@ var embeddedAnimatedAssets = struct {
 	sync.RWMutex
 	assets map[string]DeckAsset
 }{assets: map[string]DeckAsset{}}
+var embeddedStillAssets = struct {
+	sync.RWMutex
+	assets map[string]DeckAsset
+}{assets: map[string]DeckAsset{}}
 var prewarmingImageCache bool
 var fastImageRender bool
 
@@ -19466,6 +20919,29 @@ func embeddedAnimatedAsset(path string) (DeckAsset, bool) {
 	embeddedAnimatedAssets.RLock()
 	asset, ok := embeddedAnimatedAssets.assets[id]
 	embeddedAnimatedAssets.RUnlock()
+	return asset, ok
+}
+
+func registerEmbeddedStillAsset(id string, asset DeckAsset) {
+	if id == "" || len(asset.Data) == 0 || len(asset.Frames) > 0 {
+		return
+	}
+	embeddedStillAssets.Lock()
+	embeddedStillAssets.assets[id] = asset
+	embeddedStillAssets.Unlock()
+}
+
+func embeddedStillAsset(path string) (DeckAsset, bool) {
+	if !strings.HasPrefix(path, "keynope-asset:") {
+		return DeckAsset{}, false
+	}
+	id := strings.TrimPrefix(path, "keynope-asset:")
+	if ext := filepath.Ext(id); ext != "" {
+		id = strings.TrimSuffix(id, ext)
+	}
+	embeddedStillAssets.RLock()
+	asset, ok := embeddedStillAssets.assets[id]
+	embeddedStillAssets.RUnlock()
 	return asset, ok
 }
 
@@ -19564,6 +21040,23 @@ func loadDecodedStillImage(path string) image.Image {
 		decodedStillImageCacheMu.Unlock()
 		return img
 	}
+	if asset, ok := embeddedStillAsset(path); ok {
+		key := "embedded-still|" + path
+		decodedStillImageCacheMu.RLock()
+		cached := decodedStillImageCache[key]
+		decodedStillImageCacheMu.RUnlock()
+		if cached != nil {
+			return cached
+		}
+		img, err := png.Decode(bytes.NewReader(asset.Data))
+		if err != nil {
+			return nil
+		}
+		decodedStillImageCacheMu.Lock()
+		decodedStillImageCache[key] = img
+		decodedStillImageCacheMu.Unlock()
+		return img
+	}
 	info, err := os.Stat(path)
 	stamp := "missing"
 	if err == nil {
@@ -19637,7 +21130,9 @@ func renderUnicodeImage(img image.Image, b image.Rectangle, opts imageASCIIOptio
 func loadASCIIImageAnimation(path, query string, maxWidth, maxHeight int) *asciiImageAnimation {
 	opts := parseImageASCIIOptions(query)
 	cachePath := ""
-	if _, embedded := embeddedAnimatedAsset(path); !embedded {
+	_, embeddedAnimated := embeddedAnimatedAsset(path)
+	_, embeddedStill := embeddedStillAsset(path)
+	if !embeddedAnimated && !embeddedStill {
 		cachePath = asciiAnimationCachePath(path, query, maxWidth, maxHeight)
 		if cached := loadDiskASCIIAnimation(cachePath); cached != nil {
 			return cached
@@ -19851,6 +21346,13 @@ func decodeImageFrames(path string) []decodedImageFrame {
 			frames = append(frames, decodedImageFrame{image: decoded, delay: delay})
 		}
 		return frames
+	}
+	if asset, ok := embeddedStillAsset(path); ok {
+		decoded, err := png.Decode(bytes.NewReader(asset.Data))
+		if err != nil {
+			return nil
+		}
+		return []decodedImageFrame{{image: decoded, delay: 100 * time.Millisecond}}
 	}
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".gif" {

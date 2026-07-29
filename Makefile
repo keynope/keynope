@@ -38,7 +38,7 @@ PRESENTER_SRC := presenter/KeynopePresenter.swift presenter/ScreenShare.swift pr
 PRESENTER_FRAMEWORKS := -framework Cocoa -framework WebKit -framework AVFoundation -framework ScreenCaptureKit
 GO_SRC := $(filter-out %_test.go,$(wildcard *.go))
 
-.PHONY: all build app keynope presenter test install clean
+.PHONY: all build app keynope presenter web-editor test install clean
 
 all: build
 
@@ -47,6 +47,9 @@ build: keynope presenter
 keynope: $(KEYNOPE)
 
 presenter: $(PRESENTER_SIGNATURE)
+
+web-editor:
+	./tools/build_web_editor.sh
 
 app: $(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources
 
