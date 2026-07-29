@@ -8486,6 +8486,26 @@ if (keynopeAppSurface) {
     document.addEventListener('pointerdown',dismiss,true);
     menu.firstElementChild?.focus();
   }
+  function squareCanvasEffectIcon(button,whiteAllStrokes) {
+    const svg = button.querySelector('svg');
+    if (!svg) return;
+    const viewBox = (svg.getAttribute('viewBox') || '').trim().split(/\s+/).map(Number);
+    if (viewBox.length !== 4 || viewBox.some(value => !Number.isFinite(value))) return;
+    svg.firstElementChild?.remove();
+    const frame = document.createElementNS('http://www.w3.org/2000/svg','rect');
+    frame.setAttribute('x',String(viewBox[0]+10));
+    frame.setAttribute('y',String(viewBox[1]+10));
+    frame.setAttribute('width',String(viewBox[2]-20));
+    frame.setAttribute('height',String(viewBox[3]-20));
+    frame.setAttribute('fill','none');
+    frame.setAttribute('stroke','#ffffff');
+    frame.setAttribute('stroke-width','4');
+    svg.insertBefore(frame,svg.firstChild);
+    if (!whiteAllStrokes) return;
+    svg.querySelectorAll('[stroke]').forEach(part => {
+      if (part.getAttribute('stroke') !== 'none') part.setAttribute('stroke','#ffffff');
+    });
+  }
   function canvasTextGradientTools(container,index,element) {
     const query = new URLSearchParams(element.query || '');
     const active = !!query.get('gradient-start') && !!query.get('gradient-end');
@@ -8509,6 +8529,7 @@ if (keynopeAppSurface) {
       });
     });
     toggle.innerHTML = gradientIconSVGUpdated;
+    squareCanvasEffectIcon(toggle,false);
     toggle.title = active ? 'Change gradient' : 'Add gradient';
     toggle.setAttribute('aria-label',toggle.title);
     toggle.setAttribute('aria-pressed',active ? 'true' : 'false');
@@ -8542,6 +8563,7 @@ if (keynopeAppSurface) {
       });
     });
     button.innerHTML = shadowIconSVG;
+    squareCanvasEffectIcon(button,true);
     button.title = shadow ? 'Change shadow' : 'Add shadow';
     button.setAttribute('aria-label',button.title);
     button.setAttribute('aria-pressed',shadow ? 'true' : 'false');
