@@ -50,7 +50,7 @@ func TestCustomFontUsesVariableGlyphWidths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	face := compileDeckFontFace(font.Normal, false)
+	face := compileDeckFontFace(font.Normal, "")
 	mask := deckFontTextMask("IW", face)
 	if len(mask) != 8 || len(mask[0]) != 6 {
 		t.Fatalf("mask dimensions were %dx%d, want 6x8", len(mask[0]), len(mask))
@@ -111,7 +111,7 @@ func TestBlockCellFontRoundTripAndRendering(t *testing.T) {
 	if got := decoded.Normal["A"]; !reflect.DeepEqual(got, font.Normal["A"]) {
 		t.Fatalf("block cells changed during round trip: %#v", got)
 	}
-	face := compileDeckFontFace(decoded.Normal, true)
+	face := compileDeckFontFace(decoded.Normal, deckFontModeCells)
 	nativeRows := append([]string(nil), font.Normal["A"]...)
 	nativeRows[len(nativeRows)-1] = "█ "
 	if got := renderScaledDeckCellFont("A", 1, face); !reflect.DeepEqual(got, nativeRows) {
@@ -125,5 +125,62 @@ func TestBlockCellFontRoundTripAndRendering(t *testing.T) {
 	elementRows := renderElementRows(Element{Kind: "text", Text: "A", Query: "font=block-cells"}, 40)
 	if len(elementRows) != 4 || maxLineDisplayWidth(elementRows) != 1 {
 		t.Fatalf("shared element rendering is %dx%d, want the original 2x8 grid packed to 1x4: %#v", maxLineDisplayWidth(elementRows), len(elementRows), elementRows)
+	}
+}
+
+func TestParseFIGletFontPreservesLiteralCells(t *testing.T) {
+	var source strings.Builder
+	source.WriteString("flf2a$ 1 1 1 0 0 0 0\n")
+	for code := 32; code <= 126; code++ {
+		glyph := string(rune(code))
+		if code == 32 {
+			glyph = "$"
+		}
+		if code == 'A' {
+			glyph = ".A."
+		}
+		source.WriteString(glyph + "@\n")
+	}
+	font, err := parseFIGletFont("Test Figlet", source.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if font.ID != "test-figlet" || font.Mode != deckFontModeFiglet || font.Height != 1 {
+		t.Fatalf("parsed FIGlet identity = %#v", font)
+	}
+	if got := font.Normal["A"]; !reflect.DeepEqual(got, []string{".A."}) {
+		t.Fatalf("FIGlet A = %#v", got)
+	}
+	font.Bold = cloneDeckFontFace(font.Normal)
+	normalized, err := normalizeDeckFont(font)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := normalized.Normal["A"][0]; got != ".A." {
+		t.Fatalf("FIGlet literal dots changed to %q", got)
+	}
+	face := compileDeckFontFace(normalized.Normal, deckFontModeFiglet)
+	if got := renderScaledDeckFigletFont("A", 1, face, normalized.FigletLayout); !reflect.DeepEqual(got, []string{".A."}) {
+		t.Fatalf("FIGlet render = %#v", got)
+	}
+
+	registerDeckFonts(map[string]DeckFont{normalized.ID: normalized})
+	resized := Element{Kind: "text", Text: "A", Query: "font=test-figlet&render=text-image&source=bitmap&scale=2.00&text-size=10"}
+	if got := renderElementRows(resized, 40); !reflect.DeepEqual(got, []string{".A."}) {
+		t.Fatalf("terminal FIGlet resize changed native glyph size: %#v", got)
+	}
+	visual := visualFontScaledSlide(Slide{Elements: []Element{resized}})
+	if got := renderElementRows(visual.Elements[0], 40); !reflect.DeepEqual(got, []string{"..AA..", "..AA.."}) {
+		t.Fatalf("visual FIGlet resize = %#v", got)
+	}
+}
+
+func TestFontLibraryHasNoBundledAdditionalFont(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("APP_SANDBOX_CONTAINER_ID", "")
+	fonts := loadDeckFontLibrary()
+	if len(fonts) != 0 {
+		t.Fatalf("font library unexpectedly contains bundled fonts: %#v", fonts)
 	}
 }

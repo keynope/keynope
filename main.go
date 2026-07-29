@@ -2183,6 +2183,7 @@ func exportSlidePagesFrozen(slide Slide, slideIndex, slideCount, cols, rows int)
 }
 
 func exportSlidePagesMode(slide Slide, slideIndex, slideCount, cols, rows int, frozenImages bool) []exportPage {
+	slide = visualFontScaledSlide(slide)
 	pageCount := slidePageCount(slide, cols, rows)
 	pages := make([]exportPage, 0, pageCount)
 	for page := 0; page < pageCount; page++ {
@@ -2209,6 +2210,19 @@ func exportSlidePagesMode(slide Slide, slideIndex, slideCount, cols, rows int, f
 		})
 	}
 	return pages
+}
+
+func visualFontScaledSlide(slide Slide) Slide {
+	slide.Elements = append([]Element(nil), slide.Elements...)
+	for index := range slide.Elements {
+		if _, mode, _, ok := elementDeckFontRenderDetails(slide.Elements[index], false); !ok || mode != deckFontModeFiglet {
+			continue
+		}
+		values, _ := url.ParseQuery(slide.Elements[index].Query)
+		values.Set("keynope_figlet_visual", "1")
+		slide.Elements[index].Query = values.Encode()
+	}
+	return slide
 }
 
 func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int, launchHelper bool) (*presenterCompanion, error) {
@@ -3920,6 +3934,13 @@ button.keynope-shape-outline-button { display: inline-flex; align-items: center;
 .keynope-font-button { position: relative; display: inline-grid !important; place-items: center; width: 34px !important; min-width: 34px !important; height: 30px; padding: 0 !important; font-weight: 700 !important; }
 .keynope-font-button::after { position: absolute; right: 2px; bottom: 1px; color: #9bcfff; content: "✎"; font-size: 9px; line-height: 1; }
 .keynope-font-select { min-width: 118px !important; max-width: 174px; }
+.keynope-text-effect-select { min-width: 88px !important; max-width: 108px; }
+.keynope-text-effect-button svg { display: block; width: 22px; height: 22px; }
+.keynope-text-effect-dropdown { position: fixed; z-index: 96; display: grid; min-width: 112px; gap: 4px; padding: 6px; color: #eee; background: #202124; border: 1px solid #5b6168; border-radius: 7px; box-shadow: 0 12px 32px rgba(0,0,0,.55); }
+.keynope-text-effect-dropdown button { min-height: 28px; padding: 4px 9px; text-align: left; color: inherit; background: #292929; border: 1px solid #555; border-radius: 5px; font: 12px -apple-system,BlinkMacSystemFont,sans-serif; }
+.keynope-text-effect-dropdown button:hover { border-color: #70b7ff; background: #303b45; }
+.keynope-text-effect-dropdown button.active { border-color: #70b7ff; background: #244766; }
+.keynope-effect-colour-tool { width: 28px !important; min-width: 28px !important; padding: 0 !important; font-weight: 800 !important; }
 .keynope-font-editor { position: fixed; z-index: 90; inset: 18px; display: grid; grid-template-rows: auto minmax(0,1fr); overflow: hidden; color: #eee; background: #181818; border: 1px solid #666; border-radius: 8px; box-shadow: 0 18px 70px rgba(0,0,0,.72); font: 13px -apple-system,BlinkMacSystemFont,sans-serif; }
 .keynope-font-editor[hidden] { display: none; }
 .keynope-font-editor-header { display: flex; min-height: 48px; align-items: center; flex-wrap: wrap; gap: 7px; padding: 7px 10px; border-bottom: 1px solid #444; background: #202020; }
@@ -3940,6 +3961,7 @@ button.keynope-shape-outline-button { display: inline-flex; align-items: center;
 .keynope-font-glyph-heading strong { min-width: 160px; text-align: center; }
 .keynope-font-brushes { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; margin: 0 auto 12px; padding: 7px; border: 1px solid #444; border-radius: 6px; background: #151515; }
 .keynope-font-brushes button { display: grid; width: 28px; min-width: 28px; height: 28px; place-items: center; padding: 0; font: 20px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-font-brushes input { width: 54px; height: 28px; padding: 2px 5px; text-align: center; font: 16px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
 .keynope-font-faces { display: grid; align-items: start; grid-template-columns: repeat(2,minmax(300px,1fr)); gap: 12px; }
 .keynope-font-face { overflow: hidden; border: 1px solid #444; border-radius: 6px; background: #202020; }
 .keynope-font-face-head,.keynope-font-face-foot { display: flex; min-height: 42px; align-items: center; gap: 6px; padding: 6px 9px; }
@@ -3950,6 +3972,7 @@ button.keynope-shape-outline-button { display: inline-flex; align-items: center;
 .keynope-font-pixel-grid { display: grid; width: max-content; touch-action: none; border-top: 1px solid #555; border-left: 1px solid #555; user-select: none; }
 .keynope-font-pixel-grid button { position: relative; width: 27px; height: 27px; overflow: hidden; border: 0; border-right: 1px solid #555; border-bottom: 1px solid #555; border-radius: 0; padding: 0; color: #f2f2ed; background: #292929; }
 .keynope-font-cell-glyph { position: absolute; inset: 0; display: grid; place-items: center; font: 23px/27px ui-monospace,SFMono-Regular,Menlo,monospace; transform: scale(1.56,1.14); transform-origin: center; pointer-events: none; }
+.keynope-font-editor.figlet .keynope-font-cell-glyph { transform: none; }
 .keynope-font-pixel-grid button.on { background: #3a4147; }
 .keynope-font-face-foot { border-top: 1px solid #444; }
 .keynope-font-preview { display: grid; gap: 1px; margin-right: auto; padding: 4px; border: 1px solid #555; background: #090909; }
@@ -4049,6 +4072,7 @@ let editorCanvasCaret = null;
 let editorExportConfirmation = null;
 let keynopeEditorMasterMode = false;
 let keynopeEditorSelectionActive = false;
+let keynopeEditorTextEditActive = false;
 let keynopeEditorVisualResizeActive = false;
 if (keynopeAppSurface) {
   document.documentElement.setAttribute('data-keynope-app', 'true');
@@ -5662,7 +5686,7 @@ function tick() {
   const tickStartedMS = performance.now();
   const elapsedMS = Math.max(0, Math.min(1000, tickStartedMS - contentAnimationLastTickMS));
   contentAnimationLastTickMS = tickStartedMS;
-  if (!keynopeEditorSelectionActive) contentAnimationElapsedMS += elapsedMS;
+  if (!keynopeEditorSelectionActive && !keynopeEditorTextEditActive) contentAnimationElapsedMS += elapsedMS;
   try {
     drawFrame();
   } catch (_err) {
@@ -5674,7 +5698,7 @@ function tick() {
     }
   }
   setTimeout(() => {
-    frame++;
+    if (!keynopeEditorTextEditActive) frame++;
     tick();
   }, contentAnimationWakeDelayMS());
 }
@@ -6075,6 +6099,7 @@ if (keynopeAppSurface) {
   let editorActionQueue = Promise.resolve();
   let activeCanvasDrag = null;
   let activeCanvasVisualMenu = null;
+  let activeCanvasTextEffectDropdown = null;
   let activeCanvasLinkDialog = null;
   let emojiPickerPanel = null;
   let emojiPickerTarget = null;
@@ -6480,6 +6505,16 @@ if (keynopeAppSurface) {
   }
   const fontBlockBrushes = Array.from('▀▁▂▃▄▅▆▇█▉▊▋▌▍▎▏▐░▒▓▔▕▖▗▘▙▚▛▜▝▞▟');
   const fontBlockCells = new Set(fontBlockBrushes);
+  const figletBrushes = Array.from(new Set([
+    ...Array.from("!#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\\\]^_" + String.fromCharCode(34,96) + "abcdefghijklmnopqrstuvwxyz{|}~│─┌┐└┘├┤┬┴┼╔╗╚╝═║╠╣╦╩╬"),
+    ...fontBlockBrushes
+  ]));
+  function validFigletBrush(value) {
+    const values = Array.from(String(value || ''));
+    if (values.length !== 1 || /\s/.test(values[0])) return false;
+    const code = values[0].codePointAt(0);
+    return !(code >= 0x1f000 && code <= 0x1faff) && !(code >= 0x2600 && code <= 0x27bf);
+  }
   function fontFaceToCells(face) {
     const converted = {};
     for (const [character,sourceRows] of Object.entries(face || {})) {
@@ -6492,12 +6527,48 @@ if (keynopeAppSurface) {
   }
   function fontToCellMode(value) {
     const converted = fontClone(value);
+    if (converted.mode === 'figlet') return converted;
     if (converted.mode !== 'cells') {
       converted.normal = fontFaceToCells(converted.normal);
       converted.bold = fontFaceToCells(converted.bold);
       converted.mode = 'cells';
     }
     return converted;
+  }
+  function parseFIGletFont(source, filename) {
+    const lines = String(source || '').replace(/\r\n?/g,'\n').replace(/^\uFEFF/,'').split('\n');
+    const header = (lines.shift() || '').trim().split(/\s+/);
+    if (header.length < 6 || !header[0].startsWith('flf2a') || Array.from(header[0]).length !== 6) {
+      throw new Error('Not a FIGlet 2 font');
+    }
+    const hardblank = Array.from(header[0])[5];
+    const height = Number(header[1]);
+    const comments = Number(header[5]);
+    if (!Number.isInteger(height) || height < 1 || height > 32) throw new Error('Unsupported FIGlet height');
+    if (!Number.isInteger(comments) || comments < 0) throw new Error('Invalid FIGlet comments');
+    lines.splice(0,comments);
+    const normal = {};
+    let endmark = '';
+    for (let code=32;code<=126;code++) {
+      const rows = [];
+      for (let row=0;row<height;row++) {
+        let line = lines.shift();
+        if (line == null) throw new Error('FIGlet font ends inside glyph ' + String.fromCharCode(code));
+        const cells = Array.from(line);
+        if (!endmark) endmark = cells[cells.length-1] || '';
+        if (!endmark || cells[cells.length-1] !== endmark) throw new Error('Missing FIGlet endmark');
+        while (cells[cells.length-1] === endmark) cells.pop();
+        rows.push(cells.map(cell => cell === hardblank ? ' ' : validFigletBrush(cell) ? cell : ' ').join(''));
+      }
+      normal[String.fromCharCode(code)] = rows;
+    }
+    const rawName = String(filename || 'Imported FIGlet').replace(/\.(?:flf|tlf)$/i,'').replace(/_/g,' ').trim();
+    const name = rawName || 'Imported FIGlet';
+    return {
+      id:fontSlug(name), name, mode:'figlet', height,
+      figletLayout:Number(header[7] ?? header[4]) || 0,
+      normal, bold:fontClone(normal)
+    };
   }
   async function loadDefaultEditorFont() {
     if (!defaultEditorFont) {
@@ -6532,18 +6603,23 @@ if (keynopeAppSurface) {
     const deckFonts = editorState && editorState.fonts || {};
     const libraryFonts = fontLibrary();
     const firstID = preferredID && (deckFonts[preferredID] || libraryFonts[preferredID])
-      ? preferredID : Object.keys(deckFonts)[0] || '';
+      ? preferredID : '';
     base = fontToCellMode(base);
-    let font = firstID ? fontToCellMode(deckFonts[firstID] || libraryFonts[firstID]) : fontClone(base);
-    if (!firstID) {
-      font.id = 'my-font-' + Date.now().toString(36);
-      font.name = 'My Font';
-    }
+    const keynopeDefaultFont = () => {
+      const value = fontClone(base);
+      value.id = 'keynope';
+      value.name = 'Keynope';
+      return value;
+    };
+    let font = firstID ? fontToCellMode(deckFonts[firstID] || libraryFonts[firstID]) : keynopeDefaultFont();
     let character = 'A';
     let history = [];
     let future = [];
     let painting = null;
     let brush = '█';
+    let loadedBaseline = fontClone(font);
+    let pendingImportSave = null;
+    let importConfirmation = null;
     const chars = Array.from({length:95}, (_, index) => String.fromCharCode(index + 32));
     const aliases = {' ':'SPACE','"':'DOUBLE QUOTE',"'":'APOSTROPHE','\\':'BACKSLASH'};
     aliases[String.fromCharCode(96)] = 'BACKTICK';
@@ -6575,7 +6651,7 @@ if (keynopeAppSurface) {
     const importFont = command('Import');
     const importInput = document.createElement('input');
     importInput.type = 'file';
-    importInput.accept = '.json,application/json';
+    importInput.accept = '.json,.flf,.tlf,application/json,text/plain';
     importInput.hidden = true;
     const exportFont = command('Export');
     const saveFont = command('Save');
@@ -6609,17 +6685,39 @@ if (keynopeAppSurface) {
     const brushes = document.createElement('div');
     brushes.className = 'keynope-font-brushes';
     brushes.setAttribute('role','toolbar');
-    for (const value of fontBlockBrushes) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.textContent = value;
-      button.setAttribute('aria-label','Paint with ' + value);
-      button.classList.toggle('active',value === brush);
-      button.addEventListener('click',() => {
-        brush = value;
-        for (const candidate of brushes.children) candidate.classList.toggle('active',candidate === button);
-      });
-      brushes.appendChild(button);
+    function renderBrushes() {
+      brushes.replaceChildren();
+      const values = font.mode === 'figlet'
+        ? Array.from(new Set([...figletBrushes,...Object.values(font.normal || {}).flatMap(rows => rows.flatMap(row => Array.from(row))).filter(validFigletBrush)]))
+        : fontBlockBrushes;
+      if (font.mode === 'figlet' && !validFigletBrush(brush)) brush = '#';
+      if (font.mode !== 'figlet' && !fontBlockCells.has(brush)) brush = '█';
+      for (const value of values) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = value;
+        button.setAttribute('aria-label','Paint with ' + value);
+        button.classList.toggle('active',value === brush);
+        button.addEventListener('click',() => {
+          brush = value;
+          renderBrushes();
+        });
+        brushes.appendChild(button);
+      }
+      if (font.mode === 'figlet') {
+        const custom = document.createElement('input');
+        custom.type = 'text';
+        custom.inputMode = 'text';
+        custom.placeholder = 'Glyph';
+        custom.title = 'Use another non-emoji character';
+        custom.setAttribute('aria-label','Custom FIGlet brush');
+        custom.addEventListener('input',() => {
+          const value = Array.from(custom.value).pop() || '';
+          custom.value = value;
+          if (validFigletBrush(value)) { brush = value; renderBrushes(); }
+        });
+        brushes.appendChild(custom);
+      }
     }
     workspace.append(glyphHeading, brushes, faces);
     body.append(sidebar, workspace);
@@ -6627,6 +6725,14 @@ if (keynopeAppSurface) {
     document.body.appendChild(dialog);
     fontEditorDialog = dialog;
     function normalizeRows(rows) {
+      if (font.mode === 'figlet') {
+        const height = Math.max(1,Math.min(32,Number(font.height) || (rows || []).length || 1));
+        const width = Math.max(1, ...(rows || []).map(row => Array.from(String(row)).length));
+        return Array.from({length:height}, (_, row) => {
+          const values = Array.from(String(rows && rows[row] || ''));
+          return Array.from({length:width},(_,column) => validFigletBrush(values[column]) ? values[column] : ' ').join('');
+        });
+      }
       const width = Math.max(1, ...(rows || []).map(row => Array.from(String(row)).length));
       return Array.from({length:8}, (_, row) =>
         Array.from(String(rows && rows[row] || '').padEnd(width,'.').slice(0,width),
@@ -6639,6 +6745,14 @@ if (keynopeAppSurface) {
     }
     function fillCollection() {
       collection.replaceChildren();
+      const defaults = document.createElement('optgroup');
+      defaults.label = 'DEFAULT';
+      const keynope = document.createElement('option');
+      keynope.value = 'DEFAULT:keynope';
+      keynope.textContent = 'Keynope (Default)';
+      keynope.selected = font.id === 'keynope' && !(editorState && editorState.fonts && editorState.fonts.keynope) && !fontLibrary().keynope;
+      defaults.appendChild(keynope);
+      collection.appendChild(defaults);
       for (const [label, fonts] of [['DECK',editorState && editorState.fonts || {}],['LIBRARY',fontLibrary()]]) {
         const group = document.createElement('optgroup');
         group.label = label;
@@ -6661,7 +6775,8 @@ if (keynopeAppSurface) {
         if (query && !label.toLowerCase().includes(query) && !String(value.charCodeAt(0)).includes(query)) continue;
         const button = command(value === ' ' ? '␠' : value, label + ' · ASCII ' + value.charCodeAt(0));
         button.classList.toggle('active', value === character);
-        button.classList.toggle('empty', ['normal','bold'].some(face => !(font[face]?.[value] || []).some(row => Array.from(row).some(pixel => pixel !== '.'))));
+        const emptyCell = font.mode === 'figlet' ? ' ' : '.';
+        button.classList.toggle('empty', ['normal','bold'].some(face => !(font[face]?.[value] || []).some(row => Array.from(row).some(pixel => pixel !== emptyCell))));
         button.addEventListener('click', () => { character = value; render(); });
         glyphList.appendChild(button);
       }
@@ -6699,22 +6814,29 @@ if (keynopeAppSurface) {
         const cell = grid.querySelector('[data-x="' + x + '"][data-y="' + y + '"]');
         if (cell) {
           const glyph = cell.querySelector('.keynope-font-cell-glyph');
-          if (glyph) glyph.textContent = value === '.' ? '' : value;
-          cell.classList.toggle('on', value !== '.');
+          const emptyCell = font.mode === 'figlet' ? ' ' : '.';
+          if (glyph) glyph.textContent = value === emptyCell ? '' : value;
+          cell.classList.toggle('on', value !== emptyCell);
         }
         const dot = preview.children[y * rows[0].length + x];
         if (dot) {
           const glyph = dot.querySelector('.keynope-font-cell-glyph');
-          if (glyph) glyph.textContent = value === '.' ? '' : value;
-          dot.classList.toggle('on', value !== '.');
+          const emptyCell = font.mode === 'figlet' ? ' ' : '.';
+          if (glyph) glyph.textContent = value === emptyCell ? '' : value;
+          dot.classList.toggle('on', value !== emptyCell);
         }
+        if (font.mode === 'figlet' && face === 'normal') font.bold = fontClone(font.normal);
         renderGlyphList();
       }
       function draw() {
+        invert.hidden = font.mode === 'figlet';
+        heading.textContent = font.mode === 'figlet' ? 'FIGLET' : label;
         font[face] = font[face] || {};
         const rows = font[face][character] = normalizeRows(font[face][character]);
         const width = rows[0].length;
-        dimensions.textContent = width + ' × 8';
+        const height = rows.length;
+        const emptyCell = font.mode === 'figlet' ? ' ' : '.';
+        dimensions.textContent = width + ' × ' + height;
         grid.style.gridTemplateColumns = 'repeat(' + width + ',27px)';
         preview.style.gridTemplateColumns = 'repeat(' + width + ',9px)';
         grid.replaceChildren();
@@ -6723,16 +6845,16 @@ if (keynopeAppSurface) {
           const cell = command('','Cell ' + (x+1) + ', ' + (y+1));
           const cellGlyph = document.createElement('span');
           cellGlyph.className = 'keynope-font-cell-glyph';
-          cellGlyph.textContent = pixel === '.' ? '' : pixel;
+          cellGlyph.textContent = pixel === emptyCell ? '' : pixel;
           cell.appendChild(cellGlyph);
-          cell.classList.toggle('on', pixel !== '.');
+          cell.classList.toggle('on', pixel !== emptyCell);
           cell.dataset.x = x;
           cell.dataset.y = y;
           cell.addEventListener('pointerdown', event => {
             event.preventDefault();
             checkpoint();
-            const current = Array.from(font[face][character][y] || '')[x] || '.';
-            painting = {face, value:current === brush ? '.' : brush};
+            const current = Array.from(font[face][character][y] || '')[x] || emptyCell;
+            painting = {face, value:current === brush ? emptyCell : brush};
             setPixel(x,y,painting.value);
           });
           cell.addEventListener('pointerenter', () => {
@@ -6742,23 +6864,32 @@ if (keynopeAppSurface) {
           const dot = document.createElement('span');
           const previewGlyph = document.createElement('span');
           previewGlyph.className = 'keynope-font-cell-glyph';
-          previewGlyph.textContent = pixel === '.' ? '' : pixel;
+          previewGlyph.textContent = pixel === emptyCell ? '' : pixel;
           dot.appendChild(previewGlyph);
-          dot.classList.toggle('on', pixel !== '.');
+          dot.classList.toggle('on', pixel !== emptyCell);
           preview.appendChild(dot);
         }));
       }
       less.addEventListener('click', () => {
         const rows = normalizeRows(font[face][character]);
         if (rows[0].length <= 1) return;
-        checkpoint(); font[face][character] = rows.map(row => row.slice(0,-1)); render();
+        checkpoint(); font[face][character] = rows.map(row => Array.from(row).slice(0,-1).join(''));
+        if (font.mode === 'figlet' && face === 'normal') font.bold = fontClone(font.normal);
+        render();
       });
       more.addEventListener('click', () => {
-        if (normalizeRows(font[face][character])[0].length >= 32) return;
-        checkpoint(); font[face][character] = normalizeRows(font[face][character]).map(row => row + '.'); render();
+        const maximum = font.mode === 'figlet' ? 128 : 32;
+        const emptyCell = font.mode === 'figlet' ? ' ' : '.';
+        if (normalizeRows(font[face][character])[0].length >= maximum) return;
+        checkpoint(); font[face][character] = normalizeRows(font[face][character]).map(row => row + emptyCell);
+        if (font.mode === 'figlet' && face === 'normal') font.bold = fontClone(font.normal);
+        render();
       });
       clear.addEventListener('click', () => {
-        checkpoint(); font[face][character] = normalizeRows(font[face][character]).map(row => '.'.repeat(row.length)); render();
+        const emptyCell = font.mode === 'figlet' ? ' ' : '.';
+        checkpoint(); font[face][character] = normalizeRows(font[face][character]).map(row => emptyCell.repeat(Array.from(row).length));
+        if (font.mode === 'figlet' && face === 'normal') font.bold = fontClone(font.normal);
+        render();
       });
       invert.addEventListener('click', () => {
         const inverse = {'.':'█','█':'.','▀':'▄','▄':'▀','▁':'▔','▔':'▁','▂':'▆','▆':'▂','▃':'▅','▅':'▃','▇':'▔','▉':'▕','▕':'▉','▊':'▎','▎':'▊','▋':'▍','▍':'▋','▌':'▐','▐':'▌','░':'▓','▓':'░','▒':'▒','▖':'▝','▝':'▖','▗':'▘','▘':'▗','▙':'▝','▚':'▞','▛':'▗','▜':'▖','▞':'▚','▟':'▘'};
@@ -6771,20 +6902,107 @@ if (keynopeAppSurface) {
     faces.append(normal.section,bold.section);
     function render() {
       font.name = name.value || font.name || font.id;
+      title.textContent = font.mode === 'figlet' ? 'KEYNOPE FIGLET EDITOR' : 'KEYNOPE FONT EDITOR';
+      dialog.classList.toggle('figlet',font.mode === 'figlet');
       glyphName.textContent = (aliases[character] || character) + ' · ASCII ' + character.charCodeAt(0);
       undo.disabled = !history.length;
       redo.disabled = !future.length;
-      deleteFont.disabled = !(editorState && editorState.fonts && editorState.fonts[font.id]) && !fontLibrary()[font.id];
+      const embeddedFont = !!(editorState && editorState.fonts && editorState.fonts[font.id]);
+      deleteFont.disabled = !embeddedFont && !fontLibrary()[font.id];
       renderGlyphList();
       normal.draw();
-      bold.draw();
+      bold.section.hidden = font.mode === 'figlet';
+      if (font.mode !== 'figlet') bold.draw();
+      renderBrushes();
       fillCollection();
     }
-    function loadFont(value) {
+    function loadFont(value, renderNow = true) {
       font = fontToCellMode(value);
+      loadedBaseline = fontClone(font);
       name.value = font.name || font.id;
       history = []; future = [];
+      if (renderNow) render();
+    }
+    async function persistCurrentFont(statusText) {
+      font.name = name.value.trim() || font.name || font.id;
+      font.id = fontSlug(font.id || font.name);
+      await editorAction({action:'upsert-font',fontData:font});
+      storeLibraryFont(font);
+      loadedBaseline = fontClone(font);
       render();
+      if (editorStatus) editorStatus.textContent = statusText + font.name;
+    }
+    function currentFontSnapshot() {
+      const snapshot = fontClone(font);
+      snapshot.name = name.value.trim() || snapshot.name || snapshot.id;
+      return snapshot;
+    }
+    function currentFontIsDirty() {
+      return JSON.stringify(currentFontSnapshot()) !== JSON.stringify(loadedBaseline);
+    }
+    function requestImportPicker() {
+      painting = null;
+      importInput.value = '';
+      try {
+        if (typeof importInput.showPicker === 'function') {
+          importInput.showPicker();
+          return;
+        }
+      } catch (_err) {}
+      importInput.click();
+    }
+    function closeImportConfirmation() {
+      if (!importConfirmation) return;
+      importConfirmation.remove();
+      importConfirmation = null;
+    }
+    function confirmFontImport() {
+      painting = null;
+      if (!currentFontIsDirty()) {
+        requestImportPicker();
+        return;
+      }
+      closeImportConfirmation();
+      const blocker = document.createElement('div');
+      blocker.className = 'keynope-modal-blocker';
+      blocker.setAttribute('role','presentation');
+      const prompt = document.createElement('section');
+      prompt.className = 'keynope-link-dialog keynope-discard-dialog';
+      prompt.setAttribute('role','alertdialog');
+      prompt.setAttribute('aria-modal','true');
+      const heading = document.createElement('h3');
+      heading.textContent = 'Save font changes?';
+      const message = document.createElement('p');
+      message.textContent = 'This font has unsaved edits. Save them before importing another font?';
+      const actions = document.createElement('div');
+      actions.className = 'keynope-editor-actions';
+      const save = command('Save');
+      const discard = command("Don't Save");
+      const cancel = command('Cancel');
+      const proceed = saveFirst => {
+        closeImportConfirmation();
+        pendingImportSave = saveFirst
+          ? persistCurrentFont('Saved font ').then(() => null, error => error)
+          : null;
+        requestImportPicker();
+      };
+      save.addEventListener('click',() => proceed(true));
+      discard.addEventListener('click',() => proceed(false));
+      cancel.addEventListener('click',closeImportConfirmation);
+      actions.append(save,discard,cancel);
+      prompt.append(heading,message,actions);
+      blocker.appendChild(prompt);
+      blocker.addEventListener('pointerdown',event => event.stopPropagation());
+      blocker.addEventListener('keydown',event => {
+        event.stopPropagation();
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeImportConfirmation();
+        }
+      });
+      document.body.appendChild(blocker);
+      importConfirmation = blocker;
+      requestAnimationFrame(() => save.focus());
     }
     function move(delta) {
       const index = chars.indexOf(character);
@@ -6793,7 +7011,8 @@ if (keynopeAppSurface) {
     }
     collection.addEventListener('change', () => {
       const [group,id] = collection.value.split(':');
-      const selected = group === 'DECK' ? editorState.fonts?.[id] : fontLibrary()[id];
+      const selected = group === 'DEFAULT' ? keynopeDefaultFont()
+        : group === 'DECK' ? editorState.fonts?.[id] : fontLibrary()[id];
       if (selected) loadFont(selected);
     });
     name.addEventListener('input', () => { font.name = name.value; });
@@ -6812,8 +7031,8 @@ if (keynopeAppSurface) {
     redo.addEventListener('click', redoFontEdit);
     reset.addEventListener('click', () => {
       checkpoint();
-      font.normal[character] = fontClone(base.normal[character]);
-      font.bold[character] = fontClone(base.bold[character]);
+      font.normal[character] = fontClone(loadedBaseline.normal[character]);
+      font.bold[character] = fontClone(loadedBaseline.bold[character]);
       render();
     });
     create.addEventListener('click', () => {
@@ -6828,17 +7047,42 @@ if (keynopeAppSurface) {
       copy.name = (font.name || font.id) + ' Copy';
       loadFont(copy);
     });
-    importFont.addEventListener('click', () => importInput.click());
+    importFont.addEventListener('pointerdown', event => {
+      painting = null;
+      event.stopPropagation();
+    });
+    importFont.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      confirmFontImport();
+    });
     importInput.addEventListener('change', async () => {
       const file = importInput.files?.[0];
-      if (!file) return;
+      if (!file) {
+        pendingImportSave = null;
+        return;
+      }
       try {
-        const value = JSON.parse(await file.text());
-        if (!value.normal || !value.bold) throw new Error('Not a Keynope font');
-        value.id = fontSlug(value.id || value.name || file.name.replace(/\.[^.]+$/,''));
-        value.name = value.name || value.id;
-        loadFont(fontToCellMode(value));
+        if (pendingImportSave) {
+          const saveError = await pendingImportSave;
+          if (saveError) throw saveError;
+        }
+        pendingImportSave = null;
+        const source = await file.text();
+        if (source.trimStart().startsWith('flf2a')) {
+          loadFont(parseFIGletFont(source,file.name),false);
+          await persistCurrentFont('Imported and saved FIGlet font ');
+        } else {
+          const value = JSON.parse(source);
+          if (!value.normal || !value.bold) throw new Error('Not a Keynope font');
+          value.id = fontSlug(value.id || value.name || file.name.replace(/\.[^.]+$/,''));
+          value.name = value.name || value.id;
+          loadFont(fontToCellMode(value),false);
+          await persistCurrentFont('Imported and saved Keynope font ');
+        }
       } catch (error) {
+        pendingImportSave = null;
+        render();
         if (editorStatus) editorStatus.textContent = 'Font import failed: ' + error.message;
       }
       importInput.value = '';
@@ -6853,13 +7097,8 @@ if (keynopeAppSurface) {
       setTimeout(() => URL.revokeObjectURL(link.href),1000);
     });
     saveFont.addEventListener('click', async () => {
-      font.name = name.value.trim() || font.name || font.id;
-      font.id = fontSlug(font.id || font.name);
       try {
-        await editorAction({action:'upsert-font',fontData:font});
-        storeLibraryFont(font);
-        if (editorStatus) editorStatus.textContent = 'Saved font ' + font.name;
-        render();
+        await persistCurrentFont('Saved font ');
       } catch (_err) {}
     });
     deleteFont.addEventListener('click', async () => {
@@ -6897,6 +7136,7 @@ if (keynopeAppSurface) {
     window.addEventListener('pointerup',stopPainting);
     window.addEventListener('blur',stopPainting);
     dialog._keynopeCleanup = () => {
+      closeImportConfirmation();
       window.removeEventListener('pointerup',stopPainting);
       window.removeEventListener('blur',stopPainting);
       dialog.removeEventListener('keydown',fontHistoryShortcut,true);
@@ -7506,6 +7746,7 @@ if (keynopeAppSurface) {
         discardDialog = null;
       }
       activeInlineEditor = null;
+      keynopeEditorTextEditActive = false;
       suppressSelectionTopbar = true;
       const text = save ? normalizedText(editor.value) : editor.value;
       editor.remove();
@@ -7613,6 +7854,7 @@ if (keynopeAppSurface) {
       previewEditorText(index, {...element, text:editor.value}, cursor, selectionStart, selectionEnd, sequence);
     };
     activeInlineEditor = {element: index, finish, editor};
+    keynopeEditorTextEditActive = true;
     renderEditorTopbar();
     editor.addEventListener('input', () => {
       cleanupInlineEditorEmptyColorTags(editor);
@@ -7974,8 +8216,15 @@ if (keynopeAppSurface) {
     return response.json();
   }
   function canvasTextNativeSize(element) {
+    if (canvasElementUsesFIGletFont(element)) return 0;
     if (element.kind === 'heading') return Number(element.level || 1) === 1 ? 20 : 10;
     return 0;
+  }
+  function canvasElementUsesFIGletFont(element) {
+    const id = new URLSearchParams(element && element.query || '').get('font') || '';
+    if (!id) return false;
+    const font = editorState && editorState.fonts && editorState.fonts[id] || fontLibrary()[id];
+    return !!font && font.mode === 'figlet';
   }
   function canvasTextSize(element) {
     const query = new URLSearchParams(element.query || '');
@@ -8130,7 +8379,7 @@ if (keynopeAppSurface) {
     defaultOption.textContent = 'Font: Default';
     defaultOption.selected = !query.get('font');
     select.appendChild(defaultOption);
-    const fonts = editorState && editorState.fonts || {};
+    const fonts = Object.assign({},editorState && editorState.fonts || {});
     for (const font of Object.values(fonts).sort((a,b) => String(a.name).localeCompare(String(b.name)))) {
       const option = document.createElement('option');
       option.value = font.id;
@@ -8155,6 +8404,153 @@ if (keynopeAppSurface) {
     button.title = 'Edit fonts';
     button.setAttribute('aria-label','Open font editor');
     return button;
+  }
+  function canvasTextEffectCompatible(element) {
+    return ['heading','text','text-image','bullet','page-number','image'].includes(element.kind);
+  }
+  function canvasTextBaseColour(element) {
+    const query = new URLSearchParams(element.query || '');
+    const value = element.kind === 'heading'
+      ? query.get('header') || query.get('fg')
+      : query.get('fg');
+    return /^#[0-9a-f]{6}$/i.test(value || '') ? value : '#ffffff';
+  }
+  function canvasTextEffectColourTool(index, element, key, label, fallback) {
+    const query = new URLSearchParams(element.query || '');
+    const colour = /^#[0-9a-f]{6}$/i.test(query.get(key) || '') ? query.get(key) : fallback;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'keynope-colour-tool keynope-effect-colour-tool';
+    button.title = label;
+    button.setAttribute('aria-label',label);
+    button.textContent = key === 'gradient-start' ? '1' : key === 'gradient-end' ? '2' : 'S';
+    button.style.setProperty('--keynope-tool-colour',colour);
+    button.addEventListener('pointerdown',event => event.stopPropagation());
+    button.addEventListener('click',event => {
+      event.stopPropagation();
+      openKeynopeColourPicker(button,colour,next => {
+        button.style.setProperty('--keynope-tool-colour',next);
+        updateCanvasElements(index,canvasTextEffectCompatible,updated => {
+          const values = new URLSearchParams(updated.query || '');
+          values.set(key,next);
+          updated.query = values.toString();
+        });
+      });
+    });
+    return button;
+  }
+  const gradientIconSVG = '<svg viewBox="0 0 153.9087972215293 159.1406475216288" aria-hidden="true"><g stroke-linecap="round" transform="translate(10 10) rotate(0 66.95439861076466 69.5703237608144)"><path d="M32 0 C54.83 0, 77.65 0, 101.91 0 M32 0 C49.87 0, 67.74 0, 101.91 0 M101.91 0 C123.24 0, 133.91 10.67, 133.91 32 M101.91 0 C123.24 0, 133.91 10.67, 133.91 32 M133.91 32 C133.91 61.32, 133.91 90.63, 133.91 107.14 M133.91 32 C133.91 52.53, 133.91 73.06, 133.91 107.14 M133.91 107.14 C133.91 128.47, 123.24 139.14, 101.91 139.14 M133.91 107.14 C133.91 128.47, 123.24 139.14, 101.91 139.14 M101.91 139.14 C85.86 139.14, 69.81 139.14, 32 139.14 M101.91 139.14 C76.21 139.14, 50.5 139.14, 32 139.14 M32 139.14 C10.67 139.14, 0 128.47, 0 107.14 M32 139.14 C10.67 139.14, 0 128.47, 0 107.14 M0 107.14 C0 79.77, 0 52.4, 0 32 M0 107.14 C0 79.55, 0 51.95, 0 32 M0 32 C0 10.67, 10.67 0, 32 0 M0 32 C0 10.67, 10.67 0, 32 0" stroke="#d3d3d3" stroke-width="4" fill="none"/></g><g stroke-linecap="round"><g transform="translate(99.56732649987043 18.600751810497513) rotate(0 18.276489738915757 16.610009651855705)"><path d="M0 0 C6.09 5.54, 30.46 27.68, 36.55 33.22 M0 0 C6.09 5.54, 30.46 27.68, 36.55 33.22" stroke="#d3d3d3" stroke-width="4" fill="none"/></g></g><g stroke-linecap="round"><g transform="translate(57.02634018713866 17.352570961663673) rotate(0 39.78359379052495 36.81349621600677)"><path d="M0 0 C13.26 12.27, 66.31 61.36, 79.57 73.63 M0 0 C13.26 12.27, 66.31 61.36, 79.57 73.63" stroke="#aeb7c5" stroke-width="4" fill="none"/></g></g><g stroke-linecap="round"><g transform="translate(22.30262091719692 22.236777738976002) rotate(0 56.08036307862187 52.95416222051432)"><path d="M0 0 C18.69 17.65, 93.47 88.26, 112.16 105.91 M0 0 C18.69 17.65, 93.47 88.26, 112.16 105.91" stroke="#a9c1e1" stroke-width="4" fill="none"/></g></g><g stroke-linecap="round"><g transform="translate(18.62230509217602 58.98864254259888) rotate(0 40.796714438985646 39.685383115418915)"><path d="M0 0 C13.6 13.23, 67.99 66.14, 81.59 79.37 M0 0 C13.6 13.23, 67.99 66.14, 81.59 79.37" stroke="#98b5ff" stroke-width="4" fill="none"/></g></g><g stroke-linecap="round"><g transform="translate(19.840085440606344 105.6915625531426) rotate(0 18.276489738915757 16.610009651855705)"><path d="M0 0 C6.09 5.54, 30.46 27.68, 36.55 33.22 M0 0 C6.09 5.54, 30.46 27.68, 36.55 33.22" stroke="#7e8c9f" stroke-width="4" fill="none"/></g></g></svg>';
+  const gradientIconSVGUpdated = '<svg viewBox="0 0 153.9087972215293 159.1406475216288" aria-hidden="true"><g stroke-linecap="round" transform="translate(10 10) rotate(0 66.95439861076466 69.5703237608144)"><path d="M32 0 C54.83 0, 77.65 0, 101.91 0 M32 0 C49.87 0, 67.74 0, 101.91 0 M101.91 0 C123.24 0, 133.91 10.67, 133.91 32 M101.91 0 C123.24 0, 133.91 10.67, 133.91 32 M133.91 32 C133.91 61.32, 133.91 90.63, 133.91 107.14 M133.91 32 C133.91 52.53, 133.91 73.06, 133.91 107.14 M133.91 107.14 C133.91 128.47, 123.24 139.14, 101.91 139.14 M133.91 107.14 C133.91 128.47, 123.24 139.14, 101.91 139.14 M101.91 139.14 C85.86 139.14, 69.81 139.14, 32 139.14 M101.91 139.14 C76.21 139.14, 50.5 139.14, 32 139.14 M32 139.14 C10.67 139.14, 0 128.47, 0 107.14 M32 139.14 C10.67 139.14, 0 128.47, 0 107.14 M0 107.14 C0 79.77, 0 52.4, 0 32 M0 107.14 C0 79.55, 0 51.95, 0 32 M0 32 C0 10.67, 10.67 0, 32 0 M0 32 C0 10.67, 10.67 0, 32 0" stroke="#d3d3d3" stroke-width="4" fill="none"/></g><g stroke-linecap="round" transform="translate(17.62625447491814 110.17259558529452) rotate(43.08751673172199 27.011324539939437 5.338315233372214)"><path d="M0 0 L54.02 0 L54.02 10.68 L0 10.68" stroke="none" stroke-width="0" fill="#3a5392"/><path d="M0 0 C13.41 0, 26.81 0, 54.02 0 M0 0 C17.13 0, 34.26 0, 54.02 0 M54.02 0 C54.02 3.96, 54.02 7.93, 54.02 10.68 M54.02 0 C54.02 3.9, 54.02 7.79, 54.02 10.68 M54.02 10.68 C32.45 10.68, 10.88 10.68, 0 10.68 M54.02 10.68 C39.59 10.68, 25.15 10.68, 0 10.68 M0 10.68 C0 8.19, 0 5.7, 0 0 M0 10.68 C0 7.75, 0 4.83, 0 0" stroke="#ededed00" stroke-width="2" fill="none"/></g><g stroke-linecap="round" transform="translate(7.566397009479033 85.60613862164871) rotate(43.08751673172199 56.933438022769224 6.300258240863599)"><path d="M0 0 L113.87 0 L113.87 12.6 L0 12.6" stroke="none" stroke-width="0" fill="#326eb7"/><path d="M0 0 C23.08 0, 46.16 0, 113.87 0 M0 0 C35.05 0, 70.1 0, 113.87 0 M113.87 0 C113.87 4.64, 113.87 9.29, 113.87 12.6 M113.87 0 C113.87 2.66, 113.87 5.33, 113.87 12.6 M113.87 12.6 C69.55 12.6, 25.24 12.6, 0 12.6 M113.87 12.6 C80.36 12.6, 46.86 12.6, 0 12.6 M0 12.6 C0 9, 0 5.41, 0 0 M0 12.6 C0 9.65, 0 6.7, 0 0" stroke="#ededed00" stroke-width="2" fill="none"/></g><g stroke-linecap="round" transform="translate(20.420155546049273 62.732283887705194) rotate(43.08751673172199 63.270123077228845 6.162671542806919)"><path d="M0 0 L126.54 0 L126.54 12.33 L0 12.33" stroke="none" stroke-width="0" fill="#a797ff"/><path d="M0 0 C31.91 0, 63.82 0, 126.54 0 M0 0 C42.53 0, 85.06 0, 126.54 0 M126.54 0 C126.54 4.62, 126.54 9.23, 126.54 12.33 M126.54 0 C126.54 4.65, 126.54 9.3, 126.54 12.33 M126.54 12.33 C101.05 12.33, 75.56 12.33, 0 12.33 M126.54 12.33 C100.55 12.33, 74.55 12.33, 0 12.33 M0 12.33 C0 8.02, 0 3.71, 0 0 M0 12.33 C0 7.44, 0 2.56, 0 0" stroke="#ededed00" stroke-width="2" fill="none"/></g><g stroke-linecap="round" transform="translate(63.73648998932754 43.32131056054317) rotate(43.08751673172199 40.70384275507729 6.366686316751725)"><path d="M0 0 L81.41 0 L81.41 12.73 L0 12.73" stroke="none" stroke-width="0" fill="#a954be"/><path d="M0 0 C20.96 0, 41.92 0, 81.41 0 M0 0 C17.3 0, 34.6 0, 81.41 0 M81.41 0 C81.41 2.87, 81.41 5.74, 81.41 12.73 M81.41 0 C81.41 3.77, 81.41 7.54, 81.41 12.73 M81.41 12.73 C53.53 12.73, 25.65 12.73, 0 12.73 M81.41 12.73 C50.34 12.73, 19.27 12.73, 0 12.73 M0 12.73 C0 9.12, 0 5.51, 0 0 M0 12.73 C0 8.87, 0 5, 0 0" stroke="#ededed00" stroke-width="2" fill="none"/></g><g stroke-linecap="round" transform="translate(107.92600432535778 24.785304486144582) rotate(43.08751673172199 14.449976120419933 5.419813935548689)"><path d="M0 0 L28.9 0 L28.9 10.84 L0 10.84" stroke="none" stroke-width="0" fill="#e28af8"/><path d="M0 0 C8.29 0, 16.57 0, 28.9 0 M0 0 C10.01 0, 20.02 0, 28.9 0 M28.9 0 C28.9 3.78, 28.9 7.55, 28.9 10.84 M28.9 0 C28.9 2.81, 28.9 5.62, 28.9 10.84 M28.9 10.84 C19.41 10.84, 9.91 10.84, 0 10.84 M28.9 10.84 C20.02 10.84, 11.15 10.84, 0 10.84 M0 10.84 C0 7.66, 0 4.47, 0 0 M0 10.84 C0 8.49, 0 6.14, 0 0" stroke="#ededed00" stroke-width="2" fill="none"/></g><g stroke-linecap="round" transform="translate(19.585928800421016 128.97159008246564) rotate(43.08751673172199 7.255875885249793 3.3891711946313023)"><path d="M0 0 L14.51 0 L14.51 6.78 L0 6.78" stroke="none" stroke-width="0" fill="#342e50"/><path d="M0 0 C3.13 0, 6.26 0, 14.51 0 M0 0 C4.85 0, 9.7 0, 14.51 0 M14.51 0 C14.51 1.74, 14.51 3.48, 14.51 6.78 M14.51 0 C14.51 2.14, 14.51 4.28, 14.51 6.78 M14.51 6.78 C9.61 6.78, 4.71 6.78, 0 6.78 M14.51 6.78 C9.06 6.78, 3.62 6.78, 0 6.78 M0 6.78 C0 4.82, 0 2.87, 0 0 M0 6.78 C0 5.39, 0 4.01, 0 0" stroke="#ededed00" stroke-width="2" fill="none"/></g></svg>';
+  const shadowIconSVG = '<svg viewBox="0 0 163.13853308832267 159.1406475216288" aria-hidden="true"><g stroke-linecap="round" transform="translate(10 10) rotate(0 71.56926654416134 69.5703237608144)"><path d="M32 0 C57.84 0, 83.68 0, 111.14 0 M32 0 C52.23 0, 72.46 0, 111.14 0 M111.14 0 C132.47 0, 143.14 10.67, 143.14 32 M111.14 0 C132.47 0, 143.14 10.67, 143.14 32 M143.14 32 C143.14 61.32, 143.14 90.63, 143.14 107.14 M143.14 32 C143.14 52.53, 143.14 73.06, 143.14 107.14 M143.14 107.14 C143.14 128.47, 132.47 139.14, 111.14 139.14 M143.14 107.14 C143.14 128.47, 132.47 139.14, 111.14 139.14 M111.14 139.14 C92.97 139.14, 74.81 139.14, 32 139.14 M111.14 139.14 C82.04 139.14, 52.94 139.14, 32 139.14 M32 139.14 C10.67 139.14, 0 128.47, 0 107.14 M32 139.14 C10.67 139.14, 0 128.47, 0 107.14 M0 107.14 C0 79.77, 0 52.4, 0 32 M0 107.14 C0 79.55, 0 51.95, 0 32 M0 32 C0 10.67, 10.67 0, 32 0 M0 32 C0 10.67, 10.67 0, 32 0" stroke="#d3d3d3" stroke-width="4" fill="none"/></g><g stroke-linecap="round" transform="translate(82.0625244307123 71.18881275449843) rotate(279.66502197747724 20.237998533453037 37.87154105411523)"><path d="M21 0 L40.48 38 L21 75.74 L0 38" stroke="none" stroke-width="0" fill="#b3b3b3" fill-rule="evenodd"/><path d="M21 0 C25.75 9.27, 30.5 18.53, 40.48 38 M21 0 C25.91 9.59, 30.83 19.17, 40.48 38 M40.48 38 C35.26 48.1, 30.05 58.2, 21 75.74 M40.48 38 C32.93 52.61, 25.39 67.23, 21 75.74 M21 75.74 C14.76 64.53, 8.52 53.32, 0 38 M21 75.74 C12.85 61.1, 4.7 46.45, 0 38 M0 38 C5.07 28.82, 10.15 19.64, 21 0 M0 38 C6.4 26.42, 12.8 14.83, 21 0" stroke="#b7bcc1" stroke-width="2" fill="none"/></g><g stroke-linecap="round" transform="translate(25.19226172631261 25.187629560892788) rotate(0 38.29781640926376 37.87154105411523)"><path d="M39 0 C53.12 14.27, 67.24 28.54, 76.6 38 M39 0 C47.31 8.4, 55.61 16.79, 76.6 38 M76.6 38 C67 47.64, 57.4 57.27, 39 75.74 M76.6 38 C68.5 46.12, 60.41 54.25, 39 75.74 M39 75.74 C27.92 65.02, 16.85 54.3, 0 38 M39 75.74 C24.64 61.85, 10.28 47.95, 0 38 M0 38 C11.21 27.08, 22.42 16.16, 39 0 M0 38 C8.74 29.48, 17.48 20.97, 39 0" stroke="#d3d3d3" stroke-width="4" fill="none"/></g></svg>';
+  function closeCanvasTextEffectDropdown() {
+    if (!activeCanvasTextEffectDropdown) return;
+    document.removeEventListener('pointerdown',activeCanvasTextEffectDropdown.dismiss,true);
+    activeCanvasTextEffectDropdown.menu.remove();
+    activeCanvasTextEffectDropdown = null;
+  }
+  function openCanvasTextEffectDropdown(anchor, options, current, onSelect) {
+    closeCanvasTextEffectDropdown();
+    const menu = document.createElement('div');
+    menu.className = 'keynope-text-effect-dropdown';
+    menu.setAttribute('role','menu');
+    for (const [value,label] of options) {
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.textContent = label;
+      option.classList.toggle('active',value === current);
+      option.setAttribute('role','menuitemradio');
+      option.setAttribute('aria-checked',value === current ? 'true' : 'false');
+      option.addEventListener('click',event => {
+        event.stopPropagation();
+        closeCanvasTextEffectDropdown();
+        onSelect(value);
+      });
+      menu.appendChild(option);
+    }
+    document.body.appendChild(menu);
+    menu.addEventListener('keydown',event => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeCanvasTextEffectDropdown();
+      anchor.focus();
+    });
+    const anchorRect = anchor.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    menu.style.left = Math.max(8,Math.min(innerWidth-menuRect.width-8,anchorRect.left)) + 'px';
+    menu.style.top = Math.max(8,Math.min(innerHeight-menuRect.height-8,anchorRect.bottom+6)) + 'px';
+    const dismiss = event => {
+      if (!menu.contains(event.target) && event.target !== anchor) closeCanvasTextEffectDropdown();
+    };
+    activeCanvasTextEffectDropdown = {anchor,menu,dismiss};
+    document.addEventListener('pointerdown',dismiss,true);
+    menu.firstElementChild?.focus();
+  }
+  function canvasTextGradientTools(container,index,element) {
+    const query = new URLSearchParams(element.query || '');
+    const active = !!query.get('gradient-start') && !!query.get('gradient-end');
+    const direction = query.get('gradient-dir') || 'horizontal';
+    let toggle;
+    toggle = canvasTool('', (active ? 'active ' : '') + 'keynope-icon-button keynope-text-effect-button', () => {
+      const baseColour = canvasTextBaseColour(element);
+      openCanvasTextEffectDropdown(toggle,[['','Off'],['horizontal','Horizontal'],['vertical','Vertical'],['diagonal','Diagonal']],active ? direction : '',value => {
+        updateCanvasElements(index,canvasTextEffectCompatible,updated => {
+          const values = new URLSearchParams(updated.query || '');
+          if (!value) {
+            values.delete('gradient-start');
+            values.delete('gradient-end');
+          } else {
+            if (!values.get('gradient-start')) values.set('gradient-start',baseColour);
+            if (!values.get('gradient-end')) values.set('gradient-end','#55ffff');
+            values.set('gradient-dir',value);
+          }
+          updated.query = values.toString();
+        });
+      });
+    });
+    toggle.innerHTML = gradientIconSVGUpdated;
+    toggle.title = active ? 'Change gradient' : 'Add gradient';
+    toggle.setAttribute('aria-label',toggle.title);
+    toggle.setAttribute('aria-pressed',active ? 'true' : 'false');
+    container.appendChild(toggle);
+    if (active) {
+      container.appendChild(canvasTextEffectColourTool(index,element,'gradient-start','Pick gradient start colour',canvasTextBaseColour(element)));
+      container.appendChild(canvasTextEffectColourTool(index,element,'gradient-end','Pick gradient end colour','#55ffff'));
+    }
+  }
+  function canvasTextShadowTools(container,index,element) {
+    const query = new URLSearchParams(element.query || '');
+    const shadow = query.get('shadow') || '';
+    let button;
+    button = canvasTool('', (shadow ? 'active ' : '') + 'keynope-icon-button keynope-text-effect-button', () => {
+      openCanvasTextEffectDropdown(button,[['','Off'],['soft','Soft'],['solid','Hard']],shadow,value => {
+        updateCanvasElements(index,canvasTextEffectCompatible,updated => {
+          const values = new URLSearchParams(updated.query || '');
+          if (!value) {
+            values.delete('shadow');
+            values.delete('shadow-color');
+            values.delete('shadow-x');
+            values.delete('shadow-y');
+          } else {
+            values.set('shadow',value);
+            if (!values.get('shadow-color')) values.set('shadow-color','#ffffff');
+            if (!values.get('shadow-x')) values.set('shadow-x','1');
+            if (!values.get('shadow-y')) values.set('shadow-y','1');
+          }
+          updated.query = values.toString();
+        });
+      });
+    });
+    button.innerHTML = shadowIconSVG;
+    button.title = shadow ? 'Change shadow' : 'Add shadow';
+    button.setAttribute('aria-label',button.title);
+    button.setAttribute('aria-pressed',shadow ? 'true' : 'false');
+    container.appendChild(button);
+    if (shadow) container.appendChild(canvasTextEffectColourTool(index,element,'shadow-color','Pick shadow colour','#ffffff'));
+  }
+  function appendCanvasTypographyEffectTools(container,index,element) {
+    canvasTextGradientTools(container,index,element);
+    canvasTextShadowTools(container,index,element);
   }
   function canvasColourTool(index, element, renderedColour) {
     const query = new URLSearchParams(element.query || '');
@@ -8486,6 +8882,7 @@ if (keynopeAppSurface) {
     return button;
   }
   function renderEditorTopbar() {
+    closeCanvasTextEffectDropdown();
     publishEditorDirtyState();
     const slide = editorState && editorState.slides && editorState.slides[editorState.current];
     const masterPageNumberMode = slide ? (slide.pageNumber || '') : '';
@@ -8583,6 +8980,7 @@ if (keynopeAppSurface) {
       selectionTopbar.appendChild(canvasFontSelect(textIndex, textElement));
       selectionTopbar.appendChild(canvasFontEditorTool(textElement));
       selectionTopbar.appendChild(canvasColourTool(textIndex, textElement, ''));
+      if (selectedElements.some(canvasTextEffectCompatible)) appendCanvasTypographyEffectTools(selectionTopbar,textIndex,textElement);
       if (selectedElements.length === 1) selectionTopbar.appendChild(canvasLinkTool(textIndex, query));
     }
     if (!selectedText && shapeElement) selectionTopbar.appendChild(canvasColourTool(shapeIndex, shapeElement, ''));
@@ -8990,6 +9388,7 @@ if (keynopeAppSurface) {
     if (rotatableText) actions.appendChild(canvasTool('⟳', '', () => rotateCanvasText(index)));
     if (selectedText && element.kind !== 'code') actions.appendChild(canvasStyleSelect(index, element));
     if (selectedText || element.kind === 'shape') actions.appendChild(canvasColourTool(index, element, ''));
+    if (canvasTextEffectCompatible(element)) appendCanvasTypographyEffectTools(actions,index,element);
     if (selectedText) actions.appendChild(canvasLinkTool(index, query));
     if (element.kind === 'shape') appendCanvasShapeKindTools(actions, index, query);
     actions.appendChild(canvasOutlineTool(index, element, query));
@@ -10084,7 +10483,7 @@ func textPlacementComment(line string) (string, bool) {
 	}
 	values := url.Values{}
 	if parsed, err := url.ParseQuery(match[1]); err == nil {
-		for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "font", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "link", "slide", "master-clear"} {
+		for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "font", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "link", "slide", "master-clear"} {
 			for _, value := range parsed[key] {
 				addPlacementValue(values, key, value)
 			}
@@ -10187,6 +10586,24 @@ func addPlacementValue(values url.Values, key, value string) {
 		if _, ok := ansiFG(value); ok {
 			values.Set("header", normalizeColourValue(value))
 		}
+	case "gradient-start", "gradient-end", "shadow-color":
+		if _, ok := ansiFG(value); ok {
+			values.Set(key, normalizeColourValue(value))
+		}
+	case "gradient-dir":
+		switch strings.ToLower(value) {
+		case "horizontal", "vertical", "diagonal":
+			values.Set("gradient-dir", strings.ToLower(value))
+		}
+	case "shadow":
+		switch strings.ToLower(value) {
+		case "soft", "solid":
+			values.Set("shadow", strings.ToLower(value))
+		}
+	case "shadow-x", "shadow-y":
+		if parsed, err := strconv.Atoi(value); err == nil {
+			values.Set(key, strconv.Itoa(clampInt(parsed, -4, 4)))
+		}
 	case "glyph":
 		switch strings.ToLower(value) {
 		case "blocks", "block":
@@ -10236,7 +10653,7 @@ func placementCommentText(query string) string {
 		return query
 	}
 	var fields []string
-	for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "font", "fg", "bg", "header", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "slide", "link", "master-clear"} {
+	for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "font", "fg", "bg", "header", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "slide", "link", "master-clear"} {
 		if value := values.Get(key); value != "" {
 			if key == "link" {
 				fields = append(fields, key+"="+url.QueryEscape(value))
@@ -17099,6 +17516,15 @@ func bulletCaretMetrics(element Element, width, cursor int) (int, int, int) {
 
 func textImageScale(element Element) float64 {
 	values, _ := url.ParseQuery(element.Query)
+	if _, mode, _, ok := elementDeckFontRenderDetails(element, false); ok && mode == deckFontModeFiglet {
+		if values.Get("keynope_figlet_visual") != "1" {
+			return 1
+		}
+		if scale, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && scale > 0 {
+			return scale
+		}
+		return 1
+	}
 	if scale, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && scale > 0 {
 		return scale
 	}
@@ -17122,11 +17548,11 @@ func textImageBulletItemCaretMetrics(element Element, current string, cursor, wi
 	contentWidth := max(1, width-prefixWidth)
 	glyphWidth := max(1, int(math.Ceil(4*scale)))
 	boldWidth := max(glyphWidth, int(math.Ceil(5*scale)))
-	if font, ok := elementDeckFont(element, false); ok {
-		glyphWidth = max(1, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/2)))
+	if width, ok := scaledDeckFontGlyphWidth(element, false, scale); ok {
+		glyphWidth = width
 	}
-	if font, ok := elementDeckFont(element, true); ok {
-		boldWidth = max(glyphWidth, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/2)))
+	if width, ok := scaledDeckFontGlyphWidth(element, true, scale); ok {
+		boldWidth = max(glyphWidth, width)
 	}
 	runes := []rune(current)
 	cursor = max(0, min(cursor, len(runes)))
@@ -17434,8 +17860,8 @@ func editGlyphWidth(element Element) int {
 		if parsed, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && parsed > 0 {
 			scale = parsed
 		}
-		if font, ok := elementDeckFont(element, false); ok {
-			return max(1, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/2)))
+		if width, ok := scaledDeckFontGlyphWidth(element, false, scale); ok {
+			return width
 		}
 		if values.Get("source") == "bitmap" {
 			return max(1, int(math.Round(4*scale)))
@@ -17922,6 +18348,9 @@ func textSize(element Element) int {
 		}
 		return sizeFromLegacyScale(values.Get("source"), scale)
 	}
+	if _, mode, _, ok := elementDeckFontRenderDetails(element, false); ok && mode == deckFontModeFiglet {
+		return textSizeNormal
+	}
 	if element.Kind == "heading" {
 		if element.Level == 1 {
 			return textSizeTitle
@@ -17979,6 +18408,9 @@ func ensureTextImageRender(element *Element) {
 }
 
 func nativeTextSize(element Element) int {
+	if _, mode, _, ok := elementDeckFontRenderDetails(element, false); ok && mode == deckFontModeFiglet {
+		return textSizeNormal
+	}
 	if element.Kind == "heading" {
 		if element.Level == 1 {
 			return textSizeTitle
@@ -18240,10 +18672,13 @@ func shiftCursorKeys(cursor map[int]int, start, delta int) {
 
 func renderElementRows(element Element, width int) []string {
 	orientation := textOrientation(element)
+	var rows []string
 	if !isRotatableTextElement(element) || orientation == "" {
-		return renderElementRowsBase(element, width)
+		rows = renderElementRowsBase(element, width)
+	} else {
+		rows = renderRotatedTextImageElement(element, width, orientation)
 	}
-	return renderRotatedTextImageElement(element, width, orientation)
+	return padTextRowsForShadow(element, rows)
 }
 
 func renderElementRowsBase(element Element, width int) []string {
@@ -18580,6 +19015,7 @@ func layout(slide Slide, width, height int) []Line {
 			}
 			maxImageRows = constrainedElementHeight(imageElement, maxImageRows)
 			rows := renderImageElementRows(imageElement, maxImageWidth, maxImageRows)
+			rows = padTextRowsForShadow(imageElement, rows)
 			imageWidth := maxLineDisplayWidth(rows)
 			row := placementTopRow(placement, height, len(rows), currentRow)
 			col := 0
@@ -18696,7 +19132,8 @@ func layout(slide Slide, width, height int) []Line {
 	}
 	lines := append(masterBackLines, masterFrontLines...)
 	lines = append(lines, backLines...)
-	return append(lines, frontLines...)
+	lines = append(lines, frontLines...)
+	return applyTextElementEffects(lines, slide)
 }
 
 func renderImagePlaceholderRows(element Element, maxWidth, maxHeight int) []string {
@@ -19979,11 +20416,11 @@ func renderTextImageBulletElement(element Element, width int, scale float64) []s
 	renderLine := func(text string, showMarker bool) {
 		normalWidth := max(1, int(math.Ceil(4*scale)))
 		boldWidth := max(normalWidth, int(math.Ceil(5*scale)))
-		if font, ok := elementDeckFont(element, false); ok {
-			normalWidth = max(1, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/2)))
+		if width, ok := scaledDeckFontGlyphWidth(element, false, scale); ok {
+			normalWidth = width
 		}
-		if font, ok := elementDeckFont(element, true); ok {
-			boldWidth = max(normalWidth, int(math.Ceil(float64(deckFontMaxWidth(font))*scale/2)))
+		if width, ok := scaledDeckFontGlyphWidth(element, true, scale); ok {
+			boldWidth = max(normalWidth, width)
 		}
 		chunks := wrapStyledSpans(parseMarkdownStyledSpans(text), contentWidth, normalWidth, boldWidth)
 		for chunkIndex, chunk := range chunks {
@@ -20032,8 +20469,13 @@ func renderMarkdownBitmapTextImageSpans(element Element, spans []styledTextSpan,
 		}
 		height := bitmapTextRowHeight(factor)
 		rows := renderTextWithEmoji(span.Text, height, func(text string) []string {
-			if deckFont, cells, ok := elementDeckFontDetails(element, span.Bold); ok && cells {
-				return renderScaledDeckCellFont(text, factor/2, deckFont)
+			if deckFont, mode, layout, ok := elementDeckFontRenderDetails(element, span.Bold); ok {
+				if mode == deckFontModeCells {
+					return renderScaledDeckCellFont(text, factor/2, deckFont)
+				}
+				if mode == deckFontModeFiglet {
+					return renderScaledDeckFigletFont(text, factor, deckFont, layout)
+				}
 			}
 			var mask [][]bool
 			if deckFont, ok := elementDeckFont(element, span.Bold); ok {
@@ -20127,8 +20569,13 @@ func hasTextImageStyle(query string) bool {
 func renderStyledBitmapTextImage(element Element, factor float64) []string {
 	height := bitmapTextRowHeight(factor)
 	return renderTextWithEmoji(element.Text, height, func(text string) []string {
-		if font, cells, ok := elementDeckFontDetails(element, false); ok && cells {
-			return renderScaledDeckCellFont(text, factor/2, font)
+		if font, mode, layout, ok := elementDeckFontRenderDetails(element, false); ok {
+			if mode == deckFontModeCells {
+				return renderScaledDeckCellFont(text, factor/2, font)
+			}
+			if mode == deckFontModeFiglet {
+				return renderScaledDeckFigletFont(text, factor, font, layout)
+			}
 		}
 		mask := scaledElementTextMask(element, text, factor, false)
 		if len(mask) == 0 || len(mask[0]) == 0 {
@@ -20191,8 +20638,13 @@ func renderBitmapTextImage(text string, factor float64) []string {
 func renderBitmapTextImageForElement(element Element, text string, factor float64) []string {
 	height := bitmapTextRowHeight(factor)
 	return renderTextWithEmoji(text, height, func(chunk string) []string {
-		if font, cells, ok := elementDeckFontDetails(element, false); ok && cells {
-			return renderScaledDeckCellFont(chunk, factor/2, font)
+		if font, mode, layout, ok := elementDeckFontRenderDetails(element, false); ok {
+			if mode == deckFontModeCells {
+				return renderScaledDeckCellFont(chunk, factor/2, font)
+			}
+			if mode == deckFontModeFiglet {
+				return renderScaledDeckFigletFont(chunk, factor, font, layout)
+			}
 		}
 		mask := scaledElementTextMask(element, chunk, factor, false)
 		if len(mask) == 0 {

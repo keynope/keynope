@@ -689,14 +689,15 @@ func writeNativeEditorPreview(w http.ResponseWriter, action nativeEditorAction, 
 			break
 		}
 	}
-	caret := editorCaretForElement(preview, elementIndex, action.Cursor, cols, rows, action.Page)
+	visualPreview := visualFontScaledSlide(preview)
+	caret := editorCaretForElement(visualPreview, elementIndex, action.Cursor, cols, rows, action.Page)
 	response := nativeEditorInlinePreview{Pages: pages, Caret: caret}
 	if action.SelectionStart != action.SelectionEnd {
-		start := editorCaretForElement(preview, elementIndex, min(action.SelectionStart, action.SelectionEnd), cols, rows, action.Page)
-		end := editorCaretForElement(preview, elementIndex, max(action.SelectionStart, action.SelectionEnd), cols, rows, action.Page)
+		start := editorCaretForElement(visualPreview, elementIndex, min(action.SelectionStart, action.SelectionEnd), cols, rows, action.Page)
+		end := editorCaretForElement(visualPreview, elementIndex, max(action.SelectionStart, action.SelectionEnd), cols, rows, action.Page)
 		response.SelectionStart = &start
 		response.SelectionEnd = &end
-		response.SelectionRows = editorSelectionRows(preview, elementIndex, start, end, cols, rows, action.Page)
+		response.SelectionRows = editorSelectionRows(visualPreview, elementIndex, start, end, cols, rows, action.Page)
 	}
 	_ = json.NewEncoder(w).Encode(response)
 }

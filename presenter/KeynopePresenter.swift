@@ -304,9 +304,14 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         completionHandler: @escaping ([URL]?) -> Void
     ) {
         let panel = NSOpenPanel()
-        panel.title = "Import an Image"
+        panel.title = "Import a Keynope Asset"
         panel.prompt = "Import"
-        panel.allowedContentTypes = [.image]
+        panel.allowedContentTypes = [
+            .image,
+            UTType(filenameExtension: "json"),
+            UTType(filenameExtension: "flf"),
+            UTType(filenameExtension: "tlf")
+        ].compactMap { $0 }
         panel.allowsMultipleSelection = parameters.allowsMultipleSelection
         panel.canChooseDirectories = parameters.allowsDirectories
         panel.canChooseFiles = true

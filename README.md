@@ -107,7 +107,7 @@ Effects adapt to the slide palette so they remain part of the composition on lig
 
 ## Custom Fonts
 
-The Mac and web editors include a glyph editor for creating variable-width Keynope fonts. Each font has editable Normal and Bold faces covering the 95 printable ASCII characters. Select text to choose a font, or use the `Aa` font-editor button to paint glyphs, resize their advance width, clone the default face, import/export JSON, and keep reusable fonts in your personal library.
+The Mac and web editors include a glyph editor for creating variable-width Keynope fonts. Each font covers the 95 printable ASCII characters. Select text to choose a font, or use the `Aa` font-editor button to paint glyphs, resize their advance width, clone the default face, import/export JSON or FIGlet `.flf`/`.tlf` files, and keep reusable fonts in your personal library. FIGlet mode supports literal ASCII and non-emoji Unicode cell art.
 
 Fonts referenced by a deck are stored as gzip-compressed `keynope-fonts` metadata in the Markdown file. Text elements refer to them with `font=<id>`, so the same deck renders with its chosen fonts in the terminal, Mac app, web editor, presenter, and HTML export without external font files. The desktop library stores compressed font files under `~/.keynope/fonts` for the CLI and in the Keynope application-support directory for the sandboxed Mac app; the web editor uses browser-local storage.
 

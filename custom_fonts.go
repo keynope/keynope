@@ -22,7 +22,10 @@ import (
 
 const deckFontsVersion = 1
 const deckFontMaxGlyphWidth = 32
+const deckFigletMaxGlyphWidth = 128
+const deckFigletMaxGlyphHeight = 32
 const deckFontModeCells = "cells"
+const deckFontModeFiglet = "figlet"
 
 var keynopeFontsRE = regexp.MustCompile(`<!--\s*keynope-fonts\s+version=1\s+base64:([A-Za-z0-9+/=]+)\s*-->\s*`)
 
@@ -34,7 +37,8 @@ var (
 type compiledDeckFont struct {
 	normal map[rune][]string
 	bold   map[rune][]string
-	cells  bool
+	mode   string
+	layout int
 }
 
 func cloneDeckFont(font DeckFont) DeckFont {
@@ -65,8 +69,27 @@ func normalizeDeckFont(font DeckFont) (DeckFont, error) {
 		font.Name = font.ID
 	}
 	font.Mode = strings.ToLower(strings.TrimSpace(font.Mode))
-	if font.Mode != "" && font.Mode != deckFontModeCells {
+	if font.Mode != "" && font.Mode != deckFontModeCells && font.Mode != deckFontModeFiglet {
 		return DeckFont{}, fmt.Errorf("unsupported font mode %q", font.Mode)
+	}
+	if font.Mode == deckFontModeFiglet {
+		normal, height, err := normalizeDeckFigletFace(font.Normal, font.Height)
+		if err != nil {
+			return DeckFont{}, fmt.Errorf("normal face: %w", err)
+		}
+		boldSource := font.Bold
+		if len(boldSource) == 0 {
+			boldSource = normal
+		}
+		bold, boldHeight, err := normalizeDeckFigletFace(boldSource, height)
+		if err != nil {
+			return DeckFont{}, fmt.Errorf("bold face: %w", err)
+		}
+		if boldHeight != height {
+			return DeckFont{}, errors.New("normal and bold FIGlet faces must have the same height")
+		}
+		font.Height, font.Normal, font.Bold = height, normal, bold
+		return font, nil
 	}
 	normal, err := normalizeDeckFontFace(font.Normal, c64FullFont, 8, font.Mode)
 	if err != nil {
@@ -78,6 +101,78 @@ func normalizeDeckFont(font DeckFont) (DeckFont, error) {
 	}
 	font.Normal, font.Bold = normal, bold
 	return font, nil
+}
+
+func normalizeDeckFigletFace(face map[string][]string, requestedHeight int) (map[string][]string, int, error) {
+	height := requestedHeight
+	if height <= 0 {
+		for _, rows := range face {
+			if len(rows) > 0 {
+				height = len(rows)
+				break
+			}
+		}
+	}
+	if height <= 0 || height > deckFigletMaxGlyphHeight {
+		return nil, 0, fmt.Errorf("height must be between 1 and %d", deckFigletMaxGlyphHeight)
+	}
+	fallback := face["?"]
+	out := make(map[string][]string, 95)
+	for code := 32; code <= 126; code++ {
+		character := string(rune(code))
+		rows := face[character]
+		if len(rows) == 0 {
+			rows = fallback
+		}
+		if len(rows) == 0 {
+			rows = make([]string, height)
+		}
+		if len(rows) != height {
+			return nil, 0, fmt.Errorf("%q must contain %d rows", character, height)
+		}
+		width := 1
+		for _, row := range rows {
+			if !utf8.ValidString(row) {
+				return nil, 0, fmt.Errorf("%q contains invalid UTF-8", character)
+			}
+			width = max(width, utf8.RuneCountInString(row))
+		}
+		if width > deckFigletMaxGlyphWidth {
+			return nil, 0, fmt.Errorf("%q is %d cells wide; maximum is %d", character, width, deckFigletMaxGlyphWidth)
+		}
+		normalized := make([]string, height)
+		for rowIndex, row := range rows {
+			var line strings.Builder
+			for _, cell := range row {
+				if isAllowedFigletCell(cell) {
+					line.WriteRune(cell)
+				} else {
+					line.WriteByte(' ')
+				}
+			}
+			normalized[rowIndex] = padRunes(line.String(), width)
+		}
+		out[character] = normalized
+	}
+	return out, height, nil
+}
+
+func isAllowedFigletCell(character rune) bool {
+	if character == ' ' {
+		return true
+	}
+	if character < 0x21 || character == 0x7f || character == '\u200d' || character == '\ufe0f' {
+		return false
+	}
+	// FIGlet art is character-cell artwork. Exclude emoji/pictograph planes while
+	// retaining ASCII, box drawing, blocks, mathematical symbols and dingbats.
+	switch {
+	case character >= 0x1f000 && character <= 0x1faff:
+		return false
+	case character >= 0x2600 && character <= 0x27bf:
+		return false
+	}
+	return true
 }
 
 func normalizeDeckFontID(value string) string {
@@ -322,16 +417,21 @@ func encodeDeckFonts(fonts map[string]DeckFont) (string, error) {
 }
 
 func registerDeckFonts(fonts map[string]DeckFont) {
-	compiled := make(map[string]compiledDeckFont, len(fonts))
-	for _, font := range fonts {
+	available := builtinDeckFontLibrary()
+	for id, font := range fonts {
+		available[id] = font
+	}
+	compiled := make(map[string]compiledDeckFont, len(available))
+	for _, font := range available {
 		normalized, err := normalizeDeckFont(font)
 		if err != nil {
 			continue
 		}
 		compiled[normalized.ID] = compiledDeckFont{
-			normal: compileDeckFontFace(normalized.Normal, normalized.Mode == deckFontModeCells),
-			bold:   compileDeckFontFace(normalized.Bold, normalized.Mode == deckFontModeCells),
-			cells:  normalized.Mode == deckFontModeCells,
+			normal: compileDeckFontFace(normalized.Normal, normalized.Mode),
+			bold:   compileDeckFontFace(normalized.Bold, normalized.Mode),
+			mode:   normalized.Mode,
+			layout: normalized.FigletLayout,
 		}
 	}
 	deckFontRegistryMu.Lock()
@@ -381,7 +481,7 @@ func storeDeckFontsInLibrary(fonts map[string]DeckFont) {
 }
 
 func loadDeckFontLibrary() map[string]DeckFont {
-	fonts := map[string]DeckFont{}
+	fonts := builtinDeckFontLibrary()
 	if runtime.GOOS == "js" {
 		return fonts
 	}
@@ -432,14 +532,20 @@ func removeDeckFontFromLibrary(id string) error {
 	return err
 }
 
-func compileDeckFontFace(face map[string][]string, cells bool) map[rune][]string {
+func compileDeckFontFace(face map[string][]string, mode string) map[rune][]string {
 	out := make(map[rune][]string, len(face))
 	for character, rows := range face {
 		r, _ := utf8.DecodeRuneInString(character)
 		compiledRows := make([]string, len(rows))
 		for row, line := range rows {
 			compiledRows[row] = strings.Map(func(pixel rune) rune {
-				if cells {
+				if mode == deckFontModeFiglet {
+					if isAllowedFigletCell(pixel) {
+						return pixel
+					}
+					return ' '
+				}
+				if mode == deckFontModeCells {
 					if pixel == '.' || pixel == ' ' {
 						return ' '
 					}
@@ -480,9 +586,32 @@ func elementDeckFontDetails(element Element, bold bool) (map[rune][]string, bool
 		return nil, false, false
 	}
 	if bold {
-		return font.bold, font.cells, true
+		return font.bold, font.mode == deckFontModeCells, true
 	}
-	return font.normal, font.cells, true
+	return font.normal, font.mode == deckFontModeCells, true
+}
+
+func elementDeckFontMode(element Element, bold bool) (map[rune][]string, string, bool) {
+	face, mode, _, ok := elementDeckFontRenderDetails(element, bold)
+	return face, mode, ok
+}
+
+func elementDeckFontRenderDetails(element Element, bold bool) (map[rune][]string, string, int, bool) {
+	values, _ := url.ParseQuery(element.Query)
+	id := normalizeDeckFontID(values.Get("font"))
+	if id == "" || id == "default" {
+		return nil, "", 0, false
+	}
+	deckFontRegistryMu.RLock()
+	font, ok := deckFontRegistry[id]
+	deckFontRegistryMu.RUnlock()
+	if !ok {
+		return nil, "", 0, false
+	}
+	if bold {
+		return font.bold, font.mode, font.layout, true
+	}
+	return font.normal, font.mode, font.layout, true
 }
 
 func deckFontGlyphWidth(face map[rune][]string, character rune) int {
@@ -523,6 +652,97 @@ func renderDeckFontRaw(text string, face map[rune][]string) []string {
 				line = glyph[row]
 			}
 			rows[row] += padRunes(line, width)
+		}
+	}
+	return rows
+}
+
+func renderScaledDeckFigletFont(text string, factor float64, face map[rune][]string, layout int) []string {
+	raw := renderDeckFigletRaw(text, face, layout)
+	if len(raw) == 0 {
+		return nil
+	}
+	factor = math.Max(0.25, factor)
+	if math.Abs(factor-1) < 0.0001 {
+		return trimBlank(raw)
+	}
+	sourceHeight, sourceWidth := len(raw), maxLineDisplayWidth(raw)
+	if sourceWidth == 0 {
+		return raw
+	}
+	source := make([][]rune, sourceHeight)
+	for row := range raw {
+		source[row] = []rune(padRunes(raw[row], sourceWidth))
+	}
+	targetHeight := max(1, int(math.Round(float64(sourceHeight)*factor)))
+	targetWidth := max(1, int(math.Round(float64(sourceWidth)*factor)))
+	out := make([]string, targetHeight)
+	for y := range out {
+		sourceY := min(sourceHeight-1, int(float64(y)/factor))
+		var row strings.Builder
+		for x := 0; x < targetWidth; x++ {
+			sourceX := min(sourceWidth-1, int(float64(x)/factor))
+			row.WriteRune(source[sourceY][sourceX])
+		}
+		out[y] = row.String()
+	}
+	return trimBlank(out)
+}
+
+func scaledDeckFontGlyphWidth(element Element, bold bool, scale float64) (int, bool) {
+	font, mode, _, ok := elementDeckFontRenderDetails(element, bold)
+	if !ok {
+		return 0, false
+	}
+	width := float64(deckFontMaxWidth(font)) * scale
+	if mode != deckFontModeFiglet {
+		width /= 2
+	}
+	return max(1, int(math.Ceil(width))), true
+}
+
+func renderDeckFigletRaw(text string, face map[rune][]string, layout int) []string {
+	height := 0
+	for _, glyph := range face {
+		height = max(height, len(glyph))
+	}
+	rows := make([]string, max(1, height))
+	for _, character := range text {
+		glyph := face[character]
+		if glyph == nil {
+			glyph = face['?']
+		}
+		width := deckFontGlyphWidth(face, character)
+		padded := make([]string, len(rows))
+		for row := range padded {
+			if row < len(glyph) {
+				padded[row] = padRunes(glyph[row], width)
+			} else {
+				padded[row] = strings.Repeat(" ", width)
+			}
+		}
+		overlap := 0
+		if layout&64 != 0 && len(strings.TrimSpace(strings.Join(rows, ""))) > 0 {
+			overlap = width
+			for row := range rows {
+				trailing := utf8.RuneCountInString(rows[row]) - utf8.RuneCountInString(strings.TrimRight(rows[row], " "))
+				leading := utf8.RuneCountInString(padded[row]) - utf8.RuneCountInString(strings.TrimLeft(padded[row], " "))
+				overlap = min(overlap, trailing+leading)
+			}
+		}
+		for row := range rows {
+			current, incoming := []rune(rows[row]), []rune(padded[row])
+			rowOverlap := min(overlap, len(current))
+			start := len(current) - rowOverlap
+			merged := make([]rune, max(len(current), start+len(incoming)))
+			copy(merged, current)
+			for index, cell := range incoming {
+				target := start + index
+				if target >= len(current) || cell != ' ' {
+					merged[target] = cell
+				}
+			}
+			rows[row] = string(merged)
 		}
 	}
 	return rows

@@ -234,7 +234,41 @@ func TestWebExportUsesPresentationCanvasRenderer(t *testing.T) {
 		"function blendCSSForTransparency(color, overlay)",
 		"delayMs: Math.max(1, Number(frame.delayMs) || 70)",
 		"contentAnimationElapsedMS % totalDelay",
-		"if (!keynopeEditorSelectionActive) contentAnimationElapsedMS += elapsedMS;",
+		"if (!keynopeEditorSelectionActive && !keynopeEditorTextEditActive) contentAnimationElapsedMS += elapsedMS;",
+		"if (!keynopeEditorTextEditActive) frame++;",
+		"keynopeEditorTextEditActive = true;",
+		"keynopeEditorTextEditActive = false;",
+		"function canvasTextGradientTools(container,index,element)",
+		"function canvasTextShadowTools(container,index,element)",
+		"const gradientIconSVGUpdated = '<svg viewBox=\"0 0 153.9087972215293 159.1406475216288\"",
+		"toggle.innerHTML = gradientIconSVGUpdated;",
+		"fill=\"#3a5392\"",
+		"fill=\"#326eb7\"",
+		"fill=\"#a797ff\"",
+		"fill=\"#a954be\"",
+		"fill=\"#e28af8\"",
+		"fill=\"#342e50\"",
+		"const shadowIconSVG = '<svg viewBox=\"0 0 163.13853308832267 159.1406475216288\"",
+		"function openCanvasTextEffectDropdown(anchor, options, current, onSelect)",
+		"menu.className = 'keynope-text-effect-dropdown';",
+		"openCanvasTextEffectDropdown(toggle,[['','Off'],['horizontal','Horizontal'],['vertical','Vertical'],['diagonal','Diagonal']]",
+		"openCanvasTextEffectDropdown(button,[['','Off'],['soft','Soft'],['solid','Hard']]",
+		"['horizontal','Horizontal']",
+		"['soft','Soft'],['solid','Hard']",
+		"toggle.setAttribute('aria-pressed',active ? 'true' : 'false');",
+		"button.setAttribute('aria-pressed',shadow ? 'true' : 'false');",
+		"values.set('gradient-start',baseColour);",
+		"values.set('shadow-color','#ffffff');",
+		"keynope.textContent = 'Keynope (Default)';",
+		"importInput.accept = '.json,.flf,.tlf,application/json,text/plain';",
+		"if (source.trimStart().startsWith('flf2a')) {",
+		"function canvasElementUsesFIGletFont(element)",
+		"await persistCurrentFont('Imported and saved FIGlet font ');",
+		"await persistCurrentFont('Imported and saved Keynope font ');",
+		"heading.textContent = 'Save font changes?';",
+		"function currentFontIsDirty()",
+		"importInput.value = '';",
+		"if (typeof importInput.showPicker === 'function')",
 		"contentFrame.delayMs - position",
 		"function canvasElementIsGIF(element)",
 		"return glyph === '' || glyph === 'blocks' || glyph === 'block';",
@@ -316,7 +350,7 @@ func TestWebExportUsesPresentationCanvasRenderer(t *testing.T) {
 	if strings.Contains(javascript, "tools.className = 'keynope-selection-tools'") {
 		t.Fatal("windowed editor still mounts element controls over the canvas")
 	}
-	for _, removedStyle := range []string{"Style: Half", "Style: Vertical", "['half','Half']", "['vertical','Vertical']"} {
+	for _, removedStyle := range []string{"Style: Half", "Style: Vertical", "['half','Half']"} {
 		if strings.Contains(javascript, removedStyle) {
 			t.Fatalf("windowed editor still offers removed image style %q", removedStyle)
 		}
