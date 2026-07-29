@@ -3,7 +3,7 @@ name: Test And Build Artifacts
 on:
   push:
     branches:
-      - "**"
+      - main
     paths:
       - "*.go"
       - "presenter/**"
@@ -39,8 +39,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release-state:
+    name: Check Release State
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      release_needed: ${{ steps.release.outputs.release_needed }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve Version And Existing Tag
+        id: release
+        shell: bash
+        run: |
+          heading_pattern='^[[:space:]]*##[[:space:]]+v?([0-9]+\.[0-9]+\.[0-9]+)([[:space:]]|$)'
+          version=""
+
+          while IFS= read -r line; do
+            if [[ "$line" =~ $heading_pattern ]]; then
+              version="${BASH_REMATCH[1]}"
+              break
+            fi
+          done < CHANGELOG.md
+
+          if [[ -z "$version" ]]; then
+            echo "Could not find semantic version heading in CHANGELOG.md" >&2
+            exit 1
+          fi
+
+          release_needed=true
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]] &&
+             [[ "${{ github.event_name }}" == "push" || "${{ github.event_name }}" == "workflow_dispatch" ]] &&
+             git ls-remote --exit-code --tags origin "refs/tags/$version" >/dev/null 2>&1; then
+            release_needed=false
+            echo "Release tag $version already exists; skipping build, signing, publishing, and Homebrew update."
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release_needed=$release_needed" >> "$GITHUB_OUTPUT"
+          echo "Version: $version" >> "$GITHUB_STEP_SUMMARY"
+          echo "Release needed: $release_needed" >> "$GITHUB_STEP_SUMMARY"
+
   test-and-build:
     name: Test And Build (${{ matrix.arch }})
+    needs: release-state
+    if: needs.release-state.outputs.release_needed == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -102,8 +149,10 @@ jobs:
 
   release-build:
     name: Sign And Notarize (${{ matrix.arch }})
-    needs: test-and-build
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    needs:
+      - release-state
+      - test-and-build
+    if: needs.release-state.outputs.release_needed == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     environment: release
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -351,8 +400,10 @@ jobs:
 
   publish:
     name: Publish Release
-    needs: release-build
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    needs:
+      - release-state
+      - release-build
+    if: needs.release-state.outputs.release_needed == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: macos-14
     timeout-minutes: 15
     permissions:
@@ -430,3 +481,80 @@ jobs:
           gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS \
             --repo "${{ github.repository }}" \
             --clobber
+
+  homebrew:
+    name: Update Homebrew Cask
+    needs:
+      - release-state
+      - publish
+    if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && (needs.release-state.outputs.release_needed == 'false' || needs.publish.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download Published Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release-state.outputs.version }}
+        run: |
+          mkdir -p dist
+          gh release download "$VERSION" \
+            --repo "${{ github.repository }}" \
+            --pattern "keynope-mac-arm64.tar.gz" \
+            --pattern "keynope-mac-amd64.tar.gz" \
+            --dir dist
+
+      - name: Checkout Homebrew Tap
+        uses: actions/checkout@v6
+        with:
+          repository: keynope/homebrew-keynope
+          ssh-key: ${{ secrets.HOMEBREW_DEPLOY_KEY }}
+          path: homebrew-keynope
+
+      - name: Update Version And Checksums
+        shell: bash
+        env:
+          VERSION: ${{ needs.release-state.outputs.version }}
+        run: |
+          arm_archive="dist/keynope-mac-arm64.tar.gz"
+          intel_archive="dist/keynope-mac-amd64.tar.gz"
+          cask="homebrew-keynope/Casks/keynope.rb"
+
+          test -s "$arm_archive"
+          test -s "$intel_archive"
+          test -f "$cask"
+
+          export ARM_SHA
+          export INTEL_SHA
+          ARM_SHA="$(sha256sum "$arm_archive" | awk '{ print $1 }')"
+          INTEL_SHA="$(sha256sum "$intel_archive" | awk '{ print $1 }')"
+
+          perl -0pi -e '
+            s/version "[^"]+"/version "$ENV{VERSION}"/;
+            s/(sha256 arm:\s+)"[^"]+"/$1"$ENV{ARM_SHA}"/;
+            s/(\n\s+intel:\s+)"[^"]+"/$1"$ENV{INTEL_SHA}"/;
+          ' "$cask"
+
+          grep -Fq "version \"$VERSION\"" "$cask"
+          grep -Fq "\"$ARM_SHA\"" "$cask"
+          grep -Fq "\"$INTEL_SHA\"" "$cask"
+
+      - name: Commit And Push Homebrew Update
+        shell: bash
+        env:
+          VERSION: ${{ needs.release-state.outputs.version }}
+        run: |
+          git -C homebrew-keynope config user.name "keynope-release-bot"
+          git -C homebrew-keynope config user.email "actions@users.noreply.github.com"
+          git -C homebrew-keynope add Casks/keynope.rb
+
+          if git -C homebrew-keynope diff --cached --quiet; then
+            echo "Homebrew cask already matches Keynope $VERSION."
+            exit 0
+          fi
+
+          git -C homebrew-keynope commit -m "Update Keynope to $VERSION"
+          git -C homebrew-keynope push origin HEAD:main
