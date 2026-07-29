@@ -886,56 +886,9 @@ func createStarterDeck(path string) (string, error) {
 }
 
 func starterDeckMarkdown(width, height int) string {
-	charsPerLine := max(24, min(72, (width-8)/4))
-	reservedRows := 18
-	lineCount := max(2, min(6, (height-reservedRows)/4))
-	lines := loremLines(charsPerLine, lineCount)
-	var out strings.Builder
-	fmt.Fprintf(&out, "<!-- keynope width=%d height=%d -->\n\n", width, height)
-	if metadata, err := encodeMasterDeckMetadata(defaultMasterDeck()); err == nil {
-		out.WriteString(metadata)
-		out.WriteString("\n\n")
-	}
-	out.WriteString("<!-- layout=title-subtitle -->\n\n")
-	out.WriteString("<!-- master-slot=title-subtitle-title -->\n")
-	out.WriteString("# Title\n\n")
-	out.WriteString("<!-- master-slot=title-subtitle-subtitle -->\n")
-	out.WriteString("## Subtitle\n\n")
-	for _, line := range lines {
-		out.WriteString(line)
-		out.WriteByte('\n')
-	}
-	return out.String()
-}
-
-func loremLines(charsPerLine, lineCount int) []string {
-	words := strings.Fields("Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua Ut enim ad minim veniam quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat")
-	var lines []string
-	var line strings.Builder
-	for len(lines) < lineCount {
-		for _, word := range words {
-			if line.Len() == 0 {
-				line.WriteString(word)
-				continue
-			}
-			if line.Len()+1+len(word) > charsPerLine {
-				lines = append(lines, line.String())
-				line.Reset()
-				if len(lines) >= lineCount {
-					return lines
-				}
-			}
-			if line.Len() > 0 {
-				line.WriteByte(' ')
-			}
-			line.WriteString(word)
-		}
-		if line.Len() > 0 {
-			lines = append(lines, line.String())
-			line.Reset()
-		}
-	}
-	return lines[:lineCount]
+	_ = width
+	_ = height
+	return bundledStarterDeckMarkdown
 }
 
 func inferExportSize(slides []Slide) (int, int) {

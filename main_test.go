@@ -222,8 +222,8 @@ func TestBundledWelcomeDeckParses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(deck.Slides) != 1 {
-		t.Fatalf("welcome slide count = %d, want 1", len(deck.Slides))
+	if len(deck.Slides) != 2 {
+		t.Fatalf("welcome slide count = %d, want 2", len(deck.Slides))
 	}
 	if authoredTerminalWidth != 245 || authoredTerminalHeight != 56 {
 		t.Fatalf("welcome authored size = %dx%d", authoredTerminalWidth, authoredTerminalHeight)
