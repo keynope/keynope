@@ -62,7 +62,7 @@ func TestMasterDeckRoundTripDoesNotCreateSlides(t *testing.T) {
 	if len(parsed.Slides) != 1 {
 		t.Fatalf("master layouts leaked into slide count: %d", len(parsed.Slides))
 	}
-	if len(parsed.Masters.Layouts) != 4 {
+	if len(parsed.Masters.Layouts) != 5 {
 		t.Fatalf("layout count = %d", len(parsed.Masters.Layouts))
 	}
 	resolved := parsed.ResolveSlide(0, false)

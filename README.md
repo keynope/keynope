@@ -105,6 +105,18 @@ Effects adapt to the slide palette so they remain part of the composition on lig
 
 ![A Keynope effect adapting to a light slide background](https://raw.githubusercontent.com/keynope/keynope/main/screenshots/kn3-effects-adapt-to-background.jpg)
 
+## Engagement Activities
+
+The Mac and web editors add an activity slide from the permanent Activities icon in the bottom toolbar:
+
+- **Pulse** records a quick 0–5 confidence check or a custom poll.
+- **Storm** collects short ideas and reveals them together.
+- **Sort** lets the facilitator drag cards into named destinations.
+
+Each activity is inserted after the current slide with the built-in Activity master, an eight-character room code, and a centered ASCII QR code for its `keynope.sh/join/<code>` URL. Keynope monitors the short-lived room automatically during presentation while leaving the activity slide visible. Participants choose a remembered display name and respond from their own device. The presenter receives aggregate votes, ideas, card placements, and the names of respondents live. Open the controls and results from the Activities icon or with `G` in an HTML presentation.
+
+Every activity follows the same `OPEN → LOCKED → REVEAL → DISCUSS` flow; `Enter` advances, `R` resets the current responses, and `Esc` or `Q` closes it. Activity definitions and codes travel with the Markdown deck as `keynope-engagement` metadata. Rooms expire after 24 hours of inactivity, and participant responses are never written into the deck.
+
 ## Custom Fonts
 
 The Mac and web editors include a glyph editor for creating variable-width Keynope fonts. Each font covers the 95 printable ASCII characters. Select text to choose a font, or use the `Aa` font-editor button to paint glyphs, resize their advance width, clone the default face, import/export JSON or FIGlet `.flf`/`.tlf` files, and keep reusable fonts in your personal library. FIGlet mode supports literal ASCII and non-emoji Unicode cell art.

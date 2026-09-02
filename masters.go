@@ -108,6 +108,7 @@ func defaultMasterDeck() MasterDeck {
 			masterPlaceholder("title-body-title", placeholderTitle, "Title", "heading", 1),
 			masterPlaceholder("title-body-body", placeholderBody, "Body text", "text", 0),
 		}}},
+		defaultActivityMaster(),
 	}
 	return masters
 }
@@ -136,10 +137,16 @@ func masterPlaceholder(id, role, text, kind string, level int) Element {
 }
 
 func (deck *Deck) EnsureDefaultMasters() {
-	if deck == nil || len(deck.Masters.Layouts) > 0 {
+	if deck == nil {
 		return
 	}
-	deck.Masters = defaultMasterDeck()
+	if len(deck.Masters.Layouts) == 0 {
+		deck.Masters = defaultMasterDeck()
+		return
+	}
+	if _, exists := deck.Masters.Layout(activityLayoutID); !exists {
+		deck.Masters.Layouts = append(deck.Masters.Layouts, defaultActivityMaster())
+	}
 }
 
 func deckHasMasterData(masters MasterDeck) bool {
@@ -248,6 +255,12 @@ func normalizePlaceholderRole(role string) string {
 		return placeholderCode
 	case placeholderImage:
 		return placeholderImage
+	case activityTitleRole:
+		return activityTitleRole
+	case activityQRCodeRole:
+		return activityQRCodeRole
+	case activityURLRole:
+		return activityURLRole
 	default:
 		return placeholderBody
 	}
@@ -415,6 +428,7 @@ func (deck Deck) ResolveSlide(index int, includePlaceholders bool) Slide {
 	applySourceStyle(&resolved, source)
 	resolved.LayoutID = source.LayoutID
 	resolved.Notes = source.Notes
+	resolved.Engagement = cloneEngagement(source.Engagement)
 	bound := map[string]Element{}
 	for _, element := range source.Elements {
 		if element.MasterSlotID != "" {
@@ -424,6 +438,14 @@ func (deck Deck) ResolveSlide(index int, includePlaceholders bool) Slide {
 	appendMasterElements := func(elements []Element) {
 		for _, masterElement := range elements {
 			if masterElement.Kind == "page-number" {
+				continue
+			}
+			if source.Engagement != nil && (masterElement.PlaceholderRole == activityTitleRole || masterElement.PlaceholderRole == activityQRCodeRole || masterElement.PlaceholderRole == activityURLRole) {
+				effective := masterElement
+				effective.Text = activityElementText(masterElement.PlaceholderRole, source.Engagement)
+				effective.Inherited = true
+				effective.Placeholder = false
+				resolved.Elements = append(resolved.Elements, effective)
 				continue
 			}
 			if masterElement.PlaceholderRole == "" {
@@ -466,6 +488,25 @@ func (deck Deck) ResolveSlide(index int, includePlaceholders bool) Slide {
 	}
 	appendMasterElements(deck.Masters.Base.Slide.Elements)
 	appendMasterElements(layout.Slide.Elements)
+	if source.Engagement != nil && source.LayoutID == activityLayoutID {
+		for _, role := range []string{activityTitleRole, activityQRCodeRole, activityURLRole} {
+			found := false
+			for _, element := range resolved.Elements {
+				if element.PlaceholderRole == role {
+					found = true
+					break
+				}
+			}
+			if !found {
+				if element, ok := activityRoleElement(role); ok {
+					element.Text = activityElementText(role, source.Engagement)
+					element.Inherited = true
+					element.Placeholder = false
+					resolved.Elements = append(resolved.Elements, element)
+				}
+			}
+		}
+	}
 	resolved.PageNumber = deck.effectivePageNumberMode(source)
 	if resolved.PageNumber == pageNumberShow {
 		resolved.Elements = append(resolved.Elements, resolvedPageNumberElement(deck.Masters, source.LayoutID, index))

@@ -722,7 +722,7 @@ func TestNativeEditorClonesMasterImmediatelyBelowSource(t *testing.T) {
 	if state.Current != 3 {
 		t.Fatalf("selected master after clone = %d, want 3", state.Current)
 	}
-	if len(state.Masters.Layouts) != 5 || state.Masters.Layouts[1].ID != sourceID {
+	if len(state.Masters.Layouts) != 6 || state.Masters.Layouts[1].ID != sourceID {
 		t.Fatalf("master order after clone = %#v", state.Masters.Layouts)
 	}
 	clone := state.Masters.Layouts[2]

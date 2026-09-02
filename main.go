@@ -57,20 +57,21 @@ type Element struct {
 }
 
 type Slide struct {
-	Elements      []Element `json:"elements,omitempty"`
-	Effect        string    `json:"effect,omitempty"`
-	Background    string    `json:"background,omitempty"`
-	FG            string    `json:"fg,omitempty"`
-	BG            string    `json:"bg,omitempty"`
-	HeaderFG      string    `json:"headerFg,omitempty"`
-	Notes         string    `json:"notes,omitempty"`
-	LayoutID      string    `json:"layoutId,omitempty"`
-	EffectSet     bool      `json:"effectSet,omitempty"`
-	BackgroundSet bool      `json:"backgroundSet,omitempty"`
-	FGSet         bool      `json:"fgSet,omitempty"`
-	BGSet         bool      `json:"bgSet,omitempty"`
-	HeaderFGSet   bool      `json:"headerFgSet,omitempty"`
-	PageNumber    string    `json:"pageNumber,omitempty"`
+	Elements      []Element             `json:"elements,omitempty"`
+	Effect        string                `json:"effect,omitempty"`
+	Background    string                `json:"background,omitempty"`
+	FG            string                `json:"fg,omitempty"`
+	BG            string                `json:"bg,omitempty"`
+	HeaderFG      string                `json:"headerFg,omitempty"`
+	Notes         string                `json:"notes,omitempty"`
+	LayoutID      string                `json:"layoutId,omitempty"`
+	EffectSet     bool                  `json:"effectSet,omitempty"`
+	BackgroundSet bool                  `json:"backgroundSet,omitempty"`
+	FGSet         bool                  `json:"fgSet,omitempty"`
+	BGSet         bool                  `json:"bgSet,omitempty"`
+	HeaderFGSet   bool                  `json:"headerFgSet,omitempty"`
+	PageNumber    string                `json:"pageNumber,omitempty"`
+	Engagement    *EngagementDefinition `json:"engagement,omitempty"`
 }
 
 type Line struct {
@@ -149,20 +150,21 @@ type exportDeck struct {
 }
 
 type exportPage struct {
-	Slide                int                  `json:"slide"`
-	Page                 int                  `json:"page"`
-	PageCount            int                  `json:"pageCount"`
-	SlideCount           int                  `json:"slideCount"`
-	Effect               string               `json:"effect"`
-	Background           string               `json:"background"`
-	BackgroundLines      []exportLine         `json:"backgroundLines,omitempty"`
-	Transparency         []exportLine         `json:"transparency,omitempty"`
-	ContentFrames        []exportContentFrame `json:"contentFrames,omitempty"`
-	FG                   string               `json:"fg"`
-	BG                   string               `json:"bg"`
-	HeaderFG             string               `json:"headerFg"`
-	Lines                []exportLine         `json:"lines"`
-	HideChromePageNumber bool                 `json:"hideChromePageNumber,omitempty"`
+	Slide                int                   `json:"slide"`
+	Page                 int                   `json:"page"`
+	PageCount            int                   `json:"pageCount"`
+	SlideCount           int                   `json:"slideCount"`
+	Effect               string                `json:"effect"`
+	Background           string                `json:"background"`
+	BackgroundLines      []exportLine          `json:"backgroundLines,omitempty"`
+	Transparency         []exportLine          `json:"transparency,omitempty"`
+	ContentFrames        []exportContentFrame  `json:"contentFrames,omitempty"`
+	FG                   string                `json:"fg"`
+	BG                   string                `json:"bg"`
+	HeaderFG             string                `json:"headerFg"`
+	Lines                []exportLine          `json:"lines"`
+	HideChromePageNumber bool                  `json:"hideChromePageNumber,omitempty"`
+	Engagement           *EngagementDefinition `json:"engagement,omitempty"`
 }
 
 type exportFrame struct {
@@ -204,15 +206,16 @@ type appArgs struct {
 }
 
 type presenterState struct {
-	Slide       int    `json:"slide"`
-	Page        int    `json:"page"`
-	Presenting  bool   `json:"presenting"`
-	Version     int64  `json:"version"`
-	DeckVersion int64  `json:"deckVersion"`
-	DeckSlide   int    `json:"deckSlide"`
-	TimerMode   string `json:"timerMode,omitempty"`
-	TimerInput  string `json:"timerInput,omitempty"`
-	TimerEndMS  int64  `json:"timerEndMs,omitempty"`
+	Slide       int                     `json:"slide"`
+	Page        int                     `json:"page"`
+	Presenting  bool                    `json:"presenting"`
+	Version     int64                   `json:"version"`
+	DeckVersion int64                   `json:"deckVersion"`
+	DeckSlide   int                     `json:"deckSlide"`
+	TimerMode   string                  `json:"timerMode,omitempty"`
+	TimerInput  string                  `json:"timerInput,omitempty"`
+	TimerEndMS  int64                   `json:"timerEndMs,omitempty"`
+	Engagement  *EngagementRuntimeState `json:"engagement,omitempty"`
 }
 
 type presenterTerminalFrame struct {
@@ -1729,7 +1732,7 @@ func parseDeckData(path string, data []byte) (Deck, error) {
 	var slides []Slide
 	for _, part := range splitSlides(text) {
 		slide := parseSlide(part, base)
-		if len(slide.Elements) > 0 || slide.EffectSet || slide.BackgroundSet || slide.FGSet || slide.BGSet || slide.HeaderFGSet || slide.Effect != "" || slide.Background != "" || slide.FG != "" || slide.BG != "" || slide.HeaderFG != "" || slide.Notes != "" || slide.LayoutID != "" || slide.PageNumber != "" {
+		if len(slide.Elements) > 0 || slide.EffectSet || slide.BackgroundSet || slide.FGSet || slide.BGSet || slide.HeaderFGSet || slide.Effect != "" || slide.Background != "" || slide.FG != "" || slide.BG != "" || slide.HeaderFG != "" || slide.Notes != "" || slide.LayoutID != "" || slide.PageNumber != "" || slide.Engagement != nil {
 			parsedDeckElementOrderChanged = elementOrderMappingChanged(canonicalizeSlideElementOrder(&slide, authoredTerminalWidth, authoredTerminalHeight)) || parsedDeckElementOrderChanged
 			slides = append(slides, slide)
 		}
@@ -1801,6 +1804,12 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 		if slide.PageNumber != "" {
 			fmt.Fprintf(&out, "<!-- page-number=%s -->\n", slide.PageNumber)
 		}
+		if metadata, err := encodeEngagementMetadata(slide.Engagement); err != nil {
+			return nil, err
+		} else if metadata != "" {
+			out.WriteString(metadata)
+			out.WriteByte('\n')
+		}
 		if slide.EffectSet || slide.Effect != "" {
 			value := slide.Effect
 			if value == "" {
@@ -1823,7 +1832,7 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 			out.WriteString(style)
 			out.WriteByte('\n')
 		}
-		if (slide.LayoutID != "" || slide.PageNumber != "" || slide.EffectSet || slide.Effect != "" || slide.BackgroundSet || slide.Background != "" || slide.Notes != "" || style != "") && len(slide.Elements) > 0 {
+		if (slide.LayoutID != "" || slide.PageNumber != "" || slide.Engagement != nil || slide.EffectSet || slide.Effect != "" || slide.BackgroundSet || slide.Background != "" || slide.Notes != "" || style != "") && len(slide.Elements) > 0 {
 			out.WriteByte('\n')
 		}
 		for elementIndex, element := range slide.Elements {
@@ -2160,6 +2169,7 @@ func exportSlidePagesMode(slide Slide, slideIndex, slideCount, cols, rows int, f
 			HeaderFG:             ansiCSSColour(slideHeaderFG(slide)),
 			Lines:                exportLines(lines, slide, cols, rows, slideCount),
 			HideChromePageNumber: slide.PageNumber != "",
+			Engagement:           cloneEngagement(slide.Engagement),
 		})
 	}
 	return pages
@@ -2264,6 +2274,7 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int, la
 		}
 	})
 	mux.HandleFunc("/presenter-status", companion.handlePresenterStatus)
+	mux.HandleFunc("/engagement", companion.handleEngagement)
 	if activeNativeEditor != nil {
 		mux.HandleFunc("/api/editor/state", activeNativeEditor.handleState)
 		mux.HandleFunc("/api/editor/action", activeNativeEditor.handleAction)
@@ -2388,11 +2399,50 @@ func (p *presenterCompanion) handlePresenterStatus(w http.ResponseWriter, r *htt
 	p.helper = true
 	if nativeAppModeActive {
 		presenting := status.Mode != "none" && !status.Paused
+		changed := false
 		if p.state.Presenting != presenting {
 			p.state.Presenting = presenting
+			changed = true
+		}
+		if status.Mode == "none" && p.state.Engagement != nil {
+			p.state.Engagement = nil
+			changed = true
+		}
+		if changed {
 			p.state.Version++
 		}
 	}
+	p.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (p *presenterCompanion) handleEngagement(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var runtime *EngagementRuntimeState
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&runtime); err != nil {
+		http.Error(w, "invalid engagement state", http.StatusBadRequest)
+		return
+	}
+	if runtime != nil {
+		definition, err := normalizeEngagement(runtime.Definition)
+		if err != nil || runtime.Slide < 0 || runtime.Phase < 0 || runtime.Phase >= 5 || len(runtime.Ideas) > 200 {
+			http.Error(w, "invalid engagement state", http.StatusBadRequest)
+			return
+		}
+		runtime.Definition = definition
+		runtime.Ideas = cleanEngagementItems(runtime.Ideas)
+		if len(runtime.Counts) > 12 || len(runtime.Assignments) > 40 || len(runtime.Respondents) > 200 {
+			http.Error(w, "invalid engagement state", http.StatusBadRequest)
+			return
+		}
+		runtime.Respondents = cleanEngagementItems(runtime.Respondents)
+	}
+	p.mu.Lock()
+	p.state.Engagement = cloneEngagementRuntime(runtime)
+	p.state.Version++
 	p.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -3783,6 +3833,44 @@ html[data-keynope-app="true"] button:active:not(:disabled) > span { translate: 0
 .keynope-link-dialog [hidden] { display: none; }
 .keynope-link-dialog input, .keynope-link-dialog select { display: block; width: 100%; margin-top: 4px; box-sizing: border-box; padding: 6px; color: #eee; background: #111; border: 1px solid #555; border-radius: 4px; }
 .keynope-link-dialog .keynope-editor-actions { margin: 10px 0 0; }
+.keynope-engagement-dialog { position: fixed; z-index: 540; width: min(520px,calc(100vw - 32px)); max-height: calc(100vh - 80px); overflow: auto; box-sizing: border-box; padding: 16px; color: #edf1f3; background: #1b1e21; border: 1px solid #68737d; border-radius: 9px; box-shadow: 0 18px 60px rgba(0,0,0,.75); font: 13px -apple-system,BlinkMacSystemFont,sans-serif; }
+.keynope-engagement-dialog h2 { margin: 0 0 12px; color: #fff; font: 700 16px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-engagement-kind { display: grid; grid-template-columns: repeat(3,1fr); gap: 6px; margin-bottom: 12px; }
+.keynope-engagement-kind button,.keynope-engagement-actions button { min-height: 32px; color: #eee; background: #292d31; border: 1px solid #59616a; border-radius: 5px; padding: 6px 10px; font: inherit; }
+.keynope-engagement-kind button.active { color: #fff; background: #244766; border-color: #70b7ff; }
+.keynope-engagement-dialog label { display: block; margin: 0 0 9px; color: #b9c1c8; }
+.keynope-engagement-dialog input,.keynope-engagement-dialog textarea { display: block; width: 100%; min-height: 34px; margin-top: 4px; box-sizing: border-box; padding: 7px; color: #fff; background: #0e1012; border: 1px solid #59616a; border-radius: 5px; font: 13px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-engagement-dialog textarea { min-height: 88px; resize: vertical; }
+.keynope-engagement-help { margin: -2px 0 10px; color: #89949e; font-size: 11px; line-height: 1.4; }
+.keynope-engagement-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 13px; }
+.keynope-engagement-actions .danger { margin-right: auto; color: #ffb0aa; border-color: #8d4741; }
+.keynope-engagement-overlay { position: fixed; inset: 0; z-index: 500; display: grid; place-items: center; padding: 5vh 5vw; box-sizing: border-box; background: rgba(2,4,7,.88); color: #f3efe0; font: 15px ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; }
+.keynope-engagement-overlay[hidden] { display: none; }
+.keynope-engagement-board { display: grid; width: min(980px,100%); max-height: 90vh; overflow: auto; gap: 16px; padding: 22px; box-sizing: border-box; border: 2px solid #ffd166; background: rgba(12,15,19,.96); box-shadow: 0 22px 80px rgba(0,0,0,.8); }
+.keynope-engagement-head { display: flex; align-items: flex-start; gap: 14px; }
+.keynope-engagement-head h1 { flex: 1; margin: 0; color: #fff; font-size: clamp(18px,3vw,34px); }
+.keynope-engagement-phase { padding: 4px 8px; border: 1px solid #70b7ff; color: #9bcfff; font-size: 11px; letter-spacing: .1em; }
+.keynope-engagement-join { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin-top: -5px; padding: 9px 11px; border: 1px solid #48515a; color: #b9c3cc; background: #101419; font-size: 13px; }
+.keynope-engagement-join strong { color: #ffd166; font-size: 22px; letter-spacing: .14em; }
+.keynope-engagement-join a { color: #8dc8ff; text-decoration: none; }
+.keynope-engagement-join .participants { margin-left: auto; color: #78dc9a; }
+.keynope-engagement-content { min-height: 180px; }
+.keynope-engagement-pulse { display: grid; grid-template-columns: repeat(auto-fit,minmax(90px,1fr)); gap: 10px; }
+.keynope-engagement-choice { display: grid; min-height: 86px; place-items: center; gap: 4px; color: #fff; background: #20262c; border: 1px solid #59616a; font: 700 18px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-engagement-choice:disabled { opacity: .55; }
+.keynope-engagement-count { color: #ffd166; font-size: 26px; }
+.keynope-engagement-storm-form { display: flex; gap: 8px; }
+.keynope-engagement-storm-form input { flex: 1; min-width: 0; padding: 9px; color: #fff; background: #101419; border: 1px solid #59616a; font: inherit; }
+.keynope-engagement-cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)); gap: 9px; margin-top: 13px; }
+.keynope-engagement-card { padding: 10px; border: 1px solid #59616a; background: #242a30; overflow-wrap: anywhere; }
+.keynope-engagement-zones { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: 10px; }
+.keynope-engagement-zone { min-height: 150px; padding: 9px; border: 1px dashed #70b7ff; background: #13191f; }
+.keynope-engagement-zone h3 { margin: 0 0 8px; color: #9bcfff; font-size: 13px; }
+.keynope-engagement-sort-card { display: block; width: 100%; margin: 0 0 6px; padding: 8px; text-align: left; color: #fff; background: #292f35; border: 1px solid #59616a; font: inherit; }
+.keynope-engagement-controls { display: flex; align-items: center; justify-content: flex-end; gap: 8px; border-top: 1px solid #343b42; padding-top: 13px; }
+.keynope-engagement-controls button { min-height: 34px; padding: 7px 11px; color: #fff; background: #292f35; border: 1px solid #59616a; font: inherit; }
+.keynope-engagement-controls .primary { border-color: #70b7ff; background: #244766; }
+.keynope-engagement-controls .reset { margin-right: auto; }
 .keynope-input-blocker { position: fixed; inset: 0 0 52px 0; z-index: 55; background: transparent; }
 html[data-keynope-timer-active="true"] .keynope-editor-topbar,
 html[data-keynope-timer-active="true"] .keynope-editor-slides,
@@ -4027,6 +4115,337 @@ let keynopeEditorMasterMode = false;
 let keynopeEditorSelectionActive = false;
 let keynopeEditorTextEditActive = false;
 let keynopeEditorVisualResizeActive = false;
+const keynopeEngagementPhases = ['READY','OPEN','LOCKED','REVEAL','DISCUSS'];
+let keynopeEngagementRuntime = null;
+let keynopeEngagementOverlay = null;
+let keynopeEngagementPublishChain = Promise.resolve();
+let keynopeEngagementSessionEpoch = 0;
+let keynopeEditorPresentationActive = false;
+const keynopeEngagementControllerSurface = keynopeAppSurface || presenterMainSurface;
+const keynopeHostedEngagementControllerSurface = keynopeEngagementControllerSurface || (!window.KEYNOPE_PRESENTER && !window.KEYNOPE_WEB_EDITOR);
+function publishEngagementRuntime() {
+  if (!window.KEYNOPE_PRESENTER || !keynopeEngagementControllerSurface) return;
+  if (keynopeEngagementRuntime && !keynopeEngagementOverlay) return;
+  const payload = keynopeEngagementRuntime ? {
+    definition:keynopeEngagementRuntime.definition,
+    slide:keynopeEngagementRuntime.slide,
+    phase:keynopeEngagementRuntime.phase,
+    counts:keynopeEngagementRuntime.counts,
+    ideas:keynopeEngagementRuntime.ideas,
+    assignments:keynopeEngagementRuntime.assignments,
+    respondents:keynopeEngagementRuntime.respondents,
+    sessionCode:keynopeEngagementRuntime.sessionCode || '',
+    joinUrl:keynopeEngagementRuntime.joinUrl || '',
+    participants:Number(keynopeEngagementRuntime.participants) || 0
+  } : null;
+  keynopeEngagementPublishChain = keynopeEngagementPublishChain.catch(() => {}).then(() => fetch('/engagement',{
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)
+	})).then(response => { if (!response.ok) throw new Error('Could not synchronize engagement'); }).catch(() => {});
+}
+async function keynopeActivityConnector() {
+  if (globalThis.keynopeConnectActivity) return globalThis.keynopeConnectActivity;
+  const module = await import('https://keynope.sh/activity-channel.js');
+  return module.connectKeynopeActivity;
+}
+function foldHostedEngagementResponses(runtime) {
+  const responses = Object.values(runtime.responseByIdentity || {});
+  runtime.respondents = [...new Set(responses.map(item => item.displayName).filter(Boolean))].sort((left,right) => left.localeCompare(right));
+  runtime.participants = runtime.respondents.length;
+  if (runtime.definition.kind === 'pulse') {
+    runtime.counts = (runtime.definition.options || []).map(() => 0);
+    for (const item of responses) {
+      const choice = Number(item.response && item.response.choice);
+      if (Number.isInteger(choice) && choice >= 0 && choice < runtime.counts.length) runtime.counts[choice]++;
+    }
+  } else if (runtime.definition.kind === 'storm') {
+    runtime.ideas = (runtime.stormResponses || []).map(item => item.idea).filter(Boolean);
+  } else {
+    const latest = responses.slice().sort((left,right) => (left.sequence || 0) - (right.sequence || 0)).at(-1);
+    runtime.assignments = latest && Array.isArray(latest.response.assignments) ? latest.response.assignments.slice() : (runtime.definition.cards || []).map(() => -1);
+  }
+}
+function hostedEngagementResults(runtime) {
+  return {counts:runtime.counts || [],ideas:runtime.ideas || [],assignments:runtime.assignments || [],respondents:runtime.respondents || []};
+}
+function receiveHostedEngagement(event,runtime,epoch) {
+  if (!keynopeEngagementRuntime || keynopeEngagementRuntime !== runtime || epoch !== keynopeEngagementSessionEpoch) return;
+  const payload = event && event.payload || {};
+  if (payload.type === 'hello') {
+    publishHostedEngagementState(true);
+    return;
+  }
+  if (payload.type !== 'response' || payload.activityId !== runtime.definition.id) return;
+  const displayName = String(event.displayName || 'Participant').trim().slice(0,80) || 'Participant';
+  if (runtime.definition.kind === 'storm') {
+    const idea = String(payload.response && payload.response.idea || '').trim().slice(0,160);
+    if (idea && !runtime.seenResponseEvents[event.id]) {
+      runtime.seenResponseEvents[event.id] = true;
+      runtime.stormResponses.push({identity:event.identity,displayName,idea});
+      runtime.responseByIdentity[event.identity] = {displayName,response:{idea}};
+    }
+  } else {
+    runtime.responseByIdentity[event.identity] = {displayName,response:payload.response || {},sequence:++runtime.responseSequence};
+  }
+  foldHostedEngagementResponses(runtime);
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+}
+function startHostedEngagement() {
+  const runtime = keynopeEngagementRuntime;
+  if (!runtime || runtime.readOnly || !keynopeHostedEngagementControllerSurface) return;
+  const epoch = ++keynopeEngagementSessionEpoch;
+  runtime.sessionCode = runtime.definition.code || '';
+  runtime.joinUrl = runtime.sessionCode ? 'https://keynope.sh/join/' + encodeURIComponent(runtime.sessionCode) : '';
+  runtime.participants = 0;
+  runtime.participationUnavailable = false;
+  runtime.responseByIdentity = {};
+  runtime.seenResponseEvents = {};
+  runtime.stormResponses = [];
+  runtime.responseSequence = 0;
+  runtime.respondents = [];
+  renderEngagementRuntime();
+  keynopeActivityConnector().then(connect => connect({
+    code:runtime.sessionCode,activityId:runtime.definition.id,displayName:'Presenter',presenter:true,
+    onEvent:event => receiveHostedEngagement(event,runtime,epoch),
+    onError:() => { if (keynopeEngagementRuntime === runtime) { runtime.participationUnavailable = true; renderEngagementRuntime(); } }
+  })).then(channel => {
+    if (!keynopeEngagementRuntime || epoch !== keynopeEngagementSessionEpoch) { channel.close(); return; }
+    runtime.activityChannel = channel;
+    return publishHostedEngagementState(true);
+  }).then(() => {
+    if (!keynopeEngagementRuntime || epoch !== keynopeEngagementSessionEpoch) return;
+    renderEngagementRuntime();
+    publishEngagementRuntime();
+  }).catch(() => {
+    if (!keynopeEngagementRuntime || epoch !== keynopeEngagementSessionEpoch) return;
+    runtime.participationUnavailable = true;
+    renderEngagementRuntime();
+  });
+}
+function publishHostedEngagementState(includeDefinition = false) {
+  const runtime = keynopeEngagementRuntime;
+  if (!runtime || !runtime.activityChannel) return Promise.resolve();
+  const payload = includeDefinition
+    ? {type:'definition',activityId:runtime.definition.id,definition:runtime.definition,phase:runtime.phase,participants:runtime.participants}
+    : {type:'state',activityId:runtime.definition.id,phase:runtime.phase,participants:runtime.participants,results:runtime.phase >= 3 ? hostedEngagementResults(runtime) : undefined};
+  return runtime.activityChannel.send(payload).catch(() => {});
+}
+function publishHostedEngagementPhase() {
+  publishHostedEngagementState(false);
+}
+function currentEngagementDefinition() {
+  const page = deck.pages && deck.pages[pageIndex];
+  return page && page.engagement || null;
+}
+function closeEngagementRuntime(publish = true) {
+  const runtime = keynopeEngagementRuntime;
+  if (runtime && !runtime.readOnly && runtime.sessionCode) {
+    runtime.phase = 4;
+    publishHostedEngagementState(false).finally(() => runtime.activityChannel && runtime.activityChannel.close());
+  } else if (runtime && runtime.activityChannel) {
+    runtime.activityChannel.close();
+  }
+  keynopeEngagementSessionEpoch++;
+  if (keynopeEngagementOverlay) keynopeEngagementOverlay.remove();
+  keynopeEngagementOverlay = null;
+  keynopeEngagementRuntime = null;
+	for (const button of document.querySelectorAll('[aria-label="Activities"]')) button.classList.remove('active');
+	if (publish) publishEngagementRuntime();
+  if (typeof refreshEditorPresenterControls === 'function') refreshEditorPresenterControls();
+}
+function resetEngagementRuntime() {
+  if (!keynopeEngagementRuntime) return;
+  const definition = keynopeEngagementRuntime.definition;
+  keynopeEngagementRuntime.phase = 1;
+  keynopeEngagementRuntime.counts = (definition.options || []).map(() => 0);
+  keynopeEngagementRuntime.ideas = [];
+  keynopeEngagementRuntime.assignments = (definition.cards || []).map(() => -1);
+	keynopeEngagementRuntime.respondents = [];
+	keynopeEngagementRuntime.participants = 0;
+	keynopeEngagementRuntime.responseByIdentity = {};
+	keynopeEngagementRuntime.stormResponses = [];
+	keynopeEngagementRuntime.responseSequence = 0;
+	renderEngagementRuntime();
+	publishEngagementRuntime();
+	publishHostedEngagementState(true);
+}
+function advanceEngagementRuntime() {
+  if (!keynopeEngagementRuntime) return;
+  keynopeEngagementRuntime.phase = Math.min(keynopeEngagementPhases.length - 1,keynopeEngagementRuntime.phase + 1);
+  renderEngagementRuntime();
+	publishEngagementRuntime();
+	publishHostedEngagementPhase();
+}
+function engagementButton(label,className,clicked) {
+  const button = document.createElement('button');
+  button.type = 'button'; button.textContent = label; button.className = className || '';
+  button.addEventListener('click',clicked); return button;
+}
+function renderEngagementRuntime() {
+  const runtime = keynopeEngagementRuntime;
+  if (!runtime || !keynopeEngagementOverlay) return;
+  const definition = runtime.definition;
+  const phase = keynopeEngagementPhases[runtime.phase];
+  const board = document.createElement('section'); board.className = 'keynope-engagement-board';
+  const head = document.createElement('header'); head.className = 'keynope-engagement-head';
+  const title = document.createElement('h1'); title.textContent = definition.prompt || (definition.kind === 'pulse' ? 'Pulse' : definition.kind === 'storm' ? 'Storm' : 'Sort');
+  const badge = document.createElement('span'); badge.className = 'keynope-engagement-phase'; badge.textContent = phase;
+  head.append(title,badge);
+  let join = null;
+  if (runtime.sessionCode || runtime.participationUnavailable || (!runtime.readOnly && keynopeHostedEngagementControllerSurface)) {
+    join = document.createElement('div'); join.className = 'keynope-engagement-join';
+    if (runtime.sessionCode) {
+      const instruction = document.createElement('span'); instruction.textContent = 'Join at keynope.sh/join/' + runtime.sessionCode;
+      const code = document.createElement('strong'); code.textContent = runtime.sessionCode;
+      const link = document.createElement('a'); link.href = runtime.joinUrl; link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Open participant view';
+      const participants = document.createElement('span'); participants.className = 'participants'; participants.textContent = (Number(runtime.participants) || 0) + ' submitted';
+      join.append(instruction,code,link,participants);
+    } else {
+      join.textContent = runtime.participationUnavailable ? 'Participation unavailable — local facilitation still works.' : 'Opening participant room…';
+    }
+  }
+  const content = document.createElement('div'); content.className = 'keynope-engagement-content';
+	const accepting = phase === 'OPEN' && !runtime.readOnly;
+  const revealed = phase === 'REVEAL' || phase === 'DISCUSS';
+  if (definition.kind === 'pulse') {
+    const choices = document.createElement('div'); choices.className = 'keynope-engagement-pulse';
+    (definition.options || []).forEach((option,index) => {
+		const choice = engagementButton(option,'keynope-engagement-choice',() => { runtime.counts[index]++; renderEngagementRuntime(); publishEngagementRuntime(); });
+      choice.disabled = !accepting;
+      if (revealed) { const count = document.createElement('span'); count.className = 'keynope-engagement-count'; count.textContent = String(runtime.counts[index]); choice.appendChild(count); }
+      choices.appendChild(choice);
+    });
+    content.appendChild(choices);
+  } else if (definition.kind === 'storm') {
+    if (accepting) {
+      const form = document.createElement('form'); form.className = 'keynope-engagement-storm-form';
+      const input = document.createElement('input'); input.maxLength = 160; input.placeholder = 'Add an idea'; input.setAttribute('aria-label','Idea');
+      const add = engagementButton('Add','',() => {}); add.type = 'submit';
+		form.addEventListener('submit',event => { event.preventDefault(); const value = input.value.trim(); if (!value) return; runtime.ideas.push(value); input.value = ''; renderEngagementRuntime(); publishEngagementRuntime(); });
+      form.append(input,add); content.appendChild(form); requestAnimationFrame(() => input.focus());
+    }
+    if (revealed) {
+      const cards = document.createElement('div'); cards.className = 'keynope-engagement-cards';
+      runtime.ideas.forEach(idea => { const card = document.createElement('div'); card.className = 'keynope-engagement-card'; card.textContent = idea; cards.appendChild(card); });
+      if (!runtime.ideas.length) { const empty = document.createElement('div'); empty.className = 'keynope-engagement-card'; empty.textContent = 'No ideas submitted'; cards.appendChild(empty); }
+      content.appendChild(cards);
+    } else {
+      const submitted = document.createElement('p'); submitted.textContent = runtime.ideas.length + ' submitted'; content.appendChild(submitted);
+    }
+  } else if (definition.kind === 'sort') {
+    const zones = document.createElement('div'); zones.className = 'keynope-engagement-zones';
+    const labels = ['Unsorted'].concat(definition.zones || []);
+    labels.forEach((zone,visibleIndex) => {
+      const zoneIndex = visibleIndex - 1;
+      const area = document.createElement('section'); area.className = 'keynope-engagement-zone'; area.dataset.zone = String(zoneIndex);
+      const heading = document.createElement('h3'); heading.textContent = zone; area.appendChild(heading);
+      area.addEventListener('dragover',event => { if (accepting) event.preventDefault(); });
+		area.addEventListener('drop',event => { if (!accepting) return; event.preventDefault(); const cardIndex = Number(event.dataTransfer.getData('text/keynope-card')); if (Number.isInteger(cardIndex)) { runtime.assignments[cardIndex] = zoneIndex; renderEngagementRuntime(); publishEngagementRuntime(); } });
+      (definition.cards || []).forEach((cardText,cardIndex) => {
+        if (runtime.assignments[cardIndex] !== zoneIndex) return;
+		const card = engagementButton(cardText,'keynope-engagement-sort-card',() => { if (!accepting) return; runtime.assignments[cardIndex] = (runtime.assignments[cardIndex] + 2) % labels.length - 1; renderEngagementRuntime(); publishEngagementRuntime(); });
+        card.draggable = accepting;
+        card.addEventListener('dragstart',event => event.dataTransfer.setData('text/keynope-card',String(cardIndex)));
+        area.appendChild(card);
+      });
+      zones.appendChild(area);
+    });
+    content.appendChild(zones);
+  }
+  const respondentNames = Array.isArray(runtime.respondents) ? runtime.respondents.filter(Boolean) : [];
+  const submitted = document.createElement('p');
+  submitted.className = 'keynope-engagement-submitted';
+  submitted.textContent = respondentNames.length + ' submitted' + (respondentNames.length ? ' — ' + respondentNames.join(', ') : '');
+  content.appendChild(submitted);
+  const controls = document.createElement('footer'); controls.className = 'keynope-engagement-controls';
+  const reset = engagementButton('Reset','reset',resetEngagementRuntime);
+  const close = engagementButton('Close','',closeEngagementRuntime);
+  const nextLabel = runtime.phase >= keynopeEngagementPhases.length - 1 ? 'Done' : 'Next: ' + keynopeEngagementPhases[runtime.phase + 1];
+  const next = engagementButton(nextLabel,'primary',runtime.phase >= keynopeEngagementPhases.length - 1 ? closeEngagementRuntime : advanceEngagementRuntime);
+	if (!runtime.readOnly) controls.append(reset,close,next);
+  board.append(head);
+  if (join) board.append(join);
+  board.append(content,controls);
+  keynopeEngagementOverlay.replaceChildren(board);
+}
+function openEngagementRuntime(showOverlay = true) {
+  const definition = currentEngagementDefinition();
+  if (!definition) return false;
+  if (keynopeEngagementRuntime && keynopeEngagementRuntime.slide === deck.pages[pageIndex].slide) {
+    if (showOverlay && !keynopeEngagementOverlay) {
+      keynopeEngagementOverlay = document.createElement('div');
+      keynopeEngagementOverlay.className = 'keynope-engagement-overlay';
+      keynopeEngagementOverlay.setAttribute('role','dialog'); keynopeEngagementOverlay.setAttribute('aria-modal','true');
+      document.body.appendChild(keynopeEngagementOverlay);
+      renderEngagementRuntime();
+      publishEngagementRuntime();
+    }
+    return true;
+  }
+  closeEngagementRuntime();
+	keynopeEngagementRuntime = {definition:JSON.parse(JSON.stringify(definition)),slide:deck.pages[pageIndex].slide,phase:1,counts:[],ideas:[],assignments:[],readOnly:false,sessionCode:'',joinUrl:'',participants:0};
+	if (showOverlay) {
+		keynopeEngagementOverlay = document.createElement('div');
+		keynopeEngagementOverlay.className = 'keynope-engagement-overlay';
+		keynopeEngagementOverlay.setAttribute('role','dialog'); keynopeEngagementOverlay.setAttribute('aria-modal','true');
+		document.body.appendChild(keynopeEngagementOverlay);
+	}
+	for (const button of document.querySelectorAll('[aria-label="Activities"]')) button.classList.add('active');
+  const runtime = keynopeEngagementRuntime;
+  runtime.counts = (definition.options || []).map(() => 0);
+  runtime.assignments = (definition.cards || []).map(() => -1);
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  startHostedEngagement();
+  if (typeof refreshEditorPresenterControls === 'function') refreshEditorPresenterControls();
+  return true;
+}
+function syncEngagementRuntime(runtime) {
+  if (keynopeEngagementControllerSurface) return;
+	if (!runtime) { if (keynopeEngagementRuntime) closeEngagementRuntime(false); return; }
+  keynopeEngagementRuntime = {
+    definition:runtime.definition,
+    slide:Number(runtime.slide),
+    phase:Number(runtime.phase) || 0,
+    counts:Array.isArray(runtime.counts) ? runtime.counts.slice() : [],
+    ideas:Array.isArray(runtime.ideas) ? runtime.ideas.slice() : [],
+    assignments:Array.isArray(runtime.assignments) ? runtime.assignments.slice() : [],
+    respondents:Array.isArray(runtime.respondents) ? runtime.respondents.slice() : [],
+    sessionCode:runtime.sessionCode || '',
+    joinUrl:runtime.joinUrl || '',
+    participants:Number(runtime.participants) || 0,
+    readOnly:true
+  };
+  if (!keynopeEngagementOverlay) {
+    keynopeEngagementOverlay = document.createElement('div');
+    keynopeEngagementOverlay.className = 'keynope-engagement-overlay';
+    keynopeEngagementOverlay.setAttribute('role','dialog');
+    document.body.appendChild(keynopeEngagementOverlay);
+  }
+  renderEngagementRuntime();
+}
+function shouldAutoOpenEngagement() {
+  if (keynopeAppSurface) return keynopeEditorPresentationActive;
+  if (window.KEYNOPE_PRESENTER) return presenterMainSurface && presenterPresenting;
+  return !window.KEYNOPE_WEB_EDITOR;
+}
+function autoOpenEngagementForCurrentPage() {
+  if (keynopeEngagementRuntime || !currentEngagementDefinition() || !shouldAutoOpenEngagement()) return;
+  openEngagementRuntime(false);
+}
+document.addEventListener('keydown',event => {
+	if (keynopeEngagementRuntime && keynopeEngagementOverlay) {
+	if (keynopeFormControlTarget(event.target)) { if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); closeEngagementRuntime(); } return; }
+    event.preventDefault(); event.stopImmediatePropagation();
+    if (event.key === 'Escape' || event.key.toLowerCase() === 'q') closeEngagementRuntime();
+    else if (event.key === 'Enter' || event.key === ' ') advanceEngagementRuntime();
+    else if (event.key.toLowerCase() === 'r') resetEngagementRuntime();
+    return;
+  }
+  if (!event.metaKey && !event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'g' && !keynopeFormControlTarget(event.target)) {
+    if (openEngagementRuntime(true)) { event.preventDefault(); event.stopImmediatePropagation(); }
+  }
+},true);
 if (keynopeAppSurface) {
   document.documentElement.setAttribute('data-keynope-app', 'true');
   document.documentElement.setAttribute('data-keynope-notes', 'true');
@@ -5033,12 +5452,14 @@ function drawCanvasLinkUnderlines(lines) {
 }
 function render() {
   const page = deck.pages[pageIndex];
+	if (keynopeEngagementRuntime && keynopeEngagementRuntime.slide !== page.slide) closeEngagementRuntime();
   stage.style.background = page.bg;
   effectLayer.style.color = page.fg;
   contentLayer.style.color = page.fg;
   chromeLayer.innerHTML = keynopeAppSurface && !page.hideChromePageNumber ? '<span class="page-no">' + esc(label(page)) + '</span>' : '';
   drawFrame();
   if (keynopeAppSurface) requestAnimationFrame(renderEditorCanvasOverlay);
+	queueMicrotask(autoOpenEngagementForCurrentPage);
 }
 function lineKey(line) {
   const col = line.parts && line.parts.length ? line.parts[0].col : (line.col || 0);
@@ -5844,6 +6265,8 @@ async function syncPresenterState() {
     presenterVersion = state.version;
     const wasPresenting = presenterPresenting;
     presenterPresenting = !!state.presenting;
+	syncEngagementRuntime(state.engagement);
+	queueMicrotask(autoOpenEngagementForCurrentPage);
     if (!presenterMainSurface) {
       presenterTimerMode = state.timerMode || '';
       presenterTimerInput = state.timerInput || '';
@@ -6347,6 +6770,90 @@ if (keynopeAppSurface) {
     });
     wrapper.append(caption, button);
     parent.appendChild(wrapper);
+  }
+  let activeEngagementEditor = null;
+  function engagementLines(value) {
+    return String(value || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean);
+  }
+  function closeEngagementEditor() {
+    if (!activeEngagementEditor) return;
+    activeEngagementEditor.remove();
+    activeEngagementEditor = null;
+  }
+  function openEngagementEditor() {
+    if (!editorState || editorState.masterMode) return;
+    closeEngagementEditor();
+    const slide = editorState.slides && editorState.slides[editorState.current];
+    const original = slide && slide.engagement ? slide.engagement : null;
+    let kind = original && original.kind || 'pulse';
+    const blocker = document.createElement('div');
+    blocker.className = 'keynope-modal-blocker';
+    const dialog = document.createElement('section');
+    dialog.className = 'keynope-engagement-dialog';
+    dialog.setAttribute('role','dialog');
+    dialog.setAttribute('aria-modal','true');
+    dialog.innerHTML = '<h2>Engagement slide</h2>';
+    const kinds = document.createElement('div');
+    kinds.className = 'keynope-engagement-kind';
+    const form = document.createElement('div');
+    const actions = document.createElement('div');
+    actions.className = 'keynope-engagement-actions';
+    const remove = document.createElement('button');
+    remove.type = 'button'; remove.className = 'danger'; remove.textContent = 'Remove';
+    remove.hidden = !original;
+    const cancel = document.createElement('button');
+    cancel.type = 'button'; cancel.textContent = 'Cancel';
+    const save = document.createElement('button');
+    save.type = 'button'; save.textContent = 'Save activity';
+    let promptInput, optionsInput, zonesInput, cardsInput;
+    const renderForm = () => {
+      form.replaceChildren();
+      const promptLabel = document.createElement('label');
+      promptLabel.textContent = 'Prompt';
+      promptInput = document.createElement('input');
+      promptInput.maxLength = 500;
+      promptInput.value = original && original.kind === kind ? (original.prompt || '') : '';
+      promptInput.placeholder = kind === 'pulse' ? 'How confident are we?' : kind === 'storm' ? 'What should we try next?' : 'Put every card where it belongs';
+      promptLabel.appendChild(promptInput);
+      form.appendChild(promptLabel);
+      if (kind === 'pulse') {
+        const label = document.createElement('label'); label.textContent = 'Choices — one per line';
+        optionsInput = document.createElement('textarea');
+        optionsInput.value = original && original.kind === kind ? (original.options || []).join('\n') : '0\n1\n2\n3\n4\n5';
+        label.appendChild(optionsInput); form.appendChild(label);
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Use 0–5 for a quick confidence pulse, or replace them with your own poll choices.'; form.appendChild(help);
+      } else if (kind === 'sort') {
+        const zoneLabel = document.createElement('label'); zoneLabel.textContent = 'Destinations — one per line';
+        zonesInput = document.createElement('textarea'); zonesInput.value = original && original.kind === kind ? (original.zones || []).join('\n') : 'Now\nNext\nLater'; zoneLabel.appendChild(zonesInput);
+        const cardLabel = document.createElement('label'); cardLabel.textContent = 'Cards — one per line';
+        cardsInput = document.createElement('textarea'); cardsInput.value = original && original.kind === kind ? (original.cards || []).join('\n') : 'First idea\nSecond idea\nThird idea'; cardLabel.appendChild(cardsInput);
+        form.append(zoneLabel,cardLabel);
+      } else {
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Storm collects short ideas privately. Advance to Reveal to show all contributions together.'; form.appendChild(help);
+      }
+      requestAnimationFrame(() => promptInput.focus());
+    };
+    for (const item of [['pulse','Pulse'],['storm','Storm'],['sort','Sort']]) {
+      const button = document.createElement('button');
+      button.type = 'button'; button.textContent = item[1]; button.classList.toggle('active',kind === item[0]);
+      button.addEventListener('click',() => { kind = item[0]; for (const child of kinds.children) child.classList.toggle('active',child === button); renderForm(); });
+      kinds.appendChild(button);
+    }
+    remove.addEventListener('click',async () => { await editorAction({action:'remove-engagement'}); closeEngagementEditor(); });
+    cancel.addEventListener('click',closeEngagementEditor);
+    save.addEventListener('click',async () => {
+      const engagementData = {kind,prompt:(promptInput.value || '').trim()};
+      if (kind === 'pulse') engagementData.options = engagementLines(optionsInput.value);
+      if (kind === 'sort') { engagementData.zones = engagementLines(zonesInput.value); engagementData.cards = engagementLines(cardsInput.value); }
+      try { await editorAction({action:original ? 'set-engagement' : 'add-engagement-slide',engagementData}); closeEngagementEditor(); }
+      catch (error) { const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = error && error.message || 'Could not save activity'; form.appendChild(help); }
+    });
+    blocker.addEventListener('pointerdown',event => { if (event.target === blocker) closeEngagementEditor(); });
+    blocker.addEventListener('keydown',event => { event.stopPropagation(); if (event.key === 'Escape') closeEngagementEditor(); });
+    actions.append(remove,cancel,save);
+    dialog.append(kinds,form,actions); blocker.appendChild(dialog); document.body.appendChild(blocker);
+    activeEngagementEditor = blocker;
+    renderForm();
   }
   const topbar = document.createElement('div');
   topbar.className = 'keynope-editor-topbar';
@@ -9851,6 +10358,11 @@ if (keynopeAppSurface) {
   const nextSlideSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><g transform="translate(800 0) scale(-1 1)"><rect x="220" y="95" width="430" height="390" rx="28" fill="none" stroke="#fff" stroke-width="26"/><circle cx="410" cy="230" r="54" fill="#fff"/><path d="M500 210h85M500 260h85M340 360h245" fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round"/><path d="M185 215 65 300l120 85M80 300h310" fill="none" stroke="#30343a" stroke-width="62" stroke-linecap="round" stroke-linejoin="round"/><path d="M185 215 65 300l120 85M80 300h310" fill="none" stroke="#c8ccd2" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/></g></svg>';
   const presentMainSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="165" y="70" width="470" height="355" rx="30" fill="none" stroke="#fff" stroke-width="28"/><path d="m350 175 150 72-150 72Z" fill="#fff" stroke="#fff" stroke-width="12" stroke-linejoin="round"/><path d="M145 445h510l67 62c13 12 4 33-14 33H92c-18 0-27-21-14-33Z" fill="#fff"/><rect x="332" y="465" width="136" height="18" rx="9" fill="none" stroke="#fff" stroke-width="10"/></svg>';
   const presentExternalSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="55" y="300" width="270" height="190" rx="22" fill="none" stroke="#fff" stroke-width="24"/><path d="M38 505h304l35 34c9 9 3 24-10 24H13c-13 0-19-15-10-24Z" fill="#fff"/><path d="M315 265h80M350 220l45 45-45 45" fill="none" stroke="#fff" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/><rect x="430" y="55" width="330" height="330" rx="28" fill="none" stroke="#fff" stroke-width="28"/><path d="m555 145 100 75-100 75Z" fill="#fff" stroke="#fff" stroke-width="8" stroke-linejoin="round"/><path d="M595 385v100M515 500h160" fill="none" stroke="#fff" stroke-width="28" stroke-linecap="round"/></svg>';
+	const engagementRunSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><circle cx="160" cy="285" r="62" fill="none" stroke="#fff" stroke-width="28"/><circle cx="400" cy="175" r="62" fill="none" stroke="#fff" stroke-width="28"/><circle cx="640" cy="285" r="62" fill="none" stroke="#fff" stroke-width="28"/><path d="M90 470c18-105 122-105 140 0M300 455c28-145 172-145 200 0M570 470c18-105 122-105 140 0" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round"/></svg>';
+	const engagementRunButton = appToolbarIconButton('Activities',engagementRunSVG,() => {
+		if (keynopeEditorPresentationActive && currentEngagementDefinition()) openEngagementRuntime(true);
+		else openEngagementEditor();
+	});
 
   const previousButton = appToolbarIconButton('Previous', previousSlideSVG, () => navigateEditorPage(-1).catch(() => {}));
   const nextButton = appToolbarIconButton('Next', nextSlideSVG, () => navigateEditorPage(1).catch(() => {}));
@@ -9880,12 +10392,15 @@ if (keynopeAppSurface) {
     const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
     if (handler) handler.postMessage({action: 'show-about'});
   });
+	toolbar.insertBefore(engagementRunButton, aboutButton);
   function refreshEditorBottomToolbarVisibility() {
     const masterMode = !!(editorState && editorState.masterMode);
     const presenting = editorPresentationMode !== 'none';
     if (masterMode && editorSpeakerNotesVisible) setSpeakerNotesVisible(false, false);
     notesToggleButton.hidden = masterMode;
     timerButton.hidden = masterMode;
+	engagementRunButton.hidden = masterMode;
+	engagementRunButton.classList.toggle('active',!!currentEngagementDefinition());
     previousButton.hidden = masterMode;
     nextButton.hidden = masterMode;
     presentButton.hidden = masterMode || presenting;
@@ -9903,6 +10418,7 @@ if (keynopeAppSurface) {
     editorPresentationMode = mode === 'main' || mode === 'external' ? mode : 'none';
     editorPresentationPaused = !!paused && editorPresentationMode !== 'none';
     const active = editorPresentationMode !== 'none';
+	keynopeEditorPresentationActive = active && !editorPresentationPaused;
     const baseSVG = editorPresentationMode === 'main' ? presentMainSVG : presentExternalSVG;
     if (active) {
       const pauseGlyph = editorPresentationPaused ? '▶︎' : '⏸︎';
@@ -9914,6 +10430,8 @@ if (keynopeAppSurface) {
     }
     document.documentElement.setAttribute('data-keynope-presentation-mode', editorPresentationMode);
     refreshEditorBottomToolbarVisibility();
+	if (!active && keynopeEngagementRuntime) closeEngagementRuntime();
+	if (keynopeEditorPresentationActive) queueMicrotask(autoOpenEngagementForCurrentPage);
   };
   const presenterHandler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
   if (presenterHandler) presenterHandler.postMessage({action: 'query-display-state'});
@@ -10264,6 +10782,12 @@ func parseSlide(text, base string) Slide {
 		}
 		if match := pageNumberRE.FindStringSubmatch(trimmed); match != nil {
 			slide.PageNumber = match[1]
+			continue
+		}
+		if engagementMetaRE.MatchString(trimmed) {
+			if definition, err := decodeEngagementMetadata(trimmed); err == nil {
+				slide.Engagement = definition
+			}
 			continue
 		}
 		if match := masterSlotRE.FindStringSubmatch(trimmed); match != nil {
@@ -15551,6 +16075,7 @@ func setElementTextColour(element *Element, colour string) {
 func cloneSlide(slide Slide) Slide {
 	copySlide := slide
 	copySlide.Elements = append([]Element(nil), slide.Elements...)
+	copySlide.Engagement = cloneEngagement(slide.Engagement)
 	return copySlide
 }
 

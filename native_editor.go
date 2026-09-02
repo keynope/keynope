@@ -83,29 +83,30 @@ type nativeEditorState struct {
 }
 
 type nativeEditorAction struct {
-	Action         string     `json:"action"`
-	Slide          int        `json:"slide,omitempty"`
-	Page           int        `json:"page,omitempty"`
-	Value          int        `json:"value,omitempty"`
-	Cols           int        `json:"cols,omitempty"`
-	Rows           int        `json:"rows,omitempty"`
-	BoxWidth       int        `json:"boxWidth,omitempty"`
-	BoxHeight      int        `json:"boxHeight,omitempty"`
-	Element        int        `json:"element,omitempty"`
-	Cursor         int        `json:"cursor,omitempty"`
-	SelectionStart int        `json:"selectionStart,omitempty"`
-	SelectionEnd   int        `json:"selectionEnd,omitempty"`
-	Kind           string     `json:"kind,omitempty"`
-	Level          int        `json:"level,omitempty"`
-	Name           string     `json:"name,omitempty"`
-	Path           string     `json:"path,omitempty"`
-	Notes          string     `json:"notes,omitempty"`
-	ElementData    *Element   `json:"elementData,omitempty"`
-	ElementIndices []int      `json:"elementIndices,omitempty"`
-	ElementsData   []Element  `json:"elementsData,omitempty"`
-	SlideData      *Slide     `json:"slideData,omitempty"`
-	AssetData      *DeckAsset `json:"assetData,omitempty"`
-	FontData       *DeckFont  `json:"fontData,omitempty"`
+	Action         string                `json:"action"`
+	Slide          int                   `json:"slide,omitempty"`
+	Page           int                   `json:"page,omitempty"`
+	Value          int                   `json:"value,omitempty"`
+	Cols           int                   `json:"cols,omitempty"`
+	Rows           int                   `json:"rows,omitempty"`
+	BoxWidth       int                   `json:"boxWidth,omitempty"`
+	BoxHeight      int                   `json:"boxHeight,omitempty"`
+	Element        int                   `json:"element,omitempty"`
+	Cursor         int                   `json:"cursor,omitempty"`
+	SelectionStart int                   `json:"selectionStart,omitempty"`
+	SelectionEnd   int                   `json:"selectionEnd,omitempty"`
+	Kind           string                `json:"kind,omitempty"`
+	Level          int                   `json:"level,omitempty"`
+	Name           string                `json:"name,omitempty"`
+	Path           string                `json:"path,omitempty"`
+	Notes          string                `json:"notes,omitempty"`
+	ElementData    *Element              `json:"elementData,omitempty"`
+	ElementIndices []int                 `json:"elementIndices,omitempty"`
+	ElementsData   []Element             `json:"elementsData,omitempty"`
+	SlideData      *Slide                `json:"slideData,omitempty"`
+	AssetData      *DeckAsset            `json:"assetData,omitempty"`
+	FontData       *DeckFont             `json:"fontData,omitempty"`
+	EngagementData *EngagementDefinition `json:"engagementData,omitempty"`
 }
 
 type nativeEditorCaret struct {
@@ -821,6 +822,7 @@ func newNativeEditorSession(deckPath string, deck Deck, options ...bool) *native
 	isUntitled := len(options) > 0 && options[0]
 	dirtyOverride := len(options) > 1 && options[1]
 	deck = cloneDeck(deck)
+	deck.EnsureDefaultMasters()
 	registerDeckFonts(deck.Fonts)
 	ensureNativeEditorElementIDs(&deck)
 	return &nativeEditorSession{
@@ -1118,6 +1120,46 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		}
 		s.selected, changed = -1, true
 		s.selection = map[int]bool{}
+	case "set-engagement":
+		if s.current < 0 || s.current >= slideCount || action.EngagementData == nil {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		definition, err := normalizeEngagement(*action.EngagementData)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.deck.Slides[s.current].Engagement = &definition
+		if s.deck.Slides[s.current].LayoutID == "" {
+			s.deck.Slides[s.current].LayoutID = activityLayoutID
+		}
+		changed = true
+	case "add-engagement-slide":
+		if action.EngagementData == nil {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		definition, err := normalizeEngagement(*action.EngagementData)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		insert := min(slideCount, s.current+1)
+		s.deck.Slides = append(s.deck.Slides, Slide{})
+		copy(s.deck.Slides[insert+1:], s.deck.Slides[insert:])
+		s.deck.Slides[insert] = Slide{LayoutID: activityLayoutID, Engagement: &definition, PageNumber: pageNumberHide}
+		s.current, s.selected, changed = insert, -1, true
+		s.selection = map[int]bool{}
+	case "remove-engagement":
+		if s.current < 0 || s.current >= slideCount {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		if s.deck.Slides[s.current].Engagement != nil {
+			s.deck.Slides[s.current].Engagement = nil
+			changed = true
+		}
 	case "add-element":
 		if s.current < 0 || s.current >= slideCount {
 			s.mu.Unlock()
@@ -1375,14 +1417,32 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 				s.mu.Unlock()
 				return errInvalidEditorAction
 			}
-			s.deck.Masters.Layouts[index].Slide = cloneSlide(*action.SlideData)
-			if strings.TrimSpace(action.Name) != "" {
+			updated := cloneSlide(*action.SlideData)
+			if action.Kind == activityLayoutID {
+				for _, required := range s.deck.Masters.Layouts[index].Slide.Elements {
+					if protectedActivityElement(required) {
+						found := false
+						for _, element := range updated.Elements {
+							found = found || element.PlaceholderRole == required.PlaceholderRole
+						}
+						if !found {
+							updated.Elements = append(updated.Elements, required)
+						}
+					}
+				}
+			}
+			s.deck.Masters.Layouts[index].Slide = updated
+			if action.Kind != activityLayoutID && strings.TrimSpace(action.Name) != "" {
 				s.deck.Masters.Layouts[index].Name = strings.TrimSpace(action.Name)
 			}
 		}
 		s.deck.Masters.Normalize()
 		changed = true
 	case "delete-layout":
+		if action.Kind == activityLayoutID {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
 		index := s.deck.Masters.LayoutIndex(action.Kind)
 		if index < 0 {
 			s.mu.Unlock()
@@ -1538,7 +1598,7 @@ func remapNativeEditorSelection(oldToNew []int, selected *int, selection *map[in
 
 func nativeEditorRefreshScope(action string) string {
 	switch action {
-	case "add-element", "toggle-page-number", "duplicate-element", "paste-elements", "update-element", "update-elements", "convert-text-kind", "convert-selected-text-kind", "delete-element", "delete-selection", "move-element", "update-slide", "set-layout":
+	case "add-element", "toggle-page-number", "duplicate-element", "paste-elements", "update-element", "update-elements", "convert-text-kind", "convert-selected-text-kind", "delete-element", "delete-selection", "move-element", "update-slide", "set-layout", "set-engagement", "remove-engagement":
 		return "slide"
 	case "update-slide-notes":
 		return ""
@@ -1570,6 +1630,10 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 	masterCount := len(s.deck.Masters.Layouts) + 1
 	s.currentMaster = max(0, min(s.currentMaster, masterCount-1))
 	target := masterSlideAt(&s.deck, s.currentMaster)
+	activityMaster := s.currentMaster > 0 && s.deck.Masters.Layouts[s.currentMaster-1].ID == activityLayoutID
+	protectedIndex := func(index int) bool {
+		return activityMaster && index >= 0 && index < len(target.Elements) && protectedActivityElement(target.Elements[index])
+	}
 	switch action.Action {
 	case "select-slide":
 		if action.Slide < 0 || action.Slide >= masterCount {
@@ -1631,6 +1695,10 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			return errInvalidEditorAction
 		}
 		id := s.deck.Masters.Layouts[s.currentMaster-1].ID
+		if id == activityLayoutID {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
 		s.deck.Masters.Layouts = append(s.deck.Masters.Layouts[:s.currentMaster-1], s.deck.Masters.Layouts[s.currentMaster:]...)
 		for index := range s.deck.Slides {
 			if s.deck.Slides[index].LayoutID == id {
@@ -1736,6 +1804,11 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		if updated.ID == "" {
 			updated.ID = target.Elements[elementIndex].ID
 		}
+		if protectedIndex(elementIndex) {
+			original := target.Elements[elementIndex]
+			updated.Kind, updated.Level, updated.Text = original.Kind, original.Level, original.Text
+			updated.ID, updated.SlotID, updated.PlaceholderRole = original.ID, original.SlotID, original.PlaceholderRole
+		}
 		target.Elements[elementIndex] = updated
 		if elementIndex != action.Element && s.selection[action.Element] {
 			delete(s.selection, action.Element)
@@ -1753,6 +1826,11 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 				return errInvalidEditorAction
 			}
 			updated := action.ElementsData[dataIndex]
+			if protectedIndex(elementIndex) {
+				original := target.Elements[elementIndex]
+				updated.Kind, updated.Level, updated.Text = original.Kind, original.Level, original.Text
+				updated.ID, updated.SlotID, updated.PlaceholderRole = original.ID, original.SlotID, original.PlaceholderRole
+			}
 			if updated.ID == "" {
 				updated.ID = target.Elements[elementIndex].ID
 			}
@@ -1764,6 +1842,10 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		}
 		changed = true
 	case "convert-text-kind":
+		if protectedIndex(action.Element) {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
 		selected, err := convertNativeEditorTextKind(target, action.Element, action.Kind, action.Level, action.Cols, action.Rows)
 		if err != nil {
 			s.mu.Unlock()
@@ -1771,6 +1853,12 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		}
 		s.selected, s.selection, changed = selected, map[int]bool{selected: true}, true
 	case "convert-selected-text-kind":
+		for index := range s.selection {
+			if protectedIndex(index) {
+				s.mu.Unlock()
+				return errInvalidEditorAction
+			}
+		}
 		selected, selection, err := convertNativeEditorTextSelection(target, s.selection, action.Kind, action.Level, action.Cols, action.Rows)
 		if err != nil {
 			s.mu.Unlock()
@@ -1779,6 +1867,10 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		s.selected, s.selection, changed = selected, selection, true
 	case "duplicate-element":
 		if action.Element < 0 || action.Element >= len(target.Elements) {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		if protectedIndex(action.Element) {
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
@@ -1821,6 +1913,9 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		sort.Sort(sort.Reverse(sort.IntSlice(indices)))
 		for _, index := range indices {
 			if index >= 0 && index < len(target.Elements) {
+				if protectedIndex(index) {
+					continue
+				}
 				target.Elements = append(target.Elements[:index], target.Elements[index+1:]...)
 				changed = true
 			}
@@ -1863,6 +1958,10 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		if s.currentMaster == 0 {
 			s.deck.Masters.Base.Name = name
 		} else {
+			if activityMaster {
+				s.mu.Unlock()
+				return errInvalidEditorAction
+			}
 			s.deck.Masters.Layouts[s.currentMaster-1].Name = name
 		}
 		changed = true
