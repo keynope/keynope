@@ -1,0 +1,12 @@
+const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright'),assert=require('node:assert/strict'),path=require('node:path');
+(async()=>{const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});try{
+ const page=await browser.newPage({viewport:{width:390,height:844}});await page.setContent('<body style="background:#14191e;color:white;font:16px monospace"><main id="root"></main></body>');await page.addScriptTag({path:path.resolve('web/activity-games.js')});
+ await page.evaluate(()=>{window.sent=[];window.draft={};window.r={definition:{kind:'prerequisites',named:true,prerequisites:[{title:'Install tool',instructions:'Run the installer.'},{title:'Open workspace',instructions:'Open the training directory.'}]},phase:1,game:{startedAt:Date.now()-12000,finishedCount:0}};window.draw=()=>{root.replaceChildren();KeynopeGames.renderPrerequisites(root,r,{draft,send:async p=>sent.push(p)});};draw();});
+ assert.equal(await page.getByText('Run the installer.',{exact:true}).count(),1);assert.equal(await page.getByText('Open the training directory.',{exact:true}).count(),0);
+ assert(await page.getByRole('button',{name:'I AM FINISHED!'}).isHidden());await page.getByRole('button',{name:'Open workspace',exact:true}).click();assert.equal(await page.getByText('Run the installer.',{exact:true}).count(),0);
+ await page.getByLabel('Completed: Install tool',{exact:true}).check();await page.getByLabel('Completed: Open workspace',{exact:true}).check();await page.getByRole('button',{name:'I AM FINISHED!'}).click();assert.equal(await page.evaluate(()=>sent.at(-1).finished),true);assert(await page.getByLabel('Completed: Install tool',{exact:true}).isDisabled());
+ await page.evaluate(()=>{r.phase=3;r.game.stoppedAt=Date.now()-5500;r.game.finishedCount=23;r.game.ranking=Array.from({length:23},(_,i)=>({rank:i+1,name:'Person '+(i+1),elapsedMs:1000+i*100}));draw();});
+ assert.equal(await page.locator('li').count(),10);assert((await page.locator('li').first().textContent()).includes('Person 11'));await page.getByRole('button',{name:'Next',exact:true}).click();assert.equal(await page.locator('li').count(),3);
+ await page.evaluate(()=>{r.definition.named=false;draw();});assert.equal(await page.locator('li').count(),0);
+ console.log('Prerequisites UI: one instruction at a time, gated finish, stopwatch, 10-row pagination and anonymous reveal passed.');
+}finally{await browser.close();}})().catch(e=>{console.error(e);process.exitCode=1;});

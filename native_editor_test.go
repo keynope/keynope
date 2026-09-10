@@ -734,6 +734,49 @@ func TestNativeEditorClonesMasterImmediatelyBelowSource(t *testing.T) {
 	}
 }
 
+func TestNativeEditorReordersSlides(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deck.md")
+	deck := Deck{Slides: []Slide{
+		{Elements: []Element{{Kind: "text", Text: "A"}}},
+		{Elements: []Element{{Kind: "text", Text: "B"}}},
+		{Elements: []Element{{Kind: "text", Text: "C"}}},
+	}}
+	if err := saveDeck(path, deck); err != nil {
+		t.Fatal(err)
+	}
+	session := newNativeEditorSession(path, deck)
+	for _, move := range []struct {
+		from, to int
+		want     string
+	}{{0, 2, "BCA"}, {2, 0, "ABC"}, {2, 1, "ACB"}} {
+		if err := session.apply(nativeEditorAction{Action: "reorder-slide", Slide: move.from, Value: move.to}); err != nil {
+			t.Fatal(err)
+		}
+		got := ""
+		for _, slide := range session.deck.Slides {
+			got += slide.Elements[0].Text
+		}
+		if got != move.want || session.current != move.to {
+			t.Fatalf("order=%s current=%d", got, session.current)
+		}
+	}
+	if err := session.apply(nativeEditorAction{Action: "undo"}); err != nil {
+		t.Fatal(err)
+	}
+	if session.deck.Slides[1].Elements[0].Text != "B" {
+		t.Fatal("undo did not restore order")
+	}
+	if err := session.apply(nativeEditorAction{Action: "redo"}); err != nil {
+		t.Fatal(err)
+	}
+	if session.deck.Slides[1].Elements[0].Text != "C" {
+		t.Fatal("redo did not restore order")
+	}
+	if err := session.apply(nativeEditorAction{Action: "reorder-slide", Slide: 0, Value: 3}); err == nil {
+		t.Fatal("accepted invalid destination")
+	}
+}
+
 func TestNativeEditorReordersMasterLayoutsAndKeepsMovedMasterSelected(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "deck.md")
 	deck := Deck{Masters: defaultMasterDeck(), Slides: []Slide{{LayoutID: "blank"}}}

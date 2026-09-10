@@ -180,12 +180,13 @@ type exportContentFrame struct {
 }
 
 type exportLine struct {
-	Row     int          `json:"row"`
-	Col     int          `json:"col"`
-	Element int          `json:"element"`
-	Role    string       `json:"role"`
-	Link    string       `json:"link,omitempty"`
-	Parts   []exportPart `json:"parts"`
+	TrueType *exportTrueType `json:"trueType,omitempty"`
+	Row      int             `json:"row"`
+	Col      int             `json:"col"`
+	Element  int             `json:"element"`
+	Role     string          `json:"role"`
+	Link     string          `json:"link,omitempty"`
+	Parts    []exportPart    `json:"parts"`
 }
 
 type exportPart struct {
@@ -1701,6 +1702,10 @@ func parseDeck(path string) (Deck, error) {
 func parseDeckData(path string, data []byte) (Deck, error) {
 	parsedDeckElementOrderChanged = false
 	text := string(data)
+	tabs, text, err := decodeDeckTabs(text)
+	if err != nil {
+		return Deck{}, err
+	}
 	assets, remainingAssets, err := decodeDeckAssets(text)
 	if err != nil {
 		return Deck{}, err
@@ -1737,7 +1742,7 @@ func parseDeckData(path string, data []byte) (Deck, error) {
 			slides = append(slides, slide)
 		}
 	}
-	deck := Deck{Slides: slides, Masters: masters, Assets: assets, Fonts: fonts}
+	deck := Deck{Slides: slides, Masters: masters, Assets: assets, Fonts: fonts, Tabs: tabs}
 	registerDeckFonts(deck.Fonts)
 	storeDeckFontsInLibrary(deck.Fonts)
 	materializeDeckAssets(&deck)
@@ -1771,6 +1776,16 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 		canonicalizeSlideElementOrder(&deck.Masters.Layouts[index].Slide, authoredTerminalWidth, authoredTerminalHeight)
 	}
 	var out strings.Builder
+	if len(deck.Tabs) > 0 {
+		if err := validateDeckTabs(deck.Tabs); err != nil {
+			return nil, err
+		}
+		metadata, err := json.Marshal(deck.Tabs)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Fprintf(&out, "<!-- keynope-tabs version=1 base64:%s -->\n\n", base64.StdEncoding.EncodeToString(metadata))
+	}
 	if authoredTerminalWidth > 0 && authoredTerminalHeight > 0 {
 		fmt.Fprintf(&out, "<!-- keynope width=%d height=%d -->\n\n", authoredTerminalWidth, authoredTerminalHeight)
 	}
@@ -1855,6 +1870,10 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 			if element.Placeholder && element.MasterSlotID != "" {
 				out.WriteString("Placeholder")
 				out.WriteByte('\n')
+				continue
+			}
+			if isTrueType(element) {
+				fmt.Fprintf(&out, "<!-- truetype-text=base64:%s kind=%s -->\n", base64.StdEncoding.EncodeToString([]byte(element.Text)), element.Kind)
 				continue
 			}
 			switch element.Kind {
@@ -2225,6 +2244,15 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int, la
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(state)
 	})
+	mux.HandleFunc("/slides", func(w http.ResponseWriter, r *http.Request) {
+		pages, version := companion.slideSnapshot()
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(struct {
+			Pages   []exportPage `json:"pages"`
+			Version int64        `json:"version"`
+		}{pages, version})
+	})
 	mux.HandleFunc("/slide", func(w http.ResponseWriter, r *http.Request) {
 		raw := r.URL.Query().Get("index")
 		index, err := strconv.Atoi(raw)
@@ -2282,11 +2310,13 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int, la
 		mux.HandleFunc("/api/editor/fit-text", activeNativeEditor.handleFitText)
 		mux.HandleFunc("/api/editor/normalize-text-kind", activeNativeEditor.handleNormalizeTextKind)
 		mux.HandleFunc("/api/editor/emojis", activeNativeEditor.handleEmojiCatalog)
+		mux.HandleFunc("/api/editor/activity-qr", activeNativeEditor.handleActivityQR)
 		mux.HandleFunc("/api/editor/fonts/default", activeNativeEditor.handleDefaultFont)
 		mux.HandleFunc("/api/editor/fonts/library", activeNativeEditor.handleFontLibrary)
 		mux.HandleFunc("/api/editor/workspace", activeNativeEditor.handleWorkspace)
 		mux.HandleFunc("/api/editor/upload", activeNativeEditor.handleUpload)
 		mux.HandleFunc("/api/editor/document", activeNativeEditor.handleDocument)
+		mux.HandleFunc("/api/editor/participant-page", activeNativeEditor.handleParticipantPage)
 		mux.HandleFunc("/api/editor/export-document", activeNativeEditor.handleExportDocument)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -2422,7 +2452,7 @@ func (p *presenterCompanion) handleEngagement(w http.ResponseWriter, r *http.Req
 		return
 	}
 	var runtime *EngagementRuntimeState
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&runtime); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&runtime); err != nil {
 		http.Error(w, "invalid engagement state", http.StatusBadRequest)
 		return
 	}
@@ -2434,7 +2464,7 @@ func (p *presenterCompanion) handleEngagement(w http.ResponseWriter, r *http.Req
 		}
 		runtime.Definition = definition
 		runtime.Ideas = cleanEngagementItems(runtime.Ideas)
-		if len(runtime.Counts) > 12 || len(runtime.Assignments) > 40 || len(runtime.Respondents) > 200 {
+		if len(runtime.Counts) > 12 || len(runtime.Assignments) > 40 || len(runtime.Respondents) > 200 || len(runtime.Attributions) > 200 || len(runtime.Groups) > 13 {
 			http.Error(w, "invalid engagement state", http.StatusBadRequest)
 			return
 		}
@@ -2490,6 +2520,21 @@ func (p *presenterCompanion) handleTerminalEvents(w http.ResponseWriter, r *http
 			return
 		}
 	}
+}
+
+func (p *presenterCompanion) slideSnapshot() ([]exportPage, int64) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	indices := make([]int, 0, len(p.pages))
+	for index := range p.pages {
+		indices = append(indices, index)
+	}
+	sort.Ints(indices)
+	pages := make([]exportPage, 0)
+	for _, index := range indices {
+		pages = append(pages, p.pages[index]...)
+	}
+	return pages, p.state.DeckVersion
 }
 
 func (p *presenterCompanion) Refresh(deckPath string, slides []Slide, cols, rows int) error {
@@ -3336,7 +3381,26 @@ func ansiCursorPosition(params string) (int, int) {
 
 func exportLines(lines []Line, slide Slide, width, height, slideCount int) []exportLine {
 	var out []exportLine
+	seenTrueType := map[int]bool{}
 	for index, line := range lines {
+		if line.Role == "truetype" {
+			if seenTrueType[line.Element] || line.Element < 0 || line.Element >= len(slide.Elements) {
+				continue
+			}
+			seenTrueType[line.Element] = true
+			element := slide.Elements[line.Element]
+			w, h := trueTypeBounds(element, width, height)
+			color := ansiCSSColour(slideFG(slide))
+			if fg := elementFG(element.Query, false); fg != "" {
+				color = ansiCSSColour(fg)
+			}
+			link := ""
+			if target, ok := linkTargetFromQuery(element.Query, slideCount); ok {
+				link = target.Value
+			}
+			out = append(out, exportLine{Row: line.Row, Col: line.Col, Element: line.Element, Role: "truetype", Link: link, Parts: []exportPart{{Col: line.Col, Text: strings.Repeat(" ", w), Color: color}}, TrueType: &exportTrueType{Kind: element.Kind, Text: element.Text, Query: element.Query, Size: trueTypeSize(element), Width: w, Height: h}})
+			continue
+		}
 		if line.Row < 0 || line.Row >= height || line.Col >= width || line.Text == "" {
 			continue
 		}
@@ -3767,6 +3831,7 @@ func exportHTMLPrefix(preserved preservedExportHead, presenter bool) string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Keynope Export</title>
 <style>
+` + trueTypeCSS() + `
 html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; user-select: none; -webkit-user-select: none; }
 body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
 #stage { position: fixed; inset: 0; background: #000; overflow: hidden; }
@@ -3774,6 +3839,10 @@ body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Libe
 #presenter-canvas { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 2; display: none; image-rendering: auto; }
 #link-layer { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 4; display: none; pointer-events: none; }
 .canvas-link-hit { position: absolute; pointer-events: auto; cursor: pointer; background: transparent; }
+.keynope-activity-marker { position: absolute; right: 12px; top: 12px; z-index: 14; display: none; min-width: 42px; height: 36px; align-items: center; justify-content: center; gap: 5px; padding: 4px 9px; color: #ffd166; background: rgba(12,15,19,.9); border: 2px solid #ffd166; border-radius: 5px; box-shadow: 0 3px 14px rgba(0,0,0,.6); font: 800 12px ui-monospace,SFMono-Regular,Menlo,monospace; cursor: pointer; }
+.keynope-activity-marker.visible { display: inline-flex; }
+.keynope-activity-marker:hover,.keynope-activity-marker:focus-visible { color: #fff; border-color: #fff; outline: none; }
+.keynope-activity-marker.active { color: #78dc9a; border-color: #78dc9a; }
 .keynope-app-toolbar { position: fixed; left: 210px; right: 0; bottom: 0; height: 52px; z-index: 20; display: none; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 12px; box-sizing: border-box; color: #e8e8e8; background: rgba(18, 18, 18, 0.96); border-top: 1px solid #444; font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
 .keynope-app-toolbar button { color: inherit; background: #292929; border: 1px solid #555; border-radius: 6px; padding: 6px 12px; font: inherit; cursor: default; }
 .keynope-app-toolbar button:active { background: #444; }
@@ -3829,11 +3898,29 @@ html[data-keynope-app="true"] button:active:not(:disabled) > span { translate: 0
 .keynope-discard-dialog p { margin: 0 0 12px; color: #bfc7cf; line-height: 1.45; }
 .keynope-modal-blocker { position: fixed; inset: 0; z-index: 119; display: grid; place-items: start center; padding-top: max(60px, 18vh); box-sizing: border-box; background: rgba(0,0,0,.42); }
 .keynope-modal-blocker .keynope-discard-dialog { position: relative; z-index: 120; }
+.keynope-onboarding-reset-blocker { z-index: 590; place-items: center; padding: 16px; }
+.keynope-onboarding-reset-blocker .keynope-discard-dialog { z-index: 591; }
+.keynope-engagement-blocker { place-items: center; padding: 16px; }
 .keynope-link-dialog label { display: block; margin: 0 0 8px; color: #aeb4bb; }
 .keynope-link-dialog [hidden] { display: none; }
 .keynope-link-dialog input, .keynope-link-dialog select { display: block; width: 100%; margin-top: 4px; box-sizing: border-box; padding: 6px; color: #eee; background: #111; border: 1px solid #555; border-radius: 4px; }
 .keynope-link-dialog .keynope-editor-actions { margin: 10px 0 0; }
-.keynope-engagement-dialog { position: fixed; z-index: 540; width: min(520px,calc(100vw - 32px)); max-height: calc(100vh - 80px); overflow: auto; box-sizing: border-box; padding: 16px; color: #edf1f3; background: #1b1e21; border: 1px solid #68737d; border-radius: 9px; box-shadow: 0 18px 60px rgba(0,0,0,.75); font: 13px -apple-system,BlinkMacSystemFont,sans-serif; }
+.keynope-settings-menu { position:relative; align-self:center; color:#eee; font:12px monospace; }
+.keynope-settings-menu summary { cursor:pointer; border:1px solid #555; border-radius:4px; padding:10px 8px; }
+.keynope-settings-menu[open]>button { position:absolute; top:100%; right:0; z-index:30; min-width:120px; background:#202428; }
+.keynope-tabs-overlay { position:fixed; inset:0; background:#0009; z-index:100000; display:grid; place-items:center; }
+.keynope-tabs-dialog { box-sizing:border-box; width:min(760px,94vw); min-width:0; max-height:88vh; overflow:auto; background:#191c1f; color:#eee; border:1px solid #70b7ff; border-radius:8px; padding:20px; font:14px monospace; }
+.keynope-tabs-dialog p { color:#aeb4bb; line-height:1.5; }
+.keynope-tabs-dialog fieldset { box-sizing:border-box; display:grid; grid-template-columns:minmax(0,1fr) max-content; min-inline-size:0; width:100%; gap:8px; border:1px solid #555; margin:10px 0; padding:12px; }
+.keynope-tabs-dialog input,.keynope-tabs-dialog select,.keynope-tabs-dialog button { padding:8px; color:#eee; background:#111; border:1px solid #555; border-radius:4px; font:inherit; min-width:0; }
+.keynope-tabs-dialog input,.keynope-tabs-dialog select { box-sizing:border-box; width:100%; max-width:100%; }
+.keynope-tabs-dialog select { overflow:hidden; text-overflow:ellipsis; }
+.keynope-tabs-dialog .keynope-tab-target { grid-column:1 / -1; }
+.keynope-tabs-dialog .keynope-tab-actions { grid-column:1 / -1; display:flex; flex-wrap:wrap; justify-content:flex-end; gap:4px; }
+.keynope-tabs-dialog [hidden] { display:none; }
+.keynope-tabs-dialog button { margin:3px; cursor:pointer; }
+.keynope-tabs-dialog button:disabled { opacity:.4; cursor:default; }
+.keynope-engagement-dialog { position: relative; z-index: 540; width: min(520px,calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; box-sizing: border-box; padding: 16px; color: #edf1f3; background: #1b1e21; border: 1px solid #68737d; border-radius: 9px; box-shadow: 0 18px 60px rgba(0,0,0,.75); font: 13px -apple-system,BlinkMacSystemFont,sans-serif; }
 .keynope-engagement-dialog h2 { margin: 0 0 12px; color: #fff; font: 700 16px ui-monospace,SFMono-Regular,Menlo,monospace; }
 .keynope-engagement-kind { display: grid; grid-template-columns: repeat(3,1fr); gap: 6px; margin-bottom: 12px; }
 .keynope-engagement-kind button,.keynope-engagement-actions button { min-height: 32px; color: #eee; background: #292d31; border: 1px solid #59616a; border-radius: 5px; padding: 6px 10px; font: inherit; }
@@ -3841,6 +3928,11 @@ html[data-keynope-app="true"] button:active:not(:disabled) > span { translate: 0
 .keynope-engagement-dialog label { display: block; margin: 0 0 9px; color: #b9c1c8; }
 .keynope-engagement-dialog input,.keynope-engagement-dialog textarea { display: block; width: 100%; min-height: 34px; margin-top: 4px; box-sizing: border-box; padding: 7px; color: #fff; background: #0e1012; border: 1px solid #59616a; border-radius: 5px; font: 13px ui-monospace,SFMono-Regular,Menlo,monospace; }
 .keynope-engagement-dialog textarea { min-height: 88px; resize: vertical; }
+.keynope-engagement-timer,.keynope-engagement-anonymous { display: flex !important; align-items: center; gap: 8px; margin-top: 12px !important; }
+.keynope-engagement-timer > input[type="checkbox"],.keynope-engagement-anonymous > input[type="checkbox"] { display: inline-block; width: 18px; min-height: 18px; margin: 0; }
+.keynope-engagement-time-fields { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
+.keynope-engagement-time-fields input { width: 54px; min-height: 30px; margin: 0; text-align: center; }
+.keynope-engagement-time-fields[hidden] { display: none; }
 .keynope-engagement-help { margin: -2px 0 10px; color: #89949e; font-size: 11px; line-height: 1.4; }
 .keynope-engagement-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 13px; }
 .keynope-engagement-actions .danger { margin-right: auto; color: #ffb0aa; border-color: #8d4741; }
@@ -3853,16 +3945,67 @@ html[data-keynope-app="true"] button:active:not(:disabled) > span { translate: 0
 .keynope-engagement-join { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin-top: -5px; padding: 9px 11px; border: 1px solid #48515a; color: #b9c3cc; background: #101419; font-size: 13px; }
 .keynope-engagement-join strong { color: #ffd166; font-size: 22px; letter-spacing: .14em; }
 .keynope-engagement-join a { color: #8dc8ff; text-decoration: none; }
+.keynope-engagement-copy { min-height: 30px; padding: 5px 9px; color: #fff; background: #292f35; border: 1px solid #59616a; font: inherit; }
+.keynope-engagement-toast { position: fixed; z-index: 570; left: 50%; top: 50%; transform: translate(-50%,-50%); padding: 12px 18px; border: 2px solid #78dc9a; color: #78dc9a; background: rgba(8,12,10,.96); box-shadow: 0 14px 48px rgba(0,0,0,.72); font: 800 16px ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing: .08em; pointer-events: none; animation: keynope-engagement-toast 1.5s ease forwards; }
+@keyframes keynope-engagement-toast { 0% { opacity:0; transform:translate(-50%,-44%) scale(.96); } 12%,72% { opacity:1; transform:translate(-50%,-50%) scale(1); } 100% { opacity:0; transform:translate(-50%,-56%) scale(1.02); } }
 .keynope-engagement-join .participants { margin-left: auto; color: #78dc9a; }
+.keynope-engagement-qr { margin: 0 auto; padding: 2px; color: #000; background: #fff; font: 8px/8px ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing: 0; white-space: pre; }
+.keynope-engagement-countdown { color: #ffd166; text-align: center; font: 800 22px/1 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing: .08em; }
 .keynope-engagement-content { min-height: 180px; }
 .keynope-engagement-pulse { display: grid; grid-template-columns: repeat(auto-fit,minmax(90px,1fr)); gap: 10px; }
 .keynope-engagement-choice { display: grid; min-height: 86px; place-items: center; gap: 4px; color: #fff; background: #20262c; border: 1px solid #59616a; font: 700 18px ui-monospace,SFMono-Regular,Menlo,monospace; }
 .keynope-engagement-choice:disabled { opacity: .55; }
 .keynope-engagement-count { color: #ffd166; font-size: 26px; }
+.keynope-engagement-names { display: block; color: #9bcfff; font-size: 11px; font-weight: 500; line-height: 1.35; text-align: center; }
 .keynope-engagement-storm-form { display: flex; gap: 8px; }
 .keynope-engagement-storm-form input { flex: 1; min-width: 0; padding: 9px; color: #fff; background: #101419; border: 1px solid #59616a; font: inherit; }
 .keynope-engagement-cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)); gap: 9px; margin-top: 13px; }
 .keynope-engagement-card { padding: 10px; border: 1px solid #59616a; background: #242a30; overflow-wrap: anywhere; }
+.keynope-engagement-card strong { display: block; margin-bottom: 4px; color: #9bcfff; }
+.keynope-engagement-attributions { display: grid; gap: 6px; margin-top: 12px; }
+.keynope-engagement-attribution { padding: 8px 10px; border: 1px solid #48515a; color: #cbd4dc; background: #171c21; }
+.keynope-engagement-attribution strong { color: #9bcfff; }
+.keynope-engagement-results { display: grid; gap: 8px; margin-top: 18px; }
+.keynope-engagement-roster { display:flex; flex-wrap:wrap; justify-content:center; gap:8px; margin:12px auto; padding:16px; border:1px solid #46515b; background:#101419; }
+.keynope-engagement-roster h3 { width:100%; margin:0 0 6px; color:#9bcfff; text-align:center; }
+.keynope-engagement-roster span { padding:6px 10px; border:1px solid #59616a; color:#fff; background:#20262c; }
+.keynope-engagement-roster p { width:100%; color:#aab3bb; text-align:center; }
+.keynope-engagement-questions { display:grid; gap:8px; margin:12px 0; }
+.keynope-engagement-question { display:grid; grid-template-columns:auto minmax(0,1fr); gap:10px; padding:10px; border:1px solid #414951; background:#15191e; }
+.keynope-engagement-question strong { color:#ffd166; }
+.keynope-engagement-result { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 10px; padding: 10px; border: 1px solid #414951; background: #15191e; }
+.keynope-engagement-result strong { color: #ffd166; }
+.keynope-engagement-result em { grid-column: 1 / -1; color: #9bcfff; font-size: 12px; font-style: normal; }
+.keynope-engagement-result.named-sort { grid-template-columns: auto minmax(0,1fr); }
+.keynope-engagement-result.named-sort strong { color: #9bcfff; }
+.keynope-engagement-result-idea { padding: 11px; border: 1px solid #414951; background: #20262c; overflow-wrap: anywhere; }
+.keynope-engagement-result-idea strong { display: block; margin-bottom: 4px; color: #9bcfff; }
+.keynope-engagement-result-waiting { padding: 26px 0; color: #aab3bb; text-align: center; }
+.keynope-impostor-presenter { display:grid; min-height:180px; place-items:center; align-content:center; gap:12px; padding:24px; border:2px solid #ff716b; background:radial-gradient(circle,#401017 0,#15080b 70%); text-align:center; }
+.keynope-impostor-presenter strong { color:#ff716b; font-size:clamp(28px,5vw,54px); letter-spacing:.1em; text-shadow:0 0 20px rgba(255,80,75,.35); }
+.keynope-impostor-presenter span { color:#fff; font-size:20px; }
+.keynope-impostor-presenter small { color:#aab3bb; }
+.keynope-engagement-columns { display: grid; grid-template-columns: repeat(auto-fit,minmax(190px,1fr)); gap: 10px; }
+.keynope-engagement-column { min-height: 120px; padding: 10px; border: 1px solid #414951; background: #15191e; }
+.keynope-engagement-column h3 { margin: 0 0 9px; color: #9bcfff; }
+.keynope-engagement-marquee { overflow: hidden; padding: 10px 0; }
+.keynope-engagement-marquee-track { display: flex; width: max-content; gap: 22px; animation: keynope-drawing-marquee 24s linear infinite; }
+.keynope-engagement-marquee:hover .keynope-engagement-marquee-track { animation-play-state: paused; }
+@keyframes keynope-drawing-marquee { from { transform: translateX(min(0px,100vw)); } to { transform: translateX(calc(-100% + min(900px,90vw))); } }
+.keynope-engagement-portrait { display: grid; gap: 7px; justify-items: center; color: #9bcfff; }
+.keynope-engagement-drawing { display: grid; grid-template-columns: repeat(20,9px); grid-template-rows: repeat(20,9px); border: 1px solid #59616a; background: #101419; }
+.keynope-engagement-drawing i { display: grid; width: 9px; height: 9px; place-items: center; overflow: hidden; color: #f3efe0; background: #20262c; font: 10px/9px Menlo,Monaco,monospace; font-style: normal; }
+.keynope-introduction-avatar { --avatar-cell:9px; --avatar-row:calc(var(--avatar-cell) * 1.6667); position:relative; width:calc(var(--avatar-cell) * 24); height:calc(var(--avatar-row) * 18); overflow:hidden; border:1px solid #59616a; background:#101419; }
+.keynope-introduction-layer-stack { position:absolute; z-index:1; pointer-events:none; }
+.keynope-introduction-layer { position:absolute; inset:0 auto auto 0; margin:0; color:#fff; background:transparent; font-family:Menlo,Monaco,monospace; font-size:calc(var(--avatar-cell) * 1.6667); font-weight:400; line-height:var(--avatar-row); letter-spacing:0; white-space:pre; }
+.keynope-introduction-layer-shade { z-index:0; color:#000; opacity:.34; }
+.keynope-introduction-layer-blended { z-index:1; opacity:.82; }
+.keynope-engagement-group { padding: 12px; border: 1px solid #414951; background: #15191e; }
+.keynope-engagement-group h3 { margin: 0 0 8px; color: #ffd166; }
+.keynope-playing-card { display:grid; width:82px; height:116px; align-content:space-between; margin:0 auto 12px; padding:8px; color:#111; background:#f7f2e7; border:3px solid #fff; border-radius:8px; box-shadow:3px 3px 0 #59616a; }
+.keynope-playing-card strong { color:#111; font-size:26px; line-height:1; }
+.keynope-playing-card span { color:#b51a00; white-space:pre-line; text-align:center; font-size:22px; line-height:1.15; }
+.keynope-engagement-group-members { color:#fff; text-align:center; overflow-wrap:anywhere; }
 .keynope-engagement-zones { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: 10px; }
 .keynope-engagement-zone { min-height: 150px; padding: 9px; border: 1px dashed #70b7ff; background: #13191f; }
 .keynope-engagement-zone h3 { margin: 0 0 8px; color: #9bcfff; font-size: 13px; }
@@ -3912,6 +4055,10 @@ html[data-keynope-timer-active="true"] .keynope-canvas-overlay { display: none; 
 .keynope-vertical-align-button svg { display: block; width: 21px; height: 21px; }
 .keynope-editor-topbar button.keynope-svg-button { display: inline-grid; width: 30px; height: 30px; place-items: center; padding: 4px; }
 .keynope-editor-topbar button[hidden] { display: none; }
+.keynope-text-size-stack { display: inline-grid; flex: 0 0 30px; width: 30px; height: 30px; grid-template-rows: 1fr 1fr; }
+.keynope-editor-topbar .keynope-text-size-stack button { display: grid; place-items: center; width: 30px; min-width: 0; height: 15px; min-height: 0; padding: 0; margin: 0; font-size: 14px; line-height: 1; border-radius: 0; }
+.keynope-text-size-stack button:first-child { border-radius: 4px 4px 0 0; }
+.keynope-text-size-stack button:last-child { border-radius: 0 0 4px 4px; }
 .keynope-svg-button svg { display: block; width: 19px; height: 19px; }
 .keynope-editor-topbar button.keynope-page-number-button { position: relative; }
 .keynope-page-number-button svg { transform: translateY(-2px); }
@@ -4062,7 +4209,7 @@ html[data-keynope-presenter="true"] #presenter-canvas { display: block; }
 </style>
 </head>
 <body>
-<div id="stage"><canvas id="presenter-canvas"></canvas><div id="link-layer"></div><div id="effect-layer" class="terminal-layer"></div><div id="content-layer" class="terminal-layer"></div><div id="chrome-layer" class="terminal-layer"></div></div>
+<div id="stage"><canvas id="presenter-canvas"></canvas><div id="link-layer"></div><div id="effect-layer" class="terminal-layer"></div><div id="content-layer" class="terminal-layer"></div><div id="chrome-layer" class="terminal-layer"></div><button id="activity-marker" class="keynope-activity-marker" type="button" aria-label="Open activity">ACTIVITY</button></div>
 `
 	if presenter {
 		html = strings.Replace(html, `<html lang="en">`, `<html lang="en" data-keynope-presenter="true">`, 1)
@@ -4087,12 +4234,16 @@ html[data-keynope-presenter="true"] #presenter-canvas { display: block; }
 
 func exportHTMLSuffix() string {
 	return `<script>
+const keynopeIntroductionAssets = ` + introductionAssetsJSON + `;
+` + activityGamesJS + activityDesignJS + "\nconst keynopeTTFFontData = '" + strings.TrimSpace(trueTypeFontBase64) + "';\n" + trueTypeJS + `
+` + participantTransferJS + `
 const deck = JSON.parse(document.getElementById('keynope-data').textContent);
 let pageIndex = 0;
 const stage = document.getElementById('stage');
 const presenterCanvas = document.getElementById('presenter-canvas');
 const presenterContext = presenterCanvas.getContext('2d');
 const linkLayer = document.getElementById('link-layer');
+const activityMarker = document.getElementById('activity-marker');
 const presenterTestCardBuffer = document.createElement('canvas');
 const presenterTestCardBufferContext = presenterTestCardBuffer.getContext('2d');
 const effectLayer = document.getElementById('effect-layer');
@@ -4116,27 +4267,310 @@ let keynopeEditorSelectionActive = false;
 let keynopeEditorTextEditActive = false;
 let keynopeEditorVisualResizeActive = false;
 const keynopeEngagementPhases = ['READY','OPEN','LOCKED','REVEAL','DISCUSS'];
+const keynopeDrawingEmpty = '\uE000';
+const keynopeDrawingBrushes = new Set(Array.from('▀▁▂▃▄▅▆▇█▉▊▋▌▍▎▏▐░▒▓▔▕▖▗▘▙▚▛▜▝▞▟'));
+function keynopeIntroductionDarkerColor(value,factor=.68,fallback='#57221b') {
+  const color=String(value||'').toLowerCase(),match=color.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/);
+  if(!match)return fallback;
+  return '#'+match.slice(1).map(channel=>Math.round(parseInt(channel,16)*factor).toString(16).padStart(2,'0')).join('');
+}
+function keynopeIntroductionDarkerSkinTone(faceColor) {
+  const color=String(faceColor||'').toLowerCase();
+  return keynopeIntroductionDarkerColor(color,.84,'#b67f67');
+}
+function keynopeIntroductionBrighterSkinTone(faceColor) {
+  const color=String(faceColor||'').toLowerCase(),match=color.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/);
+  if(!match)return '#e0a58b';
+  return '#'+match.slice(1).map(value=>{const channel=parseInt(value,16);return Math.round(channel+(255-channel)*.12).toString(16).padStart(2,'0')}).join('');
+}
+function keynopeIntroductionInteriorRows(rows) {
+  return (rows||[]).map(row=>{const glyphs=Array.from(row),ink=glyphs.map((glyph,index)=>glyph===' '?-1:index).filter(index=>index>=0);if(ink.length<2)return ' '.repeat(glyphs.length);const left=ink[0],right=ink[ink.length-1];return glyphs.map((glyph,index)=>index>left&&index<right&&glyph===' '?'█':' ').join('')});
+}
+function keynopeIntroductionEyeInteriorRows(rows) {
+  return (rows||[]).map(row=>{const glyphs=Array.from(row),middle=Math.floor(glyphs.length/2),output=Array(glyphs.length).fill(' ');for(const [start,end] of [[0,middle],[middle,glyphs.length]]){const ink=[];for(let index=start;index<end;index++)if(glyphs[index]!==' ')ink.push(index);if(ink.length<2)continue;for(let index=ink[0]+1;index<ink[ink.length-1];index++)if(glyphs[index]===' ')output[index]='█'}return output.join('')});
+}
+function keynopeIntroductionGlyphBackgroundRows(rows) {
+  return (rows||[]).map(row=>Array.from(row,glyph=>glyph===' '?' ':'█').join(''));
+}
+function keynopeIntroductionAuthoredColor(value,avatar,category) {
+  const role=String(value||'').toLowerCase();
+  if(category.id==='eyes'&&role==='#ffaaff')return keynopeIntroductionDarkerSkinTone(avatar.colors.head);
+  if(/^#[0-9a-f]{6}$/.test(role))return role;
+  if(role==='face-dark')return keynopeIntroductionDarkerSkinTone(avatar.colors.head);
+  if(role==='mouth')return avatar.colors.mouth;
+  if(role==='mouth-dark')return keynopeIntroductionDarkerColor(avatar.colors.mouth);
+  return avatar.colors[category.id]||category.defaultColor||'#ffffff';
+}
+function keynopeIntroductionAuthoredLayer(asset,avatar,category) {
+  const foreground=asset.colorRoles||{},background=asset.backgroundColorRoles||{};
+  if(!Object.keys(foreground).length&&!Object.keys(background).length)return null;
+  const layer=document.createElement('pre');layer.className='keynope-introduction-layer';
+  const width=Math.max(1,Number(asset.width)||Math.max(1,...(asset.rows||[]).map(row=>Array.from(row).length)));
+  const height=Math.max(1,Number(asset.height)||(asset.rows||[]).length);
+  for(let y=0;y<height;y++){
+    const glyphs=Array.from(String((asset.rows||[])[y]||'').padEnd(width,' ')).slice(0,width);
+    for(let x=0;x<width;x++){
+      const key=x+','+y,cell=document.createElement('span');cell.textContent=glyphs[x]||' ';
+      cell.style.color=keynopeIntroductionAuthoredColor(foreground[key],avatar,category);
+      if(background[key])cell.style.backgroundColor=keynopeIntroductionAuthoredColor(background[key],avatar,category);
+      layer.appendChild(cell);
+    }
+    if(y+1<height)layer.appendChild(document.createTextNode('\n'));
+  }
+  return layer;
+}
+function keynopeDecodeDrawingCell(value,version) {
+  if (Number(version) >= 2) return value === keynopeDrawingEmpty ? keynopeDrawingEmpty : keynopeDrawingBrushes.has(value) ? value : keynopeDrawingEmpty;
+  if (value === '#') return '█';
+  return value === '.' ? keynopeDrawingEmpty : keynopeDrawingBrushes.has(value) ? value : keynopeDrawingEmpty;
+}
+function keynopeNormalizeIntroductionAvatar(value) {
+  const selections={},colors={};
+  for(const category of keynopeIntroductionAssets.categories||[]){
+    const selected=Number(value&&value.selections&&value.selections[category.id]);
+    selections[category.id]=Number.isInteger(selected)&&selected>=0&&selected<category.assets.length?selected:(category.optional&&selected===-1?-1:(category.optional?-1:0));
+    const color=String(value&&value.colors&&value.colors[category.id]||'').toLowerCase();
+    colors[category.id]=(keynopeIntroductionAssets.palette||[]).includes(color)?color:(category.defaultColor||'#ffffff');
+  }
+  colors.eyes=keynopeIntroductionDarkerSkinTone(colors.head);
+  colors.nose=keynopeIntroductionDarkerSkinTone(colors.head);
+  return {selections,colors};
+}
+function keynopeIntroductionAvatarElement(value,extraClass='') {
+  const avatar=keynopeNormalizeIntroductionAvatar(value);
+  const canvas=document.createElement('div');canvas.className='keynope-introduction-avatar '+extraClass;
+  for(const category of (keynopeIntroductionAssets.categories||[]).slice().sort((a,b)=>a.layer-b.layer)){
+    const index=avatar.selections[category.id];if(index<0)continue;const asset=category.assets[index];if(!asset)continue;
+    const stack=document.createElement('div');stack.className='keynope-introduction-layer-stack';stack.style.left='calc(var(--avatar-cell) * '+asset.x+')';stack.style.top='calc(var(--avatar-row) * '+asset.y+')';
+    const text=(asset.rows||[]).join('\n');
+    const blended=category.layer>0&&!['hair','facial_hair','nose','eyes','mouth','glasses'].includes(category.id);
+    const authoredLayer=keynopeIntroductionAuthoredLayer(asset,avatar,category);
+    if(authoredLayer){stack.appendChild(authoredLayer);canvas.appendChild(stack);continue;}
+    if(['head','nose','eyes','mouth'].includes(category.id)){
+      const interiorColor=category.id==='nose'?keynopeIntroductionBrighterSkinTone(avatar.colors.head):category.id==='eyes'?'#ffffff':category.id==='mouth'?keynopeIntroductionDarkerColor(avatar.colors.mouth):avatar.colors.head;
+      const interior=document.createElement('pre');interior.className='keynope-introduction-layer';interior.style.color=interiorColor;interior.textContent=(category.id==='eyes'?keynopeIntroductionEyeInteriorRows(asset.rows):keynopeIntroductionInteriorRows(asset.rows)).join('\n');stack.appendChild(interior);
+      const glyphBackground=document.createElement('pre');glyphBackground.className='keynope-introduction-layer';glyphBackground.style.color=keynopeIntroductionDarkerColor(avatar.colors[category.id],.72);glyphBackground.textContent=keynopeIntroductionGlyphBackgroundRows(asset.rows).join('\n');stack.appendChild(glyphBackground);
+    }
+    if(blended){const shade=document.createElement('pre');shade.className='keynope-introduction-layer keynope-introduction-layer-shade';shade.textContent=text;stack.appendChild(shade);}
+    const layer=document.createElement('pre');layer.className='keynope-introduction-layer'+(blended?' keynope-introduction-layer-blended':'');layer.style.color=avatar.colors[category.id];layer.textContent=text;stack.appendChild(layer);canvas.appendChild(stack);
+  }
+  return canvas;
+}
 let keynopeEngagementRuntime = null;
 let keynopeEngagementOverlay = null;
 let keynopeEngagementPublishChain = Promise.resolve();
 let keynopeEngagementSessionEpoch = 0;
+const keynopeEngagementSessions = new Map();
+let keynopeEngagementCountdownTick = 0;
+let keynopeOnboardingResetBlocker = null;
 let keynopeEditorPresentationActive = false;
+let keynopeLobbyPresentation = null;
+let keynopeLobbyPresentationConnecting = false;
+let keynopeLobbyPresentationRetryAt = 0;
+window.keynopePublishParticipantPage = () => {
+  syncPresenterState().then(() => publishLobbyPresentation()).catch(console.warn);
+};
+window.keynopePresentationPosition = () => {
+  if (window.KEYNOPE_PRESENTER && keynopeAppSurface && window.keynopeParticipantPosition) return window.keynopeParticipantPosition;
+  const page = presenterPageAt(pageIndex);
+  return page ? {slide:page.slide,page:page.page,key:[pageIndex,presenterDeckVersion].join(':')} : null;
+};
+const participantTabPublications = new WeakMap();
+async function publishParticipantTabs(channel) {
+  const tabs=window.keynopeParticipantTabs||[];
+  const revision=JSON.stringify(tabs)+':'+(window.keynopePresentationDocumentVersion||0);
+  const previous=participantTabPublications.get(channel);
+  if(previous?.pending || previous?.revision===revision&&Date.now()-previous.at<1200000)return;
+  const entry={pending:true};participantTabPublications.set(channel,entry);
+  try {
+    const published=[],documents=new Map();
+    for(const tab of tabs){
+      if(tab.url){published.push(tab);continue;}
+      const response=await fetch('/api/editor/participant-page?format=rendered&slide='+(tab.page-1),{cache:'no-store',signal:AbortSignal.timeout(12000)});
+      if(!response.ok){published.push({...tab,error:'This slide is no longer available.'});continue;}
+      const data=await response.json(),document=await KeynopePresentationTransfer.pack(JSON.stringify(data.rendered));
+      documents.set(document.id,document);
+      published.push({...tab,transfer:document.id,parts:document.parts.length,slideCount:data.slideCount});
+    }
+    // Event-only transports need the manifest first; the state service must
+    // only announce it after every referenced chunk has been uploaded.
+    if(!channel.usesState)await channel.send({type:'lobby-tabs',tabs:published});
+    for(const document of documents.values()){
+      await channel.send({type:'presentation-preload',format:'rendered-v1',transfer:document.id,parts:document.parts.length,sentAt:Date.now()});
+      for(let index=0;index<document.parts.length;index++)await channel.send({type:'presentation-part',transfer:document.id,index,data:document.parts[index]});
+    }
+    await channel.send({type:'lobby-tabs',tabs:published});
+    entry.revision=revision;entry.at=Date.now();
+  } finally {entry.pending=false;}
+}
+async function publishLobbyPresentation(force = false) {
+  const owner = onboardingSessionDefinition();
+  // The native editor owns sharing even when its window is covered by the
+  // presentation. Activity dialogs have a separate, shorter-lived channel.
+  if (window.KEYNOPE_PRESENTER && !keynopeAppSurface) return;
+  let host = keynopeLobbyPresentation;
+  if (host && (!owner || owner.code !== host.code)) { host.channel.close(); keynopeLobbyPresentation = null; host = null; }
+  if (!owner) return;
+  if(host)publishParticipantTabs(host.channel).catch(error=>console.warn('Participant tabs:',error));
+  if(host?.sending){if(force)host.forcePending=true;return;}
+  if(host?.forcePending){force=true;host.forcePending=false;}
+  // A roomful of late joiners needs one shared replay, not one per client.
+  // Retain a pending replay so a request arriving just after the last send
+  // still receives the page on the periodic publisher tick.
+  const popup = window.keynopeLivePresentationWindow;
+  const presenting = !keynopeEditorMasterMode && (window.KEYNOPE_WEB_EDITOR ? !!popup&&!popup.closed : presenterPresenting);
+  if (!host) {
+    if (!presenting || keynopeLobbyPresentationConnecting || Date.now()<keynopeLobbyPresentationRetryAt) return;
+    keynopeLobbyPresentationConnecting = true;
+    try {
+      const connect = await keynopeActivityConnector();
+      const channel = await connect({code:owner.code,sessionId:owner.id,activityId:owner.id,displayName:'Presenter',presenter:true,
+        onEvent:event => { if (!keynopeLobbyPresentation?.channel?.usesState && ['hello','presentation-request'].includes(event.payload?.type)) publishLobbyPresentation(true); },
+        onError:error => console.warn('Participant presentation connection:',error)});
+      if (onboardingSessionDefinition()?.code !== owner.code) { channel.close(); return; }
+      host = keynopeLobbyPresentation = {channel,code:owner.code,key:'',sentAt:0,sending:false,documents:new Map(),preloaded:new Set(),sentTransfers:new Set()};
+    } catch (error) {
+      keynopeLobbyPresentationRetryAt = Date.now()+10000;
+      console.warn('Could not connect participant presentation:',error);
+      return;
+    } finally { keynopeLobbyPresentationConnecting=false; }
+  }
+  let position;
+  try { position = presenting ? (popup ? popup.keynopePresentationPosition?.() : window.keynopePresentationPosition()) : null; } catch (_) { return; }
+  if (presenting && !position) return;
+  const key = [presenting,position?.key,presenterDeckVersion,window.keynopePresentationDocumentVersion||0].join(':');
+  if(force && key===host.key && host.forceSentAt && Date.now()-host.forceSentAt<2000){host.forcePending=true;return;}
+  const revision = [presenterDeckVersion,window.keynopePresentationDocumentVersion||0].join(':');
+  if(host.revision!==revision){host.revision=revision;host.documents.clear();host.preloaded.clear();}
+  if(force){host.preloaded.clear();host.sentTransfers.clear();}
+  const idle = !force && key === host.key && Date.now()-host.sentAt < 20000;
+  if(idle && (!presenting || !host.document || host.preloaded.size>=host.document.slideCount))return;
+  host.sending = true;
+  if(force)host.forceSentAt=Date.now();
+  try {
+    const prepare = async slide => {
+      if(host.documents.has(slide))return host.documents.get(slide);
+      const response=await fetch('/api/editor/participant-page?format=rendered&slide='+slide,{cache:'no-store',signal:AbortSignal.timeout(12000)});
+      if(!response.ok)throw new Error('Could not prepare the current page');
+      const data=await response.json();
+      const document={...await KeynopePresentationTransfer.pack(JSON.stringify(data.rendered)),slideCount:data.slideCount};
+      host.documents.set(slide,document);return document;
+    };
+    if(idle){
+      // One background slide per tick; check navigation between every chunk.
+      let slide=0;while(host.preloaded.has(slide))slide++;
+      const document=await prepare(slide);
+      if(host.sentTransfers.has(document.id)){host.preloaded.add(slide);return;}
+      await host.channel.send({type:'presentation-preload',format:'rendered-v1',transfer:document.id,parts:document.parts.length,sentAt:Date.now()});
+      for(let index=0;index<document.parts.length;index++){
+        const current=popup ? popup.keynopePresentationPosition?.() : window.keynopePresentationPosition();
+        if(keynopeLobbyPresentation!==host || current?.key!==position.key || (window.KEYNOPE_WEB_EDITOR ? !popup||popup.closed : !presenterPresenting))return;
+        await host.channel.send({type:'presentation-part',transfer:document.id,index,data:document.parts[index]});
+      }
+      host.preloaded.add(slide);host.sentTransfers.add(document.id);return;
+    }
+    if (!presenting) {
+      await host.channel.send({type:'presentation-md',presenting:false,sentAt:Date.now()});
+    } else {
+      const changed = key !== host.key;
+      if (changed || !host.document) {
+        host.document = await prepare(position.slide);
+      }
+      const document = host.document;
+      await host.channel.send({type:'presentation-md',format:'rendered-v1',presenting:true,transfer:document.id,parts:document.parts.length,slide:position.slide,page:position.page,slideCount:document.slideCount,sentAt:Date.now()});
+      if (!host.sentTransfers.has(document.id) || force) {
+        for (let index=0;index<document.parts.length;index++) {
+          if (keynopeLobbyPresentation !== host) return;
+          if (window.KEYNOPE_WEB_EDITOR ? !popup || popup.closed : !presenterPresenting) return;
+          const currentPosition = popup ? popup.keynopePresentationPosition?.() : window.keynopePresentationPosition();
+          if (currentPosition?.key !== position.key) return;
+          await host.channel.send({type:'presentation-part',transfer:document.id,index,data:document.parts[index]});
+        }
+        host.preloaded.add(position.slide);
+        host.sentTransfers.add(document.id);
+      }
+    }
+    host.key = key; host.sentAt = Date.now();
+  } catch (error) {
+    host.forcePending=true;host.key='';
+    if(idle){console.warn('Participant preload skipped:',error);let slide=0;while(host.preloaded.has(slide))slide++;host.preloaded.add(slide);return;}
+    if (!host.errorAt || Date.now()-host.errorAt>20000) {
+      host.errorAt=Date.now();
+      console.warn('Participant page update failed:',error);
+      // Do not await a second network write from the failure path: a stuck
+      // connection must never keep host.sending latched and block navigation.
+      host.channel.send({type:'presentation-md',presenting:false,error:String(error.message||'Page transfer failed').slice(0,160),sentAt:Date.now()}).catch(()=>{});
+    }
+  } finally { host.sending=false; }
+}
+setInterval(() => publishLobbyPresentation(),1000);
 const keynopeEngagementControllerSurface = keynopeAppSurface || presenterMainSurface;
-const keynopeHostedEngagementControllerSurface = keynopeEngagementControllerSurface || (!window.KEYNOPE_PRESENTER && !window.KEYNOPE_WEB_EDITOR);
+const keynopeHostedEngagementControllerSurface = keynopeEngagementControllerSurface || !window.KEYNOPE_PRESENTER;
+function randomActivityCode() {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const bytes = new Uint8Array(16);
+  let result = '';
+  while (result.length < 8) {
+    crypto.getRandomValues(bytes);
+    for (const value of bytes) {
+      if (value >= 248) continue;
+      result += alphabet[value % alphabet.length];
+      if (result.length === 8) break;
+    }
+  }
+  return result;
+}
+function onboardingSessionDefinition() {
+  return (deck.pages || []).map(page => page && page.engagement).find(item => item && item.kind === 'onboarding' && /^[A-Za-z0-9]{8}$/.test(item.code || '')) || null;
+}
+function engagementSessionFor(definition) {
+  const onboarding = onboardingSessionDefinition();
+  const owner = onboarding || (definition && definition.kind === 'onboarding' && /^[A-Za-z0-9]{8}$/.test(definition.code || '') ? definition : null);
+  const key = owner ? 'session-' + owner.id + '-activity-' + definition.id : definition.id || ('slide-' + (deck.pages[pageIndex] && deck.pages[pageIndex].slide));
+  let session = keynopeEngagementSessions.get(key);
+  if (!session) {
+    const code = owner ? owner.code : randomActivityCode();
+    session = {code,sessionId:owner ? owner.id : definition.id,joinUrl:'https://keynope.sh/join/' + encodeURIComponent(code),qrCode:'',deadlineMs:0};
+    keynopeEngagementSessions.set(key,session);
+  }
+  return session;
+}
+async function loadEngagementQRCode(runtime) {
+  if (!runtime || runtime.qrCode || !runtime.joinUrl) return;
+  try {
+    const response = await fetch('/api/editor/activity-qr?value=' + encodeURIComponent(runtime.joinUrl),{cache:'no-store'});
+    if (!response.ok) return;
+    const payload = await response.json();
+    if (keynopeEngagementRuntime !== runtime || !payload.text) return;
+    runtime.qrCode = payload.text;
+    const session = engagementSessionFor(runtime.definition);
+    session.qrCode = runtime.qrCode;
+    renderEngagementRuntime();
+    publishEngagementRuntime();
+  } catch (_err) {}
+}
 function publishEngagementRuntime() {
   if (!window.KEYNOPE_PRESENTER || !keynopeEngagementControllerSurface) return;
   if (keynopeEngagementRuntime && !keynopeEngagementOverlay) return;
   const payload = keynopeEngagementRuntime ? {
     definition:keynopeEngagementRuntime.definition,
+    game:keynopeEngagementRuntime.definition.kind==='prerequisites'?prerequisitePublicState(keynopeEngagementRuntime):KeynopeGames.has(keynopeEngagementRuntime.definition.kind)?KeynopeGames.publicState(keynopeEngagementRuntime):undefined,
     slide:keynopeEngagementRuntime.slide,
     phase:keynopeEngagementRuntime.phase,
     counts:keynopeEngagementRuntime.counts,
     ideas:keynopeEngagementRuntime.ideas,
     assignments:keynopeEngagementRuntime.assignments,
     respondents:keynopeEngagementRuntime.respondents,
+    attributions:keynopeEngagementRuntime.attributions || [],
+    groups:keynopeEngagementRuntime.groups || [],
     sessionCode:keynopeEngagementRuntime.sessionCode || '',
     joinUrl:keynopeEngagementRuntime.joinUrl || '',
-    participants:Number(keynopeEngagementRuntime.participants) || 0
+    qrCode:keynopeEngagementRuntime.qrCode || '',
+    roomReady:!!keynopeEngagementRuntime.roomReady,
+    deadlineMs:Number(keynopeEngagementRuntime.deadlineMs) || 0,
+    participants:Number(keynopeEngagementRuntime.participants) || 0,
+    questionIndex:Number(keynopeEngagementRuntime.questionIndex) || 0,
+    questionRevealed:!!keynopeEngagementRuntime.questionRevealed
   } : null;
   keynopeEngagementPublishChain = keynopeEngagementPublishChain.catch(() => {}).then(() => fetch('/engagement',{
     method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)
@@ -4148,41 +4582,161 @@ async function keynopeActivityConnector() {
   return module.connectKeynopeActivity;
 }
 function foldHostedEngagementResponses(runtime) {
-  const responses = Object.values(runtime.responseByIdentity || {});
+  const entries = Object.entries(runtime.responseByIdentity || {});
+  const responses = entries.map(([,item]) => item);
   runtime.respondents = [...new Set(responses.map(item => item.displayName).filter(Boolean))].sort((left,right) => left.localeCompare(right));
   runtime.participants = runtime.respondents.length;
-  if (runtime.definition.kind === 'pulse') {
+  runtime.attributions = [];
+  const kind = runtime.definition.kind;
+  if (kind === 'dots') {
     runtime.counts = (runtime.definition.options || []).map(() => 0);
-    for (const item of responses) {
-      const choice = Number(item.response && item.response.choice);
-      if (Number.isInteger(choice) && choice >= 0 && choice < runtime.counts.length) runtime.counts[choice]++;
+    for (const [,item] of entries) {
+      const dots = validEngagementDots(runtime.definition,item.response && item.response.dots);
+      if (!dots) continue;
+      dots.forEach((count,index) => runtime.counts[index] += count);
+      runtime.attributions.push({displayName:item.displayName,dots});
     }
-  } else if (runtime.definition.kind === 'storm') {
-    runtime.ideas = (runtime.stormResponses || []).map(item => item.idea).filter(Boolean);
-  } else {
+  } else if (kind === 'pulse') {
+    runtime.counts = (runtime.definition.options || []).map(() => 0);
+    for (const [,item] of entries) {
+      const choice = Number(item.response && item.response.choice);
+      if (Number.isInteger(choice) && choice >= 0 && choice < runtime.counts.length) {
+        runtime.counts[choice]++;
+        runtime.attributions.push({displayName:item.displayName,choice});
+      }
+    }
+  } else if (kind === 'storm') {
+    const ideas = runtime.entryResponses || [];
+    runtime.ideas = ideas.map(item => item.idea).filter(Boolean);
+    runtime.attributions = ideas.map(item => ({displayName:item.displayName,idea:item.idea}));
+    runtime.participants = new Set(ideas.map(item => item.identity)).size;
+    runtime.respondents = [...new Set(ideas.map(item => item.displayName).filter(Boolean))];
+  } else if (kind === 'sort') {
     const latest = responses.slice().sort((left,right) => (left.sequence || 0) - (right.sequence || 0)).at(-1);
     runtime.assignments = latest && Array.isArray(latest.response.assignments) ? latest.response.assignments.slice() : (runtime.definition.cards || []).map(() => -1);
+    runtime.attributions = responses.filter(item => Array.isArray(item.response && item.response.assignments)).map(item => ({displayName:item.displayName,assignments:item.response.assignments.slice()}));
+  } else if (kind === 'dual') {
+    runtime.attributions = responses.filter(item => Array.isArray(item.response && item.response.answers)).map(item => ({displayName:item.displayName,answers:item.response.answers.slice(0,2)}));
+  } else if (kind === 'quiz' || kind === 'truefalse') {
+    runtime.attributions = responses.filter(item => Array.isArray(item.response && item.response.choices)).map(item => ({displayName:item.displayName,choices:item.response.choices.slice()}));
+  } else if (kind === 'match') {
+    runtime.attributions = responses.filter(item => Array.isArray(item.response && item.response.multiAssignments)).map(item => ({displayName:item.displayName,multiAssignments:item.response.multiAssignments.map(value => Array.isArray(value) ? value.slice() : [])}));
+  } else if (kind === 'draw') {
+    runtime.attributions = responses.filter(item => Array.isArray(item.response && item.response.drawing)).map(item => ({displayName:item.displayName,drawing:Array.from({length:20},(_,y) => {
+      const values = Array.from(String(item.response.drawing[y] || ''));
+      return Array.from({length:20},(_,x) => keynopeDecodeDrawingCell(values[x],item.response.drawingVersion)).join('');
+    })}));
+  } else if (kind === 'introduction') {
+    runtime.attributions=responses.filter(item=>item.response&&item.response.avatar).map(item=>({displayName:item.displayName,avatar:keynopeNormalizeIntroductionAvatar(item.response.avatar)}));
+  } else if (kind === 'expertise') {
+    runtime.attributions = responses.filter(item => Array.isArray(item.response && item.response.tags)).map(item => ({displayName:item.displayName,tags:item.response.tags.slice(0,12)}));
+  } else if (kind === 'questions') {
+    const votes = runtime.questionVotes || {};
+    runtime.attributions = (runtime.entryResponses || []).map(item => { const voterIdentities=Object.entries(votes).flatMap(([identity,ballot])=>(Array.isArray(ballot)?ballot:[]).filter(id=>id===item.id).map(()=>identity)); return {displayName:item.displayName,question:item.question,votes:voterIdentities.length,voters:voterIdentities.map(identity=>runtime.memberNames[identity]).filter(Boolean),id:item.id}; });
+    runtime.participants = new Set((runtime.entryResponses || []).map(item => item.identity)).size;
+    runtime.respondents = [...new Set((runtime.entryResponses || []).map(item => item.displayName).filter(Boolean))];
+  } else if (kind === 'wall') {
+    runtime.attributions = responses.flatMap(item => (item.response && Array.isArray(item.response.answers) ? item.response.answers : []).map((idea,choice) => ({displayName:item.displayName,idea:String(idea || '').trim(),choice})).filter(item => item.idea));
   }
 }
 function hostedEngagementResults(runtime) {
-  return {counts:runtime.counts || [],ideas:runtime.ideas || [],assignments:runtime.assignments || [],respondents:runtime.respondents || []};
+  const named = !!runtime.definition.named;
+  const publicAttributions = runtime.definition.kind === 'questions' && runtime.phase < 2 ? [] : (runtime.attributions || []).map(item => runtime.definition.kind === 'questions' && runtime.phase === 2 ? {id:item.id,question:item.question} : named ? item : {...item,displayName:'',voters:[]});
+  const cardAssignments = Object.entries(runtime.cardAssignments || {}).map(([identity,card]) => ({identity,rank:card.rank,label:card.label,suit:card.suit}));
+  const pairAssignments = runtime.phase >= 3 ? Object.entries(runtime.pairAssignments || {}).map(([identity,assignment]) => ({identity,group:assignment.group,members:(assignment.members || []).map(memberIdentity => ({identity:memberIdentity,displayName:runtime.memberNames[memberIdentity] || 'Participant'}))})) : [];
+  const pairMessages = runtime.phase >= 3 ? (runtime.pairMessages || []).slice(-100) : [];
+  const members = Object.entries(runtime.memberNames || {}).map(([identity,displayName]) => ({identity,displayName})).filter(item => item.displayName && item.displayName !== 'Presenter').sort((a,b) => a.displayName.localeCompare(b.displayName));
+  return {pairing:keynopePairingRoom?.sessionCode===runtime.sessionCode?keynopePairingRoom:undefined,game:runtime.definition.kind==='prerequisites'?prerequisitePublicState(runtime):KeynopeGames.has(runtime.definition.kind)?KeynopeGames.publicState(runtime):undefined,counts:runtime.counts || [],ideas:runtime.ideas || [],assignments:runtime.assignments || [],respondents:named ? (runtime.respondents || []) : [],attributions:publicAttributions,groups:runtime.phase >= 3 ? (runtime.groups || []) : [],cardAssignments,pairAssignments,pairMessages,members};
+}
+function engagementBase64URL(bytes) {
+  let binary = '';
+  for (const byte of new Uint8Array(bytes)) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
+}
+async function sendImpostorRole(runtime,identity,publicKey) {
+  if (!runtime || !runtime.activityChannel || !identity || !publicKey) return;
+  const role = runtime.roleAssignments && runtime.roleAssignments[identity];
+  if (!role) return;
+  try {
+    const key = await crypto.subtle.importKey('jwk',publicKey,{name:'RSA-OAEP',hash:'SHA-256'},false,['encrypt']);
+    const ciphertext = await crypto.subtle.encrypt({name:'RSA-OAEP'},key,new TextEncoder().encode(role));
+    await runtime.activityChannel.send({type:'role',activityId:runtime.definition.id,recipient:identity,ciphertext:engagementBase64URL(ciphertext)});
+  } catch (_error) {}
 }
 function receiveHostedEngagement(event,runtime,epoch) {
+  if (keynopeLobbyPresentation?.channel === runtime.activityChannel && event.payload?.type === 'presentation-request') {
+    if (!runtime.lastPageRequest || Date.now()-runtime.lastPageRequest>2000) {
+      runtime.lastPageRequest=Date.now(); publishLobbyPresentation(true);
+    }
+    return;
+  }
+  if (keynopeLobbyPresentation && keynopeLobbyPresentation.channel === runtime.activityChannel && ['hello','presence'].includes((event.payload||{}).type)) {
+    if (event.payload.type === 'hello' && !runtime.activityChannel.usesState) publishLobbyPresentation(true);
+    if (!keynopeEngagementRuntime && event.payload.type === 'hello') {
+      const lobby = onboardingSessionDefinition();
+      if (lobby) runtime.activityChannel.send({type:'definition',activityId:lobby.id,definition:lobby,phase:1,participants:0}).catch(()=>{});
+    }
+  }
   if (!keynopeEngagementRuntime || keynopeEngagementRuntime !== runtime || epoch !== keynopeEngagementSessionEpoch) return;
   const payload = event && event.payload || {};
-  if (payload.type === 'hello') {
-    publishHostedEngagementState(true);
+  if (payload.type === 'hello' || payload.type === 'presence') {
+    const name = String(payload.displayName || event.displayName || 'Participant').trim().slice(0,80) || 'Participant';
+    const changed = runtime.memberNames[event.identity] !== name;
+    runtime.memberNames[event.identity] = name;
+    if (payload.rolePublicKey && typeof payload.rolePublicKey === 'object') runtime.rolePublicKeys[event.identity] = payload.rolePublicKey;
+    if ((runtime.definition.kind === 'finishpair' || runtime.definition.kind === 'prerequisites') || runtime.definition.kind === 'onboarding' || runtime.definition.kind === 'pair' || runtime.definition.kind === 'cards' || runtime.definition.kind === 'impostor') runtime.participants = Object.keys(runtime.memberNames).length;
+    if (runtime.definition.kind === 'impostor' && runtime.phase >= 3) sendImpostorRole(runtime,event.identity,payload.rolePublicKey);
+    if (!changed && payload.type !== 'hello') return;
+    runtime.presenceNeedsDefinition = runtime.presenceNeedsDefinition || (payload.type === 'hello' && !runtime.activityChannel.usesState);
+    if (!runtime.presencePublishTimer) runtime.presencePublishTimer = setTimeout(async () => {
+      runtime.presencePublishTimer = null;
+      if (keynopeEngagementRuntime !== runtime || epoch !== keynopeEngagementSessionEpoch) return;
+      const definition = runtime.presenceNeedsDefinition;
+      runtime.presenceNeedsDefinition = false;
+      renderEngagementRuntime();
+      if (definition) await publishHostedEngagementState(true);
+      await publishHostedEngagementState(false);
+    }, 100);
     return;
   }
   if (payload.type !== 'response' || payload.activityId !== runtime.definition.id) return;
+  if (KeynopeGames.receive(runtime,event)) { renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(false);return; }
+  if (runtime.definition.kind === 'dots' || (runtime.definition.kind === 'finishpair' || runtime.definition.kind === 'prerequisites')) {
+    if (runtime.phase !== 1 || (runtime.deadlineMs && Date.now() >= runtime.deadlineMs)) return;
+    if (runtime.definition.kind === 'dots' && !validEngagementDots(runtime.definition,payload.response && payload.response.dots)) return;
+    if ((runtime.definition.kind === 'finishpair' || runtime.definition.kind === 'prerequisites')) {
+      if (!runtime.memberNames[event.identity] || !payload.response || payload.response.finished !== true) return;
+      if(runtime.definition.kind==='prerequisites'&&!validPrerequisiteCompletion(runtime.definition,payload.response.checked))return;
+      runtime.finishedAt = runtime.finishedAt || {};
+      if (runtime.finishedAt[event.identity] == null) runtime.finishedAt[event.identity] = Date.now();
+      const members = Object.keys(runtime.memberNames);
+      if (members.length && members.every(id => runtime.finishedAt[id] != null)) { finishBalancedPairs(runtime); return; }
+    }
+  }
   const displayName = String(event.displayName || 'Participant').trim().slice(0,80) || 'Participant';
-  if (runtime.definition.kind === 'storm') {
+  if (runtime.definition.kind === 'pair' && payload.response && payload.response.chat) {
+    const assignment = runtime.pairAssignments && runtime.pairAssignments[event.identity];
+    const text = String(payload.response.chat || '').trim().slice(0,240);
+    if (runtime.phase === 3 && assignment && text && !runtime.seenResponseEvents[event.id]) {
+      runtime.seenResponseEvents[event.id] = true;
+      runtime.pairMessages.push({id:event.id,group:assignment.group,identity:event.identity,displayName:runtime.memberNames[event.identity] || displayName,text,createdAt:Date.now()});
+      if (runtime.pairMessages.length > 100) runtime.pairMessages.splice(0,runtime.pairMessages.length - 100);
+      renderEngagementRuntime();
+      publishEngagementRuntime();
+      publishHostedEngagementState(false);
+    }
+    return;
+  } else if (runtime.definition.kind === 'storm') {
     const idea = String(payload.response && payload.response.idea || '').trim().slice(0,160);
     if (idea && !runtime.seenResponseEvents[event.id]) {
       runtime.seenResponseEvents[event.id] = true;
-      runtime.stormResponses.push({identity:event.identity,displayName,idea});
-      runtime.responseByIdentity[event.identity] = {displayName,response:{idea}};
+      runtime.entryResponses.push({id:event.id,identity:event.identity,displayName,idea});
     }
+  } else if (runtime.definition.kind === 'questions') {
+    if (!receiveQuestionResponse(runtime,event,displayName)) return;
+  } else if (runtime.definition.kind === 'wall') {
+    const answers = Array.isArray(payload.response && payload.response.answers) ? payload.response.answers.slice(0,runtime.definition.options.length).map(value => String(value || '').trim().slice(0,240)) : [];
+    if (answers.some(Boolean)) runtime.responseByIdentity[event.identity] = {displayName,response:{answers},sequence:++runtime.responseSequence};
   } else {
     runtime.responseByIdentity[event.identity] = {displayName,response:payload.response || {},sequence:++runtime.responseSequence};
   }
@@ -4192,42 +4746,71 @@ function receiveHostedEngagement(event,runtime,epoch) {
 }
 function startHostedEngagement() {
   const runtime = keynopeEngagementRuntime;
-  if (!runtime || runtime.readOnly || !keynopeHostedEngagementControllerSurface) return;
+  if (!runtime || runtime.readOnly || !keynopeHostedEngagementControllerSurface || runtime.hostingConnection || runtime.activityChannel) return;
+  runtime.hostingConnection = true;
   const epoch = ++keynopeEngagementSessionEpoch;
-  runtime.sessionCode = runtime.definition.code || '';
+  // Non-onboarding activities deliberately have no authored code of their
+  // own. Keep the durable onboarding code that openEngagementRuntime attached
+  // to this runtime so every activity in the deck uses the same room.
+  runtime.sessionCode = runtime.sessionCode || runtime.definition.code || '';
   runtime.joinUrl = runtime.sessionCode ? 'https://keynope.sh/join/' + encodeURIComponent(runtime.sessionCode) : '';
-  runtime.participants = 0;
+  runtime.participants ??= 0;
   runtime.participationUnavailable = false;
-  runtime.responseByIdentity = {};
-  runtime.seenResponseEvents = {};
-  runtime.stormResponses = [];
-  runtime.responseSequence = 0;
-  runtime.respondents = [];
+  runtime.roomReady = false;
+  runtime.responseByIdentity ??= {};
+  runtime.seenResponseEvents ??= {};
+  runtime.stormResponses ??= [];
+  runtime.entryResponses ??= [];
+  runtime.questionVotes ??= {};
+  runtime.memberNames ??= {};
+  runtime.cardAssignments ??= {};
+	runtime.roleAssignments ??= {};
+	runtime.rolePublicKeys ??= {};
+  runtime.pairAssignments ??= {};
+  runtime.pairMessages ??= [];
+  runtime.responseSequence ??= 0;
+  runtime.respondents ??= [];
   renderEngagementRuntime();
   keynopeActivityConnector().then(connect => connect({
-    code:runtime.sessionCode,activityId:runtime.definition.id,displayName:'Presenter',presenter:true,
+    code:runtime.sessionCode,sessionId:runtime.sessionId || runtime.definition.id,activityId:runtime.definition.id,displayName:'Presenter',presenter:true,
     onEvent:event => receiveHostedEngagement(event,runtime,epoch),
-    onError:() => { if (keynopeEngagementRuntime === runtime) { runtime.participationUnavailable = true; renderEngagementRuntime(); } }
+    onError:error => { if (keynopeEngagementRuntime === runtime) { runtime.participationUnavailable = true; runtime.participationError = String(error && error.message || error || 'Connection failed'); renderEngagementRuntime(); } }
   })).then(channel => {
     if (!keynopeEngagementRuntime || epoch !== keynopeEngagementSessionEpoch) { channel.close(); return; }
     runtime.activityChannel = channel;
-    return publishHostedEngagementState(true);
+    publishLobbyPresentation(true);
+    runtime.roomReady = true;
+    runtime.participationUnavailable = false;
+    runtime.participationError = '';
+    return loadEngagementQRCode(runtime).then(() => publishHostedEngagementState(true)).then(() => {
+      if (keynopeEngagementRuntime === runtime && epoch === keynopeEngagementSessionEpoch) return publishHostedEngagementState(false);
+    });
   }).then(() => {
     if (!keynopeEngagementRuntime || epoch !== keynopeEngagementSessionEpoch) return;
     renderEngagementRuntime();
     publishEngagementRuntime();
-  }).catch(() => {
+  }).catch(error => {
     if (!keynopeEngagementRuntime || epoch !== keynopeEngagementSessionEpoch) return;
     runtime.participationUnavailable = true;
+    runtime.participationError = String(error && error.message || error || 'Connection failed');
+    runtime.roomReady = false;
     renderEngagementRuntime();
+    setTimeout(() => {
+      if (keynopeEngagementRuntime === runtime && !runtime.activityChannel) startHostedEngagement();
+    }, 3000);
+  }).finally(() => {
+    runtime.hostingConnection = false;
   });
 }
-function publishHostedEngagementState(includeDefinition = false) {
+function publishHostedEngagementState(includeDefinition = false,reset = false) {
   const runtime = keynopeEngagementRuntime;
   if (!runtime || !runtime.activityChannel) return Promise.resolve();
+  publishParticipantTabs(runtime.activityChannel).catch(error=>console.warn('Participant tabs:',error));
+  const live = hostedEngagementResults(runtime);
+  runtime.activation = runtime.activation || randomActivityCode();
   const payload = includeDefinition
-    ? {type:'definition',activityId:runtime.definition.id,definition:runtime.definition,phase:runtime.phase,participants:runtime.participants}
-    : {type:'state',activityId:runtime.definition.id,phase:runtime.phase,participants:runtime.participants,results:runtime.phase >= 3 ? hostedEngagementResults(runtime) : undefined};
+    ? {type:'definition',activation:runtime.activation,activityId:runtime.definition.id,definition:runtime.definition.kind === 'introduction' ? {...runtime.definition,introductionAssets:keynopeIntroductionAssets} : KeynopeGames.definition(runtime),phase:runtime.phase,deadlineMs:runtime.deadlineMs || 0,participants:runtime.participants,members:live.members,questionIndex:Number(runtime.questionIndex)||0,questionRevealed:!!runtime.questionRevealed,reset:!!reset}
+    : {type:'state',activityId:runtime.definition.id,phase:runtime.phase,deadlineMs:runtime.deadlineMs || 0,participants:runtime.participants,members:live.members,questionIndex:Number(runtime.questionIndex)||0,questionRevealed:!!runtime.questionRevealed,results:runtime.definition.kind === 'prerequisites' || KeynopeGames.has(runtime.definition.kind) || runtime.phase >= 3 || runtime.definition.kind === 'questions' || runtime.definition.kind === 'cards' || runtime.definition.kind === 'impostor' || runtime.definition.kind === 'onboarding' || (runtime.definition.kind === 'truefalse' && runtime.questionRevealed) ? live : undefined};
   return runtime.activityChannel.send(payload).catch(() => {});
 }
 function publishHostedEngagementPhase() {
@@ -4237,85 +4820,696 @@ function currentEngagementDefinition() {
   const page = deck.pages && deck.pages[pageIndex];
   return page && page.engagement || null;
 }
-function closeEngagementRuntime(publish = true) {
+function renderActivityMarker() {
+  if (!activityMarker) return;
+  const definition = currentEngagementDefinition();
+  const visible = !!definition && !keynopeEditorMasterMode;
+  activityMarker.classList.toggle('visible',visible);
+  activityMarker.classList.toggle('active',visible && !!keynopeEngagementRuntime);
+  activityMarker.title = definition ? 'Open ' + (definition.prompt || definition.kind || 'activity') : '';
+  if (visible) {
+    const canvasRect = presenterCanvas.getBoundingClientRect();
+    const stageRect = stage.getBoundingClientRect();
+    activityMarker.style.top = Math.max(12,canvasRect.top-stageRect.top+12) + 'px';
+    activityMarker.style.right = Math.max(12,stageRect.right-canvasRect.right+12) + 'px';
+  }
+}
+let keynopeRecentActivityItems = [];
+function closeEngagementRuntime(publish = true, returnToLobby = true) {
   const runtime = keynopeEngagementRuntime;
+  if (runtime && !runtime.readOnly) {
+    // Keep exercise state, not its connection. Reopening reconnects without
+    // clearing answers, assignments, reveal progress, or manually paused timers.
+    engagementSessionFor(runtime.definition).runtime = {...runtime,activityChannel:null,hostingConnection:false,
+      resumeTimerMs:runtime.deadlineMs ? Math.max(1,runtime.deadlineMs-Date.now()) : 0,deadlineMs:0};
+  }
+  if (runtime && !runtime.readOnly) {
+    const items=[...(runtime.ideas||[]),...(runtime.attributions||[]).map(item=>item.idea||item.question||(item.answers||[]).filter(Boolean).join(' — ')),...((runtime.game||{}).entries||[]).map(item=>item.text)].filter(Boolean);
+    if(items.length)keynopeRecentActivityItems=[...new Set(items)].slice(0,40);
+  }
   if (runtime && !runtime.readOnly && runtime.sessionCode) {
-    runtime.phase = 4;
-    publishHostedEngagementState(false).finally(() => runtime.activityChannel && runtime.activityChannel.close());
+    const lobby = onboardingSessionDefinition();
+    if (returnToLobby && lobby && runtime.definition.kind !== 'onboarding' && runtime.activityChannel) {
+      const members = hostedEngagementResults(runtime).members;
+      runtime.activityChannel.send({type:'definition',activityId:lobby.id,definition:lobby,phase:1,deadlineMs:0,participants:members.length,members}).catch(()=>{});
+    } else {
+      if (runtime.definition.kind !== 'onboarding') runtime.phase = 4;
+      publishHostedEngagementState(false).finally(() => { if (runtime.activityChannel && runtime.activityChannel !== keynopeLobbyPresentation?.channel) runtime.activityChannel.close(); });
+    }
   } else if (runtime && runtime.activityChannel) {
     runtime.activityChannel.close();
   }
   keynopeEngagementSessionEpoch++;
+  clearInterval(keynopeEngagementCountdownTick);
+  keynopeEngagementCountdownTick = 0;
   if (keynopeEngagementOverlay) keynopeEngagementOverlay.remove();
   keynopeEngagementOverlay = null;
   keynopeEngagementRuntime = null;
 	for (const button of document.querySelectorAll('[aria-label="Activities"]')) button.classList.remove('active');
+	renderActivityMarker();
 	if (publish) publishEngagementRuntime();
   if (typeof refreshEditorPresenterControls === 'function') refreshEditorPresenterControls();
+}
+function confirmOnboardingSessionReset() {
+  if (!keynopeEngagementRuntime || keynopeEngagementRuntime.definition.kind !== 'onboarding') return;
+  if (keynopeOnboardingResetBlocker) return;
+  const originalDefinition = JSON.parse(JSON.stringify(keynopeEngagementRuntime.definition));
+  const blocker = document.createElement('div'); blocker.className = 'keynope-modal-blocker keynope-onboarding-reset-blocker';
+  keynopeOnboardingResetBlocker = blocker;
+  const dialog = document.createElement('section'); dialog.className = 'keynope-engagement-dialog keynope-discard-dialog'; dialog.setAttribute('role','alertdialog'); dialog.setAttribute('aria-modal','true');
+  const title = document.createElement('h2'); title.textContent = 'New activity session?';
+  const message = document.createElement('p'); message.textContent = 'Are you sure you want to create a new session code?';
+  const actions = document.createElement('div'); actions.className = 'keynope-engagement-actions';
+  const dismiss = () => { blocker.remove(); if (keynopeOnboardingResetBlocker === blocker) keynopeOnboardingResetBlocker = null; };
+  const cancel = engagementButton('Cancel','',dismiss);
+  const yes = engagementButton('Yes','primary',async () => {
+    yes.disabled = true;
+    const definition = {...originalDefinition,code:randomActivityCode()};
+    dismiss();
+    closeEngagementRuntime(false,false);
+    keynopeEngagementSessions.clear();
+    try {
+      await editorAction({action:'set-engagement',engagementData:definition});
+      const handler = window.webkit?.messageHandlers?.keynopePresenter;
+      if (handler) handler.postMessage({action:'save-presentation'});
+      openEngagementRuntime(true);
+    }
+    catch (_error) { showEngagementToast('COULD NOT RESET'); }
+  });
+  blocker.addEventListener('pointerdown',event => event.stopPropagation());
+  actions.append(cancel,yes); dialog.append(title,message,actions); blocker.appendChild(dialog); document.body.appendChild(blocker); cancel.focus();
 }
 function resetEngagementRuntime() {
   if (!keynopeEngagementRuntime) return;
   const definition = keynopeEngagementRuntime.definition;
+  if (definition.kind === 'onboarding') { confirmOnboardingSessionReset(); return; }
   keynopeEngagementRuntime.phase = 1;
   keynopeEngagementRuntime.counts = (definition.options || []).map(() => 0);
   keynopeEngagementRuntime.ideas = [];
   keynopeEngagementRuntime.assignments = (definition.cards || []).map(() => -1);
 	keynopeEngagementRuntime.respondents = [];
+	keynopeEngagementRuntime.attributions = [];
 	keynopeEngagementRuntime.participants = 0;
 	keynopeEngagementRuntime.responseByIdentity = {};
 	keynopeEngagementRuntime.stormResponses = [];
 	keynopeEngagementRuntime.responseSequence = 0;
+	keynopeEngagementRuntime.entryResponses = [];
+	keynopeEngagementRuntime.questionVotes = {};
+	keynopeEngagementRuntime.groups = [];
+	keynopeEngagementRuntime.cardAssignments = {};
+	keynopeEngagementRuntime.pairAssignments = {};
+	keynopeEngagementRuntime.pairMessages = [];
+	keynopeEngagementRuntime.deadlineMs = 0;
+	keynopeEngagementRuntime.pausedRemainingMs = 0;
+	keynopeEngagementRuntime.roleAssignments = {};
+	keynopeEngagementRuntime.finishedAt = {};
+	keynopeEngagementRuntime.startedAt = Date.now();
+	keynopeEngagementRuntime.stoppedAt = 0;
+	delete keynopeEngagementRuntime.game;
+	keynopeEngagementRuntime.questionIndex = 0;
+	keynopeEngagementRuntime.questionRevealed = false;
+	if (definition.kind === 'pair' || definition.kind === 'cards' || definition.kind === 'impostor') keynopeEngagementRuntime.participants = Object.keys(keynopeEngagementRuntime.memberNames || {}).length;
+	const resetSeconds = definition.kind === 'pair' || definition.kind === 'cards' || definition.kind === 'impostor' ? (Number(definition.joinSeconds) || 120) : Number(definition.timerSeconds);
+	if (resetSeconds > 0) {
+		keynopeEngagementRuntime.deadlineMs = Date.now() + resetSeconds * 1000;
+		engagementSessionFor(definition).deadlineMs = keynopeEngagementRuntime.deadlineMs;
+	}
 	renderEngagementRuntime();
 	publishEngagementRuntime();
-	publishHostedEngagementState(true);
+	publishHostedEngagementState(true,true);
+	runEngagementCountdown(keynopeEngagementRuntime);
 }
 function advanceEngagementRuntime() {
   if (!keynopeEngagementRuntime) return;
-  keynopeEngagementRuntime.phase = Math.min(keynopeEngagementPhases.length - 1,keynopeEngagementRuntime.phase + 1);
+  if (KeynopeGames.next(keynopeEngagementRuntime)) {renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(false);runEngagementCountdown(keynopeEngagementRuntime);return;}
+  if ((keynopeEngagementRuntime.definition.kind === 'finishpair' || keynopeEngagementRuntime.definition.kind === 'prerequisites') && keynopeEngagementRuntime.phase === 1) { finishBalancedPairs(keynopeEngagementRuntime); return; }
+  if (keynopeEngagementRuntime.definition.kind === 'truefalse') {
+    const runtime = keynopeEngagementRuntime;
+    const lastQuestion = Math.max(0,(runtime.definition.questions || []).length - 1);
+    if (!runtime.questionRevealed) runtime.questionRevealed = true;
+    else if ((Number(runtime.questionIndex) || 0) < lastQuestion) { runtime.questionIndex = (Number(runtime.questionIndex) || 0) + 1; runtime.questionRevealed = false; }
+    else { closeEngagementRuntime(); return; }
+    renderEngagementRuntime();
+    publishEngagementRuntime();
+    publishHostedEngagementState(false);
+    return;
+  }
+  if (keynopeEngagementRuntime.definition.kind === 'pair') {
+    if (keynopeEngagementRuntime.phase === 1) beginPairShareDiscussion(keynopeEngagementRuntime);
+    else if (keynopeEngagementRuntime.phase === 3) finishPairShareDiscussion(keynopeEngagementRuntime);
+    return;
+  }
+	if (keynopeEngagementRuntime.definition.kind === 'cards' && keynopeEngagementRuntime.phase === 1) {
+    dealPlayingCards(keynopeEngagementRuntime);
+    return;
+  }
+	if (keynopeEngagementRuntime.definition.kind === 'impostor' && keynopeEngagementRuntime.phase === 1) {
+		revealImpostorRoles(keynopeEngagementRuntime);
+		return;
+	}
+  const grouping = keynopeEngagementRuntime.definition.kind === 'pair' || keynopeEngagementRuntime.definition.kind === 'cards';
+  keynopeEngagementRuntime.phase = grouping && keynopeEngagementRuntime.phase === 1 ? 3 : Math.min(keynopeEngagementPhases.length - 1,keynopeEngagementRuntime.phase + 1);
+  keynopeEngagementRuntime.deadlineMs = 0;
+  keynopeEngagementRuntime.pausedRemainingMs = 0;
+  engagementSessionFor(keynopeEngagementRuntime.definition).deadlineMs = 0;
+  if ((keynopeEngagementRuntime.phase === 2 || keynopeEngagementRuntime.phase === 3) && (keynopeEngagementRuntime.definition.kind === 'pair' || keynopeEngagementRuntime.definition.kind === 'cards')) assignEngagementGroups(keynopeEngagementRuntime);
   renderEngagementRuntime();
 	publishEngagementRuntime();
 	publishHostedEngagementPhase();
+}
+function receiveQuestionResponse(runtime,event,displayName) {
+  if (!runtime.memberNames[event.identity] || runtime.seenResponseEvents[event.id]) return false;
+  const response=event.payload.response||{};
+  if(runtime.phase===1){
+    if(runtime.deadlineMs&&Date.now()>=runtime.deadlineMs)return false;
+    const question=String(response.question||'').trim().slice(0,240);
+    if(!question)return false;
+    runtime.entryResponses.push({id:event.id,identity:event.identity,displayName,question});
+  }else if(runtime.phase===2){
+    const ballot=response.questionDots,ids=new Set(runtime.entryResponses.map(item=>item.id));
+    if(!Array.isArray(ballot)||ballot.length>3||new Set(ballot).size!==ballot.length||ballot.some(id=>typeof id!=='string'||!ids.has(id)))return false;
+    runtime.questionVotes[event.identity]=ballot.slice();
+  }else return false;
+  runtime.seenResponseEvents[event.id]=true;
+  return true;
+}
+function assignEngagementGroups(runtime) {
+  if (runtime.definition.kind === 'cards') { distributePlayingCards(runtime); return; }
+  const identities = Object.keys(runtime.memberNames || {}).filter(identity => runtime.memberNames[identity]);
+  for (let index = identities.length - 1; index > 0; index--) { const swap = engagementRandomIndex(index + 1); [identities[index],identities[swap]] = [identities[swap],identities[index]]; }
+  const size = Math.max(2,Number(runtime.definition.groupSize) || (runtime.definition.kind === 'pair' ? 2 : 4));
+  const groupCount = runtime.definition.kind === 'pair' && size === 2
+    ? Math.max(1,Math.floor(identities.length / 2))
+    : Math.max(1,Math.min(13,Math.ceil(identities.length / size)));
+  const ranks = ['Aces','Kings','Queens','Jacks','10s','9s','8s','7s','6s','5s','4s','3s','2s'];
+  runtime.groups = Array.from({length:groupCount},(_,index) => ({name:runtime.definition.kind === 'cards' ? ranks[index] : 'Group ' + (index + 1),members:[]}));
+  runtime.pairAssignments = {};
+  identities.forEach((identity,index) => {
+    const groupIndex = index % groupCount;
+    runtime.groups[groupIndex].members.push(runtime.memberNames[identity]);
+    runtime.pairAssignments[identity] = {group:groupIndex,members:[]};
+  });
+  for (const [identity,assignment] of Object.entries(runtime.pairAssignments)) {
+    assignment.members = identities.filter(memberIdentity => runtime.pairAssignments[memberIdentity] && runtime.pairAssignments[memberIdentity].group === assignment.group);
+  }
+}
+
+function validEngagementDots(definition,dots) {
+  if (!Array.isArray(dots) || dots.length !== (definition.options || []).length) return null;
+  if (dots.some(value => !Number.isInteger(value) || value < 0 || (!definition.stackDots && value > 1))) return null;
+  return dots.reduce((sum,value) => sum + value,0) <= (definition.dotBudget || 3) ? dots.slice() : null;
+}
+let keynopePairingRoom=null;
+function replacePairingRoom(runtime){
+  // Roles must never create groups: this allowlist deliberately excludes Impostor.
+  if(!['prerequisites','finishpair','cards','pair'].includes(runtime.definition.kind))return;
+  keynopePairingRoom={sessionCode:runtime.sessionCode,epoch:randomActivityCode(),assignments:Object.entries(runtime.pairAssignments||{}).map(([identity,value])=>({identity,group:value.group,members:value.members}))};
+}
+function validPrerequisiteCompletion(definition,checked){
+  return Array.isArray(checked)&&checked.length===(definition.prerequisites||[]).length&&checked.length>0&&checked.every(value=>value===true);
+}
+function prerequisitePublicState(runtime){
+  const finished=Object.entries(runtime.finishedAt||{}).sort((a,b)=>a[1]-b[1]);
+  return {startedAt:runtime.startedAt||0,stoppedAt:runtime.stoppedAt||0,finishedCount:finished.length,
+    finishedNames:runtime.definition.named?finished.map(([id])=>runtime.memberNames[id]||'Participant'):[],
+    ranking:runtime.definition.named&&runtime.phase>=3?finished.map(([id,time],index)=>({rank:index+1,name:runtime.memberNames[id]||'Participant',elapsedMs:Math.max(0,time-(runtime.startedAt||time))})):[]};
+}
+function balancedCompletionGroups(members,finishedAt,randomIndex) {
+  const finished = members.filter(id => finishedAt[id] != null).sort((a,b) => finishedAt[a] - finishedAt[b]);
+  const unfinished = members.filter(id => finishedAt[id] == null);
+  for (let i=unfinished.length-1;i>0;i--) { const j=randomIndex(i+1); [unfinished[i],unfinished[j]]=[unfinished[j],unfinished[i]]; }
+  const order = finished.concat(unfinished), groups=[];
+  while (order.length > 3) groups.push([order.shift(),order.pop()]);
+  if (order.length) groups.push(order);
+  return groups;
+}
+function finishBalancedPairs(runtime) {
+  if (runtime.phase !== 1) return;
+  const groups = balancedCompletionGroups(Object.keys(runtime.memberNames || {}),runtime.finishedAt || {},engagementRandomIndex);
+  runtime.groups=groups.map((members,index)=>({name:'Group '+(index+1),members:members.map(id=>runtime.memberNames[id])}));
+  runtime.participants=Object.keys(runtime.memberNames||{}).length;
+  runtime.pairAssignments={};
+  groups.forEach((members,group)=>members.forEach(id=>runtime.pairAssignments[id]={group,members}));
+  runtime.stoppedAt=Date.now();
+  replacePairingRoom(runtime);
+  runtime.phase=3;runtime.deadlineMs=0;runtime.pausedRemainingMs=0;
+  renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(false);
+}
+
+function beginPairShareDiscussion(runtime) {
+  if (!runtime || runtime.definition.kind !== 'pair') return;
+  assignEngagementGroups(runtime);
+  replacePairingRoom(runtime);
+  runtime.phase = 3;
+  runtime.pairMessages = [];
+  runtime.pausedRemainingMs = 0;
+  runtime.deadlineMs = Date.now() + (Number(runtime.definition.discussionSeconds) || 300) * 1000;
+  engagementSessionFor(runtime.definition).deadlineMs = runtime.deadlineMs;
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  publishHostedEngagementState(false);
+  runEngagementCountdown(runtime);
+}
+function finishPairShareDiscussion(runtime) {
+  if (!runtime || runtime.definition.kind !== 'pair') return;
+  clearInterval(keynopeEngagementCountdownTick);
+  keynopeEngagementCountdownTick = 0;
+  runtime.phase = 4;
+  runtime.deadlineMs = 0;
+  runtime.pausedRemainingMs = 0;
+  engagementSessionFor(runtime.definition).deadlineMs = 0;
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  publishHostedEngagementState(false);
+}
+function reopenPairShareJoin(runtime) {
+  if (!runtime || runtime.definition.kind !== 'pair') return;
+  runtime.phase = 1;
+  runtime.groups = [];
+  runtime.pairAssignments = {};
+  runtime.pairMessages = [];
+  runtime.pausedRemainingMs = 0;
+  runtime.deadlineMs = Date.now() + (Number(runtime.definition.joinSeconds) || 120) * 1000;
+  engagementSessionFor(runtime.definition).deadlineMs = runtime.deadlineMs;
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  publishHostedEngagementState(true,true);
+  runEngagementCountdown(runtime);
+}
+function addEngagementMinute(runtime) {
+  if (!runtime || (!runtime.deadlineMs && !runtime.pausedRemainingMs)) return;
+  if (runtime.pausedRemainingMs) runtime.pausedRemainingMs += 60000;
+  else runtime.deadlineMs = Math.max(Date.now(),Number(runtime.deadlineMs)) + 60000;
+  engagementSessionFor(runtime.definition).deadlineMs = runtime.deadlineMs || 0;
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  publishHostedEngagementState(false);
+  runEngagementCountdown(runtime);
+}
+function toggleEngagementTimer(runtime) {
+  if (!runtime) return;
+  if (runtime.pausedRemainingMs) {
+    runtime.deadlineMs = Date.now() + runtime.pausedRemainingMs;
+    runtime.pausedRemainingMs = 0;
+  } else if (runtime.deadlineMs) {
+    runtime.pausedRemainingMs = Math.max(1,Number(runtime.deadlineMs) - Date.now());
+    runtime.deadlineMs = 0;
+  } else return;
+  engagementSessionFor(runtime.definition).deadlineMs = runtime.deadlineMs || 0;
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  publishHostedEngagementState(false);
+  runEngagementCountdown(runtime);
+}
+function engagementRandomIndex(maximum) {
+  if (!globalThis.crypto || typeof globalThis.crypto.getRandomValues !== 'function') return Math.floor(Math.random() * maximum);
+  const limit = 0x100000000 - (0x100000000 % maximum);
+  const value = new Uint32Array(1);
+  do { globalThis.crypto.getRandomValues(value); } while (value[0] >= limit);
+  return value[0] % maximum;
+}
+function distributePlayingCards(runtime) {
+  const ranks = ['Aces','Kings','Queens','Jacks','10s','9s','8s','7s','6s','5s','4s','3s','2s'];
+  const labels = ['A','K','Q','J','10','9','8','7','6','5','4','3','2'];
+  const suits = ['♠','♥','♦','♣'];
+  const identities = Object.keys(runtime.memberNames || {}).filter(identity => runtime.memberNames[identity]);
+  for (let index = identities.length - 1; index > 0; index--) { const swap = engagementRandomIndex(index + 1); [identities[index],identities[swap]] = [identities[swap],identities[index]]; }
+  const targetCount = Math.max(2,Math.min(ranks.length,Number(runtime.definition.groupCount) || 4));
+  let groupCount = Math.max(1,Math.min(targetCount,identities.length || 1));
+  while (groupCount > 1 && Math.floor(identities.length / groupCount) < 2) groupCount--;
+  const slots = [];
+  const baseSize = groupCount ? Math.floor(identities.length / groupCount) : 0;
+  const extraGroups = groupCount ? identities.length % groupCount : 0;
+  const groupOrder = Array.from({length:groupCount},(_,index) => index);
+  for (let index = groupOrder.length - 1; index > 0; index--) { const swap = engagementRandomIndex(index + 1); [groupOrder[index],groupOrder[swap]] = [groupOrder[swap],groupOrder[index]]; }
+  const capacities = Array(groupCount).fill(baseSize);
+  for (let index = 0; index < extraGroups; index++) capacities[groupOrder[index]]++;
+  capacities.forEach((capacity,groupIndex) => { for (let count = 0; count < capacity; count++) slots.push(groupIndex); });
+  for (let index = slots.length - 1; index > 0; index--) { const swap = engagementRandomIndex(index + 1); [slots[index],slots[swap]] = [slots[swap],slots[index]]; }
+  runtime.cardAssignments = {};
+  const suitOrders = Array.from({length:groupCount},() => {
+    const order = suits.slice();
+    for (let index = order.length - 1; index > 0; index--) { const swap = engagementRandomIndex(index + 1); [order[index],order[swap]] = [order[swap],order[index]]; }
+    return order;
+  });
+  const suitIndexes = Array(groupCount).fill(0);
+  identities.forEach((identity,index) => {
+    const groupIndex = slots[index] || 0;
+    const order = suitOrders[groupIndex] || suits;
+    runtime.cardAssignments[identity] = {rank:ranks[groupIndex],label:labels[groupIndex],suit:order[suitIndexes[groupIndex]++ % order.length]};
+  });
+  rebuildPlayingCardGroups(runtime);
+}
+function rebuildPlayingCardGroups(runtime) {
+  const ranks = ['Aces','Kings','Queens','Jacks','10s','9s','8s','7s','6s','5s','4s','3s','2s'];
+  const labels = ['A','K','Q','J','10','9','8','7','6','5','4','3','2'];
+  runtime.groups = ranks.map((rank,index) => ({name:rank,label:labels[index],members:Object.entries(runtime.cardAssignments || {}).filter(([,card]) => card.rank === rank).map(([identity]) => runtime.memberNames[identity]).filter(Boolean)})).filter(group => group.members.length);
+}
+function dealPlayingCards(runtime) {
+  if (!runtime || runtime.definition.kind !== 'cards') return;
+  distributePlayingCards(runtime);
+  runtime.pairAssignments={};
+  const rankGroups=new Map();
+  for(const [id,card] of Object.entries(runtime.cardAssignments||{})){if(!rankGroups.has(card.rank))rankGroups.set(card.rank,[]);rankGroups.get(card.rank).push(id);}
+  [...rankGroups.values()].forEach((members,group)=>members.forEach(id=>runtime.pairAssignments[id]={group,members}));
+  replacePairingRoom(runtime);
+  runtime.phase = 3;
+  runtime.deadlineMs = 0;
+  runtime.pausedRemainingMs = 0;
+  engagementSessionFor(runtime.definition).deadlineMs = 0;
+  clearInterval(keynopeEngagementCountdownTick);
+  keynopeEngagementCountdownTick = 0;
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  publishHostedEngagementState(false);
+}
+async function revealImpostorRoles(runtime) {
+  if (!runtime || runtime.definition.kind !== 'impostor') return;
+  clearInterval(keynopeEngagementCountdownTick);
+  keynopeEngagementCountdownTick = 0;
+  runtime.phase = 2;
+  runtime.deadlineMs = 0;
+  runtime.pausedRemainingMs = 0;
+  engagementSessionFor(runtime.definition).deadlineMs = 0;
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  await publishHostedEngagementState(false);
+  const identities = Object.keys(runtime.memberNames || {}).filter(identity => runtime.memberNames[identity]);
+  for (let index = identities.length - 1; index > 0; index--) {
+    const swap = engagementRandomIndex(index + 1);
+    [identities[index],identities[swap]] = [identities[swap],identities[index]];
+  }
+  const impostors = Math.min(identities.length,Math.max(1,Number(runtime.definition.impostorCount) || 1));
+  runtime.roleAssignments = {};
+  identities.forEach((identity,index) => { runtime.roleAssignments[identity] = index < impostors ? 'impostor' : 'crew'; });
+  runtime.counts = [Math.max(0,identities.length-impostors),impostors];
+  await Promise.all(identities.map(identity => sendImpostorRole(runtime,identity,runtime.rolePublicKeys && runtime.rolePublicKeys[identity])));
+  if (keynopeEngagementRuntime !== runtime) return;
+  runtime.phase = 3;
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  publishHostedEngagementState(false);
 }
 function engagementButton(label,className,clicked) {
   const button = document.createElement('button');
   button.type = 'button'; button.textContent = label; button.className = className || '';
   button.addEventListener('click',clicked); return button;
 }
+function showEngagementToast(message) {
+  const toast = document.createElement('div');
+  toast.className = 'keynope-engagement-toast'; toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(),1600);
+}
+async function copyEngagementJoinURL(url) {
+  try {
+    await navigator.clipboard.writeText(url);
+  } catch (_error) {
+    const field = document.createElement('textarea'); field.value = url; field.style.position = 'fixed'; field.style.opacity = '0';
+    document.body.appendChild(field); field.select(); document.execCommand('copy'); field.remove();
+  }
+  showEngagementToast('LINK COPIED');
+}
+function engagementRemainingText(deadlineMs) {
+  const remaining = Math.max(0,Math.ceil((Number(deadlineMs) - Date.now()) / 1000));
+  return String(Math.floor(remaining / 60)).padStart(2,'0') + ':' + String(remaining % 60).padStart(2,'0');
+}
+function runEngagementCountdown(runtime) {
+  clearInterval(keynopeEngagementCountdownTick);
+  keynopeEngagementCountdownTick = 0;
+  if (!runtime || !runtime.deadlineMs) return;
+  keynopeEngagementCountdownTick = setInterval(() => {
+    if (keynopeEngagementRuntime !== runtime) return;
+    if (!runtime.readOnly && runtime.definition.kind === 'pair' && runtime.phase === 3 && Date.now() >= runtime.deadlineMs) {
+      finishPairShareDiscussion(runtime);
+      return;
+    }
+    if (!runtime.readOnly && runtime.phase === 1 && Date.now() >= runtime.deadlineMs) {
+      if (KeynopeGames.next(runtime)) {renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(false);runEngagementCountdown(runtime);return;}
+      if ((runtime.definition.kind === 'finishpair' || runtime.definition.kind === 'prerequisites')) { finishBalancedPairs(runtime); return; }
+      if (runtime.definition.kind === 'pair') {
+        beginPairShareDiscussion(runtime);
+        return;
+      }
+      if (runtime.definition.kind === 'cards') {
+        dealPlayingCards(runtime);
+        return;
+      }
+		if (runtime.definition.kind === 'impostor') {
+			revealImpostorRoles(runtime);
+			return;
+		}
+      const grouping = runtime.definition.kind === 'pair' || runtime.definition.kind === 'cards';
+      runtime.phase = grouping ? 3 : 2;
+      if (grouping) assignEngagementGroups(runtime);
+      renderEngagementRuntime();
+      publishHostedEngagementPhase();
+      publishEngagementRuntime();
+      return;
+    }
+    const countdown = keynopeEngagementOverlay && keynopeEngagementOverlay.querySelector('.keynope-engagement-countdown');
+    if (countdown) countdown.textContent = engagementRemainingText(runtime.deadlineMs);
+  },250);
+}
+function engagementVoteSummary(definition,items) {
+  const names = (items || []).map(item => item.displayName).filter(Boolean);
+  if (definition.named && names.length) return '(' + names.join(', ') + ')';
+  const count = (items || []).length;
+  return count + ' vote' + (count === 1 ? '' : 's');
+}
+function renderFactOrFictionQuestion(content,runtime,reveal) {
+  const questions = runtime.definition.questions || [];
+  const questionIndex = Math.max(0,Math.min(questions.length - 1,Number(runtime.questionIndex) || 0));
+  const question = questions[questionIndex];
+  if (!question) return;
+  const shell = document.createElement('section'); shell.className = 'keynope-engagement-column keynope-engagement-current-question';
+  const number = document.createElement('strong'); number.textContent = (questionIndex + 1) + '/' + questions.length;
+  const title = document.createElement('h3'); title.textContent = question.prompt;
+  shell.append(number,title);
+  if (reveal) {
+    for (const [optionIndex,option] of (question.options || []).entries()) {
+      const row = document.createElement('div'); row.className = 'keynope-engagement-result';
+      const label = document.createElement('span'); label.textContent = (optionIndex === question.correct ? '✓ ' : '') + option;
+      const voters = (runtime.attributions || []).filter(item => Number.isInteger((item.choices || [])[questionIndex]) && (item.choices || [])[questionIndex] === optionIndex);
+      const count = document.createElement('strong'); count.textContent = engagementVoteSummary(runtime.definition,voters);
+      row.append(label,count); shell.appendChild(row);
+    }
+  }
+  content.appendChild(shell);
+}
+function renderEngagementRevealResults(content,runtime) {
+  if(runtime.definition.kind==='prerequisites'){
+    KeynopeGames.renderPrerequisites(content,{...runtime,game:runtime.readOnly?runtime.game:prerequisitePublicState(runtime)},{presenter:true});
+    if(!runtime.definition.named)return;
+  }
+  const definition = runtime.definition;
+  if (KeynopeGames.render(content,runtime,{presenter:true}))return;
+  const results = document.createElement('div'); results.className = 'keynope-engagement-results';
+  if (definition.kind === 'dots') {
+    (definition.options || []).map((option,index)=>({option,index,count:Number(runtime.counts[index])||0})).sort((a,b)=>b.count-a.count||a.index-b.index).forEach(item=>{
+      const row=document.createElement('div');row.className='keynope-engagement-result';
+      const names=definition.named?(runtime.attributions||[]).filter(v=>(v.dots||[])[item.index]>0).map(v=>v.displayName+' ×'+v.dots[item.index]).join(', '):'';
+      row.textContent=item.option+' — '+item.count+' dots '+(names?'('+names+')':'');results.appendChild(row);
+    });
+  } else if (definition.kind === 'pulse') {
+    (definition.options || []).forEach((option,index) => {
+      const row = document.createElement('div'); row.className = 'keynope-engagement-result';
+      const label = document.createElement('span'); label.textContent = (definition.kind === 'truefalse' && index === Number(definition.correct) ? '✓ ' : '') + option;
+      const voters = (runtime.attributions || []).filter(item => Number(item.choice) === index);
+      const count = document.createElement('strong'); count.textContent = engagementVoteSummary(definition,voters);
+      row.append(label,count); results.appendChild(row);
+    });
+  } else if (definition.kind === 'storm') {
+    (runtime.ideas || []).forEach((value,index) => {
+      const idea = document.createElement('div'); idea.className = 'keynope-engagement-result-idea';
+      if (definition.named && runtime.attributions && runtime.attributions[index]) {
+        const name = document.createElement('strong'); name.textContent = runtime.attributions[index].displayName || 'Participant';
+        idea.append(name,document.createTextNode(value));
+      } else idea.textContent = value;
+      results.appendChild(idea);
+    });
+    if (!(runtime.ideas || []).length) {
+      const empty = document.createElement('div'); empty.className = 'keynope-engagement-result-waiting'; empty.textContent = 'No ideas submitted'; results.appendChild(empty);
+    }
+  } else if (definition.kind === 'sort') {
+    const columns = document.createElement('div'); columns.className = 'keynope-engagement-columns';
+    (definition.zones || []).forEach((zone,zoneIndex) => {
+      const column = document.createElement('section'); column.className = 'keynope-engagement-column';
+      const title = document.createElement('h3'); title.textContent = zone; column.appendChild(title);
+      (definition.cards || []).forEach((card,cardIndex) => {
+        const voters = (runtime.attributions || []).filter(item => Number(item.assignments && item.assignments[cardIndex]) === zoneIndex);
+        if (!voters.length) return;
+        const row = document.createElement('div'); row.className = 'keynope-engagement-result';
+        const label = document.createElement('span'); label.textContent = card;
+        const value = document.createElement('strong'); value.textContent = engagementVoteSummary(definition,voters);
+        row.append(label,value); column.appendChild(row);
+      });
+      columns.appendChild(column);
+    });
+    results.appendChild(columns);
+  } else if (definition.kind === 'dual') {
+    const columns = document.createElement('div'); columns.className = 'keynope-engagement-columns';
+    (definition.options || []).forEach((heading,answerIndex) => {
+      const column = document.createElement('section'); column.className = 'keynope-engagement-column';
+      const title = document.createElement('h3'); title.textContent = heading; column.appendChild(title);
+      for (const item of runtime.attributions || []) {
+        const answer = String((item.answers || [])[answerIndex] || '').trim(); if (!answer) continue;
+        const row = document.createElement('div'); row.className = 'keynope-engagement-result-idea';
+        if (definition.named && item.displayName) { const name = document.createElement('strong'); name.textContent = item.displayName; row.append(name,document.createTextNode(answer)); } else row.textContent = answer;
+        column.appendChild(row);
+      }
+      columns.appendChild(column);
+    });
+    results.appendChild(columns);
+  } else if (definition.kind === 'quiz') {
+    (definition.questions || []).forEach((question,questionIndex) => {
+      const column = document.createElement('section'); column.className = 'keynope-engagement-column';
+      const title = document.createElement('h3'); title.textContent = question.prompt; column.appendChild(title);
+      (question.options || []).forEach((option,optionIndex) => {
+        const row = document.createElement('div'); row.className = 'keynope-engagement-result';
+        const label = document.createElement('span'); label.textContent = (optionIndex === question.correct ? '✓ ' : '') + option;
+        const voters = (runtime.attributions || []).filter(item => Number((item.choices || [])[questionIndex]) === optionIndex);
+        const count = document.createElement('strong'); count.textContent = engagementVoteSummary(definition,voters);
+        row.append(label,count); column.appendChild(row);
+      });
+      results.appendChild(column);
+    });
+  } else if (definition.kind === 'match') {
+    (definition.cards || []).forEach((card,cardIndex) => {
+      const row = document.createElement('div'); row.className = 'keynope-engagement-result';
+      const label = document.createElement('span'); label.textContent = card;
+      const tallies = (definition.zones || []).map((zone,zoneIndex) => ({zone,voters:(runtime.attributions || []).filter(item => (item.multiAssignments && item.multiAssignments[cardIndex] || []).includes(zoneIndex))})).filter(item => item.voters.length).sort((a,b) => b.voters.length-a.voters.length);
+      const destination = document.createElement('strong'); destination.textContent = tallies.length ? tallies.map(item => item.zone + ' ' + engagementVoteSummary(definition,item.voters)).join(' · ') : 'Unsorted';
+      row.append(label,destination); results.appendChild(row);
+    });
+  } else if (definition.kind === 'questions') {
+    const questions = (runtime.attributions || []).slice().sort((a,b) => Number(b.votes)-Number(a.votes));
+    for (const [index,item] of questions.entries()) {
+      const row = document.createElement('div'); row.className = 'keynope-engagement-result';
+      const label = document.createElement('span'); label.textContent = (index+1)+'. '+(item.question || '');
+      const voterItems = (item.voters || []).map(displayName => ({displayName}));
+      const votes = document.createElement('strong'); votes.textContent = (Number(item.votes)||0)+' dots'+(definition.named&&voterItems.length?' ('+[...new Set(voterItems.map(item=>item.displayName))].join(', ')+')':'');
+      row.append(label,votes);
+      if (definition.named && item.displayName) { const name = document.createElement('em'); name.textContent = item.displayName; row.appendChild(name); }
+      results.appendChild(row);
+    }
+  } else if (definition.kind === 'wall') {
+    const columns = document.createElement('div'); columns.className = 'keynope-engagement-columns';
+    (definition.options || []).forEach((heading,index) => {
+      const column = document.createElement('section'); column.className = 'keynope-engagement-column'; const title = document.createElement('h3'); title.textContent = heading; column.appendChild(title);
+      for (const item of (runtime.attributions || []).filter(value => Number(value.choice) === index)) {
+        const row = document.createElement('div'); row.className = 'keynope-engagement-result-idea';
+        const prefix = item.target ? 'For ' + item.target + ': ' : '';
+        if (definition.named && item.displayName) { const name = document.createElement('strong'); name.textContent = item.displayName; row.append(name,document.createTextNode(prefix + (item.idea || ''))); } else row.textContent = prefix + (item.idea || '');
+        column.appendChild(row);
+      }
+      columns.appendChild(column);
+    }); results.appendChild(columns);
+  } else if (definition.kind === 'draw' || definition.kind === 'introduction') {
+    const marquee = document.createElement('div'); marquee.className = 'keynope-engagement-marquee'; const track = document.createElement('div'); track.className = 'keynope-engagement-marquee-track';
+    for (const item of runtime.attributions || []) {
+      const portrait = document.createElement('figure'); portrait.className = 'keynope-engagement-portrait'; let drawing;
+      if (definition.kind === 'introduction') drawing=keynopeIntroductionAvatarElement(item.avatar,'keynope-introduction-result');
+      else { drawing=document.createElement('div'); drawing.className='keynope-engagement-drawing'; const rows=Array.isArray(item.drawing)?item.drawing:[]; for(let y=0;y<20;y++)for(let x=0;x<20;x++){const pixel=document.createElement('i');const value=Array.from(String(rows[y]||''))[x]||keynopeDrawingEmpty;pixel.textContent=value===keynopeDrawingEmpty?'':value;drawing.appendChild(pixel);} }
+      const caption = document.createElement('figcaption'); caption.textContent = definition.named ? (item.displayName || 'Participant') : 'Anonymous'; portrait.append(drawing,caption); track.appendChild(portrait);
+    }
+    if (!(runtime.attributions || []).length) { const empty=document.createElement('div'); empty.className='keynope-engagement-result-waiting'; empty.textContent='No portraits submitted'; results.appendChild(empty); }
+    else { marquee.appendChild(track); results.appendChild(marquee); }
+  } else if (definition.kind === 'expertise') {
+    const tags = new Map();
+    for (const item of runtime.attributions || []) for (const tag of item.tags || []) { const key=String(tag).trim(); if (!key) continue; if (!tags.has(key)) tags.set(key,[]); if (definition.named && item.displayName) tags.get(key).push(item.displayName); }
+    for (const [tag,names] of [...tags].sort((a,b) => b[1].length-a[1].length || a[0].localeCompare(b[0]))) { const row=document.createElement('div'); row.className='keynope-engagement-result'; const label=document.createElement('span'); label.textContent=tag; const count=(runtime.attributions||[]).filter(item=>(item.tags||[]).includes(tag)).length; const value=document.createElement('strong'); value.textContent=definition.named ? '('+names.join(', ')+')' : count+' vote'+(count===1?'':'s'); row.append(label,value); results.appendChild(row); }
+  } else if (definition.kind === 'pair' || definition.kind === 'cards' || definition.kind === 'finishpair' || definition.kind === 'prerequisites') {
+    const columns=document.createElement('div'); columns.className='keynope-engagement-columns';
+    for (const group of runtime.groups || []) { const area=document.createElement('section'); area.className='keynope-engagement-group'; if(definition.kind === 'cards'){const card=document.createElement('div');card.className='keynope-playing-card';const rank=document.createElement('strong');rank.textContent=group.label||String(group.name||'').replace(/s$/,'');const suits=document.createElement('span');suits.textContent='♠ ♥\n♦ ♣';card.append(rank,suits);area.appendChild(card);}else{const name=document.createElement('h3');name.textContent=group.name;area.appendChild(name);} const members=document.createElement('div'); members.className='keynope-engagement-group-members'; members.textContent=(group.members || []).join(', ') || 'Waiting for participants'; area.appendChild(members); columns.appendChild(area); }
+    results.appendChild(columns);
+  } else if (definition.kind === 'impostor') {
+    const roles = Object.values(runtime.roleAssignments || {});
+    const impostors = roles.length ? roles.filter(role => role === 'impostor').length : Number((runtime.counts || [])[1]) || 0;
+    const crew = roles.length ? Math.max(0,roles.length-impostors) : Number((runtime.counts || [])[0]) || 0;
+    const summary = document.createElement('div'); summary.className = 'keynope-impostor-presenter';
+    const heading = document.createElement('strong'); heading.textContent = 'ROLES REVEALED';
+    const detail = document.createElement('span'); detail.textContent = impostors + ' impostor' + (impostors === 1 ? '' : 's') + ' · ' + crew + ' crew';
+    const privacy = document.createElement('small'); privacy.textContent = 'Roles are shown privately on participant screens.';
+    summary.append(heading,detail,privacy); results.appendChild(summary);
+  }
+  content.appendChild(results);
+  KeynopeActivityDesign.results(results,runtime);
+}
 function renderEngagementRuntime() {
   const runtime = keynopeEngagementRuntime;
   if (!runtime || !keynopeEngagementOverlay) return;
   const definition = runtime.definition;
   const phase = keynopeEngagementPhases[runtime.phase];
+  const phaseLabel = definition.kind === 'onboarding' ? 'LOBBY' : definition.kind === 'truefalse' ? (runtime.questionRevealed ? 'REVEAL' : 'QUESTION') : definition.kind === 'pair' ? ({1:'JOIN',3:'DISCUSS',4:'DONE'}[runtime.phase] || phase) : definition.kind === 'cards' || definition.kind === 'impostor' ? ({1:'JOIN',3:'REVEAL'}[runtime.phase] || phase) : phase;
   const board = document.createElement('section'); board.className = 'keynope-engagement-board';
   const head = document.createElement('header'); head.className = 'keynope-engagement-head';
-  const title = document.createElement('h1'); title.textContent = definition.prompt || (definition.kind === 'pulse' ? 'Pulse' : definition.kind === 'storm' ? 'Storm' : 'Sort');
-  const badge = document.createElement('span'); badge.className = 'keynope-engagement-phase'; badge.textContent = phase;
+  const activityNames = {...KeynopeGames.names,onboarding:'Onboarding',dots:'Dot Voting',finishpair:'The Race',prerequisites:'Prerequisites',pulse:'Pulse',storm:'Storm',sort:'Sort',dual:'Dual response',quiz:'Quiz',truefalse:'Fact or Fiction',match:'Mix & Match',questions:'Questions',wall:'Feedback Wall',draw:'Draw yourself',introduction:'Introduction',pair:'Pair Share',expertise:'Expertise Map',cards:'Playing Cards',impostor:'Impostor'};
+  const title = document.createElement('h1'); title.textContent = definition.prompt || activityNames[definition.kind] || 'Activity';
+  const badge = document.createElement('span'); badge.className = 'keynope-engagement-phase'; badge.textContent = definition.kind==='questions'&&runtime.phase===2?'VOTING':phaseLabel;
   head.append(title,badge);
+  if ((runtime.deadlineMs || runtime.pausedRemainingMs) && (phase === 'OPEN' || (definition.kind === 'pair' && runtime.phase === 3))) {
+    const countdown = document.createElement('div');
+    countdown.className = 'keynope-engagement-countdown';
+    countdown.textContent = (runtime.pausedRemainingMs ? 'PAUSED ' : '') + engagementRemainingText(runtime.deadlineMs || Date.now() + runtime.pausedRemainingMs);
+    head.appendChild(countdown);
+  }
+  const revealed = phase === 'REVEAL' || phase === 'DISCUSS';
   let join = null;
-  if (runtime.sessionCode || runtime.participationUnavailable || (!runtime.readOnly && keynopeHostedEngagementControllerSurface)) {
+  if (!revealed && (runtime.roomReady || runtime.participationUnavailable || (!runtime.readOnly && keynopeHostedEngagementControllerSurface))) {
     join = document.createElement('div'); join.className = 'keynope-engagement-join';
-    if (runtime.sessionCode) {
+    if (runtime.roomReady && runtime.sessionCode) {
       const instruction = document.createElement('span'); instruction.textContent = 'Join at keynope.sh/join/' + runtime.sessionCode;
       const code = document.createElement('strong'); code.textContent = runtime.sessionCode;
-      const link = document.createElement('a'); link.href = runtime.joinUrl; link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Open participant view';
-      const participants = document.createElement('span'); participants.className = 'participants'; participants.textContent = (Number(runtime.participants) || 0) + ' submitted';
-      join.append(instruction,code,link,participants);
+      const link = document.createElement('a'); link.href = runtime.joinUrl; link.target = '_blank'; link.rel = 'noopener'; link.textContent = runtime.joinUrl;
+      const copy = engagementButton('Copy','keynope-engagement-copy',() => copyEngagementJoinURL(runtime.joinUrl));
+      const participants = document.createElement('span'); participants.className = 'participants';
+      const grouping = runtime.definition.kind === 'onboarding' || runtime.definition.kind === 'pair' || runtime.definition.kind === 'cards' || runtime.definition.kind === 'impostor';
+      participants.textContent = (Number(runtime.participants) || 0) + (grouping ? ' joined' : ' submitted');
+      join.append(instruction,code,link,copy,participants);
     } else {
-      join.textContent = runtime.participationUnavailable ? 'Participation unavailable — local facilitation still works.' : 'Opening participant room…';
+      join.textContent = runtime.participationUnavailable ? 'Could not open participant room — retrying…' + (runtime.participationError ? ' (' + runtime.participationError + ')' : '') : 'Opening participant room…';
     }
   }
   const content = document.createElement('div'); content.className = 'keynope-engagement-content';
+  KeynopeActivityDesign.mount(content,runtime,{presenter:true});
+  if (!revealed && runtime.roomReady && runtime.qrCode) {
+    const qr = document.createElement('pre');
+    qr.className = 'keynope-engagement-qr';
+    qr.setAttribute('aria-label','Activity QR code');
+    qr.textContent = runtime.qrCode;
+    content.appendChild(qr);
+  }
 	const accepting = phase === 'OPEN' && !runtime.readOnly;
-  const revealed = phase === 'REVEAL' || phase === 'DISCUSS';
-  if (definition.kind === 'pulse') {
+  if (revealed) {
+    renderEngagementRevealResults(content,runtime);
+  } else if (definition.kind === 'onboarding') {
+    const roster = document.createElement('section'); roster.className = 'keynope-engagement-roster';
+    const heading = document.createElement('h3'); heading.textContent = 'Participants'; roster.appendChild(heading);
+    const members = Object.values(runtime.memberNames || {}).filter(name => name && name !== 'Presenter').sort((a,b) => a.localeCompare(b));
+    if (members.length) for (const name of members) { const item=document.createElement('span'); item.textContent=name; roster.appendChild(item); }
+    else { const empty=document.createElement('p'); empty.textContent='Waiting for people to join…'; roster.appendChild(empty); }
+    content.appendChild(roster);
+  } else if (KeynopeGames.has(definition.kind)) {
+    KeynopeGames.render(content,runtime,{presenter:!runtime.readOnly,changed:()=>{renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(true);publishHostedEngagementState(false);runEngagementCountdown(runtime);}});
+  } else if (definition.kind === 'prerequisites') {
+    KeynopeGames.renderPrerequisites(content,{...runtime,game:runtime.readOnly?runtime.game:prerequisitePublicState(runtime)},{presenter:true});
+  } else if (definition.kind === 'questions') {
+    const instruction=document.createElement('p');instruction.textContent=runtime.phase===1?'Submit your questions. Lock closes submissions and opens a three-dot voting round.':'Voting is open: distribute three dots across the submitted questions. Reveal closes voting and shows the ranked questions.';content.appendChild(instruction);
+    const tally=document.createElement('p');tally.textContent=(runtime.attributions||[]).length+' questions collected';content.appendChild(tally);
+  } else if (definition.kind === 'dots' || definition.kind === 'finishpair') {
+    const instruction=document.createElement('p');instruction.textContent=definition.kind==='dots'?'Participants distribute '+(definition.dotBudget||3)+' dots. Totals stay hidden until reveal.':'Participants press “I am finished!” when their task is complete. Groups appear when everyone finishes or you close the activity.';content.appendChild(instruction);
+  } else if (definition.kind === 'pulse') {
     const choices = document.createElement('div'); choices.className = 'keynope-engagement-pulse';
     (definition.options || []).forEach((option,index) => {
 		const choice = engagementButton(option,'keynope-engagement-choice',() => { runtime.counts[index]++; renderEngagementRuntime(); publishEngagementRuntime(); });
       choice.disabled = !accepting;
-      if (revealed) { const count = document.createElement('span'); count.className = 'keynope-engagement-count'; count.textContent = String(runtime.counts[index]); choice.appendChild(count); }
+      KeynopeActivityDesign.pulseMeter(choice,index,(definition.options||[]).length);
       choices.appendChild(choice);
     });
     content.appendChild(choices);
+  } else if (definition.kind === 'truefalse') {
+    renderFactOrFictionQuestion(content,runtime,!!runtime.questionRevealed);
   } else if (definition.kind === 'storm') {
     if (accepting) {
       const form = document.createElement('form'); form.className = 'keynope-engagement-storm-form';
@@ -4324,14 +5518,7 @@ function renderEngagementRuntime() {
 		form.addEventListener('submit',event => { event.preventDefault(); const value = input.value.trim(); if (!value) return; runtime.ideas.push(value); input.value = ''; renderEngagementRuntime(); publishEngagementRuntime(); });
       form.append(input,add); content.appendChild(form); requestAnimationFrame(() => input.focus());
     }
-    if (revealed) {
-      const cards = document.createElement('div'); cards.className = 'keynope-engagement-cards';
-      runtime.ideas.forEach(idea => { const card = document.createElement('div'); card.className = 'keynope-engagement-card'; card.textContent = idea; cards.appendChild(card); });
-      if (!runtime.ideas.length) { const empty = document.createElement('div'); empty.className = 'keynope-engagement-card'; empty.textContent = 'No ideas submitted'; cards.appendChild(empty); }
-      content.appendChild(cards);
-    } else {
-      const submitted = document.createElement('p'); submitted.textContent = runtime.ideas.length + ' submitted'; content.appendChild(submitted);
-    }
+    const submitted = document.createElement('p'); submitted.textContent = runtime.ideas.length + ' submitted'; content.appendChild(submitted);
   } else if (definition.kind === 'sort') {
     const zones = document.createElement('div'); zones.className = 'keynope-engagement-zones';
     const labels = ['Unsorted'].concat(definition.zones || []);
@@ -4353,16 +5540,98 @@ function renderEngagementRuntime() {
     content.appendChild(zones);
   }
   const respondentNames = Array.isArray(runtime.respondents) ? runtime.respondents.filter(Boolean) : [];
+  const submittedCount = Number(runtime.participants) || respondentNames.length;
   const submitted = document.createElement('p');
   submitted.className = 'keynope-engagement-submitted';
-  submitted.textContent = respondentNames.length + ' submitted' + (respondentNames.length ? ' — ' + respondentNames.join(', ') : '');
+  const groupingActivity = definition.kind === 'onboarding' || definition.kind === 'pair' || definition.kind === 'cards' || definition.kind === 'impostor';
+  submitted.textContent = revealed
+    ? submittedCount + ' participant' + (submittedCount === 1 ? '' : 's')
+    : submittedCount + (groupingActivity ? ' joined' : ' submitted');
   content.appendChild(submitted);
   const controls = document.createElement('footer'); controls.className = 'keynope-engagement-controls';
   const reset = engagementButton('Reset','reset',resetEngagementRuntime);
   const close = engagementButton('Close','',closeEngagementRuntime);
-  const nextLabel = runtime.phase >= keynopeEngagementPhases.length - 1 ? 'Done' : 'Next: ' + keynopeEngagementPhases[runtime.phase + 1];
-  const next = engagementButton(nextLabel,'primary',runtime.phase >= keynopeEngagementPhases.length - 1 ? closeEngagementRuntime : advanceEngagementRuntime);
+  if (!runtime.readOnly && definition.kind === 'ball') {
+    const game=KeynopeGames.init(runtime);
+    controls.append(reset,close);
+    if(game.stage==='join') {
+      const lock=engagementButton('Lock & toss randomly','primary',advanceEngagementRuntime);
+      lock.disabled=!game.volunteers.length;controls.append(lock);
+      controls.append(engagementButton('+1 min','',()=>addEngagementMinute(runtime)));
+      if(runtime.deadlineMs||runtime.pausedRemainingMs)controls.append(engagementButton(runtime.pausedRemainingMs?'Resume timer':'Pause timer','',()=>toggleEngagementTimer(runtime)));
+    }
+    if(game.stage!=='done')controls.append(engagementButton('End the Ball toss','',()=>{
+      game.stage='done';runtime.phase=3;runtime.deadlineMs=0;runtime.pausedRemainingMs=0;
+      renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(false);runEngagementCountdown(runtime);
+    }));
+    board.append(head);if(join)board.append(join);board.append(content,controls);keynopeEngagementOverlay.replaceChildren(board);return;
+  }
+  if (!runtime.readOnly && definition.kind === 'onboarding') {
+    controls.append(reset,close); board.append(head); if (join) board.append(join); board.append(content,controls); keynopeEngagementOverlay.replaceChildren(board); return;
+  }
+  if (!runtime.readOnly && definition.kind === 'truefalse') {
+    controls.append(reset,close);
+    if (runtime.questionRevealed) {
+      const isLast = (Number(runtime.questionIndex) || 0) >= Math.max(0,(definition.questions || []).length - 1);
+      controls.append(engagementButton(isLast ? 'Done' : 'Next','primary',advanceEngagementRuntime));
+    } else controls.append(engagementButton('Reveal','primary',advanceEngagementRuntime));
+    board.append(head); if (join) board.append(join); board.append(content,controls); keynopeEngagementOverlay.replaceChildren(board); return;
+  }
+  if (!runtime.readOnly && definition.kind === 'pair') {
+    controls.append(reset,close);
+    if (runtime.phase === 1) {
+      controls.append(engagementButton('+1 min','',() => addEngagementMinute(runtime)));
+      controls.append(engagementButton(runtime.pausedRemainingMs ? 'Resume timer' : 'Pause timer','',() => toggleEngagementTimer(runtime)));
+      controls.append(engagementButton('Pair now','primary',() => beginPairShareDiscussion(runtime)));
+    } else {
+      controls.append(engagementButton('Reopen joining','',() => reopenPairShareJoin(runtime)));
+      if (runtime.phase === 3) {
+        controls.append(engagementButton('+1 min','',() => addEngagementMinute(runtime)));
+        controls.append(engagementButton(runtime.pausedRemainingMs ? 'Resume timer' : 'Pause timer','primary',() => toggleEngagementTimer(runtime)));
+      }
+    }
+    board.append(head);
+    if (join) board.append(join);
+    board.append(content,controls);
+    keynopeEngagementOverlay.replaceChildren(board);
+    return;
+  }
+  if (!runtime.readOnly && definition.kind === 'cards') {
+    controls.append(reset,close);
+    if (runtime.phase === 1) {
+      controls.append(engagementButton('+1 min','',() => addEngagementMinute(runtime)));
+      controls.append(engagementButton(runtime.pausedRemainingMs ? 'Resume timer' : 'Pause timer','',() => toggleEngagementTimer(runtime)));
+      controls.append(engagementButton('Deal cards','primary',() => dealPlayingCards(runtime)));
+    }
+    board.append(head);
+    if (join) board.append(join);
+    board.append(content,controls);
+    keynopeEngagementOverlay.replaceChildren(board);
+    return;
+  }
+  if (!runtime.readOnly && definition.kind === 'impostor') {
+    controls.append(reset,close);
+    if (runtime.phase === 1) {
+      controls.append(engagementButton('+1 min','',() => addEngagementMinute(runtime)));
+      controls.append(engagementButton(runtime.pausedRemainingMs ? 'Resume timer' : 'Pause timer','',() => toggleEngagementTimer(runtime)));
+      controls.append(engagementButton('Reveal roles','primary',() => revealImpostorRoles(runtime)));
+    }
+    board.append(head);
+    if (join) board.append(join);
+    board.append(content,controls);
+    keynopeEngagementOverlay.replaceChildren(board);
+    return;
+  }
+  const grouping = definition.kind === 'pair' || definition.kind === 'cards';
+  const terminalPhase = runtime.phase >= keynopeEngagementPhases.length - 1 || ((definition.kind === 'draw' || definition.kind === 'introduction') && runtime.phase >= 3);
+  const nextPhase = grouping && runtime.phase === 1 ? 'REVEAL' : keynopeEngagementPhases[runtime.phase + 1];
+  const nextLabel = definition.kind==='prerequisites'&&runtime.phase===1?'Stop & reveal':terminalPhase ? 'Done' : 'Next: ' + nextPhase;
+  const next = engagementButton(nextLabel,'primary',terminalPhase ? closeEngagementRuntime : advanceEngagementRuntime);
 	if (!runtime.readOnly) controls.append(reset,close,next);
+  if (!runtime.readOnly && definition.timerSeconds > 0 && runtime.phase === 1) {
+    controls.insertBefore(engagementButton('+1 min','',() => addEngagementMinute(runtime)),next);
+    controls.insertBefore(engagementButton(runtime.pausedRemainingMs ? 'Resume timer' : 'Pause timer','',() => toggleEngagementTimer(runtime)),next);
+  }
   board.append(head);
   if (join) board.append(join);
   board.append(content,controls);
@@ -4382,8 +5651,16 @@ function openEngagementRuntime(showOverlay = true) {
     }
     return true;
   }
-  closeEngagementRuntime();
-	keynopeEngagementRuntime = {definition:JSON.parse(JSON.stringify(definition)),slide:deck.pages[pageIndex].slide,phase:1,counts:[],ideas:[],assignments:[],readOnly:false,sessionCode:'',joinUrl:'',participants:0};
+  closeEngagementRuntime(true,false);
+	const session = engagementSessionFor(definition);
+	const runtimeDefinition = JSON.parse(JSON.stringify(definition));
+	runtimeDefinition.code = session.code;
+	const savedRuntime = session.runtime && session.runtime.definition.kind === definition.kind ? session.runtime : null;
+	if (!savedRuntime && (runtimeDefinition.kind === 'pair' || runtimeDefinition.kind === 'cards' || runtimeDefinition.kind === 'impostor')) session.deadlineMs = Date.now() + (Number(runtimeDefinition.joinSeconds) || 120) * 1000;
+	else if (!savedRuntime && runtimeDefinition.timerSeconds > 0 && !session.deadlineMs) session.deadlineMs = Date.now() + runtimeDefinition.timerSeconds * 1000;
+	keynopeEngagementRuntime = {startedAt:Date.now(),stoppedAt:0,finishedAt:{},definition:runtimeDefinition,slide:deck.pages[pageIndex].slide,phase:1,counts:[],ideas:[],assignments:[],respondents:[],attributions:[],groups:[],entryResponses:[],questionVotes:{},questionIndex:0,questionRevealed:false,memberNames:{},cardAssignments:{},roleAssignments:{},pairAssignments:{},pairMessages:[],readOnly:false,sessionCode:session.code,sessionId:session.sessionId || definition.id,joinUrl:session.joinUrl,qrCode:session.qrCode || '',roomReady:false,deadlineMs:session.deadlineMs || 0,pausedRemainingMs:0,participants:0};
+	if (savedRuntime) keynopeEngagementRuntime = {...savedRuntime,definition:runtimeDefinition,slide:deck.pages[pageIndex].slide,
+    deadlineMs:savedRuntime.resumeTimerMs ? Date.now()+savedRuntime.resumeTimerMs : 0,resumeTimerMs:0};
 	if (showOverlay) {
 		keynopeEngagementOverlay = document.createElement('div');
 		keynopeEngagementOverlay.className = 'keynope-engagement-overlay';
@@ -4391,11 +5668,15 @@ function openEngagementRuntime(showOverlay = true) {
 		document.body.appendChild(keynopeEngagementOverlay);
 	}
 	for (const button of document.querySelectorAll('[aria-label="Activities"]')) button.classList.add('active');
+  renderActivityMarker();
   const runtime = keynopeEngagementRuntime;
-  runtime.counts = (definition.options || []).map(() => 0);
-  runtime.assignments = (definition.cards || []).map(() => -1);
+  if (!savedRuntime) {
+    runtime.counts = (definition.options || []).map(() => 0);
+    runtime.assignments = (definition.cards || []).map(() => -1);
+  }
   renderEngagementRuntime();
   publishEngagementRuntime();
+  runEngagementCountdown(runtime);
   startHostedEngagement();
   if (typeof refreshEditorPresenterControls === 'function') refreshEditorPresenterControls();
   return true;
@@ -4411,9 +5692,16 @@ function syncEngagementRuntime(runtime) {
     ideas:Array.isArray(runtime.ideas) ? runtime.ideas.slice() : [],
     assignments:Array.isArray(runtime.assignments) ? runtime.assignments.slice() : [],
     respondents:Array.isArray(runtime.respondents) ? runtime.respondents.slice() : [],
+    attributions:Array.isArray(runtime.attributions) ? runtime.attributions.map(item => ({...item,assignments:Array.isArray(item.assignments) ? item.assignments.slice() : [],voters:Array.isArray(item.voters) ? item.voters.slice() : []})) : [],
+    groups:Array.isArray(runtime.groups) ? runtime.groups.map(item => ({...item,members:Array.isArray(item.members) ? item.members.slice() : []})) : [],
     sessionCode:runtime.sessionCode || '',
     joinUrl:runtime.joinUrl || '',
+    qrCode:runtime.qrCode || '',
+    roomReady:!!runtime.roomReady,
+    deadlineMs:Number(runtime.deadlineMs) || 0,
     participants:Number(runtime.participants) || 0,
+    questionIndex:Number(runtime.questionIndex) || 0,
+    questionRevealed:!!runtime.questionRevealed,
     readOnly:true
   };
   if (!keynopeEngagementOverlay) {
@@ -4423,17 +5711,18 @@ function syncEngagementRuntime(runtime) {
     document.body.appendChild(keynopeEngagementOverlay);
   }
   renderEngagementRuntime();
+  runEngagementCountdown(keynopeEngagementRuntime);
 }
-function shouldAutoOpenEngagement() {
-  if (keynopeAppSurface) return keynopeEditorPresentationActive;
-  if (window.KEYNOPE_PRESENTER) return presenterMainSurface && presenterPresenting;
-  return !window.KEYNOPE_WEB_EDITOR;
-}
-function autoOpenEngagementForCurrentPage() {
-  if (keynopeEngagementRuntime || !currentEngagementDefinition() || !shouldAutoOpenEngagement()) return;
-  openEngagementRuntime(false);
-}
-document.addEventListener('keydown',event => {
+	document.addEventListener('keydown',event => {
+	if (keynopeOnboardingResetBlocker) {
+		event.stopImmediatePropagation();
+		if (event.key === 'Escape') {
+			event.preventDefault(); keynopeOnboardingResetBlocker.remove(); keynopeOnboardingResetBlocker = null;
+		} else if ((event.key === 'Enter' || event.key === ' ') && event.target instanceof HTMLButtonElement) {
+			event.preventDefault(); event.target.click();
+		} else if (event.key !== 'Tab') event.preventDefault();
+		return;
+	}
 	if (keynopeEngagementRuntime && keynopeEngagementOverlay) {
 	if (keynopeFormControlTarget(event.target)) { if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); closeEngagementRuntime(); } return; }
     event.preventDefault(); event.stopImmediatePropagation();
@@ -4446,6 +5735,16 @@ document.addEventListener('keydown',event => {
     if (openEngagementRuntime(true)) { event.preventDefault(); event.stopImmediatePropagation(); }
   }
 },true);
+activityMarker.addEventListener('pointerdown',event => {
+  event.preventDefault();
+  event.stopImmediatePropagation();
+});
+activityMarker.addEventListener('click',event => {
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if (window.KEYNOPE_PRESENTER && !keynopeEngagementControllerSurface) return;
+  openEngagementRuntime(true);
+});
 if (keynopeAppSurface) {
   document.documentElement.setAttribute('data-keynope-app', 'true');
   document.documentElement.setAttribute('data-keynope-notes', 'true');
@@ -4575,6 +5874,10 @@ function drawCanvasLines(lines) {
   const textOutlineMasks = canvasTextPixelOutlineMasks(lines, textOutlineElements);
   const drawnTextOutlines = new Set();
   for (const line of lines || []) {
+    if (line.trueType) {
+      KeynopeTrueType.draw(presenterContext,line,canvasCharWidth,canvasCell,deck.cols,deck.rows,editorCanvasCaret);
+      continue;
+    }
     if (line.role === 'transparent-text' || line.role === 'transparent-image') continue;
     if (line.role === 'outline') {
       if (textOutlineElements.has(line.element)) continue;
@@ -4603,6 +5906,7 @@ function drawCanvasLines(lines) {
   drawEditorCanvasCaret(lines);
 }
 function drawEditorCanvasSelection() {
+  if (editorCanvasCaret && editorCanvasCaret.trueType) return;
   if (!keynopeAppSurface || !editorCanvasCaret || !editorCanvasCaret.selection) return;
   presenterContext.fillStyle = 'rgba(85, 170, 255, .58)';
   for (const row of editorCanvasCaret.selection) {
@@ -4610,6 +5914,7 @@ function drawEditorCanvasSelection() {
   }
 }
 function drawEditorCanvasCaret(lines) {
+  if (editorCanvasCaret && editorCanvasCaret.trueType) return;
   if (!keynopeAppSurface || !editorCanvasCaret || (performance.now() - editorCanvasCaret.started) % 900 >= 650) return;
   if (editorCanvasCaret.exact) {
     const caret = editorCanvasCaret.exact;
@@ -5458,8 +6763,8 @@ function render() {
   contentLayer.style.color = page.fg;
   chromeLayer.innerHTML = keynopeAppSurface && !page.hideChromePageNumber ? '<span class="page-no">' + esc(label(page)) + '</span>' : '';
   drawFrame();
+  renderActivityMarker();
   if (keynopeAppSurface) requestAnimationFrame(renderEditorCanvasOverlay);
-	queueMicrotask(autoOpenEngagementForCurrentPage);
 }
 function lineKey(line) {
   const col = line.parts && line.parts.length ? line.parts[0].col : (line.col || 0);
@@ -5982,7 +7287,7 @@ function drawFrame() {
   effectLayer.innerHTML = renderLines(applyBackdropTransparency(effectLinesWithBackground, page.transparency || []));
   contentLayer.innerHTML = renderLines(contentLines) + renderLinkUnderlines(contentLines) + renderLinkHitAreas(contentLines);
 }
-function drawPresenterPage(page, frameValue, contentLines) {
+function drawPresenterPage(page, frameValue, contentLines, hideChrome = false) {
   const effectLinesWithBackground = (page.backgroundLines || []).concat(effectLines(page, frameValue));
   presenterCanvas.style.display = 'block';
   linkLayer.style.display = 'block';
@@ -5997,7 +7302,7 @@ function drawPresenterPage(page, frameValue, contentLines) {
   drawCanvasBackdropTransparency(effectLinesWithBackground, page.transparency || []);
   drawCanvasLines(contentLines);
   drawCanvasLinkUnderlines(contentLines);
-  drawCanvasPageLabel(page);
+  if (!hideChrome) drawCanvasPageLabel(page);
   if (!keynopeAppSurface) drawPresenterPhosphor(presenterCanvas.width, presenterCanvas.height);
 }
 function drawPresenterPageFallback() {
@@ -6097,10 +7402,25 @@ function activateLink(target) {
   }
   return false;
 }
+function canvasLinkAtPointer(event) {
+  if (!presenterCanvas || presenterCanvas.style.display === 'none') return '';
+  if (keynopeAppSurface && !keynopeEditorPresentationActive) return '';
+  const rect = presenterCanvas.getBoundingClientRect();
+  if (!rect.width || !rect.height || event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) return '';
+  const col = Math.floor((event.clientX - rect.left) * presenterCanvas.width / rect.width / Math.max(1,canvasCharWidth));
+  const row = Math.floor((event.clientY - rect.top) * presenterCanvas.height / rect.height / Math.max(1,canvasCell));
+  const page = deck.pages && deck.pages[pageIndex];
+  if (!page) return '';
+  const lines = presenterContentLinesFor(pageIndex,page);
+  for (const group of linkGroups(lines,true)) {
+    if (col >= group.minCol && col < group.maxCol && row >= group.minRow && row <= group.maxRow) return group.link || '';
+  }
+  return '';
+}
 addEventListener('pointerdown', e => {
   const link = e.target.closest && e.target.closest('[data-link]');
-  if (!link) return;
-  const target = link.getAttribute('data-link') || '';
+  const target = link ? (link.getAttribute('data-link') || '') : canvasLinkAtPointer(e);
+  if (!target) return;
   if (activateLink(target)) {
     e.preventDefault();
     e.stopPropagation();
@@ -6223,7 +7543,7 @@ async function refreshPresenterSlide(slideIndex) {
     location.reload();
     return false;
   }
-  const response = await fetch('/slide?index=' + encodeURIComponent(slideIndex), {cache: 'no-store'});
+  const response = await fetch('/slide?index=' + encodeURIComponent(slideIndex), {cache: 'no-store',signal:AbortSignal.timeout(12000)});
   if (!response.ok) {
     return false;
   }
@@ -6247,14 +7567,27 @@ async function refreshPresenterSlide(slideIndex) {
 async function syncPresenterState() {
   if (!window.KEYNOPE_PRESENTER) return;
   try {
-    const response = await fetch('/state', {cache: 'no-store'});
+    const response = await fetch('/state', {cache: 'no-store',signal:AbortSignal.timeout(12000)});
     if (!response.ok) return;
     const state = await response.json();
+    if (Number.isFinite(state.version) && state.version < presenterVersion) return;
+    if (keynopeAppSurface) window.keynopeParticipantPosition = {slide:state.slide,page:state.page,key:[state.slide,state.page,state.deckVersion||0].join(':')};
     if (keynopeAppSurface && keynopeEditorMasterMode) return;
     const initialSync = presenterVersion < 0;
     let slideRefreshed = false;
     if (initialSync) {
-      presenterDeckVersion = state.deckVersion || 0;
+      // A newly opened presentation may have booted from the original HTML.
+      // Load every cached slide, not just the last one that was edited.
+      const snapshotResponse = await fetch('/slides', {cache:'no-store',signal:AbortSignal.timeout(12000)});
+      if (!snapshotResponse.ok) return;
+      const snapshot = await snapshotResponse.json();
+      if (!Array.isArray(snapshot.pages) || !snapshot.pages.length) return;
+      deck.pages = snapshot.pages;
+      presenterDeckVersion = snapshot.version;
+      contentAnimationCache.clear();
+      effectState.clear();
+      pageIndex = Math.min(pageIndex, deck.pages.length - 1);
+      slideRefreshed = true;
 	} else if ((state.deckVersion || 0) !== presenterDeckVersion) {
 		if (keynopeAppSurface && keynopeEditorVisualResizeActive) return;
 		presenterDeckVersion = state.deckVersion || 0;
@@ -6266,7 +7599,6 @@ async function syncPresenterState() {
     const wasPresenting = presenterPresenting;
     presenterPresenting = !!state.presenting;
 	syncEngagementRuntime(state.engagement);
-	queueMicrotask(autoOpenEngagementForCurrentPage);
     if (!presenterMainSurface) {
       presenterTimerMode = state.timerMode || '';
       presenterTimerInput = state.timerInput || '';
@@ -6483,7 +7815,13 @@ if (keynopeAppSurface) {
   let defaultEditorFont = null;
   let nativeEditorFontLibrary = null;
   let lastPublishedEditorDirty = null;
+  let lastPublishedEditorTabsAvailable = null;
   function publishEditorDirtyState() {
+    const tabsAvailable = !!editorState?.hasActivities && !editorState?.masterMode;
+    if (tabsAvailable !== lastPublishedEditorTabsAvailable) {
+      lastPublishedEditorTabsAvailable = tabsAvailable;
+      window.webkit?.messageHandlers?.keynopePresenter?.postMessage({action:'editor-tabs-availability',available:tabsAvailable});
+    }
     const dirty = !!(editorState && editorState.dirty);
     saveButton.disabled = !dirty;
     if (dirty === lastPublishedEditorDirty && !window.KEYNOPE_WEB_EDITOR) return;
@@ -6775,6 +8113,23 @@ if (keynopeAppSurface) {
   function engagementLines(value) {
     return String(value || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean);
   }
+  function engagementQuizLines(value) {
+    return engagementLines(value).map(line => {
+      const parts = line.split('|').map(item => item.trim()).filter(Boolean);
+      const prompt = parts.shift() || '';
+      let correct = parts.findIndex(item => item.startsWith('*'));
+      if (correct < 0) correct = 0;
+      return {prompt,options:parts.map(item => item.replace(/^\*/,'')),correct};
+    }).filter(item => item.prompt && item.options.length >= 2);
+  }
+  function engagementTrueFalseLines(value) {
+    return engagementLines(value).map(line => {
+      const parts = line.split('|').map(item => item.trim());
+      const answer = String(parts.shift() || '').toLowerCase();
+      const prompt = parts.join(' | ').trim();
+      return {prompt:answer === 'fact' || answer === 'fiction' ? prompt : '',options:['Fact','Fiction'],correct:answer === 'fiction' ? 1 : 0};
+    }).filter(item => item.prompt);
+  }
   function closeEngagementEditor() {
     if (!activeEngagementEditor) return;
     activeEngagementEditor.remove();
@@ -6786,13 +8141,14 @@ if (keynopeAppSurface) {
     const slide = editorState.slides && editorState.slides[editorState.current];
     const original = slide && slide.engagement ? slide.engagement : null;
     let kind = original && original.kind || 'pulse';
+    let anonymous = original ? !original.named : true;
     const blocker = document.createElement('div');
-    blocker.className = 'keynope-modal-blocker';
+    blocker.className = 'keynope-modal-blocker keynope-engagement-blocker';
     const dialog = document.createElement('section');
     dialog.className = 'keynope-engagement-dialog';
     dialog.setAttribute('role','dialog');
     dialog.setAttribute('aria-modal','true');
-    dialog.innerHTML = '<h2>Engagement slide</h2>';
+    dialog.innerHTML = '<h2>Activity</h2>';
     const kinds = document.createElement('div');
     kinds.className = 'keynope-engagement-kind';
     const form = document.createElement('div');
@@ -6805,7 +8161,8 @@ if (keynopeAppSurface) {
     cancel.type = 'button'; cancel.textContent = 'Cancel';
     const save = document.createElement('button');
     save.type = 'button'; save.textContent = 'Save activity';
-    let promptInput, optionsInput, zonesInput, cardsInput;
+    let dotBudgetInput, stackDotsInput, prerequisiteInputs=[];
+    let promptInput, optionsInput, zonesInput, cardsInput, questionsInput, correctInput, groupSizeInput, groupCountInput, impostorCountInput, anonymousInput, timerEnabledInput, timerMinutesInput, timerSecondsInput, joinMinutesInput, joinSecondsInput, discussionMinutesInput, discussionSecondsInput;
     const renderForm = () => {
       form.replaceChildren();
       const promptLabel = document.createElement('label');
@@ -6813,27 +8170,137 @@ if (keynopeAppSurface) {
       promptInput = document.createElement('input');
       promptInput.maxLength = 500;
       promptInput.value = original && original.kind === kind ? (original.prompt || '') : '';
-      promptInput.placeholder = kind === 'pulse' ? 'How confident are we?' : kind === 'storm' ? 'What should we try next?' : 'Put every card where it belongs';
+      const placeholders = {onboarding:'Join this presentation',pulse:'How confident are we?',storm:'What should we try next?',sort:'Put every card where it belongs',dual:'Reflect on this session',quiz:'Knowledge check',truefalse:'Fact or Fiction',match:'Where could each card belong?',questions:'What would you like to ask?',wall:'Share some appreciation',draw:'Draw yourself',introduction:'Introduce yourself',pair:'Discuss this with your partner',expertise:'What expertise is in the room?',cards:'Meet your playing-card group',impostor:'Who among us is the impostor?'};
+      promptInput.placeholder = placeholders[kind] || 'Activity prompt';
       promptLabel.appendChild(promptInput);
       form.appendChild(promptLabel);
-      if (kind === 'pulse') {
+      if (kind==='prerequisites') {
+        const help=document.createElement('p');help.textContent='List each prerequisite and its instructions. Participants check items off, then confirm I AM FINISHED. Stop, timeout or everyone finishing reveals balanced pairs: fastest with slowest; unfinished people are appended in random order. Named mode shows finishers and a timed ranking; Anonymous hides those. The participant checklist does not disclose pairing in advance.';form.appendChild(help);
+        prerequisiteInputs=[];
+        const list=document.createElement('div');form.appendChild(list);
+        const addItem=(item={title:'',instructions:''})=>{if(prerequisiteInputs.length>=40)return;const row=document.createElement('section');const titleLabel=document.createElement('label');titleLabel.textContent='Prerequisite';const title=document.createElement('input');title.maxLength=160;title.value=item.title;titleLabel.appendChild(title);const instructionsLabel=document.createElement('label');instructionsLabel.textContent='Instructions';const instructions=document.createElement('textarea');instructions.maxLength=4000;instructions.value=item.instructions;instructionsLabel.appendChild(instructions);const fields={title,instructions};const remove=engagementButton('Remove item','',()=>{prerequisiteInputs=prerequisiteInputs.filter(value=>value!==fields);row.remove();});row.append(titleLabel,instructionsLabel,remove);list.appendChild(row);prerequisiteInputs.push(fields);};
+        (original&&original.kind===kind?original.prerequisites||[]:[{title:'Item 1',instructions:''}]).forEach(addItem);
+        form.appendChild(engagementButton('Add prerequisite','',()=>addItem()));
+      } else if (KeynopeGames.has(kind)) {
+        const label=document.createElement('label');label.textContent=kind==='hunt'?'Possible findings — one per line; prefix each expected answer with *':kind==='gallery'?'Exhibits to review — one per line':kind==='teach'?'Topics — one per line':kind==='three'?'Presenter explanation (shown on reveal)':'Items / agreements — one per line';
+        optionsInput=document.createElement('textarea');optionsInput.value=original&&original.kind===kind?(original.options||[]).join('\n'):'';label.appendChild(optionsInput);
+        if(['gallery','hunt','teach','agreements','three'].includes(kind))form.appendChild(label);
+        if(kind==='gallery'||kind==='hunt'){
+          const help=document.createElement('p');
+          help.textContent=kind==='gallery'?'List the work people should review: a group project, proposal, scenario or idea per line. Include a short description. Participants choose an exhibit and submit a strength, question or suggestion. Only tallies appear during collection; feedback opens on reveal.':'Set the challenge in Prompt (for example: Which observations suggest fraud?). List relevant findings mixed with distractions below. Start expected answers with *; participants will not see those markers. They select all matching findings, then compare with your expected answers on reveal. This is a checklist exercise, not a document search.';
+          form.appendChild(help);
+          optionsInput.placeholder=kind==='gallery'?'Group 1 — Claims assessment workflow\nGroup 2 — Suspicious transaction triage':'*Multiple claims using the same receipt\nA customer updates their phone number\n*Conflicting incident dates';
+        }
+        if(kind==='teach'){const help=document.createElement('p');help.textContent='Create groups, prepare for 3 minutes, then teach for 1 minute per group. Use +1 min or pause to adjust live.';form.appendChild(help);}
+        if(kind==='three'){const help=document.createElement('p');help.textContent='Ask the group a question in Prompt. Three different participants each submit one answer before you give your explanation. Answers appear live; collection closes automatically after the third person responds. Use Reveal to show your explanation and compare the ideas together.';form.appendChild(help);promptInput.placeholder='How would you approach this problem?';}
+      } else if (kind === 'dots') {
+        const label=document.createElement('label');label.textContent='Options — one per line';optionsInput=document.createElement('textarea');optionsInput.value=original&&original.kind===kind?(original.options||[]).join('\n'):'First idea\nSecond idea\nThird idea';label.appendChild(optionsInput);form.appendChild(label);
+        const budget=document.createElement('label');budget.textContent='Dots per participant';dotBudgetInput=document.createElement('input');dotBudgetInput.type='number';dotBudgetInput.min='1';dotBudgetInput.max='20';dotBudgetInput.value=original&&original.dotBudget||3;budget.appendChild(dotBudgetInput);form.appendChild(budget);
+        const stacking=document.createElement('label');stackDotsInput=document.createElement('input');stackDotsInput.type='checkbox';stackDotsInput.checked=!!(original&&original.stackDots);stacking.append(stackDotsInput,document.createTextNode('Allow multiple dots per option'));form.appendChild(stacking);
+      } else if (kind === 'pulse') {
         const label = document.createElement('label'); label.textContent = 'Choices — one per line';
         optionsInput = document.createElement('textarea');
-        optionsInput.value = original && original.kind === kind ? (original.options || []).join('\n') : '0\n1\n2\n3\n4\n5';
+        optionsInput.value = original && original.kind === kind ? (original.options || []).join('\n') : 'Not at all\nHardly\nMeh\nSomewhat\nQuite\nVery';
         label.appendChild(optionsInput); form.appendChild(label);
-        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Use 0–5 for a quick confidence pulse, or replace them with your own poll choices.'; form.appendChild(help);
-      } else if (kind === 'sort') {
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Use the confidence scale or replace it with your own poll choices.'; form.appendChild(help);
+      } else if (kind === 'sort' || kind === 'match') {
         const zoneLabel = document.createElement('label'); zoneLabel.textContent = 'Destinations — one per line';
         zonesInput = document.createElement('textarea'); zonesInput.value = original && original.kind === kind ? (original.zones || []).join('\n') : 'Now\nNext\nLater'; zoneLabel.appendChild(zonesInput);
         const cardLabel = document.createElement('label'); cardLabel.textContent = 'Cards — one per line';
         cardsInput = document.createElement('textarea'); cardsInput.value = original && original.kind === kind ? (original.cards || []).join('\n') : 'First idea\nSecond idea\nThird idea'; cardLabel.appendChild(cardsInput);
         form.append(zoneLabel,cardLabel);
-      } else {
-        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Storm collects short ideas privately. Advance to Reveal to show all contributions together.'; form.appendChild(help);
+        if (kind === 'match') { const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Unlike Sort, each card may be placed in more than one destination.'; form.appendChild(help); }
+      } else if (kind === 'dual' || kind === 'wall') {
+        const label = document.createElement('label'); label.textContent = kind === 'dual' ? 'Two response prompts — one per line' : 'Wall columns — one per line';
+        optionsInput = document.createElement('textarea');
+        optionsInput.value = original && original.kind === kind ? (original.options || []).join('\n') : kind === 'dual' ? 'What worked?\nWhat could improve?' : 'What went well\nWhat could be better\nWhat is your key takeaway';
+        label.appendChild(optionsInput); form.appendChild(label);
+      } else if (kind === 'quiz') {
+        const label = document.createElement('label'); label.textContent = 'Questions — question | answer | *correct answer';
+        questionsInput = document.createElement('textarea');
+        questionsInput.value = original && original.kind === kind ? (original.questions || []).map(question => [question.prompt].concat((question.options || []).map((option,index) => (index === question.correct ? '*' : '') + option)).join(' | ')).join('\n') : 'What is 2 + 2? | 3 | *4 | 5';
+        label.appendChild(questionsInput); form.appendChild(label);
+      } else if (kind === 'pair' || kind === 'cards' || kind === 'impostor') {
+        const label = document.createElement('label'); label.textContent = kind === 'pair' ? 'People per group (2 or 3)' : kind === 'cards' ? 'Target number of rank groups' : 'Number of impostors';
+        if (kind === 'pair') {
+          groupSizeInput = document.createElement('input'); groupSizeInput.type = 'number'; groupSizeInput.min = '2'; groupSizeInput.max = '3'; groupSizeInput.value = String(original && original.kind === kind && original.groupSize || 2);
+          label.appendChild(groupSizeInput);
+        } else if (kind === 'cards') {
+          groupCountInput = document.createElement('input'); groupCountInput.type = 'number'; groupCountInput.min = '2'; groupCountInput.max = '13'; groupCountInput.value = String(original && original.kind === kind && original.groupCount || 4);
+          label.appendChild(groupCountInput);
+		} else {
+		  impostorCountInput = document.createElement('input'); impostorCountInput.type = 'number'; impostorCountInput.min = '1'; impostorCountInput.max = '20'; impostorCountInput.value = String(original && original.kind === kind && original.impostorCount || 1);
+		  label.appendChild(impostorCountInput);
+        }
+        form.appendChild(label);
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = kind === 'cards' ? 'Participants are shuffled into balanced rank groups from Aces toward 2s.' : kind === 'impostor' ? 'Roles are assigned randomly when joining closes and shown only on each participant screen.' : 'Keynope creates balanced pairs or triads from joined participants.'; form.appendChild(help);
+      } else if (kind === 'draw') {
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Participants draw themselves on a fixed 20 × 20 block canvas. Reveal presents every portrait as a marquee.'; form.appendChild(help);
+      } else if (kind === 'introduction') {
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Participants compose a coloured character from faces, hair and features. Reveal introduces everyone as a marquee.'; form.appendChild(help);
+      } else if (kind === 'truefalse') {
+        const label = document.createElement('label'); label.textContent = 'Questions — Fact | question or Fiction | question (maximum 5)';
+        questionsInput = document.createElement('textarea'); questionsInput.maxLength = 1800;
+        questionsInput.value = original && original.kind === kind && (original.questions || []).length
+          ? original.questions.map(question => (Number(question.correct) === 1 ? 'Fiction' : 'Fact') + ' | ' + question.prompt).join('\n')
+          : 'Fact | Keynope decks are portable';
+        label.appendChild(questionsInput); form.appendChild(label);
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Participants answer each statement in sequence. Every correct answer is marked on reveal.'; form.appendChild(help);
+      } else if (kind === 'onboarding') {
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Creates the persistent presentation session. Participants join once, then use this page as their roster, chat and activity HUD.'; form.appendChild(help);
+      } else if (kind === 'questions') {
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'First collect questions (multiple per participant). Lock closes question submissions and opens voting: everyone gets three dots, with at most one dot per question. Reveal closes voting and lists questions from most to fewest dots. Ties keep submission order. Vote totals stay hidden until reveal.'; form.appendChild(help);
+      } else if (kind === 'expertise') {
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Participants add expertise one item at a time. Their entries appear as tags.'; form.appendChild(help);
+      } else if (kind === 'finishpair') {
+        const help=document.createElement('p');help.className='keynope-engagement-help';help.textContent='Give everyone the same task in Prompt. Participants press “I am finished!” when done. When everyone finishes, you lock collection, or the timer expires, Keynope pairs the fastest with the slowest, then the second-fastest with the second-slowest. Unfinished participants go after the slowest in random order. An odd number creates one group of three. The pairing method is not shown to participants; explain the task without revealing the twist.';form.appendChild(help);promptInput.placeholder='Complete the task, then press I am finished!';
+      } else if (kind === 'storm') {
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Ask a brainstorming question in Prompt. Participants submit ideas one at a time and can contribute repeatedly. During collection, show participation progress; use Reveal to explore the ideas. Names are shown on reveal only when Anonymous is unchecked.'; form.appendChild(help);
+      }
+      const anonymousLabel = document.createElement('label');
+      anonymousLabel.className = 'keynope-engagement-anonymous';
+      if(['dots','gallery','agreements'].includes(kind)&&keynopeRecentActivityItems.length)form.appendChild(engagementButton('Import ideas from last activity','',()=>{optionsInput.value=keynopeRecentActivityItems.join('\n');}));
+      anonymousInput = document.createElement('input'); anonymousInput.type = 'checkbox'; anonymousInput.checked = kind === 'impostor' ? true : kind === 'onboarding' || kind === 'cards' || kind === 'pair' || kind === 'draw' || kind === 'introduction' ? false : anonymous; anonymousInput.disabled = kind === 'onboarding' || kind === 'cards' || kind === 'pair' || kind === 'draw' || kind === 'introduction' || kind === 'impostor';
+      anonymousInput.addEventListener('change',() => { anonymous = anonymousInput.checked; });
+      if(kind==='prerequisites')anonymousInput.checked=original&&original.kind===kind?!original.named:false;
+      const anonymousText = document.createElement('span'); anonymousText.textContent = kind === 'cards' ? 'Names shown on reveal' : kind === 'pair' ? 'Names used for pairing' : kind === 'draw' ? 'Names shown with drawings' : kind === 'introduction' ? 'Names shown with introductions' : 'Anonymous';
+      anonymousLabel.append(anonymousInput,anonymousText);
+      if (kind !== 'ball' && kind !== 'teach' && kind !== 'finishpair' && kind !== 'onboarding' && kind !== 'cards' && kind !== 'pair' && kind !== 'impostor') form.appendChild(anonymousLabel);
+      if (kind === 'pair' || kind === 'cards' || kind === 'impostor') {
+        const pairDuration = (labelText,totalSeconds,prefix) => {
+          const label = document.createElement('label'); label.className = 'keynope-engagement-timer';
+          const text = document.createElement('span'); text.textContent = labelText;
+          const fields = document.createElement('span'); fields.className = 'keynope-engagement-time-fields';
+          const minutes = document.createElement('input'); minutes.type = 'number'; minutes.min = '0'; minutes.max = '99'; minutes.value = String(Math.floor(totalSeconds / 60)).padStart(2,'0'); minutes.setAttribute('aria-label',prefix + ' minutes');
+          const seconds = document.createElement('input'); seconds.type = 'number'; seconds.min = '0'; seconds.max = '59'; seconds.value = String(totalSeconds % 60).padStart(2,'0'); seconds.setAttribute('aria-label',prefix + ' seconds');
+          const colon = document.createElement('span'); colon.textContent = ':';
+          fields.append(minutes,colon,seconds); label.append(text,fields); form.appendChild(label);
+          return [minutes,seconds];
+        };
+        const timerName = kind === 'pair' ? 'Pair Share' : kind === 'cards' ? 'Playing Cards' : 'Impostor';
+        [joinMinutesInput,joinSecondsInput] = pairDuration('Join allowance',Number(original && original.joinSeconds) || 120,timerName + ' join time');
+        if (kind === 'pair') [discussionMinutesInput,discussionSecondsInput] = pairDuration('Discussion time',Number(original && original.discussionSeconds) || 300,'Pair Share discussion time');
+      } else if (kind !== 'onboarding') {
+        const timerLabel = document.createElement('label');
+        timerLabel.className = 'keynope-engagement-timer';
+        timerEnabledInput = document.createElement('input');
+        timerEnabledInput.type = 'checkbox';
+        timerEnabledInput.checked = !!(original && original.timerSeconds > 0);
+        const timerText = document.createElement('span'); timerText.textContent = 'Timer';
+        const timerFields = document.createElement('span'); timerFields.className = 'keynope-engagement-time-fields';
+        const originalSeconds = Number(original && original.timerSeconds) || 60;
+        timerMinutesInput = document.createElement('input'); timerMinutesInput.type = 'number'; timerMinutesInput.min = '0'; timerMinutesInput.max = '99'; timerMinutesInput.value = String(Math.floor(originalSeconds / 60)).padStart(2,'0'); timerMinutesInput.setAttribute('aria-label','Activity timer minutes');
+        timerSecondsInput = document.createElement('input'); timerSecondsInput.type = 'number'; timerSecondsInput.min = '0'; timerSecondsInput.max = '59'; timerSecondsInput.value = String(originalSeconds % 60).padStart(2,'0'); timerSecondsInput.setAttribute('aria-label','Activity timer seconds');
+        const colon = document.createElement('span'); colon.textContent = ':';
+        timerFields.append(timerMinutesInput,colon,timerSecondsInput);
+        timerFields.hidden = !timerEnabledInput.checked;
+        timerEnabledInput.addEventListener('change',() => { timerFields.hidden = !timerEnabledInput.checked; if (timerEnabledInput.checked) timerMinutesInput.focus(); });
+        timerLabel.append(timerEnabledInput,timerText,timerFields);
+        form.appendChild(timerLabel);
       }
       requestAnimationFrame(() => promptInput.focus());
     };
-    for (const item of [['pulse','Pulse'],['storm','Storm'],['sort','Sort']]) {
+    for (const item of [...Object.entries(KeynopeGames.names),['onboarding','Onboarding'],['dots','Dot Voting'],['finishpair','The Race'],['prerequisites','Prerequisites'],['pulse','Pulse'],['storm','Storm'],['sort','Sort'],['dual','Dual'],['quiz','Quiz'],['truefalse','Fact or Fiction'],['match','Mix & Match'],['questions','Questions'],['wall','Feedback Wall'],['draw','Quick Draw'],['introduction','Introduction'],['pair','Pair Share'],['expertise','Expertise'],['cards','Playing Cards'],['impostor','Impostor']]) {
       const button = document.createElement('button');
       button.type = 'button'; button.textContent = item[1]; button.classList.toggle('active',kind === item[0]);
       button.addEventListener('click',() => { kind = item[0]; for (const child of kinds.children) child.classList.toggle('active',child === button); renderForm(); });
@@ -6842,10 +8309,35 @@ if (keynopeAppSurface) {
     remove.addEventListener('click',async () => { await editorAction({action:'remove-engagement'}); closeEngagementEditor(); });
     cancel.addEventListener('click',closeEngagementEditor);
     save.addEventListener('click',async () => {
-      const engagementData = {kind,prompt:(promptInput.value || '').trim()};
+      const engagementData = {id:original && original.id || '',kind,prompt:(promptInput.value || '').trim(),named:!anonymousInput.checked};
+      if (kind === 'onboarding' && original && original.kind === kind && original.code) { engagementData.code = original.code; }
+      if (kind === 'prerequisites') engagementData.prerequisites=prerequisiteInputs.map(item=>({title:item.title.value.trim(),instructions:item.instructions.value.trim()})); if (kind === 'dots') { engagementData.options=engagementLines(optionsInput.value);engagementData.dotBudget=Number(dotBudgetInput.value);engagementData.stackDots=stackDotsInput.checked; }
+      if (KeynopeGames.has(kind))engagementData.options=engagementLines(optionsInput.value);
       if (kind === 'pulse') engagementData.options = engagementLines(optionsInput.value);
-      if (kind === 'sort') { engagementData.zones = engagementLines(zonesInput.value); engagementData.cards = engagementLines(cardsInput.value); }
-      try { await editorAction({action:original ? 'set-engagement' : 'add-engagement-slide',engagementData}); closeEngagementEditor(); }
+      if (kind === 'sort' || kind === 'match') { engagementData.zones = engagementLines(zonesInput.value); engagementData.cards = engagementLines(cardsInput.value); }
+      if (kind === 'dual' || kind === 'wall') engagementData.options = engagementLines(optionsInput.value);
+      if (kind === 'quiz') engagementData.questions = engagementQuizLines(questionsInput.value);
+      if (kind === 'truefalse') {
+        engagementData.questions = engagementTrueFalseLines(questionsInput.value);
+        if (!engagementData.questions.length || engagementData.questions.length > 5) { questionsInput.focus(); return; }
+      }
+      if (kind === 'pair') engagementData.groupSize = Number(groupSizeInput.value) || 2;
+      if (kind === 'cards') engagementData.groupCount = Number(groupCountInput.value) || 4;
+      if (kind === 'impostor') engagementData.impostorCount = Number(impostorCountInput.value) || 1;
+      if (kind === 'pair' || kind === 'cards' || kind === 'impostor') {
+        engagementData.joinSeconds = Math.max(0,Math.min(99,Number(joinMinutesInput.value) || 0)) * 60 + Math.max(0,Math.min(59,Number(joinSecondsInput.value) || 0));
+        if (!engagementData.joinSeconds) { joinSecondsInput.focus(); return; }
+        if (kind === 'pair') {
+          engagementData.discussionSeconds = Math.max(0,Math.min(99,Number(discussionMinutesInput.value) || 0)) * 60 + Math.max(0,Math.min(59,Number(discussionSecondsInput.value) || 0));
+          if (!engagementData.discussionSeconds) { discussionSecondsInput.focus(); return; }
+        }
+      } else if (timerEnabledInput && timerEnabledInput.checked) {
+        const minutes = Math.max(0,Math.min(99,Number(timerMinutesInput.value) || 0));
+        const seconds = Math.max(0,Math.min(59,Number(timerSecondsInput.value) || 0));
+        engagementData.timerSeconds = minutes * 60 + seconds;
+        if (!engagementData.timerSeconds) { timerSecondsInput.focus(); return; }
+      }
+      try { await editorAction({action:'set-engagement',engagementData}); closeEngagementEditor(); }
       catch (error) { const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = error && error.message || 'Could not save activity'; form.appendChild(help); }
     });
     blocker.addEventListener('pointerdown',event => { if (event.target === blocker) closeEngagementEditor(); });
@@ -6921,6 +8413,13 @@ if (keynopeAppSurface) {
   addElementIconButton('Add title', 'heading', '<path d="M3 4v12M11 4v12M3 10h8"/><path d="M14 7h3v9M14 16h5"/>', 1);
   addElementIconButton('Add subtitle', 'heading', '<path d="M3 4v12M11 4v12M3 10h8"/><text x="13" y="17" fill="currentColor" stroke="none" font-size="11" font-family="-apple-system, sans-serif" font-weight="700">2</text>', 2);
   addElementIconButton('Add text', 'text', '<path d="M3 4h14M10 4v12M7 16h6"/>');
+  const trueTypeButton=addElementIconButton('Add TrueType text (experimental)', 'text', '<path d="M3 4h14M10 4v12M7 16h6"/>',0,async()=>{
+    await KeynopeTrueType.ready;
+    const text='TrueType text',bounds=KeynopeTrueType.initialBounds(text,72,deck.cols,deck.rows);
+    await editorAction({action:'add-element',kind:'text',elementData:{kind:'text',text,query:'render=truetype&ttf-size=72&width='+bounds.width+'&height='+bounds.height+'&text-box=1&top=10&left_pct=0.1'}}).catch(()=>{});
+  });
+  trueTypeButton.style.position='relative';
+  trueTypeButton.insertAdjacentHTML('beforeend','<span class="keynope-page-number-tag">TTF</span>');
   addElementIconButton('Add bullet point', 'bullet', '<circle cx="4" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="4" cy="14" r="1" fill="currentColor" stroke="none"/><path d="M8 6h9M8 14h9"/>');
   addElementIconButton('Add code', 'code', '<path d="M7 5 3 10l4 5M13 5l4 5-4 5M11 3 9 17"/>');
   addElementIconButton('Add emoji', 'text', '<circle cx="10" cy="10" r="7"/><circle cx="7.5" cy="8" r=".8" fill="currentColor" stroke="none"/><circle cx="12.5" cy="8" r=".8" fill="currentColor" stroke="none"/><path d="M6.5 11.5c1.5 2.5 5.5 2.5 7 0"/>', 0, button => openEmojiPicker(button, -1, 'add'));
@@ -7696,6 +9195,55 @@ if (keynopeAppSurface) {
     if (handler) handler.postMessage({action: 'export-html'});
   });
   mainTopbar.appendChild(exportButton);
+  const settingsMenu = document.createElement('details');
+  settingsMenu.className = 'keynope-settings-menu';
+  const settingsTitle = document.createElement('summary');
+  settingsTitle.textContent = 'Settings';
+  const tabsButton = canvasTool('Tabs', '', () => { settingsMenu.open=false; openDeckTabsDialog(); });
+  tabsButton.title = 'Configure participant tabs';
+  settingsMenu.append(settingsTitle,tabsButton);
+  // The Mac app exposes Settings in its native menu bar. Browsers still
+  // need an in-page entry point because they have no application menu.
+  if (window.KEYNOPE_WEB_EDITOR) mainTopbar.appendChild(settingsMenu);
+  window.keynopeOpenParticipantTabs = openDeckTabsDialog;
+  function openDeckTabsDialog() {
+    if (!editorState?.hasActivities || editorState.masterMode) return;
+    closeCanvasLinkDialog();
+    const overlay=document.createElement('div');overlay.className='keynope-tabs-overlay';
+    const dialog=document.createElement('form');dialog.className='keynope-tabs-dialog';dialog.setAttribute('role','dialog');dialog.setAttribute('aria-modal','true');dialog.setAttribute('aria-label','Participant tabs');
+    const title=document.createElement('h3');title.textContent='Participant tabs';
+    const hint=document.createElement('p');hint.textContent='Shown after Presentation, before #lobby. Choose a URL or a fixed slide for each tab. Some websites do not allow embedding.';
+    const list=document.createElement('div');list.className='keynope-tabs-list';
+    const error=document.createElement('p');error.setAttribute('role','alert');
+    let draft=(editorState.tabs||[]).map(tab=>({...tab}));
+    const render=()=>{
+      list.replaceChildren();
+      draft.forEach((tab,index)=>{
+        const row=document.createElement('fieldset');
+        const name=document.createElement('input');name.value=tab.name;name.placeholder='Tab name';name.required=true;name.maxLength=80;name.setAttribute('aria-label','Tab name');name.oninput=()=>tab.name=name.value;
+        const mode=document.createElement('select');mode.setAttribute('aria-label','Tab destination');
+        for(const [value,label] of [['url','URL'],['page','Slide']]){const o=document.createElement('option');o.value=value;o.textContent=label;mode.append(o);}mode.value=tab.url?'url':'page';
+        const url=document.createElement('input');url.type='url';url.placeholder='https://example.com';url.value=tab.url||'';url.setAttribute('aria-label','Tab URL');url.oninput=()=>tab.url=url.value;
+        const page=document.createElement('select');page.setAttribute('aria-label','Tab slide');
+        url.className=page.className='keynope-tab-target';
+        (editorState.slides||[]).forEach((slide,i)=>{const o=document.createElement('option');o.value=String(i+1);o.textContent=slideTitle(slide,i);page.append(o);});page.value=String(tab.page||1);page.onchange=()=>tab.page=Number(page.value);
+        const refresh=()=>{url.hidden=mode.value!=='url';url.required=!url.hidden;page.hidden=!url.hidden;};refresh();
+        mode.onchange=()=>{if(mode.value==='url'){delete tab.page;tab.url=url.value;}else{delete tab.url;tab.page=Number(page.value);}refresh();};
+        const up=canvasTool('↑','',()=>{[draft[index-1],draft[index]]=[draft[index],draft[index-1]];render();});up.disabled=index===0;up.title='Move tab earlier';
+        const down=canvasTool('↓','',()=>{[draft[index+1],draft[index]]=[draft[index],draft[index+1]];render();});down.disabled=index===draft.length-1;down.title='Move tab later';
+        const actions=document.createElement('div');actions.className='keynope-tab-actions';
+        actions.append(up,down,canvasTool('Remove','',()=>{draft.splice(index,1);render();}));
+        row.append(name,mode,url,page,actions);list.append(row);
+      });
+    };
+    const add=canvasTool('Add tab','',()=>{if(draft.length>=20)return;draft.push({id:'tab-'+crypto.randomUUID(),name:'New tab',page:1});render();list.lastElementChild?.querySelector('input').focus();});
+    const close=()=>{overlay.remove();activeCanvasLinkDialog=null;if(settingsTitle.isConnected)settingsTitle.focus();else stage.focus();};
+    const save=canvasTool('Apply','',()=>dialog.requestSubmit());
+    dialog.onsubmit=async event=>{event.preventDefault();save.disabled=true;try{await editorAction({action:'set-tabs',tabs:draft});close();}catch(e){error.textContent=e.message||'Could not save tabs';save.disabled=false;}};
+    dialog.append(title,hint,list,error,add,save,canvasTool('Cancel','',close));overlay.append(dialog);document.body.append(overlay);activeCanvasLinkDialog=overlay;render();
+    overlay.addEventListener('keydown',event=>{event.stopPropagation();if(event.key==='Escape'){event.preventDefault();close();}if(event.key==='Tab'){const nodes=[...dialog.querySelectorAll('input:not([hidden]),select:not([hidden]),button:not(:disabled)')];const first=nodes[0],last=nodes[nodes.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}});
+    (list.querySelector('input')||add).focus();
+  }
   exportButton.classList.add('keynope-icon-button', 'keynope-monochrome-icon', 'keynope-export-button');
   exportButton.title = 'Export to HTML';
   exportButton.setAttribute('aria-label', 'Export to HTML');
@@ -7707,6 +9255,7 @@ if (keynopeAppSurface) {
   slidesPanel.className = 'keynope-editor-panel keynope-editor-slides';
   document.body.appendChild(slidesPanel);
   let draggedMasterIndex = -1;
+  let draggingMasterMode = false;
   let draggedMasterButton = null;
   let masterDropDestination = -1;
   let masterDropPlaceholder = null;
@@ -7724,11 +9273,12 @@ if (keynopeAppSurface) {
     masterDragImage = null;
   }
   function updateMasterDropPlaceholder(clientY) {
-    if (draggedMasterIndex <= 0 || !draggedMasterButton) return;
+    if (draggedMasterIndex < 0 || !draggedMasterButton) return;
+    const first = draggingMasterMode ? 1 : 0;
     const remaining = Array.from(slidesPanel.querySelectorAll('.keynope-slide-item[data-master-index]'))
-      .filter(item => Number(item.dataset.masterIndex) > 0 && Number(item.dataset.masterIndex) !== draggedMasterIndex);
+      .filter(item => Number(item.dataset.masterIndex) >= first && Number(item.dataset.masterIndex) !== draggedMasterIndex);
     const reference = remaining.find(item => clientY < item.getBoundingClientRect().top + item.getBoundingClientRect().height / 2) || null;
-    masterDropDestination = reference ? remaining.indexOf(reference) + 1 : remaining.length + 1;
+    masterDropDestination = (reference ? remaining.indexOf(reference) : remaining.length) + first;
     if (!masterDropPlaceholder) {
       masterDropPlaceholder = document.createElement('div');
       masterDropPlaceholder.className = 'keynope-master-drop-placeholder';
@@ -7739,7 +9289,7 @@ if (keynopeAppSurface) {
     else slidesPanel.appendChild(masterDropPlaceholder);
   }
   slidesPanel.addEventListener('dragover', event => {
-    if (draggedMasterIndex <= 0) return;
+    if (draggedMasterIndex < 0) return;
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
     updateMasterDropPlaceholder(event.clientY);
@@ -7748,14 +9298,15 @@ if (keynopeAppSurface) {
     else if (event.clientY > panelRect.bottom - 36) slidesPanel.scrollBy({top: 18});
   });
   slidesPanel.addEventListener('drop', event => {
-    if (draggedMasterIndex <= 0) return;
+    if (draggedMasterIndex < 0) return;
     event.preventDefault();
     updateMasterDropPlaceholder(event.clientY);
     const source = draggedMasterIndex;
     const destination = masterDropDestination;
     finishMasterDrag();
-    if (destination > 0 && destination !== source) {
-      editorAction({action: 'reorder-master', slide: source, value: destination}).catch(() => {});
+    if (destination >= (draggingMasterMode ? 1 : 0) && destination !== source) {
+      if (draggingMasterMode) editorAction({action: 'reorder-master', slide: source, value: destination}).catch(() => {});
+      else editorAction({action: 'reorder-slide', slide: source, value: destination}).catch(() => {});
     }
   });
   const masterModeButton = document.createElement('button');
@@ -7894,7 +9445,7 @@ if (keynopeAppSurface) {
       const pages = Array.isArray(payload) ? payload : payload.pages;
       if (!activeInlineEditor || activeInlineEditor.element !== index || sequence !== editorPreviewSequence) return;
       replaceEditorPreviewPages(editorState.current, pages);
-      if (payload && payload.caret && editorCanvasCaret) {
+      if (payload && payload.caret && editorCanvasCaret && !editorCanvasCaret.trueType) {
         editorCanvasCaret.exact = payload.caret;
         editorCanvasCaret.selection = Array.isArray(payload.selectionRows) && payload.selectionRows.length
           ? payload.selectionRows : null;
@@ -8308,7 +9859,7 @@ if (keynopeAppSurface) {
       const selectionEnd = [...editor.value.slice(0, editor.selectionEnd || 0)].length;
       const cursor = editor.selectionDirection === 'backward' ? selectionStart : selectionEnd;
       editorCanvasCaret = {element: resolvedElement == null ? index : resolvedElement, text: editor.value, cursor,
-        kind: element.kind, query: element.query || '', started: performance.now()};
+        kind: element.kind, query: element.query || '', trueType:KeynopeTrueType.is(element), selectionStart, selectionEnd, started: performance.now()};
       drawFrame();
       const sequence = ++editorPreviewSequence;
       previewEditorText(index, {...element, text:editor.value}, cursor, selectionStart, selectionEnd, sequence);
@@ -8317,7 +9868,7 @@ if (keynopeAppSurface) {
     keynopeEditorTextEditActive = true;
     renderEditorTopbar();
     editor.addEventListener('input', () => {
-      cleanupInlineEditorEmptyColorTags(editor);
+      if(!KeynopeTrueType.is(element))cleanupInlineEditorEmptyColorTags(editor);
       element.text = editor.value;
       updateCaret();
     });
@@ -8325,6 +9876,35 @@ if (keynopeAppSurface) {
     editor.addEventListener('click', updateCaret);
     editor.addEventListener('keyup', updateCaret);
     editor.addEventListener('keydown', keyEvent => {
+      if(KeynopeTrueType.is(element)){
+        if(keyEvent.key==='Escape'){keyEvent.preventDefault();confirmEscape();}
+        else if(keyEvent.key==='ArrowUp'||keyEvent.key==='ArrowDown'){
+          keyEvent.preventDefault();
+          const line=deck.pages[pageIndex]?.lines?.find(line=>line.trueType&&line.element===resolvedElement);
+          if(line){
+            const chars=Array.from(editor.value),position=Array.from(editor.value.slice(0,editor.selectionDirection==='backward'?editor.selectionStart:editor.selectionEnd)).length;
+            const rows=KeynopeTrueType.metrics({...line,trueType:{...line.trueType,text:editor.value}},deck.cols,deck.rows).rows;
+            let row=rows.findIndex((r,i)=>position>=r.start&&position<=r.end&&(!rows[i+1]||position<rows[i+1].start));if(row<0)row=rows.length-1;
+            const target=rows[Math.max(0,Math.min(rows.length-1,row+(keyEvent.key==='ArrowUp'?-1:1)))];
+            const x=rows[row].positions[Math.max(0,position-rows[row].start)]||0;
+            let column=0;for(let i=1;i<target.positions.length;i++)if(Math.abs(target.positions[i]-x)<Math.abs(target.positions[column]-x))column=i;
+            const next=chars.slice(0,Math.min(target.end,target.start+column)).join('').length;
+            if(keyEvent.shiftKey){const anchor=editor.selectionDirection==='backward'?editor.selectionEnd:editor.selectionStart;editor.setSelectionRange(Math.min(anchor,next),Math.max(anchor,next),next<anchor?'backward':'forward');}
+            else editor.setSelectionRange(next,next);
+            updateCaret();
+          }
+        }
+        else if(keyEvent.key==='Enter'&&keyEvent.shiftKey&&element.kind==='bullet'){
+          keyEvent.preventDefault();editor.setRangeText('\n  ',editor.selectionStart,editor.selectionEnd,'end');editor.dispatchEvent(new Event('input',{bubbles:true}));
+        }
+        else if(keyEvent.key==='Enter'&&!keyEvent.shiftKey){
+          const pos=editor.selectionStart||0,start=editor.value.lastIndexOf('\n',Math.max(0,pos-1))+1,end=editor.value.indexOf('\n',pos);
+          if(!editor.value.slice(start,end<0?editor.value.length:end).trim()){
+            keyEvent.preventDefault();editor.setRangeText('',start>0?start-1:0,end<0?editor.value.length:end,'start');finish(true);
+          }
+        }
+        keyEvent.stopPropagation();return;
+      }
       if ((keyEvent.key === 'Backspace' || keyEvent.key === 'Delete') && deleteInlineEditorSelectionPreservingFormatting(editor)) {
         keyEvent.preventDefault();
       } else if (keyEvent.key === 'Backspace' && deleteInlineEditorColorContent(editor, -1)) {
@@ -8389,7 +9969,7 @@ if (keynopeAppSurface) {
     });
     canvasOverlay.appendChild(editor);
     editor.focus();
-    const initialCursor = inlineEditorInitialCursor(editor.value);
+    const initialCursor = KeynopeTrueType.is(element)?editor.value.length:inlineEditorInitialCursor(editor.value);
     editor.setSelectionRange(initialCursor, initialCursor);
     updateCaret();
     if (editorStatus) editorStatus.textContent = element.kind === 'bullet'
@@ -8554,6 +10134,11 @@ if (keynopeAppSurface) {
     }
   }, true);
 
+  function clearCanvasPlacementAnchors(query) {
+    for (const key of ['right','right_pct','bottom','row_delta','valign','left']) query.delete(key);
+    // Justification formats lines inside the box; it is not a slide anchor.
+    if (query.get('align') !== 'justify') query.delete('align');
+  }
   function canvasElementAt(index) {
     if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return null;
     const element = editorState.slides[editorState.current].elements[index];
@@ -8611,7 +10196,7 @@ if (keynopeAppSurface) {
     const query = new URLSearchParams(element.query || '');
     const wasHeading = element.kind === 'heading';
     const colour = query.get(wasHeading ? 'header' : 'fg') || query.get(wasHeading ? 'fg' : 'header');
-    for (const key of ['render','source','scale','text-size']) query.delete(key);
+    for (const key of ['render','source','scale','text-size','ttf-size','ttf-weight']) query.delete(key);
     if (kind === 'heading') {
       query.delete('fg');
       if (colour) query.set('header', colour); else query.delete('header');
@@ -8632,19 +10217,42 @@ if (keynopeAppSurface) {
       editorAction({action: 'update-element', element: index, elementData: element}).catch(() => {});
     }
   }
+  async function setCanvasTrueType(index){
+    await KeynopeTrueType.ready;
+    updateCanvasElements(index,e=>['heading','text','text-image','bullet','code'].includes(e.kind)&&!KeynopeTrueType.is(e),e=>{
+      const q=new URLSearchParams(e.query||''),page=deck.pages[pageIndex],colour=q.get(e.kind==='heading'?'header':'fg')||q.get('fg')||(e.kind==='heading'?page?.headerFg:page?.fg)||'#ffffff';
+      const bounds=KeynopeTrueType.initialBounds(e.text||'',72,deck.cols,deck.rows);
+      if(q.get('text-box')!=='1'){
+        if(['cw','ccw'].includes(q.get('orientation'))){const aspect=(1080/deck.rows)/(1920/deck.cols);q.set('width',String(Math.max(1,Math.round(bounds.height*aspect))));q.set('height',String(Math.max(1,Math.round(bounds.width/aspect))));}
+        else{q.set('width',String(bounds.width));q.set('height',String(bounds.height));}
+      }
+      for(const key of ['source','scale','text-size','font','glyph','header'])q.delete(key);
+      q.set('fg',colour);q.set('render','truetype');q.set('ttf-size','72');q.set('text-box','1');
+      if(!['bullet','code'].includes(e.kind))e.kind='text';e.level=0;e.query=q.toString();
+    });
+  }
+  function setCanvasGlyphRenderer(index){
+    updateCanvasElements(index,e=>['bullet','code'].includes(e.kind),e=>{const q=new URLSearchParams(e.query||'');for(const key of ['render','ttf-size','ttf-weight'])q.delete(key);e.query=q.toString();});
+  }
   function appendCanvasTextKindTools(container, index, element) {
+    const trueType=KeynopeTrueType.is(element);
+    const block=['bullet','code'].includes(element.kind);
     const choices = [
       ['H1', 'heading', 1, element.kind === 'heading' && element.level !== 2, false],
       ['H2', 'heading', 2, element.kind === 'heading' && element.level === 2, false],
-      ['T', 'text', 0, element.kind === 'text' || element.kind === 'text-image', false],
+      ['T', 'text', 0, !trueType&&(block||element.kind === 'text' || element.kind === 'text-image'), false],
+      ['TT', 'truetype', 0, trueType, false],
       ['⏺', 'bullet', 0, element.kind === 'bullet', false],
       ['', 'code', 0, element.kind === 'code', true]
     ];
     for (const [label, kind, level, active, codeIcon] of choices) {
-      const button = canvasTool(label, (active ? 'active ' : '') + (codeIcon ? 'keynope-text-kind-code' : ''), () => setCanvasTextKind(index, kind, level));
+      if(block&&kind==='heading')continue;
+      const button = canvasTool(label, (active ? 'active ' : '') + (codeIcon ? 'keynope-text-kind-code' : ''), () => kind==='truetype'?setCanvasTrueType(index):block&&kind==='text'?setCanvasGlyphRenderer(index):setCanvasTextKind(index, kind, level));
       if (codeIcon) button.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5 3 10l4 5M13 5l4 5-4 5M11 3 9 17"/></svg>';
-      button.title = kind === 'heading' ? 'Convert to heading ' + level : kind === 'bullet' ? (active ? 'Convert bullets to text' : 'Convert to bullet points') : kind === 'code' ? (active ? 'Convert code block to text' : 'Convert to code block') : 'Convert to plain text';
+      button.title = kind==='truetype'?'Convert to TrueType text':kind === 'heading' ? 'Convert to heading ' + level : kind === 'bullet' ? (active ? 'Convert bullets to text' : 'Convert to bullet points') : kind === 'code' ? (active ? 'Convert code block to text' : 'Convert to code block') : 'Convert to plain text';
       button.setAttribute('aria-label', button.title);
+      if(block&&kind==='text'){button.title='Use glyph text';button.setAttribute('aria-label',button.title);}
+      button.setAttribute('aria-pressed',String(active));
       container.appendChild(button);
     }
   }
@@ -8687,6 +10295,7 @@ if (keynopeAppSurface) {
     return !!font && font.mode === 'figlet';
   }
   function canvasTextSize(element) {
+    if (KeynopeTrueType.is(element)) return KeynopeTrueType.size(element);
     const query = new URLSearchParams(element.query || '');
     const explicit = Number.parseInt(query.get('text-size'), 10);
     if (Number.isInteger(explicit)) return Math.max(-1, Math.min(25, explicit));
@@ -8703,6 +10312,9 @@ if (keynopeAppSurface) {
     return canvasTextNativeSize(element);
   }
   function applyCanvasTextSize(element, size) {
+    if (KeynopeTrueType.is(element)) {
+      const query=new URLSearchParams(element.query||'');query.set('ttf-size',String(Math.max(1,Math.min(512,Math.round(size)))));element.query=query.toString();return;
+    }
     size = Math.max(-1, Math.min(25, size));
     const query = new URLSearchParams(element.query || '');
     if (size === canvasTextNativeSize(element)) {
@@ -8783,8 +10395,18 @@ if (keynopeAppSurface) {
     return button;
   }
   function rotateCanvasText(index) {
-    updateCanvasElements(index, element => ['heading','text','text-image','bullet'].includes(element.kind), element => {
+    updateCanvasElements(index, element => KeynopeTrueType.is(element)||['heading','text','text-image','bullet'].includes(element.kind), (element,candidateIndex) => {
       const query = new URLSearchParams(element.query || '');
+      if(KeynopeTrueType.is(element)){
+        // Bounds use terminal cells, whose physical axes are not square.
+        // Swap the physical dimensions, retaining the font size and anchors.
+        const resolved=editorElementIndexMaps().rawToResolved.get(candidateIndex);
+        const line=deck.pages[pageIndex]?.lines?.find(line=>line.trueType&&line.element===resolved);
+        const width=Number(query.get('width'))||line?.trueType.width||110,height=Number(query.get('height'))||line?.trueType.height||10;
+        const aspect=(1080/deck.rows)/(1920/deck.cols);
+        query.set('width',String(Math.max(1,Math.min(deck.cols,Math.round(height*aspect)))));
+        query.set('height',String(Math.max(1,Math.min(deck.rows,Math.round(width/aspect)))));
+      }
       const orientation = query.get('orientation') || '';
       if (!orientation) query.set('orientation', 'cw');
       else if (orientation === 'cw') query.set('orientation', 'down');
@@ -9364,6 +10986,8 @@ if (keynopeAppSurface) {
     return button;
   }
   function renderEditorTopbar() {
+    tabsButton.disabled = !editorState?.hasActivities || !!editorState?.masterMode;
+    tabsButton.title = tabsButton.disabled ? 'Add an activity to configure participant tabs' : 'Configure participant tabs';
     closeCanvasTextEffectDropdown();
     publishEditorDirtyState();
     const slide = editorState && editorState.slides && editorState.slides[editorState.current];
@@ -9406,8 +11030,10 @@ if (keynopeAppSurface) {
       const highlightSelection = canvasTool('H', '', () => applyInlineSelectionWrapper('*'));
       highlightSelection.title = 'Highlight selected text';
       highlightSelection.setAttribute('aria-label', highlightSelection.title);
-      selectionTopbar.append(boldSelection, highlightSelection, inlineSelectionColourTool());
-      selectionTopbar.appendChild(canvasEmojiTool(index));
+      if(!KeynopeTrueType.is(element)){
+        selectionTopbar.append(boldSelection, highlightSelection, inlineSelectionColourTool());
+        selectionTopbar.appendChild(canvasEmojiTool(index));
+      }
       selectionTopbar.appendChild(canvasTool('Commit', '', () => activeInlineEditor && activeInlineEditor.finish(true)));
       selectionTopbar.appendChild(canvasTool('Cancel', '', () => activeInlineEditor && activeInlineEditor.finish(false)));
       return;
@@ -9418,7 +11044,7 @@ if (keynopeAppSurface) {
     selectionTopbar.appendChild(done);
     const query = new URLSearchParams(element.query || '');
     const selectedText = !!textElement;
-    const rotatableText = selectedElements.some(candidate => ['heading','text','text-image','bullet'].includes(candidate.kind));
+    const rotatableText = selectedElements.some(candidate => KeynopeTrueType.is(candidate)||['heading','text','text-image','bullet'].includes(candidate.kind));
     const positionable = selectedElements.some(candidate => ['heading','text','text-image','bullet','code','shape','image','page-number'].includes(candidate.kind));
     if (selectedText) {
       if (selectedElements.length === 1) {
@@ -9428,10 +11054,22 @@ if (keynopeAppSurface) {
         selectionTopbar.appendChild(edit);
       }
       appendCanvasTextKindTools(selectionTopbar, textIndex, textElement);
-      if (selectedElements.length === 1) selectionTopbar.appendChild(canvasEmojiTool(textIndex));
-      selectionTopbar.appendChild(canvasTool('−', '', () => changeCanvasTextSize(textIndex, -1)));
-      selectionTopbar.appendChild(canvasTool('+', '', () => changeCanvasTextSize(textIndex, 1)));
-      if (selectedElements.some(candidate => ['heading','text','text-image','bullet'].includes(candidate.kind))) {
+      if (selectedElements.length === 1 && !KeynopeTrueType.is(textElement)) selectionTopbar.appendChild(canvasEmojiTool(textIndex));
+      const sizeStack = document.createElement('span');
+      sizeStack.className = 'keynope-text-size-stack';
+      for (const [label, delta, title] of [['+',1,'Increase font size'],['−',-1,'Decrease font size']]) {
+        const button = canvasTool(label, '', () => changeCanvasTextSize(textIndex, delta));
+        button.title = title;
+        button.setAttribute('aria-label', title);
+        sizeStack.appendChild(button);
+      }
+      selectionTopbar.appendChild(sizeStack);
+      if(KeynopeTrueType.is(textElement)){
+        const size=document.createElement('input');size.type='number';size.min='1';size.max='512';size.step='1';size.value=String(KeynopeTrueType.size(textElement));size.className='keynope-ttf-size';size.title='TrueType font size (1–512)';size.setAttribute('aria-label','TrueType font size');
+        size.addEventListener('keydown',event=>event.stopPropagation());size.addEventListener('change',()=>{if(!size.checkValidity())return;updateCanvasElements(textIndex,KeynopeTrueType.is,e=>applyCanvasTextSize(e,Number(size.value)));});selectionTopbar.appendChild(size);
+        const bold=canvasTool('B',new URLSearchParams(textElement.query||'').get('ttf-weight')==='bold'?'active':'',()=>updateCanvasElement(textIndex,e=>{const q=new URLSearchParams(e.query||'');if(q.get('ttf-weight')==='bold')q.delete('ttf-weight');else q.set('ttf-weight','bold');e.query=q.toString();}));bold.title='Bold TrueType text';bold.setAttribute('aria-label',bold.title);selectionTopbar.appendChild(bold);
+      }
+      if (!KeynopeTrueType.is(textElement)&&selectedElements.some(candidate => ['heading','text','text-image','bullet'].includes(candidate.kind))) {
         const bold = canvasTool('B', (textElement.text || '').startsWith('**') && (textElement.text || '').endsWith('**') ? 'active' : '', () => toggleCanvasMarkdownStyle(textIndex, '**'));
         bold.title = 'Bold';
         bold.setAttribute('aria-label', 'Bold');
@@ -9451,6 +11089,20 @@ if (keynopeAppSurface) {
       for (const alignment of ['top','middle','bottom']) selectionTopbar.appendChild(canvasVerticalAlignmentTool(index, alignment, query.get('valign') === alignment));
     }
     if (selectedText) {
+      if (selectedElements.some(candidate => KeynopeTrueType.is(candidate)||['heading','text','text-image','bullet'].includes(candidate.kind))) {
+        const justify = canvasTool('', 'keynope-svg-button' + (query.get('align') === 'justify' ? ' active' : ''), () => {
+          updateCanvasElements(textIndex, candidate => KeynopeTrueType.is(candidate)||['heading','text','text-image','bullet'].includes(candidate.kind), candidate => {
+            const values = new URLSearchParams(candidate.query || '');
+            values.set('align', 'justify');
+            candidate.query = values.toString();
+          });
+        });
+        justify.innerHTML = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 4h16M2 8h16M2 12h16M2 16h16"/></svg>';
+        justify.title = 'Justify text';
+        justify.setAttribute('aria-label', justify.title);
+        justify.setAttribute('aria-pressed', String(query.get('align') === 'justify'));
+        selectionTopbar.appendChild(justify);
+      }
       if (rotatableText) {
         const rotate = canvasTool('⟳', 'keynope-icon-button keynope-rotate-button', () => rotateCanvasText(textIndex));
         rotate.innerHTML = '<span class="keynope-rotate-icon" aria-hidden="true">⟳</span><span class="keynope-rotate-label">ROTATE</span>';
@@ -9458,9 +11110,11 @@ if (keynopeAppSurface) {
         rotate.setAttribute('aria-label', 'Rotate');
         selectionTopbar.appendChild(rotate);
       }
-      if (selectedElements.some(candidate => ['heading','text','text-image','bullet'].includes(candidate.kind))) selectionTopbar.appendChild(canvasStyleSelect(textIndex, textElement));
-      selectionTopbar.appendChild(canvasFontSelect(textIndex, textElement));
-      selectionTopbar.appendChild(canvasFontEditorTool(textElement));
+      if(!KeynopeTrueType.is(textElement)){
+        if (selectedElements.some(candidate => ['heading','text','text-image','bullet'].includes(candidate.kind))) selectionTopbar.appendChild(canvasStyleSelect(textIndex, textElement));
+        selectionTopbar.appendChild(canvasFontSelect(textIndex, textElement));
+        selectionTopbar.appendChild(canvasFontEditorTool(textElement));
+      }
       selectionTopbar.appendChild(canvasColourTool(textIndex, textElement, ''));
       if (selectedElements.some(canvasTextEffectCompatible)) appendCanvasTypographyEffectTools(selectionTopbar,textIndex,textElement);
       if (selectedElements.length === 1) selectionTopbar.appendChild(canvasLinkTool(textIndex, query));
@@ -9529,11 +11183,12 @@ if (keynopeAppSurface) {
         if (!group.color && part.color) group.color = part.color;
       }
       groups.set(rawElement, group);
+      if(line.trueType)groups.set(rawElement,{minX:line.col,minY:line.row,maxX:line.col+line.trueType.width,maxY:line.row+line.trueType.height,color:line.parts?.[0]?.color||''});
     }
     const authoredElements = editorState.slides[editorState.current].elements || [];
     authoredElements.forEach((element, index) => {
       const query = new URLSearchParams(element.query || '');
-      if (element.kind === 'shape' && query.get('transparent') === '1') {
+      if (query.get('text-box') === '1' || element.kind === 'shape' && query.get('transparent') === '1') {
         const bounds = canvasShapeSelectionBounds(element, page.page);
         if (bounds) groups.set(index, bounds);
       }
@@ -9615,16 +11270,20 @@ if (keynopeAppSurface) {
         const fitElementForBounds = next => {
           const element = {...sourceElement};
           const query = new URLSearchParams(element.query || '');
-          for (const key of ['right','right_pct','bottom','row_delta','valign','align','left','width','height']) query.delete(key);
+          clearCanvasPlacementAnchors(query);
+          query.delete('width'); query.delete('height');
           query.set('left_pct', Math.max(0, Math.min(1, next.minX / deck.cols)).toFixed(6));
           query.set('top', String(next.minY));
+          query.set('width', String(Math.max(1, next.maxX - next.minX)));
+          query.set('height', String(Math.max(1, next.maxY - next.minY)));
+          query.set('text-box', '1');
           element.query = query.toString();
           return element;
         };
 		const resizedElementForBounds = next => {
 			const element = {...sourceElement};
 			const query = new URLSearchParams(element.query || '');
-			for (const key of ['right','right_pct','bottom','row_delta','valign','align','left']) query.delete(key);
+			clearCanvasPlacementAnchors(query);
 			if (element.kind === 'image') query.delete('scale');
           query.set('left_pct', Math.max(0, Math.min(1, next.minX / deck.cols)).toFixed(6));
           query.set('top', String(next.minY));
@@ -9658,10 +11317,9 @@ if (keynopeAppSurface) {
             const task = pendingFit;
             pendingFit = null;
             try {
-              const result = await fitCanvasTextElement(index, fitElementForBounds(task.bounds), task.bounds.maxX - task.bounds.minX, task.bounds.maxY - task.bounds.minY);
-              lastFit = {key: task.key, element: result.element};
-              replaceEditorPreviewPages(editorState.current, result.pages);
-              drawFrame();
+              const element = fitElementForBounds(task.bounds);
+              await previewCanvasMutation(editorElementIndexByID(sourceElementID, index), element, false);
+              lastFit = {key: task.key, element};
             } catch (_err) {}
           }
           fitting = false;
@@ -9729,14 +11387,14 @@ if (keynopeAppSurface) {
           const query = new URLSearchParams(element.query || '');
 		if (resizing) {
 			const next = resizedBounds(dx, dy);
-			query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('valign'); query.delete('align'); query.delete('left');
+			clearCanvasPlacementAnchors(query);
 			if (element.kind === 'image') query.delete('scale');
             query.set('left_pct', Math.max(0, Math.min(1, next.minX / deck.cols)).toFixed(6));
             query.set('top', String(next.minY));
             query.set('width', String(Math.max(1, next.maxX - next.minX)));
             query.set('height', String(Math.max(1, next.maxY - next.minY)));
           } else {
-            query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('valign'); query.delete('align'); query.delete('left');
+            clearCanvasPlacementAnchors(query);
             query.set('left_pct', Math.max(0, Math.min(1, (start.minX + dx) / deck.cols)).toFixed(6));
             query.set('top', String(Math.max(0, start.minY + dy)));
           }
@@ -9848,15 +11506,15 @@ if (keynopeAppSurface) {
     actions.className = 'keynope-editor-actions';
     const query = new URLSearchParams(element.query || '');
     const selectedText = ['heading','text','text-image','bullet','code'].includes(element.kind);
-    const rotatableText = ['heading','text','text-image','bullet'].includes(element.kind);
+    const rotatableText = KeynopeTrueType.is(element)||['heading','text','text-image','bullet'].includes(element.kind);
     const positionable = selectedText || element.kind === 'shape' || element.kind === 'image' || element.kind === 'page-number';
     if (selectedText) {
       actions.appendChild(canvasTool('✎', '', () => beginInlineEdit(index)));
       appendCanvasTextKindTools(actions, index, element);
-      actions.appendChild(canvasEmojiTool(index));
+      if(!KeynopeTrueType.is(element))actions.appendChild(canvasEmojiTool(index));
       actions.appendChild(canvasTool('−', '', () => changeCanvasTextSize(index, -1)));
       actions.appendChild(canvasTool('+', '', () => changeCanvasTextSize(index, 1)));
-      if (element.kind !== 'code') {
+      if (element.kind !== 'code'&&!KeynopeTrueType.is(element)) {
         actions.appendChild(canvasTool('Bold', '', () => toggleCanvasMarkdownStyle(index, '**')));
         actions.appendChild(canvasTool('Highlight', '', () => toggleCanvasMarkdownStyle(index, '*')));
       }
@@ -9867,8 +11525,9 @@ if (keynopeAppSurface) {
       actions.appendChild(canvasTool('Right', '', () => setCanvasAlignment(index, 'right')));
       for (const alignment of ['top','middle','bottom']) actions.appendChild(canvasVerticalAlignmentTool(index, alignment, query.get('valign') === alignment));
     }
-    if (rotatableText) actions.appendChild(canvasTool('⟳', '', () => rotateCanvasText(index)));
-    if (selectedText && element.kind !== 'code') actions.appendChild(canvasStyleSelect(index, element));
+    if (KeynopeTrueType.is(element)) actions.appendChild(canvasTool('Justify', query.get('align')==='justify'?'active':'',()=>updateCanvasElement(index,e=>{const q=new URLSearchParams(e.query||'');q.set('align','justify');e.query=q.toString();})));
+    if (rotatableText) {const rotate=canvasTool('⟳', '', () => rotateCanvasText(index));rotate.title='Rotate';rotate.setAttribute('aria-label','Rotate');actions.appendChild(rotate);}
+    if (selectedText && element.kind !== 'code'&&!KeynopeTrueType.is(element)) actions.appendChild(canvasStyleSelect(index, element));
     if (selectedText || element.kind === 'shape') actions.appendChild(canvasColourTool(index, element, ''));
     if (canvasTextEffectCompatible(element)) appendCanvasTypographyEffectTools(actions,index,element);
     if (selectedText) actions.appendChild(canvasLinkTool(index, query));
@@ -9904,6 +11563,9 @@ if (keynopeAppSurface) {
     showSlideContextMenu(editorState ? editorState.current : -1, event.clientX, event.clientY);
   });
   function renderEditorPanels() {
+    window.keynopeParticipantTabs = editorState?.hasActivities ? (editorState.tabs||[]) : [];
+    window.keynopePresentationDocumentVersion = editorState?.version || 0;
+    if (draggedMasterButton) return;
     if (!editorState || !editorState.slides || !editorState.slides.length) return;
     slidesPanel.replaceChildren();
     const slidesHeader = document.createElement('div');
@@ -9938,14 +11600,15 @@ if (keynopeAppSurface) {
         if (editorState.current === index) open();
         else editorAction({action: 'select-slide', slide: index}).then(open).catch(() => {});
       });
-      if (editorState.masterMode) {
+      {
         button.dataset.masterIndex = String(index);
-        if (index > 0) {
+        if (!editorState.masterMode || index > 0) {
           button.draggable = true;
           button.classList.add('master-reorderable');
-          button.title = 'Drag to reorder master slide';
+          button.title = editorState.masterMode ? 'Drag to reorder master slide' : 'Drag to reorder slide';
           button.addEventListener('dragstart', event => {
             draggedMasterIndex = index;
+            draggingMasterMode = !!editorState.masterMode;
             draggedMasterButton = button;
             button.classList.add('master-drag-outline');
             if (event.dataTransfer) {
@@ -9970,7 +11633,7 @@ if (keynopeAppSurface) {
               if (draggedMasterButton === button) button.classList.add('master-dragging');
             });
           });
-          button.addEventListener('dragend', finishMasterDrag);
+          button.addEventListener('dragend', () => { finishMasterDrag(); renderEditorPanels(); });
         }
       }
       slidesPanel.appendChild(button);
@@ -10042,7 +11705,7 @@ if (keynopeAppSurface) {
       const updateElement = () => editorAction({action: 'update-element', element: selected, elementData: element}).catch(() => {});
       const help = document.createElement('p');
       help.className = 'keynope-editor-help';
-      help.textContent = 'Drag on the canvas to move. Drag any blue corner to resize in that direction. Double-click or press Enter to edit text.';
+      help.textContent = 'Drag on the canvas to move. Drag a yellow corner to change the text area and wrapping; use +/− to change font size. Double-click to edit text.';
       elementSection.appendChild(help);
       const actions = document.createElement('div');
       actions.className = 'keynope-editor-actions';
@@ -10359,10 +12022,7 @@ if (keynopeAppSurface) {
   const presentMainSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="165" y="70" width="470" height="355" rx="30" fill="none" stroke="#fff" stroke-width="28"/><path d="m350 175 150 72-150 72Z" fill="#fff" stroke="#fff" stroke-width="12" stroke-linejoin="round"/><path d="M145 445h510l67 62c13 12 4 33-14 33H92c-18 0-27-21-14-33Z" fill="#fff"/><rect x="332" y="465" width="136" height="18" rx="9" fill="none" stroke="#fff" stroke-width="10"/></svg>';
   const presentExternalSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="55" y="300" width="270" height="190" rx="22" fill="none" stroke="#fff" stroke-width="24"/><path d="M38 505h304l35 34c9 9 3 24-10 24H13c-13 0-19-15-10-24Z" fill="#fff"/><path d="M315 265h80M350 220l45 45-45 45" fill="none" stroke="#fff" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/><rect x="430" y="55" width="330" height="330" rx="28" fill="none" stroke="#fff" stroke-width="28"/><path d="m555 145 100 75-100 75Z" fill="#fff" stroke="#fff" stroke-width="8" stroke-linejoin="round"/><path d="M595 385v100M515 500h160" fill="none" stroke="#fff" stroke-width="28" stroke-linecap="round"/></svg>';
 	const engagementRunSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><circle cx="160" cy="285" r="62" fill="none" stroke="#fff" stroke-width="28"/><circle cx="400" cy="175" r="62" fill="none" stroke="#fff" stroke-width="28"/><circle cx="640" cy="285" r="62" fill="none" stroke="#fff" stroke-width="28"/><path d="M90 470c18-105 122-105 140 0M300 455c28-145 172-145 200 0M570 470c18-105 122-105 140 0" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round"/></svg>';
-	const engagementRunButton = appToolbarIconButton('Activities',engagementRunSVG,() => {
-		if (keynopeEditorPresentationActive && currentEngagementDefinition()) openEngagementRuntime(true);
-		else openEngagementEditor();
-	});
+	const engagementRunButton = appToolbarIconButton('Activities',engagementRunSVG,openEngagementEditor);
 
   const previousButton = appToolbarIconButton('Previous', previousSlideSVG, () => navigateEditorPage(-1).catch(() => {}));
   const nextButton = appToolbarIconButton('Next', nextSlideSVG, () => navigateEditorPage(1).catch(() => {}));
@@ -10431,7 +12091,7 @@ if (keynopeAppSurface) {
     document.documentElement.setAttribute('data-keynope-presentation-mode', editorPresentationMode);
     refreshEditorBottomToolbarVisibility();
 	if (!active && keynopeEngagementRuntime) closeEngagementRuntime();
-	if (keynopeEditorPresentationActive) queueMicrotask(autoOpenEngagementForCurrentPage);
+	renderActivityMarker();
   };
   const presenterHandler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
   if (presenterHandler) presenterHandler.postMessage({action: 'query-display-state'});
@@ -10449,7 +12109,7 @@ if (keynopeAppSurface) {
     const query = new URLSearchParams(updated.query || '');
     const renderedLeft = parseFloat(hit.style.left || '0') / 100;
     const renderedTop = Math.round(parseFloat(hit.style.top || '0') * deck.rows / 100);
-    query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('valign'); query.delete('align'); query.delete('left');
+    clearCanvasPlacementAnchors(query);
     query.set('left_pct', Math.max(0, Math.min(1, Number(query.get('left_pct') || renderedLeft) + dx / deck.cols)).toFixed(6));
     query.set('top', String(Math.max(0, Number(query.get('top') || renderedTop) + dy)));
     updated.query = query.toString();
@@ -10475,6 +12135,7 @@ if (keynopeAppSurface) {
     return true;
   }
   addEventListener('keydown', e => {
+    if (e.target?.closest?.('.keynope-tabs-overlay')) return;
     if (presenterTimerMode === 'config' && !e.metaKey && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -10715,6 +12376,7 @@ func splitSlides(text string) []string {
 var effectRE = regexp.MustCompile(`<!--\s*effect=([a-zA-Z0-9_-]+)\s*-->`)
 var backgroundRE = regexp.MustCompile(`<!--\s*background=([a-zA-Z0-9_-]+)\s*-->`)
 var notesRE = regexp.MustCompile(`<!--\s*notes=base64:([A-Za-z0-9+/=]+)\s*-->`)
+var trueTypeTextRE = regexp.MustCompile(`<!--\s*truetype-text=base64:([A-Za-z0-9+/=]*)(?:\s+kind=(text|bullet|code|heading|text-image))?\s*-->`)
 var layoutRE = regexp.MustCompile(`<!--\s*layout=([a-zA-Z0-9_-]+)\s*-->`)
 var pageNumberRE = regexp.MustCompile(`<!--\s*page-number=(show|hide)\s*-->`)
 var masterSlotRE = regexp.MustCompile(`<!--\s*master-slot=([a-zA-Z0-9_-]+)(?:\s+placeholder=(true))?\s*-->`)
@@ -10737,7 +12399,12 @@ func parseSlide(text, base string) Slide {
 
 	flushParagraph := func() {
 		if len(paragraph) > 0 {
-			slide.Elements = append(slide.Elements, Element{Kind: "text", Text: strings.Join(paragraph, " "), Query: pendingQuery, MasterSlotID: pendingMasterSlot, Placeholder: pendingPlaceholder})
+			separator := " "
+			values, _ := url.ParseQuery(pendingQuery)
+			if values.Get("text-box") == "1" {
+				separator = "\n"
+			}
+			slide.Elements = append(slide.Elements, Element{Kind: "text", Text: strings.Join(paragraph, separator), Query: pendingQuery, MasterSlotID: pendingMasterSlot, Placeholder: pendingPlaceholder})
 			pendingQuery = ""
 			pendingMasterSlot = ""
 			pendingPlaceholder = false
@@ -10800,6 +12467,18 @@ func parseSlide(text, base string) Slide {
 			if decoded, err := base64.StdEncoding.DecodeString(match[1]); err == nil {
 				slide.Notes = string(decoded)
 			}
+			continue
+		}
+		if match := trueTypeTextRE.FindStringSubmatch(trimmed); match != nil {
+			flushParagraph()
+			if decoded, err := base64.StdEncoding.DecodeString(match[1]); err == nil {
+				kind := match[2]
+				if kind == "" {
+					kind = "text"
+				}
+				slide.Elements = append(slide.Elements, Element{Kind: kind, Text: string(decoded), Query: pendingQuery, MasterSlotID: pendingMasterSlot, Placeholder: pendingPlaceholder})
+			}
+			pendingQuery, pendingMasterSlot, pendingPlaceholder = "", "", false
 			continue
 		}
 		if nextNonEmptyLine(lines, lineIndex) == "" && applySlideStyle(trimmed, &slide) {
@@ -10982,7 +12661,7 @@ func textPlacementComment(line string) (string, bool) {
 	}
 	values := url.Values{}
 	if parsed, err := url.ParseQuery(match[1]); err == nil {
-		for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "font", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "link", "slide", "master-clear"} {
+		for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "ttf-size", "ttf-weight", "font", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "link", "slide", "master-clear"} {
 			for _, value := range parsed[key] {
 				addPlacementValue(values, key, value)
 			}
@@ -11005,6 +12684,14 @@ func addPlacementValue(values url.Values, key, value string) {
 	key = strings.ToLower(strings.TrimSpace(key))
 	value = strings.Trim(value, `"'`)
 	switch key {
+	case "participant-inherited", "text-box":
+		if value == "1" {
+			values.Set(key, value)
+		}
+	case "participant-kind":
+		if value == "page-number" {
+			values.Set(key, value)
+		}
 	case "top", "bottom", "left", "right", "width", "height":
 		if parsed, err := strconv.Atoi(value); err == nil && parsed >= 0 {
 			if key == "width" || key == "height" {
@@ -11045,7 +12732,7 @@ func addPlacementValue(values url.Values, key, value string) {
 			values.Set(key, fmt.Sprintf("%.6f", clampFloat(parsed, 0, 1)))
 		}
 	case "align":
-		if value == "left" || value == "center" || value == "right" {
+		if value == "left" || value == "center" || value == "right" || value == "justify" {
 			values.Set(key, value)
 		}
 	case "valign":
@@ -11053,7 +12740,15 @@ func addPlacementValue(values url.Values, key, value string) {
 			values.Set(key, value)
 		}
 	case "render":
-		if value == "text-image" {
+		if value == "text-image" || value == "truetype" {
+			values.Set(key, value)
+		}
+	case "ttf-size":
+		if parsed, err := strconv.Atoi(value); err == nil {
+			values.Set(key, strconv.Itoa(max(1, min(trueTypeMaxSize, parsed))))
+		}
+	case "ttf-weight":
+		if value == "bold" {
 			values.Set(key, value)
 		}
 	case "source":
@@ -11124,6 +12819,9 @@ func addPlacementValue(values url.Values, key, value string) {
 			values.Set("alpha", strconv.Itoa(max(0, min(255, parsed))))
 		}
 	case "link":
+		if decoded, err := url.QueryUnescape(value); err == nil {
+			value = decoded
+		}
 		if link, ok := normalizeLinkValue(value, 0); ok {
 			setLinkValues(values, link)
 		}
@@ -11152,13 +12850,18 @@ func placementCommentText(query string) string {
 		return query
 	}
 	var fields []string
-	for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "font", "fg", "bg", "header", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "slide", "link", "master-clear"} {
+	for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "ttf-size", "ttf-weight", "font", "fg", "bg", "header", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "slide", "link", "master-clear"} {
 		if value := values.Get(key); value != "" {
 			if key == "link" {
 				fields = append(fields, key+"="+url.QueryEscape(value))
 			} else {
 				fields = append(fields, key+"="+value)
 			}
+		}
+	}
+	for _, key := range []string{"participant-inherited", "participant-kind", "text-box"} {
+		if value := values.Get(key); value != "" {
+			fields = append(fields, key+"="+value)
 		}
 	}
 	return strings.Join(fields, " ")
@@ -11603,6 +13306,9 @@ func scaleElementForTerminal(element Element, scaleX, scaleY float64) Element {
 }
 
 func shouldAutoScaleTextElement(element Element, scaleX float64) bool {
+	if isTrueType(element) {
+		return false
+	}
 	if math.Abs(scaleX-1) < 0.02 || rendersAsTextImage(element) {
 		return false
 	}
@@ -19178,11 +20884,27 @@ func renderElementRows(element Element, width int) []string {
 	} else {
 		rows = renderRotatedTextImageElement(element, width, orientation)
 	}
-	return padTextRowsForShadow(element, rows)
+	rows = padTextRowsForShadow(element, rows)
+	values, _ := url.ParseQuery(element.Query)
+	if values.Get("text-box") == "1" {
+		boxWidth := constrainedElementWidth(element, width)
+		boxHeight := max(1, min(4096, intQueryDefault(values, "height", len(rows))))
+		if len(rows) > boxHeight {
+			rows = rows[:boxHeight]
+		}
+		for i := range rows {
+			rows[i] = cropANSIVisible(rows[i], boxWidth)
+		}
+	}
+	return rows
 }
 
 func renderElementRowsBase(element Element, width int) []string {
 	width = constrainedElementWidth(element, width)
+	values, _ := url.ParseQuery(element.Query)
+	if values.Get("align") == "justify" && (element.Kind == "text" || element.Kind == "heading" || element.Kind == "text-image" || element.Kind == "bullet") {
+		return renderJustifiedTextRows(element, width)
+	}
 	if element.Kind == "code" {
 		return renderCodeBlockRows(element, width)
 	}
@@ -19377,24 +21099,37 @@ func renderCodeBlockRows(element Element, width int) []string {
 	if width <= 0 {
 		return nil
 	}
-	glyphRows := renderCodeGlyphRows(element, max(1, width-codeBlockPadX*2))
+	padX, padY := codeBlockPadX, codeBlockPadY
+	values, _ := url.ParseQuery(element.Query)
+	if values.Get("qr") == "1" {
+		padX, padY = 0, 0
+	}
+	glyphRows := renderCodeGlyphRows(element, max(1, width-padX*2))
 	contentWidth := max(1, maxLineDisplayWidth(glyphRows))
-	blockWidth := min(width, contentWidth+codeBlockPadX*2)
+	blockWidth := min(width, contentWidth+padX*2)
 	blank := strings.Repeat(" ", blockWidth)
-	rows := make([]string, 0, len(glyphRows)+codeBlockPadY*2)
-	for i := 0; i < codeBlockPadY; i++ {
+	rows := make([]string, 0, len(glyphRows)+padY*2)
+	for i := 0; i < padY; i++ {
 		rows = append(rows, blank)
 	}
 	for _, row := range glyphRows {
-		rows = append(rows, strings.Repeat(" ", codeBlockPadX)+padRight(crop(row, contentWidth), contentWidth)+strings.Repeat(" ", codeBlockPadX))
+		rows = append(rows, strings.Repeat(" ", padX)+padRight(crop(row, contentWidth), contentWidth)+strings.Repeat(" ", padX))
 	}
-	for i := 0; i < codeBlockPadY; i++ {
+	for i := 0; i < padY; i++ {
 		rows = append(rows, blank)
 	}
 	return rows
 }
 
 func renderCodeGlyphRows(element Element, width int) []string {
+	values, _ := url.ParseQuery(element.Query)
+	if values.Get("qr") == "1" {
+		rows := strings.Split(strings.TrimSuffix(element.Text, "\n"), "\n")
+		for index := range rows {
+			rows[index] = crop(rows[index], width)
+		}
+		return rows
+	}
 	glyphWidth := 4
 	if rendersAsTextImage(element) || elementUsesDeckFont(element) {
 		glyphWidth = editGlyphWidth(element)
@@ -19449,6 +21184,10 @@ func layout(slide Slide, width, height int) []Line {
 	var blocks [][]Line
 	var typedBlocks []block
 	for elementIndex, e := range slide.Elements {
+		if isTrueType(e) {
+			typedBlocks = append(typedBlocks, block{lines: roleLines(trueTypeLayoutRows(e, width, height), "truetype", elementIndex, e.Query)})
+			continue
+		}
 		switch e.Kind {
 		case "heading":
 			typedBlocks = append(typedBlocks, block{lines: roleLines(layoutElementRows(e, width), "heading", elementIndex, e.Query)})
@@ -19590,7 +21329,7 @@ func layout(slide Slide, width, height int) []Line {
 				col = clampBlockCol(col, width, blockWidth)
 			}
 			availableWidth := max(1, width-col)
-			if availableWidth < width {
+			if availableWidth < width && block[0].Role != "truetype" {
 				role := block[0].Role
 				block = roleLines(layoutElementRows(slide.Elements[block[0].Element], availableWidth), role, block[0].Element, block[0].Query)
 				blockHeight = len(block)
@@ -19618,7 +21357,7 @@ func layout(slide Slide, width, height int) []Line {
 				line.Col = col
 				*layerLines = append(*layerLines, line)
 			}
-			if elementHasOutline(slide.Elements[block[0].Element]) {
+			if block[0].Role != "truetype" && elementHasOutline(slide.Elements[block[0].Element]) {
 				*layerLines = append(*layerLines, outlineLinesForRows(blockRows, block[0].Role, block[0].Element, block[0].Query, row, col, width)...)
 			}
 			if elementLink(block[0].Query) != "" {
@@ -20859,6 +22598,28 @@ func renderTextImageElement(element Element, width int) []string {
 	scale := textImageScale(element)
 	if element.Kind == "bullet" {
 		return renderTextImageBulletElement(element, width, scale)
+	}
+	values, _ := url.ParseQuery(element.Query)
+	if values.Get("text-box") == "1" {
+		normalWidth := max(1, int(math.Ceil(4*scale)))
+		boldWidth := max(normalWidth, int(math.Ceil(5*scale)))
+		if w, ok := scaledDeckFontGlyphWidth(element, false, scale); ok {
+			normalWidth = w
+		}
+		if w, ok := scaledDeckFontGlyphWidth(element, true, scale); ok {
+			boldWidth = max(normalWidth, w)
+		}
+		var rows []string
+		for _, line := range splitStyledSpanLines(parseMarkdownStyledSpans(element.Text)) {
+			chunks := wrapStyledSpans(line, width, normalWidth, boldWidth)
+			if len(chunks) == 0 {
+				rows = append(rows, make([]string, max(1, len(renderBitmapTextImageForElement(element, "M", scale))))...)
+			}
+			for _, chunk := range chunks {
+				rows = append(rows, renderTextImageStyledSpans(element, width, chunk)...)
+			}
+		}
+		return rows
 	}
 	if strings.Contains(strings.ReplaceAll(element.Text, "\r\n", "\n"), "\n") {
 		return renderTextImageStyledSpans(element, width, parseMarkdownStyledSpans(element.Text))

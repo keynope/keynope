@@ -487,6 +487,7 @@
         exportHTML(false).catch(error => reportFailure('Could not export presentation', error));
       } else if (action === 'show-main') {
         const presentationWindow = window.open('', '_blank');
+        window.keynopeLivePresentationWindow = presentationWindow;
         if (presentationWindow) {
           presentationWindow.document.write('<title>Keynope is preparing your presentation…</title><body style="margin:0;display:grid;min-height:100vh;place-items:center;color:#f3efe0;background:#000;font:16px monospace">RENDERING…</body>');
         }

@@ -31,6 +31,7 @@ const (
 var masterDeckMetaRE = regexp.MustCompile(`(?m)^<!--\s*keynope-masters\s+version=([0-9]+)\s+base64:([A-Za-z0-9+/=]+)\s*-->\s*`)
 
 type Deck struct {
+	Tabs    []DeckTab
 	Slides  []Slide
 	Masters MasterDeck
 	Assets  map[string]DeckAsset
@@ -188,6 +189,35 @@ func (masters *MasterDeck) Normalize() {
 			removePageNumberElements(&layout.Slide)
 		}
 		normalizeMasterSlide(&layout.Slide, layout.ID)
+		if layout.ID == activityLayoutID {
+			normalizeActivityMaster(layout)
+		}
+	}
+}
+
+func normalizeActivityMaster(layout *MasterLayout) {
+	if layout == nil {
+		return
+	}
+	for index := range layout.Slide.Elements {
+		element := &layout.Slide.Elements[index]
+		switch element.PlaceholderRole {
+		case activityTitleRole:
+			element.Kind = "heading"
+			element.Level = 2
+		case activityQRCodeRole:
+			element.Kind = "code"
+			values, _ := url.ParseQuery(element.Query)
+			if values.Get("valign") == "middle" && values.Get("top") == "" {
+				values.Del("valign")
+				values.Set("top", "12")
+			} else if values.Get("top") == "9" {
+				values.Set("top", "12")
+			}
+			element.Query = encodeQueryStable(values)
+		case activityURLRole:
+			element.Kind = "text"
+		}
 	}
 }
 
@@ -371,6 +401,7 @@ func (masters MasterDeck) Clone() MasterDeck {
 
 func cloneDeck(deck Deck) Deck {
 	out := Deck{Slides: cloneSlides(deck.Slides), Masters: deck.Masters.Clone()}
+	out.Tabs = append([]DeckTab(nil), deck.Tabs...)
 	if len(deck.Assets) > 0 {
 		out.Assets = make(map[string]DeckAsset, len(deck.Assets))
 		for id, asset := range deck.Assets {
@@ -441,8 +472,7 @@ func (deck Deck) ResolveSlide(index int, includePlaceholders bool) Slide {
 				continue
 			}
 			if source.Engagement != nil && (masterElement.PlaceholderRole == activityTitleRole || masterElement.PlaceholderRole == activityQRCodeRole || masterElement.PlaceholderRole == activityURLRole) {
-				effective := masterElement
-				effective.Text = activityElementText(masterElement.PlaceholderRole, source.Engagement)
+				effective := resolveActivityElement(masterElement, source.Engagement)
 				effective.Inherited = true
 				effective.Placeholder = false
 				resolved.Elements = append(resolved.Elements, effective)
@@ -499,7 +529,7 @@ func (deck Deck) ResolveSlide(index int, includePlaceholders bool) Slide {
 			}
 			if !found {
 				if element, ok := activityRoleElement(role); ok {
-					element.Text = activityElementText(role, source.Engagement)
+					element = resolveActivityElement(element, source.Engagement)
 					element.Inherited = true
 					element.Placeholder = false
 					resolved.Elements = append(resolved.Elements, element)

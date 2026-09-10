@@ -132,7 +132,7 @@ func applyTextElementEffects(lines []Line, slide Slide) []Line {
 	}
 	byElement := map[int][]int{}
 	for index, line := range lines {
-		if line.Element < 0 || line.Element >= len(slide.Elements) || line.Role == "outline" || line.Role == "shape" {
+		if line.Element < 0 || line.Element >= len(slide.Elements) || line.Role == "outline" || line.Role == "shape" || line.Role == "truetype" {
 			continue
 		}
 		if !textEffectElement(slide.Elements[line.Element]) {

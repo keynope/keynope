@@ -36,11 +36,13 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var shareMenu: NSMenu?
     private var recentDecksMenu: NSMenu?
     private var saveMenuItem: NSMenuItem?
+    private var participantTabsMenuItem: NSMenuItem?
     private var shareableContent: SCShareableContent?
     private var loadingShareSources = false
     private let screenShareController = ScreenShareController()
     private var presentationMode: String = "none"
     private var presentationPaused = false
+    private var participantPresentationTimer: Timer?
     private var terminatingAfterEditorClose = false
     private var documentDirty = true
     private var savingDocument = false
@@ -71,6 +73,11 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         self.didSaveDeckHandler = didSaveDeckHandler
         self.inputHandler = inputHandler
         super.init()
+        participantPresentationTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.editorWebView?.evaluateJavaScript("window.keynopePublishParticipantPage?.()")
+            }
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -207,6 +214,16 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         editItem.submenu = editMenu
         mainMenu.addItem(editItem)
 
+        let settingsItem = NSMenuItem()
+        let settingsMenu = NSMenu(title: "Settings")
+        settingsMenu.autoenablesItems = false
+        let tabsItem = settingsMenu.addItem(withTitle: "Tabs…", action: #selector(showParticipantTabs), keyEquivalent: "")
+        tabsItem.target = self
+        tabsItem.isEnabled = false
+        participantTabsMenuItem = tabsItem
+        settingsItem.submenu = settingsMenu
+        mainMenu.addItem(settingsItem)
+
         let windowItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
         let showItem = windowMenu.addItem(withTitle: "Show Keynope", action: #selector(showEditor), keyEquivalent: "0")
@@ -219,6 +236,12 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     private func editorURL() -> URL {
         presenterURLForSurface("app")
+    }
+
+    @objc private func showParticipantTabs() {
+        guard participantTabsMenuItem?.isEnabled == true else { return }
+        showEditor()
+        editorWebView?.evaluateJavaScript("window.keynopeOpenParticipantTabs?.()")
     }
 
     private var versionedAppName: String {
@@ -662,6 +685,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         noPresentation()
         presenterURL = newURL
         editorWebView?.load(URLRequest(url: editorURL()))
+        participantTabsMenuItem?.isEnabled = false
         documentDirty = true
         saveMenuItem?.isEnabled = true
         updateEditorWindowTitle()
@@ -828,6 +852,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         documentDirty = false
         saveMenuItem?.isEnabled = false
         editorWebView?.load(URLRequest(url: editorURL()))
+        participantTabsMenuItem?.isEnabled = false
         updateEditorWindowTitle(deckPath: path)
         showEditorWindow()
     }
@@ -1321,6 +1346,8 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 documentDirty = dirty
                 saveMenuItem?.isEnabled = dirty && !savingDocument
                 updateEditorWindowTitle()
+            } else if action == "editor-tabs-availability", let available = body["available"] as? Bool {
+                participantTabsMenuItem?.isEnabled = available
             }
         }
     }
@@ -1502,6 +1529,10 @@ struct KeynopePresenterMain {
         if let index = arguments.firstIndex(of: "--app"), index + 1 < arguments.count {
             return startEngine(deckPath: arguments[index + 1])
         }
+        if let recent = recentDecks().first,
+           let url = startEngine(deckPath: recent.path, restoring: true) {
+            return url
+        }
         guard let path = bundledWelcomeDeckPath() else {
             showFileError(title: "Could Not Open Starter Presentation", error: NSError(
                 domain: "sh.keynope.app", code: 5,
@@ -1540,12 +1571,13 @@ struct KeynopePresenterMain {
         Bundle.main.url(forResource: "Welcome", withExtension: "md")?.path
     }
 
-    private static func startEngine(deckPath: String, untitled: Bool = false) -> URL? {
+    private static func startEngine(deckPath: String, untitled: Bool = false, restoring: Bool = false) -> URL? {
         let authorization: DeckAuthorization
         do {
-            authorization = try authorizeDeck(for: deckPath)
+            authorization = try authorizeDeck(for: deckPath, allowPrompt: !restoring)
+            if restoring && !FileManager.default.isReadableFile(atPath: authorization.path) { return nil }
         } catch {
-            if (error as? CocoaError)?.code != .userCancelled {
+            if !restoring && (error as? CocoaError)?.code != .userCancelled {
                 showFileError(title: "Could Not Access Presentation", error: error)
             }
             return nil
@@ -1576,7 +1608,7 @@ struct KeynopePresenterMain {
         do {
             try process.run()
         } catch {
-            showFileError(title: "Could Not Start Presentation", error: error)
+            if !restoring { showFileError(title: "Could Not Start Presentation", error: error) }
             return nil
         }
         var pending = Data()
@@ -1604,6 +1636,7 @@ struct KeynopePresenterMain {
         if process.isRunning { process.terminate() }
         let errorData = errors.fileHandleForReading.readDataToEndOfFile()
         let detail = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if restoring { return nil }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Could Not Open Presentation"
@@ -1616,7 +1649,7 @@ struct KeynopePresenterMain {
         ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
     }
 
-    private static func authorizeDeck(for deckPath: String) throws -> DeckAuthorization {
+    private static func authorizeDeck(for deckPath: String, allowPrompt: Bool = true) throws -> DeckAuthorization {
         guard isSandboxed else {
             return DeckAuthorization(path: deckPath, helperBookmark: nil)
         }
@@ -1628,7 +1661,7 @@ struct KeynopePresenterMain {
             stopAccessingDeckDirectory()
             return DeckAuthorization(path: deckURL.path, helperBookmark: nil)
         }
-        _ = try authorizeDeckFile(deckURL)
+        _ = try authorizeDeckFile(deckURL, allowPrompt: allowPrompt)
         return DeckAuthorization(path: deckURL.path, helperBookmark: try bookmarkForEngineHelper())
     }
 
@@ -1671,7 +1704,7 @@ struct KeynopePresenterMain {
         )
     }
 
-    private static func authorizeDeckFile(_ deckURL: URL) throws -> Data {
+    private static func authorizeDeckFile(_ deckURL: URL, allowPrompt: Bool = true) throws -> Data {
         let bookmarkKey = deckFileBookmarkPrefix + bookmarkKeySuffix(for: deckURL)
         if let activeSandboxURL, activeSandboxURL.standardizedFileURL == deckURL.standardizedFileURL {
             return try activeSandboxURL.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
@@ -1683,6 +1716,7 @@ struct KeynopePresenterMain {
         if (try? Data(contentsOf: deckURL)) != nil {
             selectedURL = deckURL
         } else {
+            guard allowPrompt else { throw CocoaError(.fileReadNoPermission) }
             let panel = NSOpenPanel()
             panel.title = "Open a Keynope Deck"
             panel.message = "Select “\(deckURL.lastPathComponent)” to allow Keynope to open it."

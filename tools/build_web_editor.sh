@@ -8,6 +8,7 @@ trap 'rm -rf "$temporary_dir"' EXIT
 welcome_source="$repo_dir/web/editor/Welcome.md"
 
 mkdir -p "$output_dir"
+mkdir -p "$output_dir/../join"
 cp "$welcome_source" "$temporary_dir/Welcome.md"
 
 (
@@ -36,6 +37,13 @@ awk '
 cp "$temporary_dir/Welcome.md" "$output_dir/Welcome.md"
 sed "s/__KEYNOPE_VERSION__/$version/g" "$repo_dir/web/editor/editor.js" > "$output_dir/editor.js"
 cp "$repo_dir/web/editor/editor.css" "$output_dir/editor.css"
+cp "$repo_dir/web/activity-games.js" "$output_dir/../activity-games.js"
+cp "$repo_dir/web/activity-design.js" "$output_dir/../activity-design.js"
+cp "$repo_dir/web/ui-font.css" "$output_dir/../ui-font.css"
+mkdir -p "$output_dir/../fonts"
+base64 -d < "$repo_dir/assets/keynope-c64.ttf.base64" > "$output_dir/../fonts/keynope-c64.ttf"
+cp "$repo_dir/web/participant-transfer.js" "$output_dir/../participant-transfer.js"
+node "$repo_dir/tools/build_participant_renderer.cjs" "$temporary_dir/Welcome.html" "$output_dir/../join/slide-renderer.js"
 cp "$repo_dir/web/editor/service-worker.js" "$output_dir/service-worker.js"
 cp "$repo_dir/web/editor/manifest.webmanifest" "$output_dir/manifest.webmanifest"
 "$temporary_dir/keynope" --licenses > "$output_dir/licenses.txt"

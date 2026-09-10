@@ -5,6 +5,13 @@ import (
 	"testing"
 )
 
+func TestTextPlacementCommentRestoresEscapedLink(t *testing.T) {
+	query, ok := textPlacementComment("<!-- top=8 align=center link=https%3A%2F%2Fexample.com%2Fdeck%3Fa%3D1 -->")
+	if !ok || elementLink(query) != "https://example.com/deck?a=1" {
+		t.Fatalf("escaped linked text parsed as %q, ok=%v", elementLink(query), ok)
+	}
+}
+
 func TestWebExportUsesPresentationCanvasRenderer(t *testing.T) {
 	javascript := exportHTMLSuffix()
 	for _, marker := range []string{
@@ -62,7 +69,8 @@ func TestWebExportUsesPresentationCanvasRenderer(t *testing.T) {
 		"slidesHeader.className = 'keynope-slides-header'",
 		"button.classList.add('master-reorderable');",
 		"masterDropPlaceholder.className = 'keynope-master-drop-placeholder';",
-		"masterDropDestination = reference ? remaining.indexOf(reference) + 1 : remaining.length + 1;",
+		"masterDropDestination = (reference ? remaining.indexOf(reference) : remaining.length) + first;",
+		"editorAction({action: 'reorder-slide', slide: source, value: destination})",
 		"else slidesPanel.appendChild(masterDropPlaceholder);",
 		"event.dataTransfer.setDragImage(",
 		"slidesPanel.scrollBy({top: -18});",
@@ -151,7 +159,7 @@ func TestWebExportUsesPresentationCanvasRenderer(t *testing.T) {
 		"function deleteInlineEditorColorContent(editor, direction)",
 		"function deleteInlineEditorAcrossFormatting(editor, direction)",
 		"function deleteInlineEditorSelectionPreservingFormatting(editor)",
-		"editor.addEventListener('input', () => {\n      cleanupInlineEditorEmptyColorTags(editor);",
+		"editor.addEventListener('input', () => {\n      if(!KeynopeTrueType.is(element))cleanupInlineEditorEmptyColorTags(editor);",
 		"/\\[color=#[0-9a-f]{6}\\]|\\[\\/color\\]/ig",
 		"moveInlineEditorAcrossFormatting(editor, keyEvent.key === 'ArrowLeft' ? -1 : 1, keyEvent.shiftKey)",
 		"Math.min(visibleColumn, targetLength)",

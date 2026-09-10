@@ -37,6 +37,15 @@ PRESENTER_SIGNATURE := $(PRESENTER_APP)/Contents/_CodeSignature/CodeResources
 PRESENTER_SRC := presenter/KeynopePresenter.swift presenter/ScreenShare.swift presenter/EmbeddedIcon.swift
 PRESENTER_FRAMEWORKS := -framework Cocoa -framework WebKit -framework AVFoundation -framework ScreenCaptureKit
 GO_SRC := $(filter-out %_test.go,$(wildcard *.go))
+GO_SRC += web/activity-games.js
+GO_SRC += web/activity-design.js
+GO_SRC += web/truetype.js assets/keynope-c64.ttf.base64
+GO_SRC += web/participant-transfer.js
+
+.DEFAULT_GOAL := all
+
+character_assets_data.go: characters_svg/items.json eyes.json tools/generate_character_assets.go
+	$(GO) run ./tools/generate_character_assets.go
 
 .PHONY: all build app keynope presenter web-editor test install clean
 

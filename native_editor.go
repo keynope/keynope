@@ -66,23 +66,26 @@ func (s *nativeEditorSession) handleUpload(w http.ResponseWriter, r *http.Reques
 }
 
 type nativeEditorState struct {
-	Version    int64               `json:"version"`
-	Path       string              `json:"path"`
-	Current    int                 `json:"current"`
-	Selected   int                 `json:"selected"`
-	Selection  []int               `json:"selection"`
-	Slides     []Slide             `json:"slides"`
-	Resolved   []Slide             `json:"resolved"`
-	Masters    MasterDeck          `json:"masters"`
-	Fonts      map[string]DeckFont `json:"fonts,omitempty"`
-	MasterMode bool                `json:"masterMode,omitempty"`
-	Dirty      bool                `json:"dirty"`
-	Untitled   bool                `json:"untitled"`
-	TimerMode  string              `json:"timerMode,omitempty"`
-	TimerEndMS int64               `json:"timerEndMs,omitempty"`
+	Tabs          []DeckTab           `json:"tabs"`
+	HasActivities bool                `json:"hasActivities"`
+	Version       int64               `json:"version"`
+	Path          string              `json:"path"`
+	Current       int                 `json:"current"`
+	Selected      int                 `json:"selected"`
+	Selection     []int               `json:"selection"`
+	Slides        []Slide             `json:"slides"`
+	Resolved      []Slide             `json:"resolved"`
+	Masters       MasterDeck          `json:"masters"`
+	Fonts         map[string]DeckFont `json:"fonts,omitempty"`
+	MasterMode    bool                `json:"masterMode,omitempty"`
+	Dirty         bool                `json:"dirty"`
+	Untitled      bool                `json:"untitled"`
+	TimerMode     string              `json:"timerMode,omitempty"`
+	TimerEndMS    int64               `json:"timerEndMs,omitempty"`
 }
 
 type nativeEditorAction struct {
+	Tabs           []DeckTab             `json:"tabs,omitempty"`
 	Action         string                `json:"action"`
 	Slide          int                   `json:"slide,omitempty"`
 	Page           int                   `json:"page,omitempty"`
@@ -177,6 +180,21 @@ func (s *nativeEditorSession) handleEmojiCatalog(w http.ResponseWriter, r *http.
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "private, max-age=300")
 	_ = json.NewEncoder(w).Encode(nativeEditorEmojiCatalog{Groups: emojiCatalogGroups(), Items: items})
+}
+
+func (s *nativeEditorSession) handleActivityQR(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	value := strings.TrimSpace(r.URL.Query().Get("value"))
+	if value == "" || len(value) > 512 {
+		http.Error(w, "invalid QR value", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]string{"text": activityQRCodeText(value)})
 }
 
 func (s *nativeEditorSession) handleDefaultFont(w http.ResponseWriter, r *http.Request) {
@@ -447,7 +465,10 @@ func convertedTextKindElement(source Element, kind string, level int) Element {
 	} else if colour == "" {
 		colour = values.Get("header")
 	}
-	for _, key := range []string{"render", "source", "scale", "text-size"} {
+	for _, key := range []string{"render", "source", "scale", "text-size", "ttf-size", "ttf-weight"} {
+		if isTrueType(source) && (kind == "bullet" || kind == "code") && (key == "render" || key == "ttf-size" || key == "ttf-weight") {
+			continue
+		}
 		values.Del(key)
 	}
 	if kind == "heading" {
@@ -896,6 +917,7 @@ func (s *nativeEditorSession) state() nativeEditorState {
 		timerMode, timerEndMS = "running", s.timerDeadline.UnixMilli()
 	}
 	return nativeEditorState{
+		Tabs: append([]DeckTab(nil), s.deck.Tabs...), HasActivities: deckHasActivities(s.deck),
 		Version: s.version, Path: s.deckPath, Current: current, Selected: s.selected, MasterMode: s.masterMode,
 		Selection: selection, Slides: slides, Resolved: resolved, Masters: s.deck.Masters, Fonts: cloneDeck(s.deck).Fonts,
 		Dirty: s.dirtyLocked(), Untitled: s.untitled, TimerMode: timerMode, TimerEndMS: timerEndMS,
@@ -1031,6 +1053,23 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 	}
 	slideCount := len(s.deck.Slides)
 	switch action.Action {
+	case "set-tabs":
+		if !deckHasActivities(s.deck) {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		if err := validateDeckTabs(action.Tabs); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		for _, tab := range action.Tabs {
+			if tab.Page > len(s.deck.Slides) {
+				s.mu.Unlock()
+				return errInvalidEditorAction
+			}
+		}
+		s.deck.Tabs = append([]DeckTab(nil), action.Tabs...)
+		changed = true
 	case "select-slide":
 		if action.Slide < 0 || action.Slide >= slideCount {
 			s.mu.Unlock()
@@ -1110,6 +1149,22 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.deck.Slides[insert] = cloneSlide(s.deck.Slides[s.current])
 		s.current, s.selected, changed = insert, -1, true
 		s.selection = map[int]bool{}
+	case "reorder-slide":
+		if action.Slide < 0 || action.Slide >= slideCount || action.Value < 0 || action.Value >= slideCount {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		if action.Slide != action.Value {
+			slide := s.deck.Slides[action.Slide]
+			s.deck.Slides = append(s.deck.Slides[:action.Slide], s.deck.Slides[action.Slide+1:]...)
+			s.deck.Slides = append(s.deck.Slides, Slide{})
+			copy(s.deck.Slides[action.Value+1:], s.deck.Slides[action.Value:])
+			s.deck.Slides[action.Value] = slide
+			changed = true
+		}
+		s.current, s.selected = action.Value, -1
+		s.selection = map[int]bool{}
+		presenterPage = 0
 	case "delete-slide":
 		if slideCount <= 1 {
 			s.deck.Slides = []Slide{placeholderSlide()}
@@ -1131,26 +1186,7 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			return err
 		}
 		s.deck.Slides[s.current].Engagement = &definition
-		if s.deck.Slides[s.current].LayoutID == "" {
-			s.deck.Slides[s.current].LayoutID = activityLayoutID
-		}
 		changed = true
-	case "add-engagement-slide":
-		if action.EngagementData == nil {
-			s.mu.Unlock()
-			return errInvalidEditorAction
-		}
-		definition, err := normalizeEngagement(*action.EngagementData)
-		if err != nil {
-			s.mu.Unlock()
-			return err
-		}
-		insert := min(slideCount, s.current+1)
-		s.deck.Slides = append(s.deck.Slides, Slide{})
-		copy(s.deck.Slides[insert+1:], s.deck.Slides[insert:])
-		s.deck.Slides[insert] = Slide{LayoutID: activityLayoutID, Engagement: &definition, PageNumber: pageNumberHide}
-		s.current, s.selected, changed = insert, -1, true
-		s.selection = map[int]bool{}
 	case "remove-engagement":
 		if s.current < 0 || s.current >= slideCount {
 			s.mu.Unlock()
