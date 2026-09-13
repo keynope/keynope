@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -57,20 +56,24 @@ type Element struct {
 }
 
 type Slide struct {
-	Elements      []Element `json:"elements,omitempty"`
-	Effect        string    `json:"effect,omitempty"`
-	Background    string    `json:"background,omitempty"`
-	FG            string    `json:"fg,omitempty"`
-	BG            string    `json:"bg,omitempty"`
-	HeaderFG      string    `json:"headerFg,omitempty"`
-	Notes         string    `json:"notes,omitempty"`
-	LayoutID      string    `json:"layoutId,omitempty"`
-	EffectSet     bool      `json:"effectSet,omitempty"`
-	BackgroundSet bool      `json:"backgroundSet,omitempty"`
-	FGSet         bool      `json:"fgSet,omitempty"`
-	BGSet         bool      `json:"bgSet,omitempty"`
-	HeaderFGSet   bool      `json:"headerFgSet,omitempty"`
-	PageNumber    string    `json:"pageNumber,omitempty"`
+	TabID         string                `json:"tabId,omitempty"`
+	Elements      []Element             `json:"elements,omitempty"`
+	Effect        string                `json:"effect,omitempty"`
+	Background    string                `json:"background,omitempty"`
+	FG            string                `json:"fg,omitempty"`
+	BG            string                `json:"bg,omitempty"`
+	HeaderFG      string                `json:"headerFg,omitempty"`
+	TTFSize       int                   `json:"ttfSize,omitempty"`
+	TTFWidth      float64               `json:"ttfWidth,omitempty"`
+	Notes         string                `json:"notes,omitempty"`
+	LayoutID      string                `json:"layoutId,omitempty"`
+	EffectSet     bool                  `json:"effectSet,omitempty"`
+	BackgroundSet bool                  `json:"backgroundSet,omitempty"`
+	FGSet         bool                  `json:"fgSet,omitempty"`
+	BGSet         bool                  `json:"bgSet,omitempty"`
+	HeaderFGSet   bool                  `json:"headerFgSet,omitempty"`
+	PageNumber    string                `json:"pageNumber,omitempty"`
+	Engagement    *EngagementDefinition `json:"engagement,omitempty"`
 }
 
 type Line struct {
@@ -149,20 +152,26 @@ type exportDeck struct {
 }
 
 type exportPage struct {
-	Slide                int                  `json:"slide"`
-	Page                 int                  `json:"page"`
-	PageCount            int                  `json:"pageCount"`
-	SlideCount           int                  `json:"slideCount"`
-	Effect               string               `json:"effect"`
-	Background           string               `json:"background"`
-	BackgroundLines      []exportLine         `json:"backgroundLines,omitempty"`
-	Transparency         []exportLine         `json:"transparency,omitempty"`
-	ContentFrames        []exportContentFrame `json:"contentFrames,omitempty"`
-	FG                   string               `json:"fg"`
-	BG                   string               `json:"bg"`
-	HeaderFG             string               `json:"headerFg"`
-	Lines                []exportLine         `json:"lines"`
-	HideChromePageNumber bool                 `json:"hideChromePageNumber,omitempty"`
+	ShapePorts           []shapePort           `json:"shapePorts,omitempty"`
+	Connectors           []shapeConnector      `json:"connectors,omitempty"`
+	TabOnly              bool                  `json:"tabOnly,omitempty"`
+	Slide                int                   `json:"slide"`
+	Page                 int                   `json:"page"`
+	PageCount            int                   `json:"pageCount"`
+	SlideCount           int                   `json:"slideCount"`
+	Effect               string                `json:"effect"`
+	Background           string                `json:"background"`
+	BackgroundLines      []exportLine          `json:"backgroundLines,omitempty"`
+	Transparency         []exportLine          `json:"transparency,omitempty"`
+	ContentFrames        []exportContentFrame  `json:"contentFrames,omitempty"`
+	FG                   string                `json:"fg"`
+	BG                   string                `json:"bg"`
+	HeaderFG             string                `json:"headerFg"`
+	TTFSize              int                   `json:"ttfSize,omitempty"`
+	TTFWidth             float64               `json:"ttfWidth,omitempty"`
+	Lines                []exportLine          `json:"lines"`
+	HideChromePageNumber bool                  `json:"hideChromePageNumber,omitempty"`
+	Engagement           *EngagementDefinition `json:"engagement,omitempty"`
 }
 
 type exportFrame struct {
@@ -178,12 +187,13 @@ type exportContentFrame struct {
 }
 
 type exportLine struct {
-	Row     int          `json:"row"`
-	Col     int          `json:"col"`
-	Element int          `json:"element"`
-	Role    string       `json:"role"`
-	Link    string       `json:"link,omitempty"`
-	Parts   []exportPart `json:"parts"`
+	TrueType *exportTrueType `json:"trueType,omitempty"`
+	Row      int             `json:"row"`
+	Col      int             `json:"col"`
+	Element  int             `json:"element"`
+	Role     string          `json:"role"`
+	Link     string          `json:"link,omitempty"`
+	Parts    []exportPart    `json:"parts"`
 }
 
 type exportPart struct {
@@ -194,25 +204,22 @@ type exportPart struct {
 }
 
 type appArgs struct {
-	ExportOnly bool
-	Classic    bool
-	AppMode    bool
-	Untitled   bool
-	Licenses   bool
-	DeckPath   string
-	Startup    bool
+	AppMode  bool
+	Untitled bool
+	DeckPath string
 }
 
 type presenterState struct {
-	Slide       int    `json:"slide"`
-	Page        int    `json:"page"`
-	Presenting  bool   `json:"presenting"`
-	Version     int64  `json:"version"`
-	DeckVersion int64  `json:"deckVersion"`
-	DeckSlide   int    `json:"deckSlide"`
-	TimerMode   string `json:"timerMode,omitempty"`
-	TimerInput  string `json:"timerInput,omitempty"`
-	TimerEndMS  int64  `json:"timerEndMs,omitempty"`
+	Slide       int                     `json:"slide"`
+	Page        int                     `json:"page"`
+	Presenting  bool                    `json:"presenting"`
+	Version     int64                   `json:"version"`
+	DeckVersion int64                   `json:"deckVersion"`
+	DeckSlide   int                     `json:"deckSlide"`
+	TimerMode   string                  `json:"timerMode,omitempty"`
+	TimerInput  string                  `json:"timerInput,omitempty"`
+	TimerEndMS  int64                   `json:"timerEndMs,omitempty"`
+	Engagement  *EngagementRuntimeState `json:"engagement,omitempty"`
 }
 
 type presenterTerminalFrame struct {
@@ -225,7 +232,6 @@ type presenterTerminalFrame struct {
 
 type presenterCompanion struct {
 	server  *http.Server
-	cmd     *exec.Cmd
 	url     string
 	html    string
 	pages   map[int][]exportPage
@@ -233,6 +239,7 @@ type presenterCompanion struct {
 	mu      sync.RWMutex
 	state   presenterState
 	target  string
+	paused  bool
 	helper  bool
 	seq     int64
 	fullSeq int64
@@ -245,15 +252,6 @@ var presenterModeActive bool
 var nativeAppModeActive bool
 var nativeInputMu sync.Mutex
 var nativeInputBuffer bytes.Buffer
-
-func inputRead(buffer []byte) (int, error) {
-	if nativeAppModeActive {
-		nativeInputMu.Lock()
-		defer nativeInputMu.Unlock()
-		return nativeInputBuffer.Read(buffer)
-	}
-	return os.Stdin.Read(buffer)
-}
 
 func startNativeInputReader(reader io.Reader) <-chan struct{} {
 	closed := make(chan struct{})
@@ -314,575 +312,107 @@ func init() {
 	}
 }
 
-func cliMain() {
-	args, ok := parseArgs(os.Args[1:])
-	if !ok {
-		fmt.Fprintln(os.Stderr, "usage: keynope [--export] [--classic] [--app] [deck.md] | keynope --licenses")
-		os.Exit(2)
-	}
-	if args.Licenses {
-		fmt.Print(bundledLicenseText())
-		return
-	}
-	if err := startSandboxAccessFromEnvironment(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	defer stopSandboxAccess()
-	if args.Startup {
-		path, err := startupDeckPath()
-		if errors.Is(err, errStartupCancelled) {
-			return
-		}
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		args.DeckPath = path
-	}
-
-	deck, err := parseDeck(args.DeckPath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	if args.AppMode {
-		ensureDefaultAuthoredSize()
-	}
-	if len(deck.Slides) == 0 {
-		fmt.Fprintln(os.Stderr, "deck has no slides")
-		os.Exit(1)
-	}
-	resolvedSlides := deck.ResolvedSlides()
-	cleanUnusedImageCache(resolvedSlides)
-	width, height := terminalSize()
-	presenterWidth, presenterHeight := authoredRenderSize(width, height)
-	presenterMode := !args.ExportOnly && !args.Classic
-	presenterModeActive = presenterMode
-	nativeAppModeActive = args.AppMode
-	var nativeInputClosed <-chan struct{}
-	if args.AppMode {
-		nativeInputClosed = startNativeInputReader(os.Stdin)
-	}
-	if args.ExportOnly {
-		width, height = exportRenderSize(resolvedSlides)
-	}
-	prewarmImageCache(resolvedSlides, width, height)
-	if args.ExportOnly {
-		if err := exportHTML(args.DeckPath, resolvedSlides, width, height); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	var presenter *presenterCompanion
-	var nativeEditor *nativeEditorSession
-	if args.AppMode {
-		nativeEditor = newNativeEditorSession(args.DeckPath, deck, args.Untitled, parsedDeckElementOrderChanged)
-		activeNativeEditor = nativeEditor
-		defer func() { activeNativeEditor = nil }()
-	}
-	if presenterMode {
-		presenter, err = startPresenterCompanion(args.DeckPath, resolvedSlides, presenterWidth, presenterHeight, !args.AppMode)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "presenter companion unavailable: %v\n", err)
-		} else {
-			activePresenter = presenter
-			defer func() { activePresenter = nil }()
-			defer presenter.Close()
-		}
-	}
-	if nativeEditor != nil {
-		if presenter == nil {
-			fmt.Fprintln(os.Stderr, "native editor server unavailable")
-			os.Exit(1)
-		}
-		nativeEditor.mu.Lock()
-		nativeEditor.companion = presenter
-		nativeEditor.mu.Unlock()
-		presenter.Update(0, 0, false, nil)
-		<-nativeInputClosed
-		return
-	}
-
-	restore := func() {}
-	if !args.AppMode {
-		restore, err = rawTerminal()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-	}
-	defer restore()
-	if !args.AppMode {
-		termPrint("\033[?25l\033[?1049h\033[?1000h\033[?1002h\033[?1006h\033[?2004h")
-		defer termPrint("\033[0m\033[?2004l\033[?1006l\033[?1002l\033[?1000l\033[?25h\033[?1049l")
-	}
-
-	current := 0
-	page := 0
-	chromeVisible := true
-	editStates := map[int]*EditState{}
-	lastSearchQuery := ""
-	for {
-		resolvedSlides = deck.ResolvedSlides()
-		displaySlides := resolvedSlides
-		if chromeVisible {
-			displaySlides = deck.ResolvedSlidesForEditing()
-		}
-		width, height := terminalSize()
-		updateViewportFitWarning(width, height)
-		if current < 0 {
-			current = 0
-		}
-		if current >= len(deck.Slides) {
-			current = len(deck.Slides) - 1
-		}
-		page = clampPage(displaySlides[current], width, height, page)
-		deckState := editState(editStates, -1)
-		if deckState.SlideNavIndex < 0 || deckState.SlideNavIndex >= len(deck.Slides) {
-			deckState.SlideNavIndex = current
-		}
-		view := ViewState{
-			Chrome:         chromeVisible,
-			SlideIndex:     current,
-			SlideCount:     len(deck.Slides),
-			Page:           page,
-			PageCount:      slidePageCount(displaySlides[current], width, height),
-			Slides:         displaySlides,
-			ShowNotes:      deckState.ShowNotes,
-			ShowSlides:     deckState.ShowSlides,
-			SlideNavIndex:  deckState.SlideNavIndex,
-			SlideNavScroll: deckState.SlideNavScroll,
-			TimerMode:      deckState.TimerMode,
-			TimerInput:     deckState.TimerInput,
-			TimerDeadline:  deckState.TimerDeadline,
-		}
-		if presenter != nil {
-			presenter.Update(current, page, !chromeVisible, deckState)
-		}
-
-		if displaySlides[current].Effect != "" {
-			action := playEffect(displaySlides[current], width, height, page, view)
-			if action == "quit" {
-				if chromeVisible {
-					return
-				}
-				action = "controls"
-			}
-			var result string
-			current, page, chromeVisible, result = handleAction(action, &deck, current, page, width, height, args.DeckPath, editStates, &lastSearchQuery, chromeVisible)
-			if result == "quit" {
-				return
-			}
-			continue
-		}
-
-		if slideHasAnimatedImage(displaySlides[current]) {
-			action := playAnimatedSlide(displaySlides[current], width, height, page, view)
-			if action == "quit" {
-				if chromeVisible {
-					return
-				}
-				action = "controls"
-			}
-			var result string
-			current, page, chromeVisible, result = handleAction(action, &deck, current, page, width, height, args.DeckPath, editStates, &lastSearchQuery, chromeVisible)
-			if result == "quit" {
-				return
-			}
-		} else {
-			action := playStaticSlide(displaySlides[current], width, height, page, view)
-			if action == "quit" {
-				if chromeVisible {
-					return
-				}
-				action = "controls"
-			}
-			var result string
-			current, page, chromeVisible, result = handleAction(action, &deck, current, page, width, height, args.DeckPath, editStates, &lastSearchQuery, chromeVisible)
-			if result == "quit" {
-				return
-			}
-		}
-	}
-}
-
-func parseArgs(raw []string) (appArgs, bool) {
-	var args appArgs
-	if len(raw) == 0 {
-		args.Startup = true
-		return args, true
-	}
-	for _, value := range raw {
-		switch value {
-		case "--export":
-			args.ExportOnly = true
-		case "--classic":
-			args.Classic = true
-		case "--app":
-			args.AppMode = true
-		case "--untitled":
-			args.Untitled = true
-		case "--licenses":
-			args.Licenses = true
-		default:
-			if strings.HasPrefix(value, "-") || args.DeckPath != "" {
-				return appArgs{}, false
-			}
-			args.DeckPath = value
-		}
-	}
-	if args.Licenses {
-		return args, args.DeckPath == "" && !args.ExportOnly && !args.Classic && !args.AppMode
-	}
-	if args.DeckPath == "" || (args.ExportOnly && args.Classic) || (args.AppMode && (args.ExportOnly || args.Classic)) || (args.Untitled && !args.AppMode) {
-		return appArgs{}, false
-	}
-	return args, true
-}
-
-var errStartupCancelled = errors.New("startup cancelled")
-
-func startupDeckPath() (string, error) {
-	restore, err := rawTerminal()
-	if err != nil {
-		return "", err
-	}
-	termPrint("\033[?1049h\033[?25l")
-	defer func() {
-		termPrint("\033[0m\033[?25h\033[?1049l")
-		restore()
-	}()
-	for {
-		choice, err := startupMenu("Keynope", "Start with a new deck or open an existing Markdown deck.", []startupMenuItem{
-			{Title: "New", Detail: "Create a new .md deck in the current directory."},
-			{Title: "Open", Detail: "Open an existing .md or .markdown deck by path."},
-			{Title: "Cancel", Detail: "Exit without opening a deck."},
-		})
-		if err != nil {
-			return "", err
-		}
-		switch choice {
-		case 0:
-			name, err := startupTextInput("New deck", "Deck name", "deck")
-			if err != nil {
-				return "", err
-			}
-			path, err := promptNewDeckPath(name)
-			if errors.Is(err, errStartupCancelled) {
-				continue
-			}
-			return path, err
-		case 1:
-			termPrint("\033[0m\033[?25h\033[?1049l")
-			restore()
-			path, err := openDeckWithSystemDialog()
-			if rawRestore, rawErr := rawTerminal(); rawErr == nil {
-				restore = rawRestore
-				termPrint("\033[?1049h\033[?25l")
-			} else if err == nil {
-				return "", rawErr
-			}
-			if err != nil {
-				return "", err
-			}
-			if err := validateOpenDeckPath(path); err != nil {
-				startupMessage("Open deck", err.Error())
-				continue
-			}
-			return path, nil
-		default:
-			return "", errStartupCancelled
-		}
-	}
-}
-
-func openDeckWithSystemDialog() (string, error) {
-	if runtime.GOOS != "darwin" {
-		return startupTextInput("Open deck", "Path to .md deck", "")
-	}
-	script := `POSIX path of (choose file with prompt "Open Keynope deck" of type {"net.daringfireball.markdown", "public.markdown", "md", "markdown"})`
-	out, err := exec.Command("osascript", "-e", script).Output()
-	if err != nil {
-		return "", errStartupCancelled
-	}
-	path := strings.TrimSpace(string(out))
-	if path == "" {
-		return "", errStartupCancelled
-	}
-	return path, nil
-}
-
-func promptNewDeckPath(name string) (string, error) {
-	path := deckPathFromName(name)
-	if path == "" {
-		return "", fmt.Errorf("deck name cannot be empty")
-	}
-	if _, err := os.Stat(path); err == nil {
-		overwrite, err := confirmOverwriteDeck(path)
-		if err != nil {
-			return "", err
-		}
-		if !overwrite {
-			return "", errStartupCancelled
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	return createStarterDeck(path)
-}
-
-func validateOpenDeckPath(path string) error {
-	if strings.TrimSpace(path) == "" {
-		return fmt.Errorf("path cannot be empty")
-	}
-	if !isMarkdownDeckPath(path) {
-		return fmt.Errorf("deck must be a .md or .markdown file")
-	}
-	info, err := os.Stat(path)
+// appEngineMain is the private backend of Keynope.app, not a terminal editor.
+// The owning window supplies a deck and keeps stdin open for its lifetime.
+func saveDeck(path string, deck Deck) error {
+	data, err := serializeDeck(path, deck)
 	if err != nil {
 		return err
 	}
-	if info.IsDir() {
-		return fmt.Errorf("%s is a directory", path)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return err
+	}
+	if activePresenter != nil {
+		width, height := terminalAuthoredSize()
+		activePresenter.RefreshActiveSlideAsync(deck.ResolvedSlides(), width, height)
 	}
 	return nil
 }
 
-func isMarkdownDeckPath(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	return ext == ".md" || ext == ".markdown"
+func isSelectableElement(element Element) bool {
+	return !element.Inherited && (isEditableElement(element) || isPositionedElement(element))
 }
 
-func deckPathFromName(name string) string {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return ""
-	}
-	if filepath.Ext(name) == "" {
-		name += ".md"
-	}
-	return filepath.Clean(name)
+func isPositionedElement(element Element) bool {
+	return element.Kind == "image" || element.Kind == "shape" || element.Kind == "page-number"
 }
 
-func confirmOverwriteDeck(path string) (bool, error) {
-	choice, err := startupMenu("Overwrite deck?", path+" already exists.", []startupMenuItem{
-		{Title: "Cancel", Detail: "Keep the existing deck."},
-		{Title: "Overwrite", Detail: "Replace it with a new starter deck."},
-	})
-	if err != nil {
-		return false, errStartupCancelled
+func undoSlideSnapshot(state *EditState, slide *Slide) bool {
+	if state == nil || slide == nil || len(state.Undo) == 0 {
+		return false
 	}
-	return choice == 1, nil
+	snapshot := state.Undo[len(state.Undo)-1]
+	state.Undo = state.Undo[:len(state.Undo)-1]
+	state.Redo = append(state.Redo, snapshot)
+	if len(state.Redo) > editHistoryLimit {
+		state.Redo = append([]SlideSnapshot(nil), state.Redo[len(state.Redo)-editHistoryLimit:]...)
+	}
+	*slide = cloneSlide(snapshot.Before)
+	return true
 }
 
-type startupMenuItem struct {
-	Title  string
-	Detail string
+func commitSlideSnapshot(state *EditState, before, after Slide) bool {
+	if state == nil || reflect.DeepEqual(before, after) {
+		return false
+	}
+	snapshot := SlideSnapshot{Before: cloneSlide(before), After: cloneSlide(after)}
+	state.Undo = append(state.Undo, snapshot)
+	if len(state.Undo) > editHistoryLimit {
+		state.Undo = append([]SlideSnapshot(nil), state.Undo[len(state.Undo)-editHistoryLimit:]...)
+	}
+	state.Redo = nil
+	return true
 }
 
-func startupMenu(title, subtitle string, items []startupMenuItem) (int, error) {
-	if len(items) == 0 {
-		return 0, errStartupCancelled
+func redoDeckSnapshot(state *EditState, deck *Deck) (int, bool) {
+	if state == nil || deck == nil || len(state.DeckRedo) == 0 {
+		return 0, false
 	}
-	selected := 0
-	for {
-		drawStartupMenu(title, subtitle, items, selected)
-		event := readStartupKeyEvent()
-		switch event.Action {
-		case "up":
-			selected = (selected + len(items) - 1) % len(items)
-		case "down", "tab":
-			selected = (selected + 1) % len(items)
-		case "enter":
-			return selected, nil
-		case "escape", "quit":
-			return 0, errStartupCancelled
-		}
+	snapshot := state.DeckRedo[len(state.DeckRedo)-1]
+	state.DeckRedo = state.DeckRedo[:len(state.DeckRedo)-1]
+	state.DeckUndo = append(state.DeckUndo, snapshot)
+	if len(state.DeckUndo) > editHistoryLimit {
+		state.DeckUndo = append([]DeckSnapshot(nil), state.DeckUndo[len(state.DeckUndo)-editHistoryLimit:]...)
 	}
+	deck.Slides = cloneSlides(snapshot.After)
+	if snapshot.HasMasters {
+		deck.Masters = snapshot.AfterMasters.Clone()
+	}
+	return max(0, min(len(deck.Slides)-1, snapshot.AfterIndex)), true
 }
 
-func drawStartupMenu(title, subtitle string, items []startupMenuItem, selected int) {
-	width, height := terminalSize()
-	boxW := min(max(48, width/2), max(30, width-4))
-	boxH := min(height-2, 7+len(items)*2)
-	x := max(0, (width-boxW)/2)
-	y := max(0, (height-boxH)/2)
-	clearStartupScreen()
-	drawStartupBox(x, y, boxW, boxH)
-	termPrintf("\033[1;37m\033[%d;%dH%s", y+2, x+3, crop(title, max(0, boxW-4)))
-	if subtitle != "" {
-		termPrintf("\033[0;90m\033[%d;%dH%s", y+3, x+3, crop(subtitle, max(0, boxW-4)))
+func undoDeckSnapshot(state *EditState, deck *Deck) (int, bool) {
+	if state == nil || deck == nil || len(state.DeckUndo) == 0 {
+		return 0, false
 	}
-	row := y + 5
-	for i, item := range items {
-		prefix := "  "
-		mode := "\033[0;37m"
-		if i == selected {
-			prefix = "> "
-			mode = "\033[7;37m"
-		}
-		line := prefix + item.Title
-		termPrintf("%s\033[%d;%dH%s\033[0m", mode, row, x+3, padRight(crop(line, max(0, boxW-6)), max(0, boxW-6)))
-		if item.Detail != "" && row+1 < y+boxH {
-			termPrintf("\033[0;90m\033[%d;%dH%s", row+1, x+5, crop(item.Detail, max(0, boxW-8)))
-		}
-		row += 2
+	snapshot := state.DeckUndo[len(state.DeckUndo)-1]
+	state.DeckUndo = state.DeckUndo[:len(state.DeckUndo)-1]
+	state.DeckRedo = append(state.DeckRedo, snapshot)
+	if len(state.DeckRedo) > editHistoryLimit {
+		state.DeckRedo = append([]DeckSnapshot(nil), state.DeckRedo[len(state.DeckRedo)-editHistoryLimit:]...)
 	}
-	hint := "up/down select  enter confirm  esc cancel"
-	termPrintf("\033[0;90m\033[%d;%dH%s", y+boxH-1, x+3, crop(hint, max(0, boxW-4)))
+	deck.Slides = cloneSlides(snapshot.Before)
+	if snapshot.HasMasters {
+		deck.Masters = snapshot.BeforeMasters.Clone()
+	}
+	return max(0, min(len(deck.Slides)-1, snapshot.BeforeIndex)), true
 }
 
-func startupTextInput(title, label, initial string) (string, error) {
-	input := initial
-	cursor := len([]rune(input))
-	for {
-		drawStartupTextInput(title, label, input, cursor)
-		event := readStartupKeyEvent()
-		runes := []rune(input)
-		switch event.Action {
-		case "enter":
-			return strings.TrimSpace(input), nil
-		case "escape", "quit":
-			return "", errStartupCancelled
-		case "left":
-			cursor = max(0, cursor-1)
-		case "right":
-			cursor = min(len(runes), cursor+1)
-		case "backspace":
-			if cursor > 0 {
-				input = string(append(runes[:cursor-1], runes[cursor:]...))
-				cursor--
-			}
-		case "text":
-			text := []rune(event.Text)
-			next := append([]rune{}, runes[:cursor]...)
-			next = append(next, text...)
-			next = append(next, runes[cursor:]...)
-			input = string(next)
-			cursor += len(text)
-		}
+func commitFullDeckSnapshot(state *EditState, before, after Deck, beforeIndex, afterIndex int) bool {
+	if state == nil || reflect.DeepEqual(before, after) {
+		return false
 	}
-}
-
-func drawStartupTextInput(title, label, input string, cursor int) {
-	width, height := terminalSize()
-	boxW := min(max(54, width/2), max(32, width-4))
-	boxH := 9
-	x := max(0, (width-boxW)/2)
-	y := max(0, (height-boxH)/2)
-	clearStartupScreen()
-	drawStartupBox(x, y, boxW, boxH)
-	termPrintf("\033[1;37m\033[%d;%dH%s", y+2, x+3, crop(title, max(0, boxW-4)))
-	termPrintf("\033[0;90m\033[%d;%dH%s", y+4, x+3, crop(label, max(0, boxW-4)))
-	fieldW := max(1, boxW-6)
-	display := crop(input, fieldW)
-	termPrintf("\033[0;37;40m\033[%d;%dH%s", y+5, x+3, padRight(display, fieldW))
-	cursorCol := x + 3 + min(cursor, fieldW-1)
-	termPrintf("\033[0;37m\033[%d;%dH_", y+6, cursorCol)
-	hint := "type path/name  enter confirm  esc cancel"
-	termPrintf("\033[0;90m\033[%d;%dH%s", y+boxH-1, x+3, crop(hint, max(0, boxW-4)))
-}
-
-func startupMessage(title, message string) {
-	for {
-		drawStartupMessage(title, message)
-		event := readStartupKeyEvent()
-		if event.Action == "enter" || event.Action == "escape" || event.Action == "quit" {
-			return
-		}
+	snapshot := DeckSnapshot{
+		Before: cloneSlides(before.Slides), After: cloneSlides(after.Slides),
+		BeforeMasters: before.Masters.Clone(), AfterMasters: after.Masters.Clone(), HasMasters: true,
+		BeforeIndex: beforeIndex, AfterIndex: afterIndex,
 	}
-}
-
-func drawStartupMessage(title, message string) {
-	width, height := terminalSize()
-	boxW := min(max(54, width/2), max(32, width-4))
-	boxH := 8
-	x := max(0, (width-boxW)/2)
-	y := max(0, (height-boxH)/2)
-	clearStartupScreen()
-	drawStartupBox(x, y, boxW, boxH)
-	termPrintf("\033[1;37m\033[%d;%dH%s", y+2, x+3, crop(title, max(0, boxW-4)))
-	termPrintf("\033[0;37m\033[%d;%dH%s", y+4, x+3, crop(message, max(0, boxW-4)))
-	termPrintf("\033[0;90m\033[%d;%dH%s", y+boxH-1, x+3, crop("enter/esc return", max(0, boxW-4)))
-}
-
-func clearStartupScreen() {
-	termPrint("\033[0m\033[2J\033[H")
-}
-
-func drawStartupBox(x, y, w, h int) {
-	if w < 4 || h < 3 {
-		return
+	state.DeckUndo = append(state.DeckUndo, snapshot)
+	if len(state.DeckUndo) > editHistoryLimit {
+		state.DeckUndo = append([]DeckSnapshot(nil), state.DeckUndo[len(state.DeckUndo)-editHistoryLimit:]...)
 	}
-	top := "+" + strings.Repeat("-", w-2) + "+"
-	mid := "|" + strings.Repeat(" ", w-2) + "|"
-	termPrintf("\033[0;37m\033[%d;%dH%s", y+1, x+1, top)
-	for row := 1; row < h-1; row++ {
-		termPrintf("\033[0;37m\033[%d;%dH%s", y+row+1, x+1, mid)
-	}
-	termPrintf("\033[0;37m\033[%d;%dH%s", y+h, x+1, top)
-}
-
-func readStartupKeyEvent() KeyEvent {
-	var buf [64]byte
-	for {
-		n, _ := inputRead(buf[:])
-		if n == 0 {
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-		b := buf[:n]
-		switch {
-		case bytes.Equal(b, []byte{3}):
-			return KeyEvent{Action: "quit"}
-		case bytes.Equal(b, []byte{27}):
-			return KeyEvent{Action: "escape"}
-		case bytes.Contains(b, []byte{27, '[', 'A'}):
-			return KeyEvent{Action: "up"}
-		case bytes.Contains(b, []byte{27, '[', 'B'}):
-			return KeyEvent{Action: "down"}
-		case bytes.Contains(b, []byte{27, '[', 'D'}):
-			return KeyEvent{Action: "left"}
-		case bytes.Contains(b, []byte{27, '[', 'C'}):
-			return KeyEvent{Action: "right"}
-		case bytes.Contains(b, []byte{'\r'}) || bytes.Contains(b, []byte{'\n'}):
-			return KeyEvent{Action: "enter"}
-		case bytes.Contains(b, []byte{9}):
-			return KeyEvent{Action: "tab"}
-		case bytes.Contains(b, []byte{127}) || bytes.Contains(b, []byte{8}):
-			return KeyEvent{Action: "backspace"}
-		default:
-			text := string(b)
-			if !utf8.ValidString(text) {
-				return KeyEvent{}
-			}
-			var out []rune
-			for _, r := range text {
-				if r >= 32 && r != 127 {
-					out = append(out, r)
-				}
-			}
-			if len(out) > 0 {
-				return KeyEvent{Action: "text", Text: string(out)}
-			}
-			return KeyEvent{}
-		}
-	}
-}
-
-func createStarterDeck(path string) (string, error) {
-	width, height := terminalSize()
-	if width <= 0 || height <= 0 {
-		width, height = 80, 25
-	}
-	content := starterDeckMarkdown(width, height)
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return "", err
-	}
-	return path, nil
+	state.DeckRedo = nil
+	return true
 }
 
 func starterDeckMarkdown(width, height int) string {
@@ -891,579 +421,207 @@ func starterDeckMarkdown(width, height int) string {
 	return bundledStarterDeckMarkdown
 }
 
-func inferExportSize(slides []Slide) (int, int) {
-	width, height := 160, 45
-	for _, slide := range slides {
-		for _, element := range slide.Elements {
-			placement := parseImagePlacement(element.Query)
-			if placement.left != nil {
-				width = max(width, *placement.left+80)
-			}
-			if placement.right != nil {
-				width = max(width, 160+*placement.right)
-			}
-			if placement.top != nil {
-				height = max(height, *placement.top+20)
-			}
-			if placement.bottom != nil {
-				height = max(height, 45+*placement.bottom)
-			}
-		}
+func removeEmptyTextLineAtCursor(element *Element, cursor int) int {
+	if element == nil {
+		return cursor
 	}
-	return width, height
+	runes := []rune(element.Text)
+	cursor = max(0, min(cursor, len(runes)))
+	start := cursor
+	for start > 0 && runes[start-1] != '\n' {
+		start--
+	}
+	end := cursor
+	for end < len(runes) && runes[end] != '\n' {
+		end++
+	}
+	if strings.TrimSpace(string(runes[start:end])) != "" {
+		return cursor
+	}
+	removeStart, removeEnd := start, end
+	if start > 0 {
+		removeStart--
+	} else if end < len(runes) {
+		removeEnd++
+	}
+	element.Text = string(append(append([]rune(nil), runes[:removeStart]...), runes[removeEnd:]...))
+	return removeStart
 }
 
-func parseJumpSlideResult(result string, slideCount int) (int, bool) {
-	if !strings.HasPrefix(result, "jump-slide:") {
-		return 0, false
+func bulletItemAtCursorEmpty(text string, cursor int) bool {
+	runes := []rune(text)
+	cursor = max(0, min(cursor, len(runes)))
+	start := cursor
+	for start > 0 && runes[start-1] != '\n' {
+		start--
 	}
-	target, err := strconv.Atoi(strings.TrimPrefix(result, "jump-slide:"))
-	if err != nil || target < 0 || target >= slideCount {
-		return 0, false
+	end := cursor
+	for end < len(runes) && runes[end] != '\n' {
+		end++
 	}
-	return target, true
+	return strings.TrimSpace(string(runes[start:end])) == ""
 }
 
-func handleAction(action string, deck *Deck, current, page, width, height int, deckPath string, editStates map[int]*EditState, lastSearchQuery *string, chromeVisible bool) (int, int, bool, string) {
-	slides := &deck.Slides
-	resolvedSlides := deck.ResolvedSlides()
-	deckState := editState(editStates, -1)
-	runEditMode := func(event *KeyEvent) string {
-		if event != nil {
-			queuedEditEvent = event
-		}
-		state := editState(editStates, current)
-		state.Clipboard = deckState.Clipboard
-		state.ShowNotes = deckState.ShowNotes
-		state.TimerMode = deckState.TimerMode
-		state.TimerInput = deckState.TimerInput
-		state.TimerDeadline = deckState.TimerDeadline
-		if deckState.ShowNotes && event != nil && (event.Action == "tab" || event.Action == "enter") {
-			state.NotesCursor = len([]rune((*slides)[current].Notes))
-		}
-		result := playEditMode(deck, current, width, height, page, deckPath, state, editModeOptions{})
-		deckState.Clipboard = state.Clipboard
-		deckState.ShowNotes = state.ShowNotes
-		deckState.TimerMode = state.TimerMode
-		deckState.TimerInput = state.TimerInput
-		deckState.TimerDeadline = state.TimerDeadline
-		return result
+func toggleMarkdownStyle(text, marker string) string {
+	if text == "" || marker == "" {
+		return text
 	}
-	if deckState.TimerMode != "" && action == "controls" {
-		deckState.TimerMode = ""
-		deckState.TimerInput = ""
-		deckState.TimerDeadline = time.Time{}
-		return current, page, chromeVisible, ""
+	if hasMarkdownStyleWrapper(text, marker) {
+		return text[len(marker) : len(text)-len(marker)]
 	}
-	if deckState.ShowSlides {
-		switch action {
-		case "slide-list", "controls":
-			deckState.ShowSlides = false
-			return current, page, chromeVisible, ""
-		case "up":
-			deckState.SlideNavIndex = max(0, deckState.SlideNavIndex-1)
-			return current, page, chromeVisible, ""
-		case "down":
-			deckState.SlideNavIndex = min(len(*slides)-1, deckState.SlideNavIndex+1)
-			return current, page, chromeVisible, ""
-		case "enter":
-			target := max(0, min(len(*slides)-1, deckState.SlideNavIndex))
-			return target, 0, chromeVisible, ""
-		case "mouse-click":
-			event := queuedMainMouseEvent
-			queuedMainMouseEvent = nil
-			if event != nil {
-				if target, ok := slideNavigatorIndexAtPoint(event.X, event.Y, deckState.SlideNavScroll, len(*slides), width, height); ok {
-					deckState.SlideNavIndex = target
-				}
-			}
-			return current, page, chromeVisible, ""
+	return marker + text + marker
+}
+
+func hasMarkdownStyleWrapper(text, marker string) bool {
+	return marker != "" && len(text) >= len(marker)*2 && strings.HasPrefix(text, marker) && strings.HasSuffix(text, marker)
+}
+
+func renderBitmapTextImage(text string, factor float64) []string {
+	height := bitmapTextRowHeight(factor)
+	return renderTextWithEmoji(text, height, func(chunk string) []string {
+		mask := scaledC64TextMask(chunk, factor)
+		if len(mask) == 0 {
+			return nil
+		}
+		return maskToQuadrants(mask)
+	})
+}
+
+func normalizeImageSettingsQuery(query string) string {
+	values, _ := url.ParseQuery(query)
+	if values.Get("glyph") == "" {
+		values.Set("glyph", "blocks")
+	}
+	if values.Get("shape") == "" {
+		values.Set("shape", "subject")
+	}
+	for _, key := range []string{"brightness", "contrast", "saturation", "sharpness"} {
+		if values.Get(key) == "" {
+			values.Set(key, "1.0")
 		}
 	}
-	if deckState.TimerMode != "" {
-		switch action {
-		case "controls":
-			deckState.TimerMode = ""
-			deckState.TimerInput = ""
-			deckState.TimerDeadline = time.Time{}
-			return current, page, chromeVisible, ""
-		case "timer":
-			if deckState.TimerMode == "config" {
-				if len(deckState.TimerInput) < 4 {
-					deckState.TimerInput += "0"
-				}
-				return current, page, chromeVisible, ""
-			}
-			deckState.TimerMode = "config"
-			deckState.TimerInput = ""
-			deckState.TimerDeadline = time.Time{}
-			return current, page, chromeVisible, ""
-		}
-		if deckState.TimerMode == "config" {
-			switch action {
-			case "slide-list":
-				if len(deckState.TimerInput) < 4 {
-					deckState.TimerInput += "1"
-				}
-				return current, page, chromeVisible, ""
-			case "speaker-notes":
-				if len(deckState.TimerInput) < 4 {
-					deckState.TimerInput += "2"
-				}
-				return current, page, chromeVisible, ""
-			case "backspace":
-				if deckState.TimerInput != "" {
-					deckState.TimerInput = deckState.TimerInput[:len(deckState.TimerInput)-1]
-				}
-				return current, page, chromeVisible, ""
-			case "enter":
-				if duration := timerInputDuration(deckState.TimerInput); duration > 0 {
-					deckState.TimerMode = "running"
-					deckState.TimerDeadline = time.Now().Add(duration)
-				}
-				return current, page, chromeVisible, ""
-			case "text":
-				if len(deckState.TimerInput) < 4 {
-					for _, r := range queuedTimerText {
-						if r >= '0' && r <= '9' && len(deckState.TimerInput) < 4 {
-							deckState.TimerInput += string(r)
-						}
-					}
-					queuedTimerText = ""
-				}
-				return current, page, chromeVisible, ""
-			}
+	if values.Get("alpha") == "" {
+		values.Set("alpha", "96")
+	}
+	return values.Encode()
+}
+
+func compactImageSettingsQuery(query string) string {
+	values, _ := url.ParseQuery(query)
+	defaults := map[string]string{
+		"glyph":      "blocks",
+		"shape":      "subject",
+		"brightness": "1.0",
+		"contrast":   "1.0",
+		"saturation": "1.0",
+		"sharpness":  "1.0",
+		"alpha":      "96",
+	}
+	for key, value := range defaults {
+		if values.Get(key) == value {
+			values.Del(key)
 		}
 	}
-	if deckState.ShowNotes {
-		switch action {
-		case "controls":
-			deckState.ShowNotes = false
-			return current, page, chromeVisible, ""
-		case "speaker-notes":
-			deckState.ShowNotes = false
-			return current, page, chromeVisible, ""
-		}
-		if chromeVisible {
-			switch action {
-			case "tab", "enter":
-				event := KeyEvent{Action: action}
-				result := runEditMode(&event)
-				if result == "quit" {
-					return current, page, chromeVisible, "quit"
+	return values.Encode()
+}
+
+func codeCursorIndexForVisualLineCol(text string, charsPerLine, targetVisualLine, targetCol int) int {
+	charsPerLine = max(1, charsPerLine)
+	targetVisualLine = max(0, targetVisualLine)
+	targetCol = max(0, targetCol)
+	offset := 0
+	visualLine := 0
+	for _, rawLine := range strings.Split(text, "\n") {
+		runes := []rune(rawLine)
+		visualWidth := textVisualUnitWidth(rawLine)
+		chunkCount := max(1, (visualWidth+charsPerLine-1)/charsPerLine)
+		if targetVisualLine < visualLine+chunkCount {
+			chunk := targetVisualLine - visualLine
+			targetWidth := min(visualWidth, chunk*charsPerLine+targetCol)
+			runeCol, used := 0, 0
+			for _, unit := range textVisualUnits(rawLine) {
+				if used+unit.width > targetWidth {
+					break
 				}
-				if target, ok := parseJumpSlideResult(result, len(*slides)); ok {
-					return target, 0, chromeVisible, ""
-				}
-				return current, page, chromeVisible, ""
-			case "mouse-click":
-				event := queuedMainMouseEvent
-				if event != nil {
-					if _, ok := notesCursorAtPoint((*slides)[current].Notes, event.X, event.Y, width, height); ok {
-						result := runEditMode(event)
-						queuedMainMouseEvent = nil
-						if result == "quit" {
-							return current, page, chromeVisible, "quit"
-						}
-						return current, page, chromeVisible, ""
-					}
-				}
+				used += unit.width
+				runeCol += len([]rune(unit.text))
 			}
+			return offset + min(len(runes), runeCol)
+		}
+		offset += len(runes)
+		if offset < len([]rune(text)) {
+			offset++
+		}
+		visualLine += chunkCount
+	}
+	return len([]rune(text))
+}
+
+func appEngineMain() {
+	args, ok := parseArgs(os.Args[1:])
+	if !ok {
+		fmt.Fprintln(os.Stderr, "This is Keynope's private app engine. Open Keynope.app to edit presentations.")
+		os.Exit(2)
+	}
+	if err := startSandboxAccessFromEnvironment(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer stopSandboxAccess()
+	deck, err := parseDeck(args.DeckPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	ensureDefaultAuthoredSize()
+	if len(deck.Slides) == 0 {
+		fmt.Fprintln(os.Stderr, "deck has no slides")
+		os.Exit(1)
+	}
+	nativeAppModeActive, presenterModeActive = true, true
+	closed := startNativeInputReader(os.Stdin)
+	editor := newNativeEditorSession(args.DeckPath, deck, args.Untitled, parsedDeckElementOrderChanged)
+	activeNativeEditor = editor
+	defer func() { activeNativeEditor = nil }()
+	slides := editor.deck.ResolvedSlides()
+	presenter, err := startPresenterCompanion(args.DeckPath, slides, authoredTerminalWidth, authoredTerminalHeight)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	activePresenter = presenter
+	defer func() { activePresenter = nil }()
+	defer presenter.Close()
+	editor.mu.Lock()
+	editor.companion = presenter
+	editor.mu.Unlock()
+	presenter.Update(0, 0, false, nil)
+	<-closed
+}
+
+func parseArgs(raw []string) (appArgs, bool) {
+	var args appArgs
+	for _, value := range raw {
+		switch value {
+		case "--app":
+			args.AppMode = true
+		case "--untitled":
+			args.Untitled = true
+		default:
+			if strings.HasPrefix(value, "-") || args.DeckPath != "" {
+				return appArgs{}, false
+			}
+			args.DeckPath = value
 		}
 	}
-	switch action {
-	case "controls":
-		return current, page, true, ""
-	case "present":
-		return current, page, false, ""
-	case "shortcuts":
-		event := playShortcutHelp("Main shortcuts", mainShortcutHelp(), resolvedSlides[current], page, width, height, readKeyEvent)
-		if shortcutHelpDismissed(event) {
-			return current, page, chromeVisible, ""
-		}
-		return handleAction(event.Action, deck, current, page, width, height, deckPath, editStates, lastSearchQuery, chromeVisible)
-	case "mouse-click":
-		event := queuedMainMouseEvent
-		queuedMainMouseEvent = nil
-		if event == nil {
-			return current, page, chromeVisible, ""
-		}
-		if chromeVisible {
-			result := runEditMode(event)
-			if result == "quit" {
-				return current, page, chromeVisible, "quit"
-			}
-			if target, ok := parseJumpSlideResult(result, len(*slides)); ok {
-				return target, 0, chromeVisible, ""
-			}
-			if result == "next-slide" {
-				return min(current+1, len(*slides)-1), 0, chromeVisible, ""
-			}
-			if result == "delete-slide" {
-				return min(current, len(*slides)-1), 0, chromeVisible, ""
-			}
-			return current, page, chromeVisible, ""
-		}
-		lines := displayLines(resolvedSlides[current], width, height, page)
-		if target, ok := linkAtPoint(resolvedSlides[current], lines, event.X, event.Y, len(*slides)); ok {
-			if target.URL != "" {
-				_ = openElementLink(target)
-				return current, page, chromeVisible, ""
-			}
-			if target.Slide >= 0 && target.Slide < len(*slides) {
-				return target.Slide, 0, chromeVisible, ""
-			}
-		}
-		return current, page, chromeVisible, ""
-	case "undo":
-		if chromeVisible {
-			state := editState(editStates, current)
-			working := deck.ResolveSlide(current, true)
-			if undoSlideSnapshot(state, &working) {
-				deck.StoreResolvedSlide(current, working)
-				if persistDeck(deckPath, *deck) {
-					setUINotice("Undone")
-				}
-				page = clampPage(deck.ResolveSlide(current, false), width, height, page)
-				return current, page, chromeVisible, ""
-			}
-			deckState := editState(editStates, -1)
-			if nextCurrent, ok := undoDeckSnapshot(deckState, deck); ok {
-				if persistDeck(deckPath, *deck) {
-					setUINotice("Undone")
-					if activePresenter != nil {
-						activePresenter.RefreshAllAsync(deckPath, deck.ResolvedSlides(), width, height)
-					}
-				}
-				return nextCurrent, 0, chromeVisible, ""
-			}
-		}
-		return current, page, chromeVisible, ""
-	case "redo":
-		if chromeVisible {
-			state := editState(editStates, current)
-			working := deck.ResolveSlide(current, true)
-			if redoSlideSnapshot(state, &working) {
-				deck.StoreResolvedSlide(current, working)
-				if persistDeck(deckPath, *deck) {
-					setUINotice("Redone")
-				}
-				page = clampPage(deck.ResolveSlide(current, false), width, height, page)
-				return current, page, chromeVisible, ""
-			}
-			deckState := editState(editStates, -1)
-			if nextCurrent, ok := redoDeckSnapshot(deckState, deck); ok {
-				if persistDeck(deckPath, *deck) {
-					setUINotice("Redone")
-					if activePresenter != nil {
-						activePresenter.RefreshAllAsync(deckPath, deck.ResolvedSlides(), width, height)
-					}
-				}
-				return nextCurrent, 0, chromeVisible, ""
-			}
-		}
-		return current, page, chromeVisible, ""
-	case "edit":
-		if chromeVisible {
-			result := runEditMode(nil)
-			if result == "quit" {
-				return current, page, chromeVisible, "quit"
-			}
-			if target, ok := parseJumpSlideResult(result, len(*slides)); ok {
-				return target, 0, chromeVisible, ""
-			}
-			if result == "next-slide" {
-				return min(current+1, len(*slides)-1), 0, chromeVisible, ""
-			}
-			if result == "delete-slide" {
-				return min(current, len(*slides)-1), 0, chromeVisible, ""
-			}
-		}
-		return current, page, chromeVisible, ""
-	case "insert-image":
-		if chromeVisible {
-			event := KeyEvent{Action: "insert-image"}
-			result := runEditMode(&event)
-			if result == "quit" {
-				return current, page, chromeVisible, "quit"
-			}
-			if target, ok := parseJumpSlideResult(result, len(*slides)); ok {
-				return target, 0, chromeVisible, ""
-			}
-			if result == "next-slide" {
-				return min(current+1, len(*slides)-1), 0, chromeVisible, ""
-			}
-			if result == "delete-slide" {
-				return min(current, len(*slides)-1), 0, chromeVisible, ""
-			}
-		}
-		return current, page, chromeVisible, ""
-	case "insert-text":
-		if chromeVisible {
-			event := KeyEvent{Action: "insert-text"}
-			result := runEditMode(&event)
-			if result == "quit" {
-				return current, page, chromeVisible, "quit"
-			}
-			if target, ok := parseJumpSlideResult(result, len(*slides)); ok {
-				return target, 0, chromeVisible, ""
-			}
-			if result == "next-slide" {
-				return min(current+1, len(*slides)-1), 0, chromeVisible, ""
-			}
-			if result == "delete-slide" {
-				return min(current, len(*slides)-1), 0, chromeVisible, ""
-			}
-		}
-		return current, page, chromeVisible, ""
-	case "shape-picker":
-		if chromeVisible {
-			event := KeyEvent{Action: "shape-picker"}
-			result := runEditMode(&event)
-			if result == "quit" {
-				return current, page, chromeVisible, "quit"
-			}
-			if target, ok := parseJumpSlideResult(result, len(*slides)); ok {
-				return target, 0, chromeVisible, ""
-			}
-			if result == "next-slide" {
-				return min(current+1, len(*slides)-1), 0, chromeVisible, ""
-			}
-			if result == "delete-slide" {
-				return min(current, len(*slides)-1), 0, chromeVisible, ""
-			}
-		}
-		return current, page, chromeVisible, ""
-	case "tab":
-		if chromeVisible {
-			event := KeyEvent{Action: "tab"}
-			result := runEditMode(&event)
-			if result == "quit" {
-				return current, page, chromeVisible, "quit"
-			}
-			if target, ok := parseJumpSlideResult(result, len(*slides)); ok {
-				return target, 0, chromeVisible, ""
-			}
-			if result == "next-slide" {
-				return min(current+1, len(*slides)-1), 0, chromeVisible, ""
-			}
-			if result == "delete-slide" {
-				return min(current, len(*slides)-1), 0, chromeVisible, ""
-			}
-		}
-		return current, page, chromeVisible, ""
-	case "shift-tab":
-		if chromeVisible {
-			event := KeyEvent{Action: "shift-tab"}
-			result := runEditMode(&event)
-			if result == "quit" {
-				return current, page, chromeVisible, "quit"
-			}
-			if target, ok := parseJumpSlideResult(result, len(*slides)); ok {
-				return target, 0, chromeVisible, ""
-			}
-			if result == "next-slide" {
-				return min(current+1, len(*slides)-1), 0, chromeVisible, ""
-			}
-			if result == "delete-slide" {
-				return min(current, len(*slides)-1), 0, chromeVisible, ""
-			}
-		}
-		return current, page, chromeVisible, ""
-	case "slide-list":
-		deckState.ShowSlides = !deckState.ShowSlides
-		deckState.ShowNotes = false
-		deckState.SlideNavIndex = current
-		deckState.SlideNavScroll = 0
-		return current, page, chromeVisible, ""
-	case "speaker-notes":
-		deckState.ShowNotes = true
-		deckState.ShowSlides = false
-		return current, page, chromeVisible, ""
-	case "timer":
-		deckState.TimerMode = "config"
-		deckState.TimerInput = ""
-		deckState.TimerDeadline = time.Time{}
-		deckState.ShowSlides = false
-		return current, page, chromeVisible, ""
-	case "text", "backspace", "enter":
-		return current, page, chromeVisible, ""
-	case "copy", "cut", "paste":
-		if chromeVisible {
-			event := KeyEvent{Action: action}
-			result := runEditMode(&event)
-			if result == "quit" {
-				return current, page, chromeVisible, "quit"
-			}
-			if target, ok := parseJumpSlideResult(result, len(*slides)); ok {
-				return target, 0, chromeVisible, ""
-			}
-			if result == "next-slide" {
-				return min(current+1, len(*slides)-1), 0, chromeVisible, ""
-			}
-			if result == "delete-slide" {
-				return min(current, len(*slides)-1), 0, chromeVisible, ""
-			}
-		}
-		return current, page, chromeVisible, ""
-	case "insert-slide":
-		if chromeVisible {
-			deck.EnsureDefaultMasters()
-			layoutID, ok := playLayoutPicker(deck, (*slides)[current].LayoutID, width, height)
-			if !ok {
-				return current, page, chromeVisible, ""
-			}
-			before := cloneSlides(*slides)
-			insertAt := current + 1
-			*slides = append(*slides, Slide{})
-			copy((*slides)[insertAt+1:], (*slides)[insertAt:])
-			(*slides)[insertAt] = deck.NewSlideFromLayout(layoutID)
-			commitDeckSnapshot(editState(editStates, -1), before, *slides, current, insertAt)
-			if persistDeck(deckPath, *deck) {
-				setUINotice("Slide added")
-			}
-			return insertAt, 0, chromeVisible, ""
-		}
-		return current, page, chromeVisible, ""
-	case "layout-picker":
-		if chromeVisible {
-			deck.EnsureDefaultMasters()
-			layoutID, ok := playLayoutPicker(deck, (*slides)[current].LayoutID, width, height)
-			if !ok {
-				return current, page, chromeVisible, ""
-			}
-			before := cloneSlides(*slides)
-			if deck.RebindSlideLayout(current, layoutID) {
-				commitDeckSnapshot(editState(editStates, -1), before, *slides, current, current)
-				if persistDeck(deckPath, *deck) {
-					setUINotice("Layout changed")
-				}
-			}
-		}
-		return current, 0, chromeVisible, ""
-	case "master-view":
-		if chromeVisible {
-			result := playMasterView(deck, deckPath, width, height, editState(editStates, -1))
-			if result.Quit {
-				return current, page, chromeVisible, "quit"
-			}
-		}
-		return current, page, chromeVisible, ""
-	case "page-number":
-		if chromeVisible {
-			before := cloneSlides(*slides)
-			(*slides)[current].PageNumber = nextPageNumberOverride((*slides)[current].PageNumber)
-			commitDeckSnapshot(editState(editStates, -1), before, *slides, current, current)
-			if persistDeck(deckPath, *deck) {
-				setUINotice("Page number: " + pageNumberModeLabel((*slides)[current].PageNumber, true))
-			}
-		}
-		return current, page, chromeVisible, ""
-	case "visual-properties":
-		if chromeVisible {
-			source := cloneSlide((*slides)[current])
-			resolve := func(candidate Slide) Slide {
-				previewDeck := cloneDeck(*deck)
-				previewDeck.Slides[current] = candidate
-				return previewDeck.ResolveSlide(current, true)
-			}
-			if updated, ok := playVisualProperties(source, source.LayoutID != "", resolve, width, height); ok {
-				before := cloneSlides(*slides)
-				(*slides)[current] = updated
-				commitDeckSnapshot(editState(editStates, -1), before, *slides, current, current)
-				if persistDeck(deckPath, *deck) {
-					setUINotice("Visual properties updated")
-				}
-			}
-		}
-		return current, page, chromeVisible, ""
-	case "clone-slide":
-		if chromeVisible {
-			before := cloneSlides(*slides)
-			insertAt := current + 1
-			clone := cloneSlide((*slides)[current])
-			*slides = append(*slides, Slide{})
-			copy((*slides)[insertAt+1:], (*slides)[insertAt:])
-			(*slides)[insertAt] = clone
-			commitDeckSnapshot(editState(editStates, -1), before, *slides, current, insertAt)
-			if persistDeck(deckPath, *deck) {
-				setUINotice("Slide cloned")
-			}
-			return insertAt, 0, chromeVisible, ""
-		}
-		return current, page, chromeVisible, ""
-	case "delete-slide":
-		if chromeVisible {
-			before := cloneSlides(*slides)
-			nextCurrent := current
-			if len(*slides) <= 1 {
-				*slides = []Slide{placeholderSlide()}
-				nextCurrent = 0
-			} else {
-				*slides = append((*slides)[:current], (*slides)[current+1:]...)
-				nextCurrent = min(current, len(*slides)-1)
-			}
-			commitDeckSnapshot(editState(editStates, -1), before, *slides, current, nextCurrent)
-			if persistDeck(deckPath, *deck) {
-				setUINotice("Slide deleted")
-			}
-			return nextCurrent, 0, chromeVisible, ""
-		}
-		return current, page, chromeVisible, ""
-	case "effect-picker":
-		if chromeVisible {
-			if effect, ok := playEffectPicker(resolvedSlides[current], width, height); ok {
-				before := cloneSlides(*slides)
-				if effect == "none" {
-					(*slides)[current].Effect = ""
-				} else {
-					(*slides)[current].Effect = effect
-				}
-				(*slides)[current].EffectSet = true
-				commitDeckSnapshot(editState(editStates, -1), before, *slides, current, current)
-				if persistDeck(deckPath, *deck) {
-					setUINotice("Effect updated")
-				}
-			}
-		}
-		return current, page, chromeVisible, ""
-	case "background-picker":
-		if chromeVisible {
-			if background, ok := playBackgroundPicker(resolvedSlides[current], width, height); ok {
-				before := cloneSlides(*slides)
-				if background == "none" {
-					(*slides)[current].Background = ""
-				} else {
-					(*slides)[current].Background = background
-				}
-				(*slides)[current].BackgroundSet = true
-				commitDeckSnapshot(editState(editStates, -1), before, *slides, current, current)
-				if persistDeck(deckPath, *deck) {
-					setUINotice("Background updated")
-				}
-			}
-		}
-		return current, page, chromeVisible, ""
-	case "search":
-		current, page = playSearchMode(resolvedSlides, current, page, width, height, lastSearchQuery)
-		return current, page, chromeVisible, ""
-	case "jump":
-		current, page = playJumpMode(resolvedSlides, current, page, width, height)
-		return current, page, chromeVisible, ""
-	case "export":
-		exportHTMLWithNotice(deckPath, resolvedSlides, width, height)
-		return current, page, chromeVisible, ""
-	case "prev":
-		if page > 0 {
-			return current, page - 1, chromeVisible, ""
-		}
-		return current - 1, 0, chromeVisible, ""
-	default:
-		if hasNextPage(resolvedSlides[current], width, height, page) {
-			return current, page + 1, chromeVisible, ""
-		}
-		return current + 1, 0, chromeVisible, ""
-	}
+	return args, args.AppMode && args.DeckPath != ""
+}
+
+var errStartupCancelled = errors.New("startup cancelled")
+
+type startupMenuItem struct {
+	Title  string
+	Detail string
 }
 
 func decodeDeckAssets(text string) (map[string]DeckAsset, string, error) {
@@ -1698,6 +856,10 @@ func parseDeck(path string) (Deck, error) {
 func parseDeckData(path string, data []byte) (Deck, error) {
 	parsedDeckElementOrderChanged = false
 	text := string(data)
+	tabs, text, err := decodeDeckTabs(text)
+	if err != nil {
+		return Deck{}, err
+	}
 	assets, remainingAssets, err := decodeDeckAssets(text)
 	if err != nil {
 		return Deck{}, err
@@ -1729,12 +891,14 @@ func parseDeckData(path string, data []byte) (Deck, error) {
 	var slides []Slide
 	for _, part := range splitSlides(text) {
 		slide := parseSlide(part, base)
-		if len(slide.Elements) > 0 || slide.EffectSet || slide.BackgroundSet || slide.FGSet || slide.BGSet || slide.HeaderFGSet || slide.Effect != "" || slide.Background != "" || slide.FG != "" || slide.BG != "" || slide.HeaderFG != "" || slide.Notes != "" || slide.LayoutID != "" || slide.PageNumber != "" {
+		if slide.TabID != "" || len(slide.Elements) > 0 || slide.TTFSize > 0 || slide.TTFWidth > 0 || slide.EffectSet || slide.BackgroundSet || slide.FGSet || slide.BGSet || slide.HeaderFGSet || slide.Effect != "" || slide.Background != "" || slide.FG != "" || slide.BG != "" || slide.HeaderFG != "" || slide.Notes != "" || slide.LayoutID != "" || slide.PageNumber != "" || slide.Engagement != nil {
 			parsedDeckElementOrderChanged = elementOrderMappingChanged(canonicalizeSlideElementOrder(&slide, authoredTerminalWidth, authoredTerminalHeight)) || parsedDeckElementOrderChanged
 			slides = append(slides, slide)
 		}
 	}
-	deck := Deck{Slides: slides, Masters: masters, Assets: assets, Fonts: fonts}
+	deck := Deck{Slides: slides, Masters: masters, Assets: assets, Fonts: fonts, Tabs: tabs}
+	syncSlideTabs(&deck)
+	standardizeDeckText(&deck)
 	registerDeckFonts(deck.Fonts)
 	storeDeckFontsInLibrary(deck.Fonts)
 	materializeDeckAssets(&deck)
@@ -1753,6 +917,7 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 		authoredTerminalWidth, authoredTerminalHeight = terminalSize()
 	}
 	deck = cloneDeck(deck)
+	syncSlideTabs(&deck)
 	pruneUnusedDeckAssets(&deck)
 	pruneUnusedDeckFonts(&deck)
 	visitDeckImages(&deck, func(element *Element) {
@@ -1768,6 +933,16 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 		canonicalizeSlideElementOrder(&deck.Masters.Layouts[index].Slide, authoredTerminalWidth, authoredTerminalHeight)
 	}
 	var out strings.Builder
+	if len(deck.Tabs) > 0 {
+		if err := validateDeckTabs(deck.Tabs); err != nil {
+			return nil, err
+		}
+		metadata, err := json.Marshal(deck.Tabs)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Fprintf(&out, "<!-- keynope-tabs version=1 base64:%s -->\n\n", base64.StdEncoding.EncodeToString(metadata))
+	}
 	if authoredTerminalWidth > 0 && authoredTerminalHeight > 0 {
 		fmt.Fprintf(&out, "<!-- keynope width=%d height=%d -->\n\n", authoredTerminalWidth, authoredTerminalHeight)
 	}
@@ -1798,8 +973,17 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 		if slide.LayoutID != "" {
 			fmt.Fprintf(&out, "<!-- layout=%s -->\n", slide.LayoutID)
 		}
+		if slide.TabID != "" {
+			fmt.Fprintf(&out, "<!-- keynope-tab=%s -->\n", slide.TabID)
+		}
 		if slide.PageNumber != "" {
 			fmt.Fprintf(&out, "<!-- page-number=%s -->\n", slide.PageNumber)
+		}
+		if metadata, err := encodeEngagementMetadata(slide.Engagement); err != nil {
+			return nil, err
+		} else if metadata != "" {
+			out.WriteString(metadata)
+			out.WriteByte('\n')
 		}
 		if slide.EffectSet || slide.Effect != "" {
 			value := slide.Effect
@@ -1823,7 +1007,7 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 			out.WriteString(style)
 			out.WriteByte('\n')
 		}
-		if (slide.LayoutID != "" || slide.PageNumber != "" || slide.EffectSet || slide.Effect != "" || slide.BackgroundSet || slide.Background != "" || slide.Notes != "" || style != "") && len(slide.Elements) > 0 {
+		if (slide.LayoutID != "" || slide.PageNumber != "" || slide.Engagement != nil || slide.EffectSet || slide.Effect != "" || slide.BackgroundSet || slide.Background != "" || slide.Notes != "" || style != "") && len(slide.Elements) > 0 {
 			out.WriteByte('\n')
 		}
 		for elementIndex, element := range slide.Elements {
@@ -1840,6 +1024,9 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 					fmt.Fprintf(&out, "<!-- master-slot=%s -->\n", element.MasterSlotID)
 				}
 			}
+			if (element.Kind == "shape" || element.Kind == "connector") && element.ID != "" {
+				element.Query = setQueryValue(element.Query, "element-id", element.ID)
+			}
 			if (element.Kind != "image" || element.Placeholder) && element.Query != "" {
 				fmt.Fprintf(&out, "<!-- %s -->\n", placementCommentText(element.Query))
 			}
@@ -1848,7 +1035,17 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 				out.WriteByte('\n')
 				continue
 			}
+			if isTrueType(element) && (element.Text == "" || strings.Contains(element.Text, "\n") || strings.ContainsAny(element.Text, "`<>#[]") || strings.HasPrefix(element.Text, "-") || strings.TrimSpace(element.Text) != element.Text) {
+				level := ""
+				if element.Kind == "heading" {
+					level = fmt.Sprintf(" level=%d", max(1, min(2, element.Level)))
+				}
+				fmt.Fprintf(&out, "<!-- truetype-text=base64:%s kind=%s%s -->\n", base64.StdEncoding.EncodeToString([]byte(element.Text)), element.Kind, level)
+				continue
+			}
 			switch element.Kind {
+			case "connector":
+				out.WriteString("[connector]\n")
 			case "heading":
 				if element.Level == 1 {
 					fmt.Fprintf(&out, "# %s\n", element.Text)
@@ -1896,21 +1093,6 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 		}
 	}
 	return []byte(out.String()), nil
-}
-
-func saveDeck(path string, deck Deck) error {
-	data, err := serializeDeck(path, deck)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return err
-	}
-	if activePresenter != nil {
-		width, height := terminalAuthoredSize()
-		activePresenter.RefreshActiveSlideAsync(deck.ResolvedSlides(), width, height)
-	}
-	return nil
 }
 
 func canonicalizeSlideElementOrder(slide *Slide, width, height int) []int {
@@ -2026,10 +1208,6 @@ func normalizeBulletText(text string) string {
 	return strings.Join(lines, "\n")
 }
 
-func setUINotice(message string) {
-	setUINoticeLevel(message, noticeSuccess)
-}
-
 type noticeLevel int
 
 const (
@@ -2060,47 +1238,6 @@ func setUINoticeLevel(message string, level noticeLevel) {
 
 func setUIError(message string) {
 	setUINoticeLevel(message, noticeError)
-}
-
-func currentUINotice() string {
-	uiNoticeMu.Lock()
-	defer uiNoticeMu.Unlock()
-	if activeUINotice.Text == "" || time.Now().After(activeUINotice.ExpiresAt) {
-		activeUINotice = uiNotice{}
-		return ""
-	}
-	if activeUINotice.Level == noticeError {
-		return "ERROR: " + activeUINotice.Text
-	}
-	return activeUINotice.Text
-}
-
-func persistDeck(path string, deck Deck) bool {
-	if err := saveDeck(path, deck); err != nil {
-		setUIError("Save failed: " + err.Error())
-		return false
-	}
-	return true
-}
-
-func exportHTML(deckPath string, slides []Slide, cols, rows int) error {
-	outPath := strings.TrimSuffix(deckPath, filepath.Ext(deckPath)) + ".html"
-	preserved := readPreservedExportHead(outPath)
-	html, err := exportHTMLDocument(deckPath, slides, cols, rows, preserved, false)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(outPath, []byte(html), 0o644)
-}
-
-func exportHTMLWithNotice(deckPath string, slides []Slide, cols, rows int) bool {
-	if err := exportHTML(deckPath, slides, cols, rows); err != nil {
-		setUIError("Export failed: " + err.Error())
-		return false
-	}
-	outPath := strings.TrimSuffix(deckPath, filepath.Ext(deckPath)) + ".html"
-	setUINotice("Exported " + filepath.Base(outPath))
-	return true
 }
 
 func exportHTMLDocument(deckPath string, slides []Slide, cols, rows int, preserved preservedExportHead, presenter bool) (string, error) {
@@ -2136,6 +1273,7 @@ func exportSlidePagesFrozen(slide Slide, slideIndex, slideCount, cols, rows int)
 }
 
 func exportSlidePagesMode(slide Slide, slideIndex, slideCount, cols, rows int, frozenImages bool) []exportPage {
+	slide = withTrueTypeDefaults(slide)
 	slide = visualFontScaledSlide(slide)
 	pageCount := slidePageCount(slide, cols, rows)
 	pages := make([]exportPage, 0, pageCount)
@@ -2146,6 +1284,9 @@ func exportSlidePagesMode(slide Slide, slideIndex, slideCount, cols, rows int, f
 			contentFrames = exportContentFrames(slide, page, cols, rows, slideCount)
 		}
 		pages = append(pages, exportPage{
+			ShapePorts:           slideShapePorts(slide, lines, cols, rows),
+			Connectors:           slideShapeConnectors(slide, lines, cols, rows),
+			TabOnly:              slide.TabID != "",
 			Slide:                slideIndex,
 			Page:                 page,
 			PageCount:            pageCount,
@@ -2158,8 +1299,11 @@ func exportSlidePagesMode(slide Slide, slideIndex, slideCount, cols, rows int, f
 			FG:                   ansiCSSColour(slideFG(slide)),
 			BG:                   ansiCSSColour(slideBG(slide)),
 			HeaderFG:             ansiCSSColour(slideHeaderFG(slide)),
+			TTFSize:              slide.TTFSize,
+			TTFWidth:             slide.TTFWidth,
 			Lines:                exportLines(lines, slide, cols, rows, slideCount),
 			HideChromePageNumber: slide.PageNumber != "",
+			Engagement:           cloneEngagement(slide.Engagement),
 		})
 	}
 	return pages
@@ -2178,7 +1322,7 @@ func visualFontScaledSlide(slide Slide) Slide {
 	return slide
 }
 
-func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int, launchHelper bool) (*presenterCompanion, error) {
+func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*presenterCompanion, error) {
 	html, err := exportHTMLDocument(deckPath, slides, cols, rows, readPreservedExportHead(strings.TrimSuffix(deckPath, filepath.Ext(deckPath))+".html"), true)
 	if err != nil {
 		return nil, err
@@ -2214,6 +1358,15 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int, la
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(state)
+	})
+	mux.HandleFunc("/slides", func(w http.ResponseWriter, r *http.Request) {
+		pages, version := companion.slideSnapshot()
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(struct {
+			Pages   []exportPage `json:"pages"`
+			Version int64        `json:"version"`
+		}{pages, version})
 	})
 	mux.HandleFunc("/slide", func(w http.ResponseWriter, r *http.Request) {
 		raw := r.URL.Query().Get("index")
@@ -2264,18 +1417,22 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int, la
 		}
 	})
 	mux.HandleFunc("/presenter-status", companion.handlePresenterStatus)
+	mux.HandleFunc("/engagement", companion.handleEngagement)
 	if activeNativeEditor != nil {
 		mux.HandleFunc("/api/editor/state", activeNativeEditor.handleState)
 		mux.HandleFunc("/api/editor/action", activeNativeEditor.handleAction)
 		mux.HandleFunc("/api/editor/preview", activeNativeEditor.handlePreview)
+		mux.HandleFunc("/api/editor/connector-preview", activeNativeEditor.handleConnectorPreview)
 		mux.HandleFunc("/api/editor/fit-text", activeNativeEditor.handleFitText)
 		mux.HandleFunc("/api/editor/normalize-text-kind", activeNativeEditor.handleNormalizeTextKind)
 		mux.HandleFunc("/api/editor/emojis", activeNativeEditor.handleEmojiCatalog)
+		mux.HandleFunc("/api/editor/activity-qr", activeNativeEditor.handleActivityQR)
 		mux.HandleFunc("/api/editor/fonts/default", activeNativeEditor.handleDefaultFont)
 		mux.HandleFunc("/api/editor/fonts/library", activeNativeEditor.handleFontLibrary)
 		mux.HandleFunc("/api/editor/workspace", activeNativeEditor.handleWorkspace)
 		mux.HandleFunc("/api/editor/upload", activeNativeEditor.handleUpload)
 		mux.HandleFunc("/api/editor/document", activeNativeEditor.handleDocument)
+		mux.HandleFunc("/api/editor/participant-page", activeNativeEditor.handleParticipantPage)
 		mux.HandleFunc("/api/editor/export-document", activeNativeEditor.handleExportDocument)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -2289,31 +1446,11 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int, la
 			fmt.Fprintf(os.Stderr, "presenter companion stopped: %v\n", err)
 		}
 	}()
-	if !launchHelper {
-		companion.mu.Lock()
-		companion.helper = true
-		companion.target = "none"
-		companion.mu.Unlock()
-		fmt.Println("KEYNOPE_URL=" + companion.url)
-		return companion, nil
-	}
-	cmd, err := launchPresenterSurface(companion.url)
-	if err != nil {
-		_ = companion.server.Close()
-		return nil, err
-	}
-	companion.cmd = cmd
 	companion.mu.Lock()
 	companion.helper = true
 	companion.target = "none"
 	companion.mu.Unlock()
-	go func() {
-		_ = cmd.Wait()
-		companion.mu.Lock()
-		companion.helper = false
-		companion.target = "none"
-		companion.mu.Unlock()
-	}()
+	fmt.Println("KEYNOPE_URL=" + companion.url)
 	return companion, nil
 }
 
@@ -2357,6 +1494,17 @@ func (p *presenterCompanion) Status() (available bool, target string, live bool)
 	return p.helper, p.target, p.state.Presenting
 }
 
+// Visiting a tab temporarily suppresses broadcasting, not the presenter's
+// chosen play/pause state. Returning to a normal slide resumes that state.
+func (p *presenterCompanion) presentationEnabled() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.helper {
+		return (p.target == "main" || p.target == "external") && !p.paused
+	}
+	return p.state.Presenting
+}
+
 func (p *presenterCompanion) Position() (slide, page int) {
 	if p == nil {
 		return 0, 0
@@ -2385,14 +1533,57 @@ func (p *presenterCompanion) handlePresenterStatus(w http.ResponseWriter, r *htt
 	}
 	p.mu.Lock()
 	p.target = status.Mode
+	p.paused = status.Paused
 	p.helper = true
 	if nativeAppModeActive {
 		presenting := status.Mode != "none" && !status.Paused
+		if pages := p.pages[p.state.Slide]; len(pages) > 0 && pages[0].TabOnly {
+			presenting = false
+		}
+		changed := false
 		if p.state.Presenting != presenting {
 			p.state.Presenting = presenting
+			changed = true
+		}
+		if status.Mode == "none" && p.state.Engagement != nil {
+			p.state.Engagement = nil
+			changed = true
+		}
+		if changed {
 			p.state.Version++
 		}
 	}
+	p.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (p *presenterCompanion) handleEngagement(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var runtime *EngagementRuntimeState
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&runtime); err != nil {
+		http.Error(w, "invalid engagement state", http.StatusBadRequest)
+		return
+	}
+	if runtime != nil {
+		definition, err := normalizeEngagement(runtime.Definition)
+		if err != nil || runtime.Slide < 0 || runtime.Phase < 0 || runtime.Phase >= 5 || len(runtime.Ideas) > 200 {
+			http.Error(w, "invalid engagement state", http.StatusBadRequest)
+			return
+		}
+		runtime.Definition = definition
+		runtime.Ideas = cleanEngagementItems(runtime.Ideas)
+		if len(runtime.Counts) > 12 || len(runtime.Assignments) > 40 || len(runtime.Respondents) > 200 || len(runtime.Attributions) > 200 || len(runtime.Groups) > 13 {
+			http.Error(w, "invalid engagement state", http.StatusBadRequest)
+			return
+		}
+		runtime.Respondents = cleanEngagementItems(runtime.Respondents)
+	}
+	p.mu.Lock()
+	p.state.Engagement = cloneEngagementRuntime(runtime)
+	p.state.Version++
 	p.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -2440,6 +1631,21 @@ func (p *presenterCompanion) handleTerminalEvents(w http.ResponseWriter, r *http
 			return
 		}
 	}
+}
+
+func (p *presenterCompanion) slideSnapshot() ([]exportPage, int64) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	indices := make([]int, 0, len(p.pages))
+	for index := range p.pages {
+		indices = append(indices, index)
+	}
+	sort.Ints(indices)
+	pages := make([]exportPage, 0)
+	for _, index := range indices {
+		pages = append(pages, p.pages[index]...)
+	}
+	return pages, p.state.DeckVersion
 }
 
 func (p *presenterCompanion) Refresh(deckPath string, slides []Slide, cols, rows int) error {
@@ -2541,6 +1747,9 @@ func (p *presenterCompanion) Update(slide, page int, presenting bool, deckState 
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if pages := p.pages[slide]; len(pages) > 0 && pages[0].TabOnly {
+		presenting = false
+	}
 	timerMode, timerInput, timerEndMS := p.state.TimerMode, p.state.TimerInput, p.state.TimerEndMS
 	if deckState != nil {
 		timerMode = deckState.TimerMode
@@ -2613,77 +1822,7 @@ func (p *presenterCompanion) Close() {
 	if p == nil || p.server == nil {
 		return
 	}
-	if p.cmd != nil && p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
-	}
 	_ = p.server.Close()
-}
-
-func launchPresenterSurface(url string) (*exec.Cmd, error) {
-	if runtime.GOOS != "darwin" {
-		return nil, fmt.Errorf("second-screen broadcast is only available on macOS with the KeynopePresenter helper")
-	}
-	helper, ok := findMacPresenterHelper()
-	if !ok {
-		return nil, fmt.Errorf("KeynopePresenter.app not found; run `make build` from the distribution repo to enable second-screen broadcast")
-	}
-	cmd := exec.Command("/usr/bin/open", macPresenterLaunchArgs(helper.bundle, url, os.Getpid())...)
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	return cmd, nil
-}
-
-func macPresenterLaunchArgs(bundle, url string, parentPID int) []string {
-	return []string{
-		"-g",
-		"-n",
-		"-W",
-		bundle,
-		"--args",
-		url,
-		"--parent-pid",
-		strconv.Itoa(parentPID),
-	}
-}
-
-type macPresenterHelper struct {
-	bundle     string
-	executable string
-}
-
-func findMacPresenterHelper() (macPresenterHelper, bool) {
-	executable, _ := os.Executable()
-	workingDirectory, _ := os.Getwd()
-	return findMacPresenterHelperFrom(executable, workingDirectory)
-}
-
-func findMacPresenterHelperFrom(executable, workingDirectory string) (macPresenterHelper, bool) {
-	candidates := []macPresenterHelper{}
-	if executable != "" {
-		if resolved, err := filepath.EvalSymlinks(executable); err == nil {
-			executable = resolved
-		}
-		base := filepath.Dir(executable)
-		candidates = append(candidates, macPresenterHelperCandidates(base)...)
-	}
-	if workingDirectory != "" {
-		candidates = append(candidates, macPresenterHelperCandidates(filepath.Join(workingDirectory, "bin"))...)
-	}
-	for _, candidate := range candidates {
-		if info, err := os.Stat(candidate.executable); err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
-			return candidate, true
-		}
-	}
-	return macPresenterHelper{}, false
-}
-
-func macPresenterHelperCandidates(base string) []macPresenterHelper {
-	bundle := filepath.Join(base, "KeynopePresenter.app")
-	return []macPresenterHelper{{
-		bundle:     bundle,
-		executable: filepath.Join(bundle, "Contents", "MacOS", "KeynopePresenter"),
-	}}
 }
 
 type preservedExportHead struct {
@@ -3286,7 +2425,39 @@ func ansiCursorPosition(params string) (int, int) {
 
 func exportLines(lines []Line, slide Slide, width, height, slideCount int) []exportLine {
 	var out []exportLine
+	seenTrueType := map[int]bool{}
 	for index, line := range lines {
+		if line.Role == "shape-label" && line.Element >= 0 && line.Element < len(slide.Elements) {
+			if label, ok := shapeLabel(slide.Elements[line.Element]); ok {
+				label.Query = line.Query
+				q, _ := url.ParseQuery(line.Query)
+				w, h := intQueryDefault(q, "width", 1), intQueryDefault(q, "height", 1)
+				color := ansiCSSColour(elementFG(label.Query, false))
+				out = append(out, exportLine{Row: line.Row, Col: line.Col, Element: line.Element, Role: "shape-label", Parts: []exportPart{{Col: line.Col, Text: line.Text, Color: color}}, TrueType: exportTrueTypeElement(label, w, h)})
+			}
+			continue
+		}
+		if line.Role == "truetype" {
+			if seenTrueType[line.Element] || line.Element < 0 || line.Element >= len(slide.Elements) {
+				continue
+			}
+			seenTrueType[line.Element] = true
+			element := slide.Elements[line.Element]
+			w, h := trueTypeBounds(element, width, height)
+			color := ansiCSSColour(slideFG(slide))
+			if element.Kind == "heading" {
+				color = ansiCSSColour(slideHeaderFG(slide))
+			}
+			if fg := elementFG(element.Query, element.Kind == "heading"); fg != "" {
+				color = ansiCSSColour(fg)
+			}
+			link := ""
+			if target, ok := linkTargetFromQuery(element.Query, slideCount); ok {
+				link = target.Value
+			}
+			out = append(out, exportLine{Row: line.Row, Col: line.Col, Element: line.Element, Role: "truetype", Link: link, Parts: []exportPart{{Col: line.Col, Text: strings.Repeat(" ", w), Color: color}}, TrueType: exportTrueTypeElement(element, w, h)})
+			continue
+		}
 		if line.Row < 0 || line.Row >= height || line.Col >= width || line.Text == "" {
 			continue
 		}
@@ -3353,7 +2524,7 @@ func transparentShapeExportLines(lines []Line, width, height int, slide Slide) [
 	// curved/antialiased edges (particularly visible on colour emoji).
 	glyphs := map[int]map[int]rune{}
 	for _, line := range lines {
-		if !transparencyMaskLine(line, slide) || line.Role == "shape" || line.Role == "code" {
+		if !transparencyMaskLine(line, slide) || line.Role == "code" {
 			continue
 		}
 		parts := exportANSITextParts(line.Text, line.Col, ansiCSSColour(slideFG(slide)), width)
@@ -3717,6 +2888,7 @@ func exportHTMLPrefix(preserved preservedExportHead, presenter bool) string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Keynope Export</title>
 <style>
+` + trueTypeCSS() + `
 html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; user-select: none; -webkit-user-select: none; }
 body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
 #stage { position: fixed; inset: 0; background: #000; overflow: hidden; }
@@ -3724,13 +2896,21 @@ body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Libe
 #presenter-canvas { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 2; display: none; image-rendering: auto; }
 #link-layer { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 4; display: none; pointer-events: none; }
 .canvas-link-hit { position: absolute; pointer-events: auto; cursor: pointer; background: transparent; }
+.keynope-activity-marker { position: absolute; right: 12px; top: 12px; z-index: 14; display: none; min-width: 42px; height: 36px; align-items: center; justify-content: center; gap: 5px; padding: 4px 9px; color: #ffd166; background: rgba(12,15,19,.9); border: 2px solid #ffd166; border-radius: 5px; box-shadow: 0 3px 14px rgba(0,0,0,.6); font: 800 12px ui-monospace,SFMono-Regular,Menlo,monospace; cursor: pointer; }
+.keynope-activity-marker.visible { display: inline-flex; }
+.keynope-activity-marker:hover,.keynope-activity-marker:focus-visible { color: #fff; border-color: #fff; outline: none; }
+.keynope-activity-marker.active { color: #78dc9a; border-color: #78dc9a; }
 .keynope-app-toolbar { position: fixed; left: 210px; right: 0; bottom: 0; height: 52px; z-index: 20; display: none; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 12px; box-sizing: border-box; color: #e8e8e8; background: rgba(18, 18, 18, 0.96); border-top: 1px solid #444; font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
 .keynope-app-toolbar button { color: inherit; background: #292929; border: 1px solid #555; border-radius: 6px; padding: 6px 12px; font: inherit; cursor: default; }
 .keynope-app-toolbar button:active { background: #444; }
 .keynope-app-toolbar button.active { border-color: #70b7ff; background: #244766; }
 .keynope-app-toolbar button:disabled { opacity: .38; filter: grayscale(1); }
 .keynope-app-toolbar button.keynope-app-icon-button { display: inline-grid; width: 42px; min-width: 42px; height: 36px; place-items: center; padding: 3px; }
+.keynope-app-toolbar button.keynope-timer-button { width: 56px; min-width: 56px; }
 .keynope-app-icon-button svg { display: block; width: 34px; height: 26px; }
+.keynope-app-toolbar button[data-timer-audience="broadcast"] { background: #a8dfaf; border-color: #a8dfaf; }
+.keynope-app-toolbar button[data-timer-audience="broadcast"] svg [fill="#fff"] { fill: #193d24; }
+.keynope-app-toolbar button[data-timer-audience="broadcast"] svg [stroke="#fff"] { stroke: #193d24; }
 .keynope-app-toolbar button.keynope-app-tag-button { position: relative; overflow: visible; }
 .keynope-app-tag-button svg { transform: translateY(-2px); }
 .keynope-app-button-tag { position: absolute; left: 50%; bottom: 1px; transform: translateX(-50%); padding: 0 3px; border: 1px solid #59616a; border-radius: 3px; color: #d8dee5; background: #151719; font: 700 6px/8px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .05em; box-shadow: 0 1px 2px rgba(0,0,0,.7); }
@@ -3751,15 +2931,28 @@ html[data-keynope-app="true"] button:focus-visible:not(:disabled) { border-color
 html[data-keynope-app="true"] button:active:not(:disabled) { background-color: #202c36; box-shadow: inset 0 2px 5px rgba(0,0,0,.72), 0 0 0 1px rgba(112,183,255,.22); transform: translateY(1px); }
 html[data-keynope-app="true"] button:active:not(:disabled) > svg,
 html[data-keynope-app="true"] button:active:not(:disabled) > span { translate: 0 1px; }
-.keynope-editor-topbar { position: fixed; left: 210px; right: 0; top: 0; height: 52px; z-index: 21; display: none; align-items: center; gap: 6px; padding: 0 10px; box-sizing: border-box; overflow-x: auto; background: #181818; border-bottom: 1px solid #444; font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
-.keynope-editor-topbar > .keynope-save-button { display: grid; flex: 0 0 auto; width: 36px; min-width: 36px; height: 32px; place-items: center; padding: 4px; }
-.keynope-editor-topbar > .keynope-save-button svg { display: block; width: 22px; height: 22px; }
-.keynope-topbar-mode { display: flex; min-width: max-content; flex: 1 0 max-content; align-items: center; gap: 6px; }
+.keynope-editor-topbar { position: fixed; left: 210px; right: 0; top: 0; height: 96px; z-index: 21; display: none; flex-direction:column; align-items:stretch; gap:4px; padding:4px 10px; box-sizing: border-box; background: #181818; border-bottom: 1px solid #444; font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
+.keynope-ribbon-header { display:flex; align-items:center; gap:12px; min-height:40px; }
+.keynope-ribbon-quick,.keynope-ribbon-trailing { display:flex; align-items:center; gap:6px; flex:none; }
+.keynope-ribbon-quick .keynope-save-button { display:grid; flex:none; width:36px; min-width:36px; height:32px; place-items:center; padding:4px; }
+.keynope-ribbon-quick .keynope-save-button svg { display:block; width:22px; height:22px; }
+.keynope-ribbon-tabs { display:flex; align-self:stretch; align-items:end; gap:4px; flex:1; min-width:0; overflow-x:auto; }
+.keynope-editor-topbar .keynope-ribbon-tab { flex:none; border-color:transparent; border-radius:5px 5px 0 0; padding:7px 12px; white-space:nowrap; background:transparent; }
+.keynope-editor-topbar .keynope-ribbon-tab[aria-selected="true"] { border-color:#70b7ff; border-bottom-color:#292f35; color:#fff; background:#292f35; }
+.keynope-topbar-mode { display: flex; min-width:0; width:100%; height:42px; align-items:center; }
+.keynope-ribbon-panel { display:flex; align-items:center; gap:8px; width:100%; height:42px; min-width:0; overflow-x:auto; scrollbar-width:thin; }
+.keynope-ribbon-panel > * { flex-shrink:0; }
+.keynope-ribbon-panel[hidden] { display:none; }
+.keynope-ribbon-panel select { max-width:190px; }
+.keynope-ribbon-panel .keynope-see-through-button { margin-left:0; }
+.keynope-ribbon-trailing .keynope-toolbar-delete { margin-left:0; }
+.keynope-ribbon-trailing button { width:36px; min-width:36px; height:32px; padding:4px; }
+@media(max-width:850px) { .keynope-ribbon-header { gap:6px; } .keynope-editor-topbar .keynope-ribbon-tab { padding:7px; } }
 .keynope-topbar-mode[hidden] { display: none; }
 .keynope-topbar-mode button { padding: 4px 7px; }
 .keynope-topbar-label { max-width: 180px; overflow: hidden; color: #bfc7cf; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .keynope-topbar-link { width: 180px; min-width: 120px !important; box-sizing: border-box; color: #eee; background: #111; border: 1px solid #555; border-radius: 5px; padding: 5px 7px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
-.keynope-visual-panel { position: fixed; z-index: 90; display: grid; grid-template-columns: max-content 150px; gap: 7px 9px; width: 270px; padding: 10px; box-sizing: border-box; border: 1px solid #5b6168; border-radius: 8px; color: #ddd; background: #202124; box-shadow: 0 12px 32px rgba(0,0,0,.55); }
+.keynope-visual-panel { position: fixed; z-index: 90; display: grid; grid-template-columns: minmax(0,1fr) minmax(0,150px); gap: 7px 9px; width: min(300px,calc(100vw - 16px)); padding: 10px; box-sizing: border-box; border: 1px solid #5b6168; border-radius: 8px; color: #ddd; background: #202124; box-shadow: 0 12px 32px rgba(0,0,0,.55); }
 .keynope-visual-panel[hidden] { display: none; }
 .keynope-visual-panel label { align-self: center; color: #aeb4bb; font-size: 11px; }
 .keynope-visual-panel select, .keynope-visual-panel input { width: 100%; min-width: 0; box-sizing: border-box; }
@@ -3779,10 +2972,122 @@ html[data-keynope-app="true"] button:active:not(:disabled) > span { translate: 0
 .keynope-discard-dialog p { margin: 0 0 12px; color: #bfc7cf; line-height: 1.45; }
 .keynope-modal-blocker { position: fixed; inset: 0; z-index: 119; display: grid; place-items: start center; padding-top: max(60px, 18vh); box-sizing: border-box; background: rgba(0,0,0,.42); }
 .keynope-modal-blocker .keynope-discard-dialog { position: relative; z-index: 120; }
+.keynope-onboarding-reset-blocker { z-index: 590; place-items: center; padding: 16px; }
+.keynope-onboarding-reset-blocker .keynope-discard-dialog { z-index: 591; }
+.keynope-engagement-blocker { place-items: center; padding: 16px; }
 .keynope-link-dialog label { display: block; margin: 0 0 8px; color: #aeb4bb; }
 .keynope-link-dialog [hidden] { display: none; }
 .keynope-link-dialog input, .keynope-link-dialog select { display: block; width: 100%; margin-top: 4px; box-sizing: border-box; padding: 6px; color: #eee; background: #111; border: 1px solid #555; border-radius: 4px; }
 .keynope-link-dialog .keynope-editor-actions { margin: 10px 0 0; }
+.keynope-settings-menu { position:relative; align-self:center; color:#eee; font:12px monospace; }
+.keynope-settings-menu summary { cursor:pointer; border:1px solid #555; border-radius:4px; padding:10px 8px; }
+.keynope-settings-menu[open]>button { position:fixed; z-index:30; min-width:120px; background:#202428; }
+.keynope-tabs-overlay { position:fixed; inset:0; background:#0009; z-index:100000; display:grid; place-items:center; }
+.keynope-tabs-dialog { box-sizing:border-box; width:min(760px,94vw); min-width:0; max-height:88vh; overflow:auto; background:#191c1f; color:#eee; border:1px solid #70b7ff; border-radius:8px; padding:20px; font:14px monospace; }
+.keynope-tabs-dialog p { color:#aeb4bb; line-height:1.5; }
+.keynope-tabs-dialog fieldset { box-sizing:border-box; display:grid; grid-template-columns:minmax(0,1fr) max-content; min-inline-size:0; width:100%; gap:8px; border:1px solid #555; margin:10px 0; padding:12px; }
+.keynope-tabs-dialog input,.keynope-tabs-dialog select,.keynope-tabs-dialog button { padding:8px; color:#eee; background:#111; border:1px solid #555; border-radius:4px; font:inherit; min-width:0; }
+.keynope-tabs-dialog input,.keynope-tabs-dialog select { box-sizing:border-box; width:100%; max-width:100%; }
+.keynope-tabs-dialog select { overflow:hidden; text-overflow:ellipsis; }
+.keynope-tabs-dialog .keynope-tab-target { grid-column:1 / -1; }
+.keynope-tabs-dialog .keynope-tab-actions { grid-column:1 / -1; display:flex; flex-wrap:wrap; justify-content:flex-end; gap:4px; }
+.keynope-tabs-dialog [hidden] { display:none; }
+.keynope-tabs-dialog button { margin:3px; cursor:pointer; }
+.keynope-tabs-dialog button:disabled { opacity:.4; cursor:default; }
+.keynope-engagement-dialog { position: relative; z-index: 540; width: min(520px,calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; box-sizing: border-box; padding: 16px; color: #edf1f3; background: #1b1e21; border: 1px solid #68737d; border-radius: 9px; box-shadow: 0 18px 60px rgba(0,0,0,.75); font: 13px -apple-system,BlinkMacSystemFont,sans-serif; }
+.keynope-engagement-dialog h2 { margin: 0 0 12px; color: #fff; font: 700 16px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-engagement-kind { display: grid; grid-template-columns: repeat(3,1fr); gap: 6px; margin-bottom: 12px; }
+.keynope-engagement-kind button,.keynope-engagement-actions button { min-height: 32px; color: #eee; background: #292d31; border: 1px solid #59616a; border-radius: 5px; padding: 6px 10px; font: inherit; }
+.keynope-engagement-kind button.active { color: #fff; background: #244766; border-color: #70b7ff; }
+.keynope-engagement-dialog label { display: block; margin: 0 0 9px; color: #b9c1c8; }
+.keynope-engagement-dialog input,.keynope-engagement-dialog textarea { display: block; width: 100%; min-height: 34px; margin-top: 4px; box-sizing: border-box; padding: 7px; color: #fff; background: #0e1012; border: 1px solid #59616a; border-radius: 5px; font: 13px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-engagement-dialog textarea { min-height: 88px; resize: vertical; }
+.keynope-engagement-timer,.keynope-engagement-anonymous { display: flex !important; align-items: center; gap: 8px; margin-top: 12px !important; }
+.keynope-engagement-timer > input[type="checkbox"],.keynope-engagement-anonymous > input[type="checkbox"] { display: inline-block; width: 18px; min-height: 18px; margin: 0; }
+.keynope-engagement-time-fields { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
+.keynope-engagement-time-fields input { width: 54px; min-height: 30px; margin: 0; text-align: center; }
+.keynope-engagement-time-fields[hidden] { display: none; }
+.keynope-engagement-help { margin: -2px 0 10px; color: #89949e; font-size: 11px; line-height: 1.4; }
+.keynope-engagement-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 13px; }
+.keynope-engagement-actions .danger { margin-right: auto; color: #ffb0aa; border-color: #8d4741; }
+.keynope-engagement-overlay { position: fixed; inset: 0; z-index: 500; display: grid; place-items: center; padding: 5vh 5vw; box-sizing: border-box; background: rgba(2,4,7,.88); color: #f3efe0; font: 15px ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; }
+.keynope-engagement-overlay[hidden] { display: none; }
+.keynope-engagement-board { display: grid; width: min(980px,100%); max-height: 90vh; overflow: auto; gap: 16px; padding: 22px; box-sizing: border-box; border: 2px solid #ffd166; background: rgba(12,15,19,.96); box-shadow: 0 22px 80px rgba(0,0,0,.8); }
+.keynope-engagement-head { display: flex; align-items: flex-start; gap: 14px; }
+.keynope-engagement-head h1 { flex: 1; margin: 0; color: #fff; font-size: clamp(18px,3vw,34px); }
+.keynope-engagement-phase { padding: 4px 8px; border: 1px solid #70b7ff; color: #9bcfff; font-size: 11px; letter-spacing: .1em; }
+.keynope-engagement-join { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin-top: -5px; padding: 9px 11px; border: 1px solid #48515a; color: #b9c3cc; background: #101419; font-size: 13px; }
+.keynope-engagement-join strong { color: #ffd166; font-size: 22px; letter-spacing: .14em; }
+.keynope-engagement-join a { color: #8dc8ff; text-decoration: none; }
+.keynope-engagement-copy { min-height: 30px; padding: 5px 9px; color: #fff; background: #292f35; border: 1px solid #59616a; font: inherit; }
+.keynope-engagement-toast { position: fixed; z-index: 570; left: 50%; top: 50%; transform: translate(-50%,-50%); padding: 12px 18px; border: 2px solid #78dc9a; color: #78dc9a; background: rgba(8,12,10,.96); box-shadow: 0 14px 48px rgba(0,0,0,.72); font: 800 16px ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing: .08em; pointer-events: none; animation: keynope-engagement-toast 1.5s ease forwards; }
+@keyframes keynope-engagement-toast { 0% { opacity:0; transform:translate(-50%,-44%) scale(.96); } 12%,72% { opacity:1; transform:translate(-50%,-50%) scale(1); } 100% { opacity:0; transform:translate(-50%,-56%) scale(1.02); } }
+.keynope-engagement-join .participants { margin-left: auto; color: #78dc9a; }
+.keynope-engagement-qr { margin: 0 auto; padding: 2px; color: #000; background: #fff; font: 8px/8px ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing: 0; white-space: pre; }
+.keynope-engagement-countdown { color: #ffd166; text-align: center; font: 800 22px/1 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing: .08em; }
+.keynope-engagement-content { min-height: 180px; }
+.keynope-engagement-pulse { display: grid; grid-template-columns: repeat(auto-fit,minmax(90px,1fr)); gap: 10px; }
+.keynope-engagement-choice { display: grid; min-height: 86px; place-items: center; gap: 4px; color: #fff; background: #20262c; border: 1px solid #59616a; font: 700 18px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-engagement-choice:disabled { opacity: .55; }
+.keynope-engagement-count { color: #ffd166; font-size: 26px; }
+.keynope-engagement-names { display: block; color: #9bcfff; font-size: 11px; font-weight: 500; line-height: 1.35; text-align: center; }
+.keynope-engagement-storm-form { display: flex; gap: 8px; }
+.keynope-engagement-storm-form input { flex: 1; min-width: 0; padding: 9px; color: #fff; background: #101419; border: 1px solid #59616a; font: inherit; }
+.keynope-engagement-cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)); gap: 9px; margin-top: 13px; }
+.keynope-engagement-card { padding: 10px; border: 1px solid #59616a; background: #242a30; overflow-wrap: anywhere; }
+.keynope-engagement-card strong { display: block; margin-bottom: 4px; color: #9bcfff; }
+.keynope-engagement-attributions { display: grid; gap: 6px; margin-top: 12px; }
+.keynope-engagement-attribution { padding: 8px 10px; border: 1px solid #48515a; color: #cbd4dc; background: #171c21; }
+.keynope-engagement-attribution strong { color: #9bcfff; }
+.keynope-engagement-results { display: grid; gap: 8px; margin-top: 18px; }
+.keynope-engagement-roster { display:flex; flex-wrap:wrap; justify-content:center; gap:8px; margin:12px auto; padding:16px; border:1px solid #46515b; background:#101419; }
+.keynope-engagement-roster h3 { width:100%; margin:0 0 6px; color:#9bcfff; text-align:center; }
+.keynope-engagement-roster span { padding:6px 10px; border:1px solid #59616a; color:#fff; background:#20262c; }
+.keynope-engagement-roster p { width:100%; color:#aab3bb; text-align:center; }
+.keynope-engagement-questions { display:grid; gap:8px; margin:12px 0; }
+.keynope-engagement-question { display:grid; grid-template-columns:auto minmax(0,1fr); gap:10px; padding:10px; border:1px solid #414951; background:#15191e; }
+.keynope-engagement-question strong { color:#ffd166; }
+.keynope-engagement-result { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 10px; padding: 10px; border: 1px solid #414951; background: #15191e; }
+.keynope-engagement-result strong { color: #ffd166; }
+.keynope-engagement-result em { grid-column: 1 / -1; color: #9bcfff; font-size: 12px; font-style: normal; }
+.keynope-engagement-result.named-sort { grid-template-columns: auto minmax(0,1fr); }
+.keynope-engagement-result.named-sort strong { color: #9bcfff; }
+.keynope-engagement-result-idea { padding: 11px; border: 1px solid #414951; background: #20262c; overflow-wrap: anywhere; }
+.keynope-engagement-result-idea strong { display: block; margin-bottom: 4px; color: #9bcfff; }
+.keynope-engagement-result-waiting { padding: 26px 0; color: #aab3bb; text-align: center; }
+.keynope-impostor-presenter { display:grid; min-height:180px; place-items:center; align-content:center; gap:12px; padding:24px; border:2px solid #ff716b; background:radial-gradient(circle,#401017 0,#15080b 70%); text-align:center; }
+.keynope-impostor-presenter strong { color:#ff716b; font-size:clamp(28px,5vw,54px); letter-spacing:.1em; text-shadow:0 0 20px rgba(255,80,75,.35); }
+.keynope-impostor-presenter span { color:#fff; font-size:20px; }
+.keynope-impostor-presenter small { color:#aab3bb; }
+.keynope-engagement-columns { display: grid; grid-template-columns: repeat(auto-fit,minmax(190px,1fr)); gap: 10px; }
+.keynope-engagement-column { min-height: 120px; padding: 10px; border: 1px solid #414951; background: #15191e; }
+.keynope-engagement-column h3 { margin: 0 0 9px; color: #9bcfff; }
+.keynope-engagement-marquee { overflow: hidden; padding: 10px 0; }
+.keynope-engagement-marquee-track { display: flex; width: max-content; gap: 22px; animation: keynope-drawing-marquee 24s linear infinite; }
+.keynope-engagement-marquee:hover .keynope-engagement-marquee-track { animation-play-state: paused; }
+@keyframes keynope-drawing-marquee { from { transform: translateX(min(0px,100vw)); } to { transform: translateX(calc(-100% + min(900px,90vw))); } }
+.keynope-engagement-portrait { display: grid; gap: 7px; justify-items: center; color: #9bcfff; }
+.keynope-engagement-drawing { display: grid; grid-template-columns: repeat(20,9px); grid-template-rows: repeat(20,9px); border: 1px solid #59616a; background: #101419; }
+.keynope-engagement-drawing i { display: grid; width: 9px; height: 9px; place-items: center; overflow: hidden; color: #f3efe0; background: #20262c; font: 10px/9px Menlo,Monaco,monospace; font-style: normal; }
+.keynope-introduction-avatar { --avatar-cell:9px; --avatar-row:calc(var(--avatar-cell) * 1.6667); position:relative; width:calc(var(--avatar-cell) * 24); height:calc(var(--avatar-row) * 18); overflow:hidden; border:1px solid #59616a; background:#101419; }
+.keynope-introduction-layer-stack { position:absolute; z-index:1; pointer-events:none; }
+.keynope-introduction-layer { position:absolute; inset:0 auto auto 0; margin:0; color:#fff; background:transparent; font-family:Menlo,Monaco,monospace; font-size:calc(var(--avatar-cell) * 1.6667); font-weight:400; line-height:var(--avatar-row); letter-spacing:0; white-space:pre; }
+.keynope-introduction-layer-shade { z-index:0; color:#000; opacity:.34; }
+.keynope-introduction-layer-blended { z-index:1; opacity:.82; }
+.keynope-engagement-group { padding: 12px; border: 1px solid #414951; background: #15191e; }
+.keynope-engagement-group h3 { margin: 0 0 8px; color: #ffd166; }
+.keynope-playing-card { display:grid; width:82px; height:116px; align-content:space-between; margin:0 auto 12px; padding:8px; color:#111; background:#f7f2e7; border:3px solid #fff; border-radius:8px; box-shadow:3px 3px 0 #59616a; }
+.keynope-playing-card strong { color:#111; font-size:26px; line-height:1; }
+.keynope-playing-card span { color:#b51a00; white-space:pre-line; text-align:center; font-size:22px; line-height:1.15; }
+.keynope-engagement-group-members { color:#fff; text-align:center; overflow-wrap:anywhere; }
+.keynope-engagement-zones { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: 10px; }
+.keynope-engagement-zone { min-height: 150px; padding: 9px; border: 1px dashed #70b7ff; background: #13191f; }
+.keynope-engagement-zone h3 { margin: 0 0 8px; color: #9bcfff; font-size: 13px; }
+.keynope-engagement-sort-card { display: block; width: 100%; margin: 0 0 6px; padding: 8px; text-align: left; color: #fff; background: #292f35; border: 1px solid #59616a; font: inherit; }
+.keynope-engagement-controls { display: flex; align-items: center; justify-content: flex-end; gap: 8px; border-top: 1px solid #343b42; padding-top: 13px; }
+.keynope-engagement-controls button { min-height: 34px; padding: 7px 11px; color: #fff; background: #292f35; border: 1px solid #59616a; font: inherit; }
+.keynope-engagement-controls .primary { border-color: #70b7ff; background: #244766; }
+.keynope-engagement-controls .reset { margin-right: auto; }
 .keynope-input-blocker { position: fixed; inset: 0 0 52px 0; z-index: 55; background: transparent; }
 html[data-keynope-timer-active="true"] .keynope-editor-topbar,
 html[data-keynope-timer-active="true"] .keynope-editor-slides,
@@ -3824,6 +3129,10 @@ html[data-keynope-timer-active="true"] .keynope-canvas-overlay { display: none; 
 .keynope-vertical-align-button svg { display: block; width: 21px; height: 21px; }
 .keynope-editor-topbar button.keynope-svg-button { display: inline-grid; width: 30px; height: 30px; place-items: center; padding: 4px; }
 .keynope-editor-topbar button[hidden] { display: none; }
+.keynope-text-size-stack { display: inline-grid; flex: 0 0 30px; width: 30px; height: 30px; grid-template-rows: 1fr 1fr; }
+.keynope-editor-topbar .keynope-text-size-stack button { display: grid; place-items: center; width: 30px; min-width: 0; height: 15px; min-height: 0; padding: 0; margin: 0; font-size: 14px; line-height: 1; border-radius: 0; }
+.keynope-text-size-stack button:first-child { border-radius: 4px 4px 0 0; }
+.keynope-text-size-stack button:last-child { border-radius: 0 0 4px 4px; }
 .keynope-svg-button svg { display: block; width: 19px; height: 19px; }
 .keynope-editor-topbar button.keynope-page-number-button { position: relative; }
 .keynope-page-number-button svg { transform: translateY(-2px); }
@@ -3939,6 +3248,8 @@ button.keynope-shape-outline-button { display: inline-flex; align-items: center;
 .keynope-canvas-element { position: absolute; min-width: 22px; min-height: 22px; box-sizing: border-box; border: 1px solid transparent; background: transparent; pointer-events: auto; cursor: move; }
 .keynope-canvas-element:hover { border-color: rgba(112,183,255,.65); }
 .keynope-canvas-element.active { border: 2px solid #ffd166; box-shadow: 0 0 0 1px #111; }
+.keynope-canvas-element.marquee-candidate { border: 2px solid #ffd166; background: rgba(255,209,102,.12); box-shadow: 0 0 0 1px #111; }
+.keynope-canvas-marquee { position:absolute; pointer-events:none; box-sizing:border-box; border:1px solid #8fc9ff; background:rgba(112,183,255,.15); z-index:30; }
 .keynope-resize-handle { position: absolute; z-index: 2; width: 9px; height: 9px; border: 1px solid #111; background: #ffd166; }
 .keynope-resize-handle.nw { left: -6px; top: -6px; cursor: nwse-resize; }
 .keynope-resize-handle.ne { right: -6px; top: -6px; cursor: nesw-resize; }
@@ -3974,7 +3285,7 @@ html[data-keynope-presenter="true"] #presenter-canvas { display: block; }
 </style>
 </head>
 <body>
-<div id="stage"><canvas id="presenter-canvas"></canvas><div id="link-layer"></div><div id="effect-layer" class="terminal-layer"></div><div id="content-layer" class="terminal-layer"></div><div id="chrome-layer" class="terminal-layer"></div></div>
+<div id="stage"><canvas id="presenter-canvas"></canvas><div id="link-layer"></div><div id="effect-layer" class="terminal-layer"></div><div id="content-layer" class="terminal-layer"></div><div id="chrome-layer" class="terminal-layer"></div><button id="activity-marker" class="keynope-activity-marker" type="button" aria-label="Open activity">ACTIVITY</button></div>
 `
 	if presenter {
 		html = strings.Replace(html, `<html lang="en">`, `<html lang="en" data-keynope-presenter="true">`, 1)
@@ -3999,12 +3310,16 @@ html[data-keynope-presenter="true"] #presenter-canvas { display: block; }
 
 func exportHTMLSuffix() string {
 	return `<script>
+const keynopeIntroductionAssets = ` + introductionAssetsJSON + `;
+` + activityGamesJS + activityDesignJS + "\nconst keynopeTTFFontData = '" + strings.TrimSpace(trueTypeFontBase64) + "';\n" + trueTypeJS + `
+` + participantTransferJS + `
 const deck = JSON.parse(document.getElementById('keynope-data').textContent);
-let pageIndex = 0;
+let pageIndex = Math.max(0, deck.pages.findIndex(page => !page.tabOnly));
 const stage = document.getElementById('stage');
 const presenterCanvas = document.getElementById('presenter-canvas');
 const presenterContext = presenterCanvas.getContext('2d');
 const linkLayer = document.getElementById('link-layer');
+const activityMarker = document.getElementById('activity-marker');
 const presenterTestCardBuffer = document.createElement('canvas');
 const presenterTestCardBufferContext = presenterTestCardBuffer.getContext('2d');
 const effectLayer = document.getElementById('effect-layer');
@@ -4027,6 +3342,1500 @@ let keynopeEditorMasterMode = false;
 let keynopeEditorSelectionActive = false;
 let keynopeEditorTextEditActive = false;
 let keynopeEditorVisualResizeActive = false;
+const keynopeEngagementPhases = ['READY','OPEN','LOCKED','REVEAL','DISCUSS'];
+const keynopeDrawingEmpty = '\uE000';
+const keynopeDrawingBrushes = new Set(Array.from('▀▁▂▃▄▅▆▇█▉▊▋▌▍▎▏▐░▒▓▔▕▖▗▘▙▚▛▜▝▞▟'));
+function keynopeIntroductionDarkerColor(value,factor=.68,fallback='#57221b') {
+  const color=String(value||'').toLowerCase(),match=color.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/);
+  if(!match)return fallback;
+  return '#'+match.slice(1).map(channel=>Math.round(parseInt(channel,16)*factor).toString(16).padStart(2,'0')).join('');
+}
+function keynopeIntroductionDarkerSkinTone(faceColor) {
+  const color=String(faceColor||'').toLowerCase();
+  return keynopeIntroductionDarkerColor(color,.84,'#b67f67');
+}
+function keynopeIntroductionBrighterSkinTone(faceColor) {
+  const color=String(faceColor||'').toLowerCase(),match=color.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/);
+  if(!match)return '#e0a58b';
+  return '#'+match.slice(1).map(value=>{const channel=parseInt(value,16);return Math.round(channel+(255-channel)*.12).toString(16).padStart(2,'0')}).join('');
+}
+function keynopeIntroductionInteriorRows(rows) {
+  return (rows||[]).map(row=>{const glyphs=Array.from(row),ink=glyphs.map((glyph,index)=>glyph===' '?-1:index).filter(index=>index>=0);if(ink.length<2)return ' '.repeat(glyphs.length);const left=ink[0],right=ink[ink.length-1];return glyphs.map((glyph,index)=>index>left&&index<right&&glyph===' '?'█':' ').join('')});
+}
+function keynopeIntroductionEyeInteriorRows(rows) {
+  return (rows||[]).map(row=>{const glyphs=Array.from(row),middle=Math.floor(glyphs.length/2),output=Array(glyphs.length).fill(' ');for(const [start,end] of [[0,middle],[middle,glyphs.length]]){const ink=[];for(let index=start;index<end;index++)if(glyphs[index]!==' ')ink.push(index);if(ink.length<2)continue;for(let index=ink[0]+1;index<ink[ink.length-1];index++)if(glyphs[index]===' ')output[index]='█'}return output.join('')});
+}
+function keynopeIntroductionGlyphBackgroundRows(rows) {
+  return (rows||[]).map(row=>Array.from(row,glyph=>glyph===' '?' ':'█').join(''));
+}
+function keynopeIntroductionAuthoredColor(value,avatar,category) {
+  const role=String(value||'').toLowerCase();
+  if(category.id==='eyes'&&role==='#ffaaff')return keynopeIntroductionDarkerSkinTone(avatar.colors.head);
+  if(/^#[0-9a-f]{6}$/.test(role))return role;
+  if(role==='face-dark')return keynopeIntroductionDarkerSkinTone(avatar.colors.head);
+  if(role==='mouth')return avatar.colors.mouth;
+  if(role==='mouth-dark')return keynopeIntroductionDarkerColor(avatar.colors.mouth);
+  return avatar.colors[category.id]||category.defaultColor||'#ffffff';
+}
+function keynopeIntroductionAuthoredLayer(asset,avatar,category) {
+  const foreground=asset.colorRoles||{},background=asset.backgroundColorRoles||{};
+  if(!Object.keys(foreground).length&&!Object.keys(background).length)return null;
+  const layer=document.createElement('pre');layer.className='keynope-introduction-layer';
+  const width=Math.max(1,Number(asset.width)||Math.max(1,...(asset.rows||[]).map(row=>Array.from(row).length)));
+  const height=Math.max(1,Number(asset.height)||(asset.rows||[]).length);
+  for(let y=0;y<height;y++){
+    const glyphs=Array.from(String((asset.rows||[])[y]||'').padEnd(width,' ')).slice(0,width);
+    for(let x=0;x<width;x++){
+      const key=x+','+y,cell=document.createElement('span');cell.textContent=glyphs[x]||' ';
+      cell.style.color=keynopeIntroductionAuthoredColor(foreground[key],avatar,category);
+      if(background[key])cell.style.backgroundColor=keynopeIntroductionAuthoredColor(background[key],avatar,category);
+      layer.appendChild(cell);
+    }
+    if(y+1<height)layer.appendChild(document.createTextNode('\n'));
+  }
+  return layer;
+}
+function keynopeDecodeDrawingCell(value,version) {
+  if (Number(version) >= 2) return value === keynopeDrawingEmpty ? keynopeDrawingEmpty : keynopeDrawingBrushes.has(value) ? value : keynopeDrawingEmpty;
+  if (value === '#') return '█';
+  return value === '.' ? keynopeDrawingEmpty : keynopeDrawingBrushes.has(value) ? value : keynopeDrawingEmpty;
+}
+function keynopeNormalizeIntroductionAvatar(value) {
+  const selections={},colors={};
+  for(const category of keynopeIntroductionAssets.categories||[]){
+    const selected=Number(value&&value.selections&&value.selections[category.id]);
+    selections[category.id]=Number.isInteger(selected)&&selected>=0&&selected<category.assets.length?selected:(category.optional&&selected===-1?-1:(category.optional?-1:0));
+    const color=String(value&&value.colors&&value.colors[category.id]||'').toLowerCase();
+    colors[category.id]=(keynopeIntroductionAssets.palette||[]).includes(color)?color:(category.defaultColor||'#ffffff');
+  }
+  colors.eyes=keynopeIntroductionDarkerSkinTone(colors.head);
+  colors.nose=keynopeIntroductionDarkerSkinTone(colors.head);
+  return {selections,colors};
+}
+function keynopeIntroductionAvatarElement(value,extraClass='') {
+  const avatar=keynopeNormalizeIntroductionAvatar(value);
+  const canvas=document.createElement('div');canvas.className='keynope-introduction-avatar '+extraClass;
+  for(const category of (keynopeIntroductionAssets.categories||[]).slice().sort((a,b)=>a.layer-b.layer)){
+    const index=avatar.selections[category.id];if(index<0)continue;const asset=category.assets[index];if(!asset)continue;
+    const stack=document.createElement('div');stack.className='keynope-introduction-layer-stack';stack.style.left='calc(var(--avatar-cell) * '+asset.x+')';stack.style.top='calc(var(--avatar-row) * '+asset.y+')';
+    const text=(asset.rows||[]).join('\n');
+    const blended=category.layer>0&&!['hair','facial_hair','nose','eyes','mouth','glasses'].includes(category.id);
+    const authoredLayer=keynopeIntroductionAuthoredLayer(asset,avatar,category);
+    if(authoredLayer){stack.appendChild(authoredLayer);canvas.appendChild(stack);continue;}
+    if(['head','nose','eyes','mouth'].includes(category.id)){
+      const interiorColor=category.id==='nose'?keynopeIntroductionBrighterSkinTone(avatar.colors.head):category.id==='eyes'?'#ffffff':category.id==='mouth'?keynopeIntroductionDarkerColor(avatar.colors.mouth):avatar.colors.head;
+      const interior=document.createElement('pre');interior.className='keynope-introduction-layer';interior.style.color=interiorColor;interior.textContent=(category.id==='eyes'?keynopeIntroductionEyeInteriorRows(asset.rows):keynopeIntroductionInteriorRows(asset.rows)).join('\n');stack.appendChild(interior);
+      const glyphBackground=document.createElement('pre');glyphBackground.className='keynope-introduction-layer';glyphBackground.style.color=keynopeIntroductionDarkerColor(avatar.colors[category.id],.72);glyphBackground.textContent=keynopeIntroductionGlyphBackgroundRows(asset.rows).join('\n');stack.appendChild(glyphBackground);
+    }
+    if(blended){const shade=document.createElement('pre');shade.className='keynope-introduction-layer keynope-introduction-layer-shade';shade.textContent=text;stack.appendChild(shade);}
+    const layer=document.createElement('pre');layer.className='keynope-introduction-layer'+(blended?' keynope-introduction-layer-blended':'');layer.style.color=avatar.colors[category.id];layer.textContent=text;stack.appendChild(layer);canvas.appendChild(stack);
+  }
+  return canvas;
+}
+let keynopeEngagementRuntime = null;
+let keynopeEngagementOverlay = null;
+let keynopeEngagementPublishChain = Promise.resolve();
+let keynopeEngagementSessionEpoch = 0;
+const keynopeEngagementSessions = new Map();
+let keynopeEngagementCountdownTick = 0;
+let keynopeOnboardingResetBlocker = null;
+let keynopeEditorPresentationActive = false;
+let keynopeLobbyPresentation = null;
+let keynopeLobbyPresentationConnecting = false;
+let keynopeLobbyPresentationRetryAt = 0;
+window.keynopePublishParticipantPage = () => {
+  syncPresenterState().then(() => publishLobbyPresentation()).catch(console.warn);
+};
+window.keynopePresentationPosition = () => {
+  if (window.KEYNOPE_PRESENTER && keynopeAppSurface && window.keynopeParticipantPosition) return window.keynopeParticipantPosition;
+  const page = presenterPageAt(pageIndex);
+  return page ? {slide:page.slide,page:page.page,tabOnly:!!page.tabOnly,key:[pageIndex,presenterDeckVersion].join(':')} : null;
+};
+window.keynopePresentationTimerEnd = () => presenterTimerBroadcast && presenterTimerCanBroadcast() && presenterTimerMode === 'running' && Number.isSafeInteger(presenterTimerEndMS) && presenterTimerEndMS > 0 ? presenterTimerEndMS : 0;
+const participantTabPublications = new WeakMap();
+async function publishParticipantTabs(channel) {
+  const tabs=window.keynopeParticipantTabs||[];
+  const revision=JSON.stringify(tabs)+':'+(window.keynopePresentationDocumentVersion||0);
+  const previous=participantTabPublications.get(channel);
+  if(previous?.pending || previous?.revision===revision&&Date.now()-previous.at<1200000)return;
+  const entry={pending:true};participantTabPublications.set(channel,entry);
+  try {
+    const published=[],documents=new Map();
+    for(const tab of tabs){
+      if(tab.url){published.push(tab);continue;}
+      const response=await fetch('/api/editor/participant-page?format=rendered&slide='+(tab.page-1),{cache:'no-store',signal:AbortSignal.timeout(12000)});
+      if(!response.ok){published.push({...tab,error:'This slide is no longer available.'});continue;}
+      const data=await response.json(),document=await KeynopePresentationTransfer.pack(JSON.stringify(data.rendered));
+      documents.set(document.id,document);
+      published.push({...tab,transfer:document.id,parts:document.parts.length,slideCount:data.slideCount});
+    }
+    // Event-only transports need the manifest first; the state service must
+    // only announce it after every referenced chunk has been uploaded.
+    if(!channel.usesState)await channel.send({type:'lobby-tabs',tabs:published});
+    for(const document of documents.values()){
+      await channel.send({type:'presentation-preload',format:'rendered-v1',transfer:document.id,parts:document.parts.length,sentAt:Date.now()});
+      for(let index=0;index<document.parts.length;index++)await channel.send({type:'presentation-part',transfer:document.id,index,data:document.parts[index]});
+    }
+    await channel.send({type:'lobby-tabs',tabs:published});
+    entry.revision=revision;entry.at=Date.now();
+  } finally {entry.pending=false;}
+}
+async function publishLobbyPresentation(force = false) {
+  const owner = onboardingSessionDefinition();
+  // The native editor owns sharing even when its window is covered by the
+  // presentation. Activity dialogs have a separate, shorter-lived channel.
+  if (window.KEYNOPE_PRESENTER && !keynopeAppSurface) return;
+  let host = keynopeLobbyPresentation;
+  if (host && (!owner || owner.code !== host.code)) { host.channel.close(); keynopeLobbyPresentation = null; host = null; }
+  if (!owner) return;
+  if(host)publishParticipantTabs(host.channel).catch(error=>console.warn('Participant tabs:',error));
+  if(host?.sending){if(force)host.forcePending=true;return;}
+  if(host?.forcePending){force=true;host.forcePending=false;}
+  // A roomful of late joiners needs one shared replay, not one per client.
+  // Retain a pending replay so a request arriving just after the last send
+  // still receives the page on the periodic publisher tick.
+  const popup = window.keynopeLivePresentationWindow;
+  const readTimerEnd = () => {
+    if (keynopeEditorMasterMode) return 0;
+    try { return window.keynopePresentationTimerEnd() || (popup && !popup.closed ? popup.keynopePresentationTimerEnd?.() : 0) || 0; } catch (_) { return 0; }
+  };
+  const timerEndMs = readTimerEnd();
+  let presenting = !keynopeEditorMasterMode && (!!timerEndMs || (window.KEYNOPE_WEB_EDITOR ? !!popup&&!popup.closed : presenterPresenting));
+  if (!host) {
+    if (!presenting || keynopeLobbyPresentationConnecting || Date.now()<keynopeLobbyPresentationRetryAt) return;
+    keynopeLobbyPresentationConnecting = true;
+    try {
+      const connect = await keynopeActivityConnector();
+      const channel = await connect({code:owner.code,sessionId:owner.id,activityId:owner.id,displayName:'Presenter',presenter:true,
+        onEvent:event => { if (!keynopeLobbyPresentation?.channel?.usesState && ['hello','presentation-request'].includes(event.payload?.type)) publishLobbyPresentation(true); },
+        onError:error => console.warn('Participant presentation connection:',error)});
+      if (onboardingSessionDefinition()?.code !== owner.code) { channel.close(); return; }
+      host = keynopeLobbyPresentation = {channel,code:owner.code,key:'',sentAt:0,sending:false,documents:new Map(),preloaded:new Set(),sentTransfers:new Set()};
+    } catch (error) {
+      keynopeLobbyPresentationRetryAt = Date.now()+10000;
+      console.warn('Could not connect participant presentation:',error);
+      return;
+    } finally { keynopeLobbyPresentationConnecting=false; }
+  }
+  let position;
+  try { position = timerEndMs ? {slide:0,page:0,key:'timer'} : presenting ? (popup ? popup.keynopePresentationPosition?.() : window.keynopePresentationPosition()) : null; } catch (_) { return; }
+  if (position?.tabOnly) { presenting = false; position = null; }
+  if (presenting && !position) return;
+  const key = [presenting,position?.key,timerEndMs,presenterDeckVersion,window.keynopePresentationDocumentVersion||0].join(':');
+  if(force && key===host.key && host.forceSentAt && Date.now()-host.forceSentAt<2000){host.forcePending=true;return;}
+  const revision = [presenterDeckVersion,window.keynopePresentationDocumentVersion||0].join(':');
+  if(host.revision!==revision){host.revision=revision;host.documents.clear();host.preloaded.clear();}
+  if(force){host.preloaded.clear();host.sentTransfers.clear();}
+  const idle = !force && key === host.key && Date.now()-host.sentAt < 20000;
+  if(idle && (timerEndMs || !presenting || !host.document || host.preloaded.size>=host.document.slideCount))return;
+  host.sending = true;
+  if(force)host.forceSentAt=Date.now();
+  try {
+    const prepare = async slide => {
+      if(host.documents.has(slide))return host.documents.get(slide);
+      const response=await fetch('/api/editor/participant-page?format=rendered&slide='+slide,{cache:'no-store',signal:AbortSignal.timeout(12000)});
+      if(!response.ok)throw new Error('Could not prepare the current page');
+      const data=await response.json();
+      const document={...await KeynopePresentationTransfer.pack(JSON.stringify(data.rendered)),slideCount:data.slideCount};
+      host.documents.set(slide,document);return document;
+    };
+    if(idle){
+      // One background slide per tick; check navigation between every chunk.
+      let slide=0;while(host.preloaded.has(slide))slide++;
+      const document=await prepare(slide);
+      if(host.sentTransfers.has(document.id)){host.preloaded.add(slide);return;}
+      await host.channel.send({type:'presentation-preload',format:'rendered-v1',transfer:document.id,parts:document.parts.length,sentAt:Date.now()});
+      for(let index=0;index<document.parts.length;index++){
+        const current=popup ? popup.keynopePresentationPosition?.() : window.keynopePresentationPosition();
+        if(keynopeLobbyPresentation!==host || readTimerEnd()!==timerEndMs || current?.key!==position.key || (window.KEYNOPE_WEB_EDITOR ? !popup||popup.closed : !presenterPresenting))return;
+        await host.channel.send({type:'presentation-part',transfer:document.id,index,data:document.parts[index]});
+      }
+      host.preloaded.add(slide);host.sentTransfers.add(document.id);return;
+    }
+    if (!presenting) {
+      await host.channel.send({type:'presentation-md',presenting:false,sentAt:Date.now()});
+    } else {
+      const changed = key !== host.key;
+      if (changed || !host.document) {
+        if (timerEndMs) {
+          // Share a tiny neutral page, not the underlying slide or screenshots.
+          // The participant renderer draws the same test card and clock locally.
+          if (!host.timerDocument) host.timerDocument = {...await KeynopePresentationTransfer.pack(JSON.stringify({cols:245,rows:56,pages:[{slide:0,page:0,pageCount:1,slideCount:1,fg:'#fff',bg:'#000',effect:'none',lines:[]}]})),slideCount:1};
+          host.document = host.timerDocument;
+        } else host.document = await prepare(position.slide);
+      }
+      const document = host.document;
+      await host.channel.send({type:'presentation-md',format:'rendered-v1',presenting:true,transfer:document.id,parts:document.parts.length,slide:position.slide,page:position.page,slideCount:document.slideCount,timerEndMs,sentAt:Date.now()});
+      if (!host.sentTransfers.has(document.id) || force) {
+        for (let index=0;index<document.parts.length;index++) {
+          if (keynopeLobbyPresentation !== host) return;
+          if (readTimerEnd() !== timerEndMs) return;
+          if (!timerEndMs) {
+            if (window.KEYNOPE_WEB_EDITOR ? !popup || popup.closed : !presenterPresenting) return;
+            const currentPosition = popup ? popup.keynopePresentationPosition?.() : window.keynopePresentationPosition();
+            if (currentPosition?.key !== position.key) return;
+          }
+          await host.channel.send({type:'presentation-part',transfer:document.id,index,data:document.parts[index]});
+        }
+        if (!timerEndMs) host.preloaded.add(position.slide);
+        host.sentTransfers.add(document.id);
+      }
+    }
+    host.key = key; host.sentAt = Date.now();
+  } catch (error) {
+    host.forcePending=true;host.key='';
+    if(idle){console.warn('Participant preload skipped:',error);let slide=0;while(host.preloaded.has(slide))slide++;host.preloaded.add(slide);return;}
+    if (!host.errorAt || Date.now()-host.errorAt>20000) {
+      host.errorAt=Date.now();
+      console.warn('Participant page update failed:',error);
+      // Do not await a second network write from the failure path: a stuck
+      // connection must never keep host.sending latched and block navigation.
+      host.channel.send({type:'presentation-md',presenting:false,error:String(error.message||'Page transfer failed').slice(0,160),sentAt:Date.now()}).catch(()=>{});
+    }
+  } finally { host.sending=false; }
+}
+setInterval(() => publishLobbyPresentation(),1000);
+const keynopeEngagementControllerSurface = keynopeAppSurface || presenterMainSurface;
+const keynopeHostedEngagementControllerSurface = keynopeEngagementControllerSurface || !window.KEYNOPE_PRESENTER;
+function randomActivityCode() {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const bytes = new Uint8Array(16);
+  let result = '';
+  while (result.length < 8) {
+    crypto.getRandomValues(bytes);
+    for (const value of bytes) {
+      if (value >= 248) continue;
+      result += alphabet[value % alphabet.length];
+      if (result.length === 8) break;
+    }
+  }
+  return result;
+}
+function onboardingSessionDefinition() {
+  return (deck.pages || []).map(page => page && page.engagement).find(item => item && item.kind === 'onboarding' && /^[A-Za-z0-9]{8}$/.test(item.code || '')) || null;
+}
+function engagementSessionFor(definition) {
+  const onboarding = onboardingSessionDefinition();
+  const owner = onboarding || (definition && definition.kind === 'onboarding' && /^[A-Za-z0-9]{8}$/.test(definition.code || '') ? definition : null);
+  const key = owner ? 'session-' + owner.id + '-activity-' + definition.id : definition.id || ('slide-' + (deck.pages[pageIndex] && deck.pages[pageIndex].slide));
+  let session = keynopeEngagementSessions.get(key);
+  if (!session) {
+    const code = owner ? owner.code : randomActivityCode();
+    session = {code,sessionId:owner ? owner.id : definition.id,joinUrl:'https://keynope.sh/join/' + encodeURIComponent(code),qrCode:'',deadlineMs:0};
+    keynopeEngagementSessions.set(key,session);
+  }
+  return session;
+}
+async function loadEngagementQRCode(runtime) {
+  if (!runtime || runtime.qrCode || !runtime.joinUrl) return;
+  try {
+    const response = await fetch('/api/editor/activity-qr?value=' + encodeURIComponent(runtime.joinUrl),{cache:'no-store'});
+    if (!response.ok) return;
+    const payload = await response.json();
+    if (keynopeEngagementRuntime !== runtime || !payload.text) return;
+    runtime.qrCode = payload.text;
+    const session = engagementSessionFor(runtime.definition);
+    session.qrCode = runtime.qrCode;
+    renderEngagementRuntime();
+    publishEngagementRuntime();
+  } catch (_err) {}
+}
+function publishEngagementRuntime() {
+  if (!window.KEYNOPE_PRESENTER || !keynopeEngagementControllerSurface) return;
+  if (keynopeEngagementRuntime && !keynopeEngagementOverlay) return;
+  const payload = keynopeEngagementRuntime ? {
+    definition:keynopeEngagementRuntime.definition,
+    game:keynopeEngagementRuntime.definition.kind==='prerequisites'?prerequisitePublicState(keynopeEngagementRuntime):KeynopeGames.has(keynopeEngagementRuntime.definition.kind)?KeynopeGames.publicState(keynopeEngagementRuntime):undefined,
+    slide:keynopeEngagementRuntime.slide,
+    phase:keynopeEngagementRuntime.phase,
+    counts:keynopeEngagementRuntime.counts,
+    ideas:keynopeEngagementRuntime.ideas,
+    assignments:keynopeEngagementRuntime.assignments,
+    respondents:keynopeEngagementRuntime.respondents,
+    attributions:keynopeEngagementRuntime.attributions || [],
+    groups:keynopeEngagementRuntime.groups || [],
+    sessionCode:keynopeEngagementRuntime.sessionCode || '',
+    joinUrl:keynopeEngagementRuntime.joinUrl || '',
+    qrCode:keynopeEngagementRuntime.qrCode || '',
+    roomReady:!!keynopeEngagementRuntime.roomReady,
+    deadlineMs:Number(keynopeEngagementRuntime.deadlineMs) || 0,
+    participants:Number(keynopeEngagementRuntime.participants) || 0,
+    questionIndex:Number(keynopeEngagementRuntime.questionIndex) || 0,
+    questionRevealed:!!keynopeEngagementRuntime.questionRevealed
+  } : null;
+  keynopeEngagementPublishChain = keynopeEngagementPublishChain.catch(() => {}).then(() => fetch('/engagement',{
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)
+	})).then(response => { if (!response.ok) throw new Error('Could not synchronize engagement'); }).catch(() => {});
+}
+async function keynopeActivityConnector() {
+  if (globalThis.keynopeConnectActivity) return globalThis.keynopeConnectActivity;
+  const module = await import('https://keynope.sh/activity-channel.js');
+  return module.connectKeynopeActivity;
+}
+function foldHostedEngagementResponses(runtime) {
+  const entries = Object.entries(runtime.responseByIdentity || {});
+  const responses = entries.map(([,item]) => item);
+  runtime.respondents = [...new Set(responses.map(item => item.displayName).filter(Boolean))].sort((left,right) => left.localeCompare(right));
+  runtime.participants = runtime.respondents.length;
+  runtime.attributions = [];
+  const kind = runtime.definition.kind;
+  if (kind === 'dots') {
+    runtime.counts = (runtime.definition.options || []).map(() => 0);
+    for (const [,item] of entries) {
+      const dots = validEngagementDots(runtime.definition,item.response && item.response.dots);
+      if (!dots) continue;
+      dots.forEach((count,index) => runtime.counts[index] += count);
+      runtime.attributions.push({displayName:item.displayName,dots});
+    }
+  } else if (kind === 'pulse') {
+    runtime.counts = (runtime.definition.options || []).map(() => 0);
+    for (const [,item] of entries) {
+      const choice = Number(item.response && item.response.choice);
+      if (Number.isInteger(choice) && choice >= 0 && choice < runtime.counts.length) {
+        runtime.counts[choice]++;
+        runtime.attributions.push({displayName:item.displayName,choice});
+      }
+    }
+  } else if (kind === 'storm') {
+    const ideas = runtime.entryResponses || [];
+    runtime.ideas = ideas.map(item => item.idea).filter(Boolean);
+    runtime.attributions = ideas.map(item => ({displayName:item.displayName,idea:item.idea}));
+    runtime.participants = new Set(ideas.map(item => item.identity)).size;
+    runtime.respondents = [...new Set(ideas.map(item => item.displayName).filter(Boolean))];
+  } else if (kind === 'sort') {
+    const latest = responses.slice().sort((left,right) => (left.sequence || 0) - (right.sequence || 0)).at(-1);
+    runtime.assignments = latest && Array.isArray(latest.response.assignments) ? latest.response.assignments.slice() : (runtime.definition.cards || []).map(() => -1);
+    runtime.attributions = responses.filter(item => Array.isArray(item.response && item.response.assignments)).map(item => ({displayName:item.displayName,assignments:item.response.assignments.slice()}));
+  } else if (kind === 'dual') {
+    runtime.attributions = responses.filter(item => Array.isArray(item.response && item.response.answers)).map(item => ({displayName:item.displayName,answers:item.response.answers.slice(0,2)}));
+  } else if (kind === 'quiz' || kind === 'truefalse') {
+    runtime.attributions = responses.filter(item => Array.isArray(item.response && item.response.choices)).map(item => ({displayName:item.displayName,choices:item.response.choices.slice()}));
+  } else if (kind === 'match') {
+    runtime.attributions = responses.filter(item => Array.isArray(item.response && item.response.multiAssignments)).map(item => ({displayName:item.displayName,multiAssignments:item.response.multiAssignments.map(value => Array.isArray(value) ? value.slice() : [])}));
+  } else if (kind === 'draw') {
+    runtime.attributions = responses.filter(item => Array.isArray(item.response && item.response.drawing)).map(item => ({displayName:item.displayName,drawing:Array.from({length:20},(_,y) => {
+      const values = Array.from(String(item.response.drawing[y] || ''));
+      return Array.from({length:20},(_,x) => keynopeDecodeDrawingCell(values[x],item.response.drawingVersion)).join('');
+    })}));
+  } else if (kind === 'introduction') {
+    runtime.attributions=responses.filter(item=>item.response&&item.response.avatar).map(item=>({displayName:item.displayName,avatar:keynopeNormalizeIntroductionAvatar(item.response.avatar)}));
+  } else if (kind === 'expertise') {
+    runtime.attributions = responses.filter(item => Array.isArray(item.response && item.response.tags)).map(item => ({displayName:item.displayName,tags:item.response.tags.slice(0,12)}));
+  } else if (kind === 'questions') {
+    const votes = runtime.questionVotes || {};
+    runtime.attributions = (runtime.entryResponses || []).map(item => { const voterIdentities=Object.entries(votes).flatMap(([identity,ballot])=>(Array.isArray(ballot)?ballot:[]).filter(id=>id===item.id).map(()=>identity)); return {displayName:item.displayName,question:item.question,votes:voterIdentities.length,voters:voterIdentities.map(identity=>runtime.memberNames[identity]).filter(Boolean),id:item.id}; });
+    runtime.participants = new Set((runtime.entryResponses || []).map(item => item.identity)).size;
+    runtime.respondents = [...new Set((runtime.entryResponses || []).map(item => item.displayName).filter(Boolean))];
+  } else if (kind === 'wall') {
+    runtime.attributions = responses.flatMap(item => (item.response && Array.isArray(item.response.answers) ? item.response.answers : []).map((idea,choice) => ({displayName:item.displayName,idea:String(idea || '').trim(),choice})).filter(item => item.idea));
+  }
+}
+function hostedEngagementResults(runtime) {
+  const named = !!runtime.definition.named;
+  const publicAttributions = runtime.definition.kind === 'questions' && runtime.phase < 2 ? [] : (runtime.attributions || []).map(item => runtime.definition.kind === 'questions' && runtime.phase === 2 ? {id:item.id,question:item.question} : named ? item : {...item,displayName:'',voters:[]});
+  const cardAssignments = Object.entries(runtime.cardAssignments || {}).map(([identity,card]) => ({identity,rank:card.rank,label:card.label,suit:card.suit}));
+  const pairAssignments = runtime.phase >= 3 ? Object.entries(runtime.pairAssignments || {}).map(([identity,assignment]) => ({identity,group:assignment.group,members:(assignment.members || []).map(memberIdentity => ({identity:memberIdentity,displayName:runtime.memberNames[memberIdentity] || 'Participant'}))})) : [];
+  const pairMessages = runtime.phase >= 3 ? (runtime.pairMessages || []).slice(-100) : [];
+  const members = Object.entries(runtime.memberNames || {}).map(([identity,displayName]) => ({identity,displayName})).filter(item => item.displayName && item.displayName !== 'Presenter').sort((a,b) => a.displayName.localeCompare(b.displayName));
+  return {pairing:keynopePairingRoom?.sessionCode===runtime.sessionCode?keynopePairingRoom:undefined,game:runtime.definition.kind==='prerequisites'?prerequisitePublicState(runtime):KeynopeGames.has(runtime.definition.kind)?KeynopeGames.publicState(runtime):undefined,counts:runtime.counts || [],ideas:runtime.ideas || [],assignments:runtime.assignments || [],respondents:named ? (runtime.respondents || []) : [],attributions:publicAttributions,groups:runtime.phase >= 3 ? (runtime.groups || []) : [],cardAssignments,pairAssignments,pairMessages,members};
+}
+function engagementBase64URL(bytes) {
+  let binary = '';
+  for (const byte of new Uint8Array(bytes)) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
+}
+async function sendImpostorRole(runtime,identity,publicKey) {
+  if (!runtime || !runtime.activityChannel || !identity || !publicKey) return;
+  const role = runtime.roleAssignments && runtime.roleAssignments[identity];
+  if (!role) return;
+  try {
+    const key = await crypto.subtle.importKey('jwk',publicKey,{name:'RSA-OAEP',hash:'SHA-256'},false,['encrypt']);
+    const ciphertext = await crypto.subtle.encrypt({name:'RSA-OAEP'},key,new TextEncoder().encode(role));
+    await runtime.activityChannel.send({type:'role',activityId:runtime.definition.id,recipient:identity,ciphertext:engagementBase64URL(ciphertext)});
+  } catch (_error) {}
+}
+function receiveHostedEngagement(event,runtime,epoch) {
+  if (keynopeLobbyPresentation?.channel === runtime.activityChannel && event.payload?.type === 'presentation-request') {
+    if (!runtime.lastPageRequest || Date.now()-runtime.lastPageRequest>2000) {
+      runtime.lastPageRequest=Date.now(); publishLobbyPresentation(true);
+    }
+    return;
+  }
+  if (keynopeLobbyPresentation && keynopeLobbyPresentation.channel === runtime.activityChannel && ['hello','presence'].includes((event.payload||{}).type)) {
+    if (event.payload.type === 'hello' && !runtime.activityChannel.usesState) publishLobbyPresentation(true);
+    if (!keynopeEngagementRuntime && event.payload.type === 'hello') {
+      const lobby = onboardingSessionDefinition();
+      if (lobby) runtime.activityChannel.send({type:'definition',activityId:lobby.id,definition:lobby,phase:1,participants:0}).catch(()=>{});
+    }
+  }
+  if (!keynopeEngagementRuntime || keynopeEngagementRuntime !== runtime || epoch !== keynopeEngagementSessionEpoch) return;
+  const payload = event && event.payload || {};
+  if (payload.type === 'hello' || payload.type === 'presence') {
+    const name = String(payload.displayName || event.displayName || 'Participant').trim().slice(0,80) || 'Participant';
+    const changed = runtime.memberNames[event.identity] !== name;
+    runtime.memberNames[event.identity] = name;
+    if (payload.rolePublicKey && typeof payload.rolePublicKey === 'object') runtime.rolePublicKeys[event.identity] = payload.rolePublicKey;
+    if ((runtime.definition.kind === 'finishpair' || runtime.definition.kind === 'prerequisites') || runtime.definition.kind === 'onboarding' || runtime.definition.kind === 'pair' || runtime.definition.kind === 'cards' || runtime.definition.kind === 'impostor') runtime.participants = Object.keys(runtime.memberNames).length;
+    if (runtime.definition.kind === 'impostor' && runtime.phase >= 3) sendImpostorRole(runtime,event.identity,payload.rolePublicKey);
+    if (!changed && payload.type !== 'hello') return;
+    runtime.presenceNeedsDefinition = runtime.presenceNeedsDefinition || (payload.type === 'hello' && !runtime.activityChannel.usesState);
+    if (!runtime.presencePublishTimer) runtime.presencePublishTimer = setTimeout(async () => {
+      runtime.presencePublishTimer = null;
+      if (keynopeEngagementRuntime !== runtime || epoch !== keynopeEngagementSessionEpoch) return;
+      const definition = runtime.presenceNeedsDefinition;
+      runtime.presenceNeedsDefinition = false;
+      renderEngagementRuntime();
+      if (definition) await publishHostedEngagementState(true);
+      await publishHostedEngagementState(false);
+    }, 100);
+    return;
+  }
+  if (payload.type !== 'response' || payload.activityId !== runtime.definition.id) return;
+  if (KeynopeGames.receive(runtime,event)) { renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(false);return; }
+  if (runtime.definition.kind === 'dots' || (runtime.definition.kind === 'finishpair' || runtime.definition.kind === 'prerequisites')) {
+    if (runtime.phase !== 1 || (runtime.deadlineMs && Date.now() >= runtime.deadlineMs)) return;
+    if (runtime.definition.kind === 'dots' && !validEngagementDots(runtime.definition,payload.response && payload.response.dots)) return;
+    if ((runtime.definition.kind === 'finishpair' || runtime.definition.kind === 'prerequisites')) {
+      if (!runtime.memberNames[event.identity] || !payload.response || payload.response.finished !== true) return;
+      if(runtime.definition.kind==='prerequisites'&&!validPrerequisiteCompletion(runtime.definition,payload.response.checked))return;
+      runtime.finishedAt = runtime.finishedAt || {};
+      if (runtime.finishedAt[event.identity] == null) runtime.finishedAt[event.identity] = Date.now();
+      const members = Object.keys(runtime.memberNames);
+      if (members.length && members.every(id => runtime.finishedAt[id] != null)) { finishBalancedPairs(runtime); return; }
+    }
+  }
+  const displayName = String(event.displayName || 'Participant').trim().slice(0,80) || 'Participant';
+  if (runtime.definition.kind === 'pair' && payload.response && payload.response.chat) {
+    const assignment = runtime.pairAssignments && runtime.pairAssignments[event.identity];
+    const text = String(payload.response.chat || '').trim().slice(0,240);
+    if (runtime.phase === 3 && assignment && text && !runtime.seenResponseEvents[event.id]) {
+      runtime.seenResponseEvents[event.id] = true;
+      runtime.pairMessages.push({id:event.id,group:assignment.group,identity:event.identity,displayName:runtime.memberNames[event.identity] || displayName,text,createdAt:Date.now()});
+      if (runtime.pairMessages.length > 100) runtime.pairMessages.splice(0,runtime.pairMessages.length - 100);
+      renderEngagementRuntime();
+      publishEngagementRuntime();
+      publishHostedEngagementState(false);
+    }
+    return;
+  } else if (runtime.definition.kind === 'storm') {
+    const idea = String(payload.response && payload.response.idea || '').trim().slice(0,160);
+    if (idea && !runtime.seenResponseEvents[event.id]) {
+      runtime.seenResponseEvents[event.id] = true;
+      runtime.entryResponses.push({id:event.id,identity:event.identity,displayName,idea});
+    }
+  } else if (runtime.definition.kind === 'questions') {
+    if (!receiveQuestionResponse(runtime,event,displayName)) return;
+  } else if (runtime.definition.kind === 'wall') {
+    const answers = Array.isArray(payload.response && payload.response.answers) ? payload.response.answers.slice(0,runtime.definition.options.length).map(value => String(value || '').trim().slice(0,240)) : [];
+    if (answers.some(Boolean)) runtime.responseByIdentity[event.identity] = {displayName,response:{answers},sequence:++runtime.responseSequence};
+  } else {
+    runtime.responseByIdentity[event.identity] = {displayName,response:payload.response || {},sequence:++runtime.responseSequence};
+  }
+  foldHostedEngagementResponses(runtime);
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+}
+function startHostedEngagement() {
+  const runtime = keynopeEngagementRuntime;
+  if (!runtime || runtime.readOnly || !keynopeHostedEngagementControllerSurface || runtime.hostingConnection || runtime.activityChannel) return;
+  runtime.hostingConnection = true;
+  const epoch = ++keynopeEngagementSessionEpoch;
+  // Non-onboarding activities deliberately have no authored code of their
+  // own. Keep the durable onboarding code that openEngagementRuntime attached
+  // to this runtime so every activity in the deck uses the same room.
+  runtime.sessionCode = runtime.sessionCode || runtime.definition.code || '';
+  runtime.joinUrl = runtime.sessionCode ? 'https://keynope.sh/join/' + encodeURIComponent(runtime.sessionCode) : '';
+  runtime.participants ??= 0;
+  runtime.participationUnavailable = false;
+  runtime.roomReady = false;
+  runtime.responseByIdentity ??= {};
+  runtime.seenResponseEvents ??= {};
+  runtime.stormResponses ??= [];
+  runtime.entryResponses ??= [];
+  runtime.questionVotes ??= {};
+  runtime.memberNames ??= {};
+  runtime.cardAssignments ??= {};
+	runtime.roleAssignments ??= {};
+	runtime.rolePublicKeys ??= {};
+  runtime.pairAssignments ??= {};
+  runtime.pairMessages ??= [];
+  runtime.responseSequence ??= 0;
+  runtime.respondents ??= [];
+  renderEngagementRuntime();
+  keynopeActivityConnector().then(connect => connect({
+    code:runtime.sessionCode,sessionId:runtime.sessionId || runtime.definition.id,activityId:runtime.definition.id,displayName:'Presenter',presenter:true,
+    onEvent:event => receiveHostedEngagement(event,runtime,epoch),
+    onError:error => { if (keynopeEngagementRuntime === runtime) { runtime.participationUnavailable = true; runtime.participationError = String(error && error.message || error || 'Connection failed'); renderEngagementRuntime(); } }
+  })).then(channel => {
+    if (!keynopeEngagementRuntime || epoch !== keynopeEngagementSessionEpoch) { channel.close(); return; }
+    runtime.activityChannel = channel;
+    publishLobbyPresentation(true);
+    runtime.roomReady = true;
+    runtime.participationUnavailable = false;
+    runtime.participationError = '';
+    return loadEngagementQRCode(runtime).then(() => publishHostedEngagementState(true)).then(() => {
+      if (keynopeEngagementRuntime === runtime && epoch === keynopeEngagementSessionEpoch) return publishHostedEngagementState(false);
+    });
+  }).then(() => {
+    if (!keynopeEngagementRuntime || epoch !== keynopeEngagementSessionEpoch) return;
+    renderEngagementRuntime();
+    publishEngagementRuntime();
+  }).catch(error => {
+    if (!keynopeEngagementRuntime || epoch !== keynopeEngagementSessionEpoch) return;
+    runtime.participationUnavailable = true;
+    runtime.participationError = String(error && error.message || error || 'Connection failed');
+    runtime.roomReady = false;
+    renderEngagementRuntime();
+    setTimeout(() => {
+      if (keynopeEngagementRuntime === runtime && !runtime.activityChannel) startHostedEngagement();
+    }, 3000);
+  }).finally(() => {
+    runtime.hostingConnection = false;
+  });
+}
+function publishHostedEngagementState(includeDefinition = false,reset = false) {
+  const runtime = keynopeEngagementRuntime;
+  if (!runtime || !runtime.activityChannel) return Promise.resolve();
+  publishParticipantTabs(runtime.activityChannel).catch(error=>console.warn('Participant tabs:',error));
+  const live = hostedEngagementResults(runtime);
+  runtime.activation = runtime.activation || randomActivityCode();
+  const payload = includeDefinition
+    ? {type:'definition',activation:runtime.activation,activityId:runtime.definition.id,definition:runtime.definition.kind === 'introduction' ? {...runtime.definition,introductionAssets:keynopeIntroductionAssets} : KeynopeGames.definition(runtime),phase:runtime.phase,deadlineMs:runtime.deadlineMs || 0,participants:runtime.participants,members:live.members,questionIndex:Number(runtime.questionIndex)||0,questionRevealed:!!runtime.questionRevealed,reset:!!reset}
+    : {type:'state',activityId:runtime.definition.id,phase:runtime.phase,deadlineMs:runtime.deadlineMs || 0,participants:runtime.participants,members:live.members,questionIndex:Number(runtime.questionIndex)||0,questionRevealed:!!runtime.questionRevealed,results:runtime.definition.kind === 'prerequisites' || KeynopeGames.has(runtime.definition.kind) || runtime.phase >= 3 || runtime.definition.kind === 'questions' || runtime.definition.kind === 'cards' || runtime.definition.kind === 'impostor' || runtime.definition.kind === 'onboarding' || (runtime.definition.kind === 'truefalse' && runtime.questionRevealed) ? live : undefined};
+  return runtime.activityChannel.send(payload).catch(() => {});
+}
+function publishHostedEngagementPhase() {
+  publishHostedEngagementState(false);
+}
+function currentEngagementDefinition() {
+  const page = deck.pages && deck.pages[pageIndex];
+  return page && page.engagement || null;
+}
+function renderActivityMarker() {
+  if (!activityMarker) return;
+  const definition = currentEngagementDefinition();
+  const visible = !!definition && !keynopeEditorMasterMode;
+  activityMarker.classList.toggle('visible',visible);
+  activityMarker.classList.toggle('active',visible && !!keynopeEngagementRuntime);
+  activityMarker.title = definition ? 'Open ' + (definition.prompt || definition.kind || 'activity') : '';
+  if (visible) {
+    const canvasRect = presenterCanvas.getBoundingClientRect();
+    const stageRect = stage.getBoundingClientRect();
+    activityMarker.style.top = Math.max(12,canvasRect.top-stageRect.top+12) + 'px';
+    activityMarker.style.right = Math.max(12,stageRect.right-canvasRect.right+12) + 'px';
+  }
+}
+let keynopeRecentActivityItems = [];
+function closeEngagementRuntime(publish = true, returnToLobby = true) {
+  const runtime = keynopeEngagementRuntime;
+  if (runtime && !runtime.readOnly) {
+    // Keep exercise state, not its connection. Reopening reconnects without
+    // clearing answers, assignments, reveal progress, or manually paused timers.
+    engagementSessionFor(runtime.definition).runtime = {...runtime,activityChannel:null,hostingConnection:false,
+      resumeTimerMs:runtime.deadlineMs ? Math.max(1,runtime.deadlineMs-Date.now()) : 0,deadlineMs:0};
+  }
+  if (runtime && !runtime.readOnly) {
+    const items=[...(runtime.ideas||[]),...(runtime.attributions||[]).map(item=>item.idea||item.question||(item.answers||[]).filter(Boolean).join(' — ')),...((runtime.game||{}).entries||[]).map(item=>item.text)].filter(Boolean);
+    if(items.length)keynopeRecentActivityItems=[...new Set(items)].slice(0,40);
+  }
+  if (runtime && !runtime.readOnly && runtime.sessionCode) {
+    const lobby = onboardingSessionDefinition();
+    if (returnToLobby && lobby && runtime.definition.kind !== 'onboarding' && runtime.activityChannel) {
+      const members = hostedEngagementResults(runtime).members;
+      runtime.activityChannel.send({type:'definition',activityId:lobby.id,definition:lobby,phase:1,deadlineMs:0,participants:members.length,members}).catch(()=>{});
+    } else {
+      if (runtime.definition.kind !== 'onboarding') runtime.phase = 4;
+      publishHostedEngagementState(false).finally(() => { if (runtime.activityChannel && runtime.activityChannel !== keynopeLobbyPresentation?.channel) runtime.activityChannel.close(); });
+    }
+  } else if (runtime && runtime.activityChannel) {
+    runtime.activityChannel.close();
+  }
+  keynopeEngagementSessionEpoch++;
+  clearInterval(keynopeEngagementCountdownTick);
+  keynopeEngagementCountdownTick = 0;
+  if (keynopeEngagementOverlay) keynopeEngagementOverlay.remove();
+  keynopeEngagementOverlay = null;
+  keynopeEngagementRuntime = null;
+	for (const button of document.querySelectorAll('[aria-label="Activities"]')) button.classList.remove('active');
+	renderActivityMarker();
+	if (publish) publishEngagementRuntime();
+  if (typeof refreshEditorPresenterControls === 'function') refreshEditorPresenterControls();
+}
+function confirmOnboardingSessionReset() {
+  if (!keynopeEngagementRuntime || keynopeEngagementRuntime.definition.kind !== 'onboarding') return;
+  if (keynopeOnboardingResetBlocker) return;
+  const originalDefinition = JSON.parse(JSON.stringify(keynopeEngagementRuntime.definition));
+  const blocker = document.createElement('div'); blocker.className = 'keynope-modal-blocker keynope-onboarding-reset-blocker';
+  keynopeOnboardingResetBlocker = blocker;
+  const dialog = document.createElement('section'); dialog.className = 'keynope-engagement-dialog keynope-discard-dialog'; dialog.setAttribute('role','alertdialog'); dialog.setAttribute('aria-modal','true');
+  const title = document.createElement('h2'); title.textContent = 'New activity session?';
+  const message = document.createElement('p'); message.textContent = 'Are you sure you want to create a new session code?';
+  const actions = document.createElement('div'); actions.className = 'keynope-engagement-actions';
+  const dismiss = () => { blocker.remove(); if (keynopeOnboardingResetBlocker === blocker) keynopeOnboardingResetBlocker = null; };
+  const cancel = engagementButton('Cancel','',dismiss);
+  const yes = engagementButton('Yes','primary',async () => {
+    yes.disabled = true;
+    const definition = {...originalDefinition,code:randomActivityCode()};
+    dismiss();
+    closeEngagementRuntime(false,false);
+    keynopeEngagementSessions.clear();
+    try {
+      await editorAction({action:'set-engagement',engagementData:definition});
+      const handler = window.webkit?.messageHandlers?.keynopePresenter;
+      if (handler) handler.postMessage({action:'save-presentation'});
+      openEngagementRuntime(true);
+    }
+    catch (_error) { showEngagementToast('COULD NOT RESET'); }
+  });
+  blocker.addEventListener('pointerdown',event => event.stopPropagation());
+  actions.append(cancel,yes); dialog.append(title,message,actions); blocker.appendChild(dialog); document.body.appendChild(blocker); cancel.focus();
+}
+function resetEngagementRuntime() {
+  if (!keynopeEngagementRuntime) return;
+  const definition = keynopeEngagementRuntime.definition;
+  if (definition.kind === 'onboarding') { confirmOnboardingSessionReset(); return; }
+  keynopeEngagementRuntime.phase = 1;
+  keynopeEngagementRuntime.counts = (definition.options || []).map(() => 0);
+  keynopeEngagementRuntime.ideas = [];
+  keynopeEngagementRuntime.assignments = (definition.cards || []).map(() => -1);
+	keynopeEngagementRuntime.respondents = [];
+	keynopeEngagementRuntime.attributions = [];
+	keynopeEngagementRuntime.participants = 0;
+	keynopeEngagementRuntime.responseByIdentity = {};
+	keynopeEngagementRuntime.stormResponses = [];
+	keynopeEngagementRuntime.responseSequence = 0;
+	keynopeEngagementRuntime.entryResponses = [];
+	keynopeEngagementRuntime.questionVotes = {};
+	keynopeEngagementRuntime.groups = [];
+	keynopeEngagementRuntime.cardAssignments = {};
+	keynopeEngagementRuntime.pairAssignments = {};
+	keynopeEngagementRuntime.pairMessages = [];
+	keynopeEngagementRuntime.deadlineMs = 0;
+	keynopeEngagementRuntime.pausedRemainingMs = 0;
+	keynopeEngagementRuntime.roleAssignments = {};
+	keynopeEngagementRuntime.finishedAt = {};
+	keynopeEngagementRuntime.startedAt = Date.now();
+	keynopeEngagementRuntime.stoppedAt = 0;
+	delete keynopeEngagementRuntime.game;
+	keynopeEngagementRuntime.questionIndex = 0;
+	keynopeEngagementRuntime.questionRevealed = false;
+	if (definition.kind === 'pair' || definition.kind === 'cards' || definition.kind === 'impostor') keynopeEngagementRuntime.participants = Object.keys(keynopeEngagementRuntime.memberNames || {}).length;
+	const resetSeconds = definition.kind === 'pair' || definition.kind === 'cards' || definition.kind === 'impostor' ? (Number(definition.joinSeconds) || 120) : Number(definition.timerSeconds);
+	if (resetSeconds > 0) {
+		keynopeEngagementRuntime.deadlineMs = Date.now() + resetSeconds * 1000;
+		engagementSessionFor(definition).deadlineMs = keynopeEngagementRuntime.deadlineMs;
+	}
+	renderEngagementRuntime();
+	publishEngagementRuntime();
+	publishHostedEngagementState(true,true);
+	runEngagementCountdown(keynopeEngagementRuntime);
+}
+function advanceEngagementRuntime() {
+  if (!keynopeEngagementRuntime) return;
+  if (KeynopeGames.next(keynopeEngagementRuntime)) {renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(false);runEngagementCountdown(keynopeEngagementRuntime);return;}
+  if ((keynopeEngagementRuntime.definition.kind === 'finishpair' || keynopeEngagementRuntime.definition.kind === 'prerequisites') && keynopeEngagementRuntime.phase === 1) { finishBalancedPairs(keynopeEngagementRuntime); return; }
+  if (keynopeEngagementRuntime.definition.kind === 'truefalse') {
+    const runtime = keynopeEngagementRuntime;
+    const lastQuestion = Math.max(0,(runtime.definition.questions || []).length - 1);
+    if (!runtime.questionRevealed) runtime.questionRevealed = true;
+    else if ((Number(runtime.questionIndex) || 0) < lastQuestion) { runtime.questionIndex = (Number(runtime.questionIndex) || 0) + 1; runtime.questionRevealed = false; }
+    else { closeEngagementRuntime(); return; }
+    renderEngagementRuntime();
+    publishEngagementRuntime();
+    publishHostedEngagementState(false);
+    return;
+  }
+  if (keynopeEngagementRuntime.definition.kind === 'pair') {
+    if (keynopeEngagementRuntime.phase === 1) beginPairShareDiscussion(keynopeEngagementRuntime);
+    else if (keynopeEngagementRuntime.phase === 3) finishPairShareDiscussion(keynopeEngagementRuntime);
+    return;
+  }
+	if (keynopeEngagementRuntime.definition.kind === 'cards' && keynopeEngagementRuntime.phase === 1) {
+    dealPlayingCards(keynopeEngagementRuntime);
+    return;
+  }
+	if (keynopeEngagementRuntime.definition.kind === 'impostor' && keynopeEngagementRuntime.phase === 1) {
+		revealImpostorRoles(keynopeEngagementRuntime);
+		return;
+	}
+  const grouping = keynopeEngagementRuntime.definition.kind === 'pair' || keynopeEngagementRuntime.definition.kind === 'cards';
+  keynopeEngagementRuntime.phase = grouping && keynopeEngagementRuntime.phase === 1 ? 3 : Math.min(keynopeEngagementPhases.length - 1,keynopeEngagementRuntime.phase + 1);
+  keynopeEngagementRuntime.deadlineMs = 0;
+  keynopeEngagementRuntime.pausedRemainingMs = 0;
+  engagementSessionFor(keynopeEngagementRuntime.definition).deadlineMs = 0;
+  if ((keynopeEngagementRuntime.phase === 2 || keynopeEngagementRuntime.phase === 3) && (keynopeEngagementRuntime.definition.kind === 'pair' || keynopeEngagementRuntime.definition.kind === 'cards')) assignEngagementGroups(keynopeEngagementRuntime);
+  renderEngagementRuntime();
+	publishEngagementRuntime();
+	publishHostedEngagementPhase();
+}
+function receiveQuestionResponse(runtime,event,displayName) {
+  if (!runtime.memberNames[event.identity] || runtime.seenResponseEvents[event.id]) return false;
+  const response=event.payload.response||{};
+  if(runtime.phase===1){
+    if(runtime.deadlineMs&&Date.now()>=runtime.deadlineMs)return false;
+    const question=String(response.question||'').trim().slice(0,240);
+    if(!question)return false;
+    runtime.entryResponses.push({id:event.id,identity:event.identity,displayName,question});
+  }else if(runtime.phase===2){
+    const ballot=response.questionDots,ids=new Set(runtime.entryResponses.map(item=>item.id));
+    if(!Array.isArray(ballot)||ballot.length>3||new Set(ballot).size!==ballot.length||ballot.some(id=>typeof id!=='string'||!ids.has(id)))return false;
+    runtime.questionVotes[event.identity]=ballot.slice();
+  }else return false;
+  runtime.seenResponseEvents[event.id]=true;
+  return true;
+}
+function assignEngagementGroups(runtime) {
+  if (runtime.definition.kind === 'cards') { distributePlayingCards(runtime); return; }
+  const identities = Object.keys(runtime.memberNames || {}).filter(identity => runtime.memberNames[identity]);
+  for (let index = identities.length - 1; index > 0; index--) { const swap = engagementRandomIndex(index + 1); [identities[index],identities[swap]] = [identities[swap],identities[index]]; }
+  const size = Math.max(2,Number(runtime.definition.groupSize) || (runtime.definition.kind === 'pair' ? 2 : 4));
+  const groupCount = runtime.definition.kind === 'pair' && size === 2
+    ? Math.max(1,Math.floor(identities.length / 2))
+    : Math.max(1,Math.min(13,Math.ceil(identities.length / size)));
+  const ranks = ['Aces','Kings','Queens','Jacks','10s','9s','8s','7s','6s','5s','4s','3s','2s'];
+  runtime.groups = Array.from({length:groupCount},(_,index) => ({name:runtime.definition.kind === 'cards' ? ranks[index] : 'Group ' + (index + 1),members:[]}));
+  runtime.pairAssignments = {};
+  identities.forEach((identity,index) => {
+    const groupIndex = index % groupCount;
+    runtime.groups[groupIndex].members.push(runtime.memberNames[identity]);
+    runtime.pairAssignments[identity] = {group:groupIndex,members:[]};
+  });
+  for (const [identity,assignment] of Object.entries(runtime.pairAssignments)) {
+    assignment.members = identities.filter(memberIdentity => runtime.pairAssignments[memberIdentity] && runtime.pairAssignments[memberIdentity].group === assignment.group);
+  }
+}
+
+function validEngagementDots(definition,dots) {
+  if (!Array.isArray(dots) || dots.length !== (definition.options || []).length) return null;
+  if (dots.some(value => !Number.isInteger(value) || value < 0 || (!definition.stackDots && value > 1))) return null;
+  return dots.reduce((sum,value) => sum + value,0) <= (definition.dotBudget || 3) ? dots.slice() : null;
+}
+let keynopePairingRoom=null;
+function replacePairingRoom(runtime){
+  // Roles must never create groups: this allowlist deliberately excludes Impostor.
+  if(!['prerequisites','finishpair','cards','pair'].includes(runtime.definition.kind))return;
+  keynopePairingRoom={sessionCode:runtime.sessionCode,epoch:randomActivityCode(),assignments:Object.entries(runtime.pairAssignments||{}).map(([identity,value])=>({identity,group:value.group,members:value.members}))};
+}
+function validPrerequisiteCompletion(definition,checked){
+  return Array.isArray(checked)&&checked.length===(definition.prerequisites||[]).length&&checked.length>0&&checked.every(value=>value===true);
+}
+function prerequisitePublicState(runtime){
+  const finished=Object.entries(runtime.finishedAt||{}).sort((a,b)=>a[1]-b[1]);
+  return {startedAt:runtime.startedAt||0,stoppedAt:runtime.stoppedAt||0,finishedCount:finished.length,
+    finishedNames:runtime.definition.named?finished.map(([id])=>runtime.memberNames[id]||'Participant'):[],
+    ranking:runtime.definition.named&&runtime.phase>=3?finished.map(([id,time],index)=>({rank:index+1,name:runtime.memberNames[id]||'Participant',elapsedMs:Math.max(0,time-(runtime.startedAt||time))})):[]};
+}
+function balancedCompletionGroups(members,finishedAt,randomIndex) {
+  const finished = members.filter(id => finishedAt[id] != null).sort((a,b) => finishedAt[a] - finishedAt[b]);
+  const unfinished = members.filter(id => finishedAt[id] == null);
+  for (let i=unfinished.length-1;i>0;i--) { const j=randomIndex(i+1); [unfinished[i],unfinished[j]]=[unfinished[j],unfinished[i]]; }
+  const order = finished.concat(unfinished), groups=[];
+  while (order.length > 3) groups.push([order.shift(),order.pop()]);
+  if (order.length) groups.push(order);
+  return groups;
+}
+function finishBalancedPairs(runtime) {
+  if (runtime.phase !== 1) return;
+  const groups = balancedCompletionGroups(Object.keys(runtime.memberNames || {}),runtime.finishedAt || {},engagementRandomIndex);
+  runtime.groups=groups.map((members,index)=>({name:'Group '+(index+1),members:members.map(id=>runtime.memberNames[id])}));
+  runtime.participants=Object.keys(runtime.memberNames||{}).length;
+  runtime.pairAssignments={};
+  groups.forEach((members,group)=>members.forEach(id=>runtime.pairAssignments[id]={group,members}));
+  runtime.stoppedAt=Date.now();
+  replacePairingRoom(runtime);
+  runtime.phase=3;runtime.deadlineMs=0;runtime.pausedRemainingMs=0;
+  renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(false);
+}
+
+function beginPairShareDiscussion(runtime) {
+  if (!runtime || runtime.definition.kind !== 'pair') return;
+  assignEngagementGroups(runtime);
+  replacePairingRoom(runtime);
+  runtime.phase = 3;
+  runtime.pairMessages = [];
+  runtime.pausedRemainingMs = 0;
+  runtime.deadlineMs = Date.now() + (Number(runtime.definition.discussionSeconds) || 300) * 1000;
+  engagementSessionFor(runtime.definition).deadlineMs = runtime.deadlineMs;
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  publishHostedEngagementState(false);
+  runEngagementCountdown(runtime);
+}
+function finishPairShareDiscussion(runtime) {
+  if (!runtime || runtime.definition.kind !== 'pair') return;
+  clearInterval(keynopeEngagementCountdownTick);
+  keynopeEngagementCountdownTick = 0;
+  runtime.phase = 4;
+  runtime.deadlineMs = 0;
+  runtime.pausedRemainingMs = 0;
+  engagementSessionFor(runtime.definition).deadlineMs = 0;
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  publishHostedEngagementState(false);
+}
+function reopenPairShareJoin(runtime) {
+  if (!runtime || runtime.definition.kind !== 'pair') return;
+  runtime.phase = 1;
+  runtime.groups = [];
+  runtime.pairAssignments = {};
+  runtime.pairMessages = [];
+  runtime.pausedRemainingMs = 0;
+  runtime.deadlineMs = Date.now() + (Number(runtime.definition.joinSeconds) || 120) * 1000;
+  engagementSessionFor(runtime.definition).deadlineMs = runtime.deadlineMs;
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  publishHostedEngagementState(true,true);
+  runEngagementCountdown(runtime);
+}
+function addEngagementMinute(runtime) {
+  if (!runtime || (!runtime.deadlineMs && !runtime.pausedRemainingMs)) return;
+  if (runtime.pausedRemainingMs) runtime.pausedRemainingMs += 60000;
+  else runtime.deadlineMs = Math.max(Date.now(),Number(runtime.deadlineMs)) + 60000;
+  engagementSessionFor(runtime.definition).deadlineMs = runtime.deadlineMs || 0;
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  publishHostedEngagementState(false);
+  runEngagementCountdown(runtime);
+}
+function toggleEngagementTimer(runtime) {
+  if (!runtime) return;
+  if (runtime.pausedRemainingMs) {
+    runtime.deadlineMs = Date.now() + runtime.pausedRemainingMs;
+    runtime.pausedRemainingMs = 0;
+  } else if (runtime.deadlineMs) {
+    runtime.pausedRemainingMs = Math.max(1,Number(runtime.deadlineMs) - Date.now());
+    runtime.deadlineMs = 0;
+  } else return;
+  engagementSessionFor(runtime.definition).deadlineMs = runtime.deadlineMs || 0;
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  publishHostedEngagementState(false);
+  runEngagementCountdown(runtime);
+}
+function engagementRandomIndex(maximum) {
+  if (!globalThis.crypto || typeof globalThis.crypto.getRandomValues !== 'function') return Math.floor(Math.random() * maximum);
+  const limit = 0x100000000 - (0x100000000 % maximum);
+  const value = new Uint32Array(1);
+  do { globalThis.crypto.getRandomValues(value); } while (value[0] >= limit);
+  return value[0] % maximum;
+}
+function distributePlayingCards(runtime) {
+  const ranks = ['Aces','Kings','Queens','Jacks','10s','9s','8s','7s','6s','5s','4s','3s','2s'];
+  const labels = ['A','K','Q','J','10','9','8','7','6','5','4','3','2'];
+  const suits = ['♠','♥','♦','♣'];
+  const identities = Object.keys(runtime.memberNames || {}).filter(identity => runtime.memberNames[identity]);
+  for (let index = identities.length - 1; index > 0; index--) { const swap = engagementRandomIndex(index + 1); [identities[index],identities[swap]] = [identities[swap],identities[index]]; }
+  const targetCount = Math.max(2,Math.min(ranks.length,Number(runtime.definition.groupCount) || 4));
+  let groupCount = Math.max(1,Math.min(targetCount,identities.length || 1));
+  while (groupCount > 1 && Math.floor(identities.length / groupCount) < 2) groupCount--;
+  const slots = [];
+  const baseSize = groupCount ? Math.floor(identities.length / groupCount) : 0;
+  const extraGroups = groupCount ? identities.length % groupCount : 0;
+  const groupOrder = Array.from({length:groupCount},(_,index) => index);
+  for (let index = groupOrder.length - 1; index > 0; index--) { const swap = engagementRandomIndex(index + 1); [groupOrder[index],groupOrder[swap]] = [groupOrder[swap],groupOrder[index]]; }
+  const capacities = Array(groupCount).fill(baseSize);
+  for (let index = 0; index < extraGroups; index++) capacities[groupOrder[index]]++;
+  capacities.forEach((capacity,groupIndex) => { for (let count = 0; count < capacity; count++) slots.push(groupIndex); });
+  for (let index = slots.length - 1; index > 0; index--) { const swap = engagementRandomIndex(index + 1); [slots[index],slots[swap]] = [slots[swap],slots[index]]; }
+  runtime.cardAssignments = {};
+  const suitOrders = Array.from({length:groupCount},() => {
+    const order = suits.slice();
+    for (let index = order.length - 1; index > 0; index--) { const swap = engagementRandomIndex(index + 1); [order[index],order[swap]] = [order[swap],order[index]]; }
+    return order;
+  });
+  const suitIndexes = Array(groupCount).fill(0);
+  identities.forEach((identity,index) => {
+    const groupIndex = slots[index] || 0;
+    const order = suitOrders[groupIndex] || suits;
+    runtime.cardAssignments[identity] = {rank:ranks[groupIndex],label:labels[groupIndex],suit:order[suitIndexes[groupIndex]++ % order.length]};
+  });
+  rebuildPlayingCardGroups(runtime);
+}
+function rebuildPlayingCardGroups(runtime) {
+  const ranks = ['Aces','Kings','Queens','Jacks','10s','9s','8s','7s','6s','5s','4s','3s','2s'];
+  const labels = ['A','K','Q','J','10','9','8','7','6','5','4','3','2'];
+  runtime.groups = ranks.map((rank,index) => ({name:rank,label:labels[index],members:Object.entries(runtime.cardAssignments || {}).filter(([,card]) => card.rank === rank).map(([identity]) => runtime.memberNames[identity]).filter(Boolean)})).filter(group => group.members.length);
+}
+function dealPlayingCards(runtime) {
+  if (!runtime || runtime.definition.kind !== 'cards') return;
+  distributePlayingCards(runtime);
+  runtime.pairAssignments={};
+  const rankGroups=new Map();
+  for(const [id,card] of Object.entries(runtime.cardAssignments||{})){if(!rankGroups.has(card.rank))rankGroups.set(card.rank,[]);rankGroups.get(card.rank).push(id);}
+  [...rankGroups.values()].forEach((members,group)=>members.forEach(id=>runtime.pairAssignments[id]={group,members}));
+  replacePairingRoom(runtime);
+  runtime.phase = 3;
+  runtime.deadlineMs = 0;
+  runtime.pausedRemainingMs = 0;
+  engagementSessionFor(runtime.definition).deadlineMs = 0;
+  clearInterval(keynopeEngagementCountdownTick);
+  keynopeEngagementCountdownTick = 0;
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  publishHostedEngagementState(false);
+}
+async function revealImpostorRoles(runtime) {
+  if (!runtime || runtime.definition.kind !== 'impostor') return;
+  clearInterval(keynopeEngagementCountdownTick);
+  keynopeEngagementCountdownTick = 0;
+  runtime.phase = 2;
+  runtime.deadlineMs = 0;
+  runtime.pausedRemainingMs = 0;
+  engagementSessionFor(runtime.definition).deadlineMs = 0;
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  await publishHostedEngagementState(false);
+  const identities = Object.keys(runtime.memberNames || {}).filter(identity => runtime.memberNames[identity]);
+  for (let index = identities.length - 1; index > 0; index--) {
+    const swap = engagementRandomIndex(index + 1);
+    [identities[index],identities[swap]] = [identities[swap],identities[index]];
+  }
+  const impostors = Math.min(identities.length,Math.max(1,Number(runtime.definition.impostorCount) || 1));
+  runtime.roleAssignments = {};
+  identities.forEach((identity,index) => { runtime.roleAssignments[identity] = index < impostors ? 'impostor' : 'crew'; });
+  runtime.counts = [Math.max(0,identities.length-impostors),impostors];
+  await Promise.all(identities.map(identity => sendImpostorRole(runtime,identity,runtime.rolePublicKeys && runtime.rolePublicKeys[identity])));
+  if (keynopeEngagementRuntime !== runtime) return;
+  runtime.phase = 3;
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  publishHostedEngagementState(false);
+}
+function engagementButton(label,className,clicked) {
+  const button = document.createElement('button');
+  button.type = 'button'; button.textContent = label; button.className = className || '';
+  button.addEventListener('click',clicked); return button;
+}
+function showEngagementToast(message) {
+  const toast = document.createElement('div');
+  toast.className = 'keynope-engagement-toast'; toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(),1600);
+}
+async function copyEngagementJoinURL(url) {
+  try {
+    await navigator.clipboard.writeText(url);
+  } catch (_error) {
+    const field = document.createElement('textarea'); field.value = url; field.style.position = 'fixed'; field.style.opacity = '0';
+    document.body.appendChild(field); field.select(); document.execCommand('copy'); field.remove();
+  }
+  showEngagementToast('LINK COPIED');
+}
+function engagementRemainingText(deadlineMs) {
+  const remaining = Math.max(0,Math.ceil((Number(deadlineMs) - Date.now()) / 1000));
+  return String(Math.floor(remaining / 60)).padStart(2,'0') + ':' + String(remaining % 60).padStart(2,'0');
+}
+function runEngagementCountdown(runtime) {
+  clearInterval(keynopeEngagementCountdownTick);
+  keynopeEngagementCountdownTick = 0;
+  if (!runtime || !runtime.deadlineMs) return;
+  keynopeEngagementCountdownTick = setInterval(() => {
+    if (keynopeEngagementRuntime !== runtime) return;
+    if (!runtime.readOnly && runtime.definition.kind === 'pair' && runtime.phase === 3 && Date.now() >= runtime.deadlineMs) {
+      finishPairShareDiscussion(runtime);
+      return;
+    }
+    if (!runtime.readOnly && runtime.phase === 1 && Date.now() >= runtime.deadlineMs) {
+      if (KeynopeGames.next(runtime)) {renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(false);runEngagementCountdown(runtime);return;}
+      if ((runtime.definition.kind === 'finishpair' || runtime.definition.kind === 'prerequisites')) { finishBalancedPairs(runtime); return; }
+      if (runtime.definition.kind === 'pair') {
+        beginPairShareDiscussion(runtime);
+        return;
+      }
+      if (runtime.definition.kind === 'cards') {
+        dealPlayingCards(runtime);
+        return;
+      }
+		if (runtime.definition.kind === 'impostor') {
+			revealImpostorRoles(runtime);
+			return;
+		}
+      const grouping = runtime.definition.kind === 'pair' || runtime.definition.kind === 'cards';
+      runtime.phase = grouping ? 3 : 2;
+      if (grouping) assignEngagementGroups(runtime);
+      renderEngagementRuntime();
+      publishHostedEngagementPhase();
+      publishEngagementRuntime();
+      return;
+    }
+    const countdown = keynopeEngagementOverlay && keynopeEngagementOverlay.querySelector('.keynope-engagement-countdown');
+    if (countdown) countdown.textContent = engagementRemainingText(runtime.deadlineMs);
+  },250);
+}
+function engagementVoteSummary(definition,items) {
+  const names = (items || []).map(item => item.displayName).filter(Boolean);
+  if (definition.named && names.length) return '(' + names.join(', ') + ')';
+  const count = (items || []).length;
+  return count + ' vote' + (count === 1 ? '' : 's');
+}
+function renderFactOrFictionQuestion(content,runtime,reveal) {
+  const questions = runtime.definition.questions || [];
+  const questionIndex = Math.max(0,Math.min(questions.length - 1,Number(runtime.questionIndex) || 0));
+  const question = questions[questionIndex];
+  if (!question) return;
+  const shell = document.createElement('section'); shell.className = 'keynope-engagement-column keynope-engagement-current-question';
+  const number = document.createElement('strong'); number.textContent = (questionIndex + 1) + '/' + questions.length;
+  const title = document.createElement('h3'); title.textContent = question.prompt;
+  shell.append(number,title);
+  if (reveal) {
+    for (const [optionIndex,option] of (question.options || []).entries()) {
+      const row = document.createElement('div'); row.className = 'keynope-engagement-result';
+      const label = document.createElement('span'); label.textContent = (optionIndex === question.correct ? '✓ ' : '') + option;
+      const voters = (runtime.attributions || []).filter(item => Number.isInteger((item.choices || [])[questionIndex]) && (item.choices || [])[questionIndex] === optionIndex);
+      const count = document.createElement('strong'); count.textContent = engagementVoteSummary(runtime.definition,voters);
+      row.append(label,count); shell.appendChild(row);
+    }
+  }
+  content.appendChild(shell);
+}
+function renderEngagementRevealResults(content,runtime) {
+  if(runtime.definition.kind==='prerequisites'){
+    KeynopeGames.renderPrerequisites(content,{...runtime,game:runtime.readOnly?runtime.game:prerequisitePublicState(runtime)},{presenter:true});
+    if(!runtime.definition.named)return;
+  }
+  const definition = runtime.definition;
+  if (KeynopeGames.render(content,runtime,{presenter:true}))return;
+  const results = document.createElement('div'); results.className = 'keynope-engagement-results';
+  if (definition.kind === 'dots') {
+    (definition.options || []).map((option,index)=>({option,index,count:Number(runtime.counts[index])||0})).sort((a,b)=>b.count-a.count||a.index-b.index).forEach(item=>{
+      const row=document.createElement('div');row.className='keynope-engagement-result';
+      const names=definition.named?(runtime.attributions||[]).filter(v=>(v.dots||[])[item.index]>0).map(v=>v.displayName+' ×'+v.dots[item.index]).join(', '):'';
+      row.textContent=item.option+' — '+item.count+' dots '+(names?'('+names+')':'');results.appendChild(row);
+    });
+  } else if (definition.kind === 'pulse') {
+    (definition.options || []).forEach((option,index) => {
+      const row = document.createElement('div'); row.className = 'keynope-engagement-result';
+      const label = document.createElement('span'); label.textContent = (definition.kind === 'truefalse' && index === Number(definition.correct) ? '✓ ' : '') + option;
+      const voters = (runtime.attributions || []).filter(item => Number(item.choice) === index);
+      const count = document.createElement('strong'); count.textContent = engagementVoteSummary(definition,voters);
+      row.append(label,count); results.appendChild(row);
+    });
+  } else if (definition.kind === 'storm') {
+    (runtime.ideas || []).forEach((value,index) => {
+      const idea = document.createElement('div'); idea.className = 'keynope-engagement-result-idea';
+      if (definition.named && runtime.attributions && runtime.attributions[index]) {
+        const name = document.createElement('strong'); name.textContent = runtime.attributions[index].displayName || 'Participant';
+        idea.append(name,document.createTextNode(value));
+      } else idea.textContent = value;
+      results.appendChild(idea);
+    });
+    if (!(runtime.ideas || []).length) {
+      const empty = document.createElement('div'); empty.className = 'keynope-engagement-result-waiting'; empty.textContent = 'No ideas submitted'; results.appendChild(empty);
+    }
+  } else if (definition.kind === 'sort') {
+    const columns = document.createElement('div'); columns.className = 'keynope-engagement-columns';
+    (definition.zones || []).forEach((zone,zoneIndex) => {
+      const column = document.createElement('section'); column.className = 'keynope-engagement-column';
+      const title = document.createElement('h3'); title.textContent = zone; column.appendChild(title);
+      (definition.cards || []).forEach((card,cardIndex) => {
+        const voters = (runtime.attributions || []).filter(item => Number(item.assignments && item.assignments[cardIndex]) === zoneIndex);
+        if (!voters.length) return;
+        const row = document.createElement('div'); row.className = 'keynope-engagement-result';
+        const label = document.createElement('span'); label.textContent = card;
+        const value = document.createElement('strong'); value.textContent = engagementVoteSummary(definition,voters);
+        row.append(label,value); column.appendChild(row);
+      });
+      columns.appendChild(column);
+    });
+    results.appendChild(columns);
+  } else if (definition.kind === 'dual') {
+    const columns = document.createElement('div'); columns.className = 'keynope-engagement-columns';
+    (definition.options || []).forEach((heading,answerIndex) => {
+      const column = document.createElement('section'); column.className = 'keynope-engagement-column';
+      const title = document.createElement('h3'); title.textContent = heading; column.appendChild(title);
+      for (const item of runtime.attributions || []) {
+        const answer = String((item.answers || [])[answerIndex] || '').trim(); if (!answer) continue;
+        const row = document.createElement('div'); row.className = 'keynope-engagement-result-idea';
+        if (definition.named && item.displayName) { const name = document.createElement('strong'); name.textContent = item.displayName; row.append(name,document.createTextNode(answer)); } else row.textContent = answer;
+        column.appendChild(row);
+      }
+      columns.appendChild(column);
+    });
+    results.appendChild(columns);
+  } else if (definition.kind === 'quiz') {
+    (definition.questions || []).forEach((question,questionIndex) => {
+      const column = document.createElement('section'); column.className = 'keynope-engagement-column';
+      const title = document.createElement('h3'); title.textContent = question.prompt; column.appendChild(title);
+      (question.options || []).forEach((option,optionIndex) => {
+        const row = document.createElement('div'); row.className = 'keynope-engagement-result';
+        const label = document.createElement('span'); label.textContent = (optionIndex === question.correct ? '✓ ' : '') + option;
+        const voters = (runtime.attributions || []).filter(item => Number((item.choices || [])[questionIndex]) === optionIndex);
+        const count = document.createElement('strong'); count.textContent = engagementVoteSummary(definition,voters);
+        row.append(label,count); column.appendChild(row);
+      });
+      results.appendChild(column);
+    });
+  } else if (definition.kind === 'match') {
+    (definition.cards || []).forEach((card,cardIndex) => {
+      const row = document.createElement('div'); row.className = 'keynope-engagement-result';
+      const label = document.createElement('span'); label.textContent = card;
+      const tallies = (definition.zones || []).map((zone,zoneIndex) => ({zone,voters:(runtime.attributions || []).filter(item => (item.multiAssignments && item.multiAssignments[cardIndex] || []).includes(zoneIndex))})).filter(item => item.voters.length).sort((a,b) => b.voters.length-a.voters.length);
+      const destination = document.createElement('strong'); destination.textContent = tallies.length ? tallies.map(item => item.zone + ' ' + engagementVoteSummary(definition,item.voters)).join(' · ') : 'Unsorted';
+      row.append(label,destination); results.appendChild(row);
+    });
+  } else if (definition.kind === 'questions') {
+    const questions = (runtime.attributions || []).slice().sort((a,b) => Number(b.votes)-Number(a.votes));
+    for (const [index,item] of questions.entries()) {
+      const row = document.createElement('div'); row.className = 'keynope-engagement-result';
+      const label = document.createElement('span'); label.textContent = (index+1)+'. '+(item.question || '');
+      const voterItems = (item.voters || []).map(displayName => ({displayName}));
+      const votes = document.createElement('strong'); votes.textContent = (Number(item.votes)||0)+' dots'+(definition.named&&voterItems.length?' ('+[...new Set(voterItems.map(item=>item.displayName))].join(', ')+')':'');
+      row.append(label,votes);
+      if (definition.named && item.displayName) { const name = document.createElement('em'); name.textContent = item.displayName; row.appendChild(name); }
+      results.appendChild(row);
+    }
+  } else if (definition.kind === 'wall') {
+    const columns = document.createElement('div'); columns.className = 'keynope-engagement-columns';
+    (definition.options || []).forEach((heading,index) => {
+      const column = document.createElement('section'); column.className = 'keynope-engagement-column'; const title = document.createElement('h3'); title.textContent = heading; column.appendChild(title);
+      for (const item of (runtime.attributions || []).filter(value => Number(value.choice) === index)) {
+        const row = document.createElement('div'); row.className = 'keynope-engagement-result-idea';
+        const prefix = item.target ? 'For ' + item.target + ': ' : '';
+        if (definition.named && item.displayName) { const name = document.createElement('strong'); name.textContent = item.displayName; row.append(name,document.createTextNode(prefix + (item.idea || ''))); } else row.textContent = prefix + (item.idea || '');
+        column.appendChild(row);
+      }
+      columns.appendChild(column);
+    }); results.appendChild(columns);
+  } else if (definition.kind === 'draw' || definition.kind === 'introduction') {
+    const marquee = document.createElement('div'); marquee.className = 'keynope-engagement-marquee'; const track = document.createElement('div'); track.className = 'keynope-engagement-marquee-track';
+    for (const item of runtime.attributions || []) {
+      const portrait = document.createElement('figure'); portrait.className = 'keynope-engagement-portrait'; let drawing;
+      if (definition.kind === 'introduction') drawing=keynopeIntroductionAvatarElement(item.avatar,'keynope-introduction-result');
+      else { drawing=document.createElement('div'); drawing.className='keynope-engagement-drawing'; const rows=Array.isArray(item.drawing)?item.drawing:[]; for(let y=0;y<20;y++)for(let x=0;x<20;x++){const pixel=document.createElement('i');const value=Array.from(String(rows[y]||''))[x]||keynopeDrawingEmpty;pixel.textContent=value===keynopeDrawingEmpty?'':value;drawing.appendChild(pixel);} }
+      const caption = document.createElement('figcaption'); caption.textContent = definition.named ? (item.displayName || 'Participant') : 'Anonymous'; portrait.append(drawing,caption); track.appendChild(portrait);
+    }
+    if (!(runtime.attributions || []).length) { const empty=document.createElement('div'); empty.className='keynope-engagement-result-waiting'; empty.textContent='No portraits submitted'; results.appendChild(empty); }
+    else { marquee.appendChild(track); results.appendChild(marquee); }
+  } else if (definition.kind === 'expertise') {
+    const tags = new Map();
+    for (const item of runtime.attributions || []) for (const tag of item.tags || []) { const key=String(tag).trim(); if (!key) continue; if (!tags.has(key)) tags.set(key,[]); if (definition.named && item.displayName) tags.get(key).push(item.displayName); }
+    for (const [tag,names] of [...tags].sort((a,b) => b[1].length-a[1].length || a[0].localeCompare(b[0]))) { const row=document.createElement('div'); row.className='keynope-engagement-result'; const label=document.createElement('span'); label.textContent=tag; const count=(runtime.attributions||[]).filter(item=>(item.tags||[]).includes(tag)).length; const value=document.createElement('strong'); value.textContent=definition.named ? '('+names.join(', ')+')' : count+' vote'+(count===1?'':'s'); row.append(label,value); results.appendChild(row); }
+  } else if (definition.kind === 'pair' || definition.kind === 'cards' || definition.kind === 'finishpair' || definition.kind === 'prerequisites') {
+    const columns=document.createElement('div'); columns.className='keynope-engagement-columns';
+    for (const group of runtime.groups || []) { const area=document.createElement('section'); area.className='keynope-engagement-group'; if(definition.kind === 'cards'){const card=document.createElement('div');card.className='keynope-playing-card';const rank=document.createElement('strong');rank.textContent=group.label||String(group.name||'').replace(/s$/,'');const suits=document.createElement('span');suits.textContent='♠ ♥\n♦ ♣';card.append(rank,suits);area.appendChild(card);}else{const name=document.createElement('h3');name.textContent=group.name;area.appendChild(name);} const members=document.createElement('div'); members.className='keynope-engagement-group-members'; members.textContent=(group.members || []).join(', ') || 'Waiting for participants'; area.appendChild(members); columns.appendChild(area); }
+    results.appendChild(columns);
+  } else if (definition.kind === 'impostor') {
+    const roles = Object.values(runtime.roleAssignments || {});
+    const impostors = roles.length ? roles.filter(role => role === 'impostor').length : Number((runtime.counts || [])[1]) || 0;
+    const crew = roles.length ? Math.max(0,roles.length-impostors) : Number((runtime.counts || [])[0]) || 0;
+    const summary = document.createElement('div'); summary.className = 'keynope-impostor-presenter';
+    const heading = document.createElement('strong'); heading.textContent = 'ROLES REVEALED';
+    const detail = document.createElement('span'); detail.textContent = impostors + ' impostor' + (impostors === 1 ? '' : 's') + ' · ' + crew + ' crew';
+    const privacy = document.createElement('small'); privacy.textContent = 'Roles are shown privately on participant screens.';
+    summary.append(heading,detail,privacy); results.appendChild(summary);
+  }
+  content.appendChild(results);
+  KeynopeActivityDesign.results(results,runtime);
+}
+function renderEngagementRuntime() {
+  const runtime = keynopeEngagementRuntime;
+  if (!runtime || !keynopeEngagementOverlay) return;
+  const definition = runtime.definition;
+  const phase = keynopeEngagementPhases[runtime.phase];
+  const phaseLabel = definition.kind === 'onboarding' ? 'LOBBY' : definition.kind === 'truefalse' ? (runtime.questionRevealed ? 'REVEAL' : 'QUESTION') : definition.kind === 'pair' ? ({1:'JOIN',3:'DISCUSS',4:'DONE'}[runtime.phase] || phase) : definition.kind === 'cards' || definition.kind === 'impostor' ? ({1:'JOIN',3:'REVEAL'}[runtime.phase] || phase) : phase;
+  const board = document.createElement('section'); board.className = 'keynope-engagement-board';
+  const head = document.createElement('header'); head.className = 'keynope-engagement-head';
+  const activityNames = {...KeynopeGames.names,onboarding:'Onboarding',dots:'Dot Voting',finishpair:'The Race',prerequisites:'Prerequisites',pulse:'Pulse',storm:'Storm',sort:'Sort',dual:'Dual response',quiz:'Quiz',truefalse:'Fact or Fiction',match:'Mix & Match',questions:'Questions',wall:'Feedback Wall',draw:'Draw yourself',introduction:'Introduction',pair:'Pair Share',expertise:'Expertise Map',cards:'Playing Cards',impostor:'Impostor'};
+  const title = document.createElement('h1'); title.textContent = definition.prompt || activityNames[definition.kind] || 'Activity';
+  const badge = document.createElement('span'); badge.className = 'keynope-engagement-phase'; badge.textContent = definition.kind==='questions'&&runtime.phase===2?'VOTING':phaseLabel;
+  head.append(title,badge);
+  if ((runtime.deadlineMs || runtime.pausedRemainingMs) && (phase === 'OPEN' || (definition.kind === 'pair' && runtime.phase === 3))) {
+    const countdown = document.createElement('div');
+    countdown.className = 'keynope-engagement-countdown';
+    countdown.textContent = (runtime.pausedRemainingMs ? 'PAUSED ' : '') + engagementRemainingText(runtime.deadlineMs || Date.now() + runtime.pausedRemainingMs);
+    head.appendChild(countdown);
+  }
+  const revealed = phase === 'REVEAL' || phase === 'DISCUSS';
+  let join = null;
+  if (!revealed && (runtime.roomReady || runtime.participationUnavailable || (!runtime.readOnly && keynopeHostedEngagementControllerSurface))) {
+    join = document.createElement('div'); join.className = 'keynope-engagement-join';
+    if (runtime.roomReady && runtime.sessionCode) {
+      const instruction = document.createElement('span'); instruction.textContent = 'Join at keynope.sh/join/' + runtime.sessionCode;
+      const code = document.createElement('strong'); code.textContent = runtime.sessionCode;
+      const link = document.createElement('a'); link.href = runtime.joinUrl; link.target = '_blank'; link.rel = 'noopener'; link.textContent = runtime.joinUrl;
+      const copy = engagementButton('Copy','keynope-engagement-copy',() => copyEngagementJoinURL(runtime.joinUrl));
+      const participants = document.createElement('span'); participants.className = 'participants';
+      const grouping = runtime.definition.kind === 'onboarding' || runtime.definition.kind === 'pair' || runtime.definition.kind === 'cards' || runtime.definition.kind === 'impostor';
+      participants.textContent = (Number(runtime.participants) || 0) + (grouping ? ' joined' : ' submitted');
+      join.append(instruction,code,link,copy,participants);
+    } else {
+      join.textContent = runtime.participationUnavailable ? 'Could not open participant room — retrying…' + (runtime.participationError ? ' (' + runtime.participationError + ')' : '') : 'Opening participant room…';
+    }
+  }
+  const content = document.createElement('div'); content.className = 'keynope-engagement-content';
+  KeynopeActivityDesign.mount(content,runtime,{presenter:true});
+  if (!revealed && runtime.roomReady && runtime.qrCode) {
+    const qr = document.createElement('pre');
+    qr.className = 'keynope-engagement-qr';
+    qr.setAttribute('aria-label','Activity QR code');
+    qr.textContent = runtime.qrCode;
+    content.appendChild(qr);
+  }
+	const accepting = phase === 'OPEN' && !runtime.readOnly;
+  if (revealed) {
+    renderEngagementRevealResults(content,runtime);
+  } else if (definition.kind === 'onboarding') {
+    const roster = document.createElement('section'); roster.className = 'keynope-engagement-roster';
+    const heading = document.createElement('h3'); heading.textContent = 'Participants'; roster.appendChild(heading);
+    const members = Object.values(runtime.memberNames || {}).filter(name => name && name !== 'Presenter').sort((a,b) => a.localeCompare(b));
+    if (members.length) for (const name of members) { const item=document.createElement('span'); item.textContent=name; roster.appendChild(item); }
+    else { const empty=document.createElement('p'); empty.textContent='Waiting for people to join…'; roster.appendChild(empty); }
+    content.appendChild(roster);
+  } else if (KeynopeGames.has(definition.kind)) {
+    KeynopeGames.render(content,runtime,{presenter:!runtime.readOnly,changed:()=>{renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(true);publishHostedEngagementState(false);runEngagementCountdown(runtime);}});
+  } else if (definition.kind === 'prerequisites') {
+    KeynopeGames.renderPrerequisites(content,{...runtime,game:runtime.readOnly?runtime.game:prerequisitePublicState(runtime)},{presenter:true});
+  } else if (definition.kind === 'questions') {
+    const instruction=document.createElement('p');instruction.textContent=runtime.phase===1?'Submit your questions. Lock closes submissions and opens a three-dot voting round.':'Voting is open: distribute three dots across the submitted questions. Reveal closes voting and shows the ranked questions.';content.appendChild(instruction);
+    const tally=document.createElement('p');tally.textContent=(runtime.attributions||[]).length+' questions collected';content.appendChild(tally);
+  } else if (definition.kind === 'dots' || definition.kind === 'finishpair') {
+    const instruction=document.createElement('p');instruction.textContent=definition.kind==='dots'?'Participants distribute '+(definition.dotBudget||3)+' dots. Totals stay hidden until reveal.':'Participants press “I am finished!” when their task is complete. Groups appear when everyone finishes or you close the activity.';content.appendChild(instruction);
+  } else if (definition.kind === 'pulse') {
+    const choices = document.createElement('div'); choices.className = 'keynope-engagement-pulse';
+    (definition.options || []).forEach((option,index) => {
+		const choice = engagementButton(option,'keynope-engagement-choice',() => { runtime.counts[index]++; renderEngagementRuntime(); publishEngagementRuntime(); });
+      choice.disabled = !accepting;
+      KeynopeActivityDesign.pulseMeter(choice,index,(definition.options||[]).length);
+      choices.appendChild(choice);
+    });
+    content.appendChild(choices);
+  } else if (definition.kind === 'truefalse') {
+    renderFactOrFictionQuestion(content,runtime,!!runtime.questionRevealed);
+  } else if (definition.kind === 'storm') {
+    if (accepting) {
+      const form = document.createElement('form'); form.className = 'keynope-engagement-storm-form';
+      const input = document.createElement('input'); input.maxLength = 160; input.placeholder = 'Add an idea'; input.setAttribute('aria-label','Idea');
+      const add = engagementButton('Add','',() => {}); add.type = 'submit';
+		form.addEventListener('submit',event => { event.preventDefault(); const value = input.value.trim(); if (!value) return; runtime.ideas.push(value); input.value = ''; renderEngagementRuntime(); publishEngagementRuntime(); });
+      form.append(input,add); content.appendChild(form); requestAnimationFrame(() => input.focus());
+    }
+    const submitted = document.createElement('p'); submitted.textContent = runtime.ideas.length + ' submitted'; content.appendChild(submitted);
+  } else if (definition.kind === 'sort') {
+    const zones = document.createElement('div'); zones.className = 'keynope-engagement-zones';
+    const labels = ['Unsorted'].concat(definition.zones || []);
+    labels.forEach((zone,visibleIndex) => {
+      const zoneIndex = visibleIndex - 1;
+      const area = document.createElement('section'); area.className = 'keynope-engagement-zone'; area.dataset.zone = String(zoneIndex);
+      const heading = document.createElement('h3'); heading.textContent = zone; area.appendChild(heading);
+      area.addEventListener('dragover',event => { if (accepting) event.preventDefault(); });
+		area.addEventListener('drop',event => { if (!accepting) return; event.preventDefault(); const cardIndex = Number(event.dataTransfer.getData('text/keynope-card')); if (Number.isInteger(cardIndex)) { runtime.assignments[cardIndex] = zoneIndex; renderEngagementRuntime(); publishEngagementRuntime(); } });
+      (definition.cards || []).forEach((cardText,cardIndex) => {
+        if (runtime.assignments[cardIndex] !== zoneIndex) return;
+		const card = engagementButton(cardText,'keynope-engagement-sort-card',() => { if (!accepting) return; runtime.assignments[cardIndex] = (runtime.assignments[cardIndex] + 2) % labels.length - 1; renderEngagementRuntime(); publishEngagementRuntime(); });
+        card.draggable = accepting;
+        card.addEventListener('dragstart',event => event.dataTransfer.setData('text/keynope-card',String(cardIndex)));
+        area.appendChild(card);
+      });
+      zones.appendChild(area);
+    });
+    content.appendChild(zones);
+  }
+  const respondentNames = Array.isArray(runtime.respondents) ? runtime.respondents.filter(Boolean) : [];
+  const submittedCount = Number(runtime.participants) || respondentNames.length;
+  const submitted = document.createElement('p');
+  submitted.className = 'keynope-engagement-submitted';
+  const groupingActivity = definition.kind === 'onboarding' || definition.kind === 'pair' || definition.kind === 'cards' || definition.kind === 'impostor';
+  submitted.textContent = revealed
+    ? submittedCount + ' participant' + (submittedCount === 1 ? '' : 's')
+    : submittedCount + (groupingActivity ? ' joined' : ' submitted');
+  content.appendChild(submitted);
+  const controls = document.createElement('footer'); controls.className = 'keynope-engagement-controls';
+  const reset = engagementButton('Reset','reset',resetEngagementRuntime);
+  const close = engagementButton('Close','',closeEngagementRuntime);
+  if (!runtime.readOnly && definition.kind === 'ball') {
+    const game=KeynopeGames.init(runtime);
+    controls.append(reset,close);
+    if(game.stage==='join') {
+      const lock=engagementButton('Lock & toss randomly','primary',advanceEngagementRuntime);
+      lock.disabled=!game.volunteers.length;controls.append(lock);
+      controls.append(engagementButton('+1 min','',()=>addEngagementMinute(runtime)));
+      if(runtime.deadlineMs||runtime.pausedRemainingMs)controls.append(engagementButton(runtime.pausedRemainingMs?'Resume timer':'Pause timer','',()=>toggleEngagementTimer(runtime)));
+    }
+    if(game.stage!=='done')controls.append(engagementButton('End the Ball toss','',()=>{
+      game.stage='done';runtime.phase=3;runtime.deadlineMs=0;runtime.pausedRemainingMs=0;
+      renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(false);runEngagementCountdown(runtime);
+    }));
+    board.append(head);if(join)board.append(join);board.append(content,controls);keynopeEngagementOverlay.replaceChildren(board);return;
+  }
+  if (!runtime.readOnly && definition.kind === 'onboarding') {
+    controls.append(reset,close); board.append(head); if (join) board.append(join); board.append(content,controls); keynopeEngagementOverlay.replaceChildren(board); return;
+  }
+  if (!runtime.readOnly && definition.kind === 'truefalse') {
+    controls.append(reset,close);
+    if (runtime.questionRevealed) {
+      const isLast = (Number(runtime.questionIndex) || 0) >= Math.max(0,(definition.questions || []).length - 1);
+      controls.append(engagementButton(isLast ? 'Done' : 'Next','primary',advanceEngagementRuntime));
+    } else controls.append(engagementButton('Reveal','primary',advanceEngagementRuntime));
+    board.append(head); if (join) board.append(join); board.append(content,controls); keynopeEngagementOverlay.replaceChildren(board); return;
+  }
+  if (!runtime.readOnly && definition.kind === 'pair') {
+    controls.append(reset,close);
+    if (runtime.phase === 1) {
+      controls.append(engagementButton('+1 min','',() => addEngagementMinute(runtime)));
+      controls.append(engagementButton(runtime.pausedRemainingMs ? 'Resume timer' : 'Pause timer','',() => toggleEngagementTimer(runtime)));
+      controls.append(engagementButton('Pair now','primary',() => beginPairShareDiscussion(runtime)));
+    } else {
+      controls.append(engagementButton('Reopen joining','',() => reopenPairShareJoin(runtime)));
+      if (runtime.phase === 3) {
+        controls.append(engagementButton('+1 min','',() => addEngagementMinute(runtime)));
+        controls.append(engagementButton(runtime.pausedRemainingMs ? 'Resume timer' : 'Pause timer','primary',() => toggleEngagementTimer(runtime)));
+      }
+    }
+    board.append(head);
+    if (join) board.append(join);
+    board.append(content,controls);
+    keynopeEngagementOverlay.replaceChildren(board);
+    return;
+  }
+  if (!runtime.readOnly && definition.kind === 'cards') {
+    controls.append(reset,close);
+    if (runtime.phase === 1) {
+      controls.append(engagementButton('+1 min','',() => addEngagementMinute(runtime)));
+      controls.append(engagementButton(runtime.pausedRemainingMs ? 'Resume timer' : 'Pause timer','',() => toggleEngagementTimer(runtime)));
+      controls.append(engagementButton('Deal cards','primary',() => dealPlayingCards(runtime)));
+    }
+    board.append(head);
+    if (join) board.append(join);
+    board.append(content,controls);
+    keynopeEngagementOverlay.replaceChildren(board);
+    return;
+  }
+  if (!runtime.readOnly && definition.kind === 'impostor') {
+    controls.append(reset,close);
+    if (runtime.phase === 1) {
+      controls.append(engagementButton('+1 min','',() => addEngagementMinute(runtime)));
+      controls.append(engagementButton(runtime.pausedRemainingMs ? 'Resume timer' : 'Pause timer','',() => toggleEngagementTimer(runtime)));
+      controls.append(engagementButton('Reveal roles','primary',() => revealImpostorRoles(runtime)));
+    }
+    board.append(head);
+    if (join) board.append(join);
+    board.append(content,controls);
+    keynopeEngagementOverlay.replaceChildren(board);
+    return;
+  }
+  const grouping = definition.kind === 'pair' || definition.kind === 'cards';
+  const terminalPhase = runtime.phase >= keynopeEngagementPhases.length - 1 || ((definition.kind === 'draw' || definition.kind === 'introduction') && runtime.phase >= 3);
+  const nextPhase = grouping && runtime.phase === 1 ? 'REVEAL' : keynopeEngagementPhases[runtime.phase + 1];
+  const nextLabel = definition.kind==='prerequisites'&&runtime.phase===1?'Stop & reveal':terminalPhase ? 'Done' : 'Next: ' + nextPhase;
+  const next = engagementButton(nextLabel,'primary',terminalPhase ? closeEngagementRuntime : advanceEngagementRuntime);
+	if (!runtime.readOnly) controls.append(reset,close,next);
+  if (!runtime.readOnly && definition.timerSeconds > 0 && runtime.phase === 1) {
+    controls.insertBefore(engagementButton('+1 min','',() => addEngagementMinute(runtime)),next);
+    controls.insertBefore(engagementButton(runtime.pausedRemainingMs ? 'Resume timer' : 'Pause timer','',() => toggleEngagementTimer(runtime)),next);
+  }
+  board.append(head);
+  if (join) board.append(join);
+  board.append(content,controls);
+  keynopeEngagementOverlay.replaceChildren(board);
+}
+function openEngagementRuntime(showOverlay = true) {
+  const definition = currentEngagementDefinition();
+  if (!definition) return false;
+  if (keynopeEngagementRuntime && keynopeEngagementRuntime.slide === deck.pages[pageIndex].slide) {
+    if (showOverlay && !keynopeEngagementOverlay) {
+      keynopeEngagementOverlay = document.createElement('div');
+      keynopeEngagementOverlay.className = 'keynope-engagement-overlay';
+      keynopeEngagementOverlay.setAttribute('role','dialog'); keynopeEngagementOverlay.setAttribute('aria-modal','true');
+      document.body.appendChild(keynopeEngagementOverlay);
+      renderEngagementRuntime();
+      publishEngagementRuntime();
+    }
+    return true;
+  }
+  closeEngagementRuntime(true,false);
+	const session = engagementSessionFor(definition);
+	const runtimeDefinition = JSON.parse(JSON.stringify(definition));
+	runtimeDefinition.code = session.code;
+	const savedRuntime = session.runtime && session.runtime.definition.kind === definition.kind ? session.runtime : null;
+	if (!savedRuntime && (runtimeDefinition.kind === 'pair' || runtimeDefinition.kind === 'cards' || runtimeDefinition.kind === 'impostor')) session.deadlineMs = Date.now() + (Number(runtimeDefinition.joinSeconds) || 120) * 1000;
+	else if (!savedRuntime && runtimeDefinition.timerSeconds > 0 && !session.deadlineMs) session.deadlineMs = Date.now() + runtimeDefinition.timerSeconds * 1000;
+	keynopeEngagementRuntime = {startedAt:Date.now(),stoppedAt:0,finishedAt:{},definition:runtimeDefinition,slide:deck.pages[pageIndex].slide,phase:1,counts:[],ideas:[],assignments:[],respondents:[],attributions:[],groups:[],entryResponses:[],questionVotes:{},questionIndex:0,questionRevealed:false,memberNames:{},cardAssignments:{},roleAssignments:{},pairAssignments:{},pairMessages:[],readOnly:false,sessionCode:session.code,sessionId:session.sessionId || definition.id,joinUrl:session.joinUrl,qrCode:session.qrCode || '',roomReady:false,deadlineMs:session.deadlineMs || 0,pausedRemainingMs:0,participants:0};
+	if (savedRuntime) keynopeEngagementRuntime = {...savedRuntime,definition:runtimeDefinition,slide:deck.pages[pageIndex].slide,
+    deadlineMs:savedRuntime.resumeTimerMs ? Date.now()+savedRuntime.resumeTimerMs : 0,resumeTimerMs:0};
+	if (showOverlay) {
+		keynopeEngagementOverlay = document.createElement('div');
+		keynopeEngagementOverlay.className = 'keynope-engagement-overlay';
+		keynopeEngagementOverlay.setAttribute('role','dialog'); keynopeEngagementOverlay.setAttribute('aria-modal','true');
+		document.body.appendChild(keynopeEngagementOverlay);
+	}
+	for (const button of document.querySelectorAll('[aria-label="Activities"]')) button.classList.add('active');
+  renderActivityMarker();
+  const runtime = keynopeEngagementRuntime;
+  if (!savedRuntime) {
+    runtime.counts = (definition.options || []).map(() => 0);
+    runtime.assignments = (definition.cards || []).map(() => -1);
+  }
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  runEngagementCountdown(runtime);
+  startHostedEngagement();
+  if (typeof refreshEditorPresenterControls === 'function') refreshEditorPresenterControls();
+  return true;
+}
+function syncEngagementRuntime(runtime) {
+  if (keynopeEngagementControllerSurface) return;
+	if (!runtime) { if (keynopeEngagementRuntime) closeEngagementRuntime(false); return; }
+  keynopeEngagementRuntime = {
+    definition:runtime.definition,
+    slide:Number(runtime.slide),
+    phase:Number(runtime.phase) || 0,
+    counts:Array.isArray(runtime.counts) ? runtime.counts.slice() : [],
+    ideas:Array.isArray(runtime.ideas) ? runtime.ideas.slice() : [],
+    assignments:Array.isArray(runtime.assignments) ? runtime.assignments.slice() : [],
+    respondents:Array.isArray(runtime.respondents) ? runtime.respondents.slice() : [],
+    attributions:Array.isArray(runtime.attributions) ? runtime.attributions.map(item => ({...item,assignments:Array.isArray(item.assignments) ? item.assignments.slice() : [],voters:Array.isArray(item.voters) ? item.voters.slice() : []})) : [],
+    groups:Array.isArray(runtime.groups) ? runtime.groups.map(item => ({...item,members:Array.isArray(item.members) ? item.members.slice() : []})) : [],
+    sessionCode:runtime.sessionCode || '',
+    joinUrl:runtime.joinUrl || '',
+    qrCode:runtime.qrCode || '',
+    roomReady:!!runtime.roomReady,
+    deadlineMs:Number(runtime.deadlineMs) || 0,
+    participants:Number(runtime.participants) || 0,
+    questionIndex:Number(runtime.questionIndex) || 0,
+    questionRevealed:!!runtime.questionRevealed,
+    readOnly:true
+  };
+  if (!keynopeEngagementOverlay) {
+    keynopeEngagementOverlay = document.createElement('div');
+    keynopeEngagementOverlay.className = 'keynope-engagement-overlay';
+    keynopeEngagementOverlay.setAttribute('role','dialog');
+    document.body.appendChild(keynopeEngagementOverlay);
+  }
+  renderEngagementRuntime();
+  runEngagementCountdown(keynopeEngagementRuntime);
+}
+	document.addEventListener('keydown',event => {
+	if (keynopeOnboardingResetBlocker) {
+		event.stopImmediatePropagation();
+		if (event.key === 'Escape') {
+			event.preventDefault(); keynopeOnboardingResetBlocker.remove(); keynopeOnboardingResetBlocker = null;
+		} else if ((event.key === 'Enter' || event.key === ' ') && event.target instanceof HTMLButtonElement) {
+			event.preventDefault(); event.target.click();
+		} else if (event.key !== 'Tab') event.preventDefault();
+		return;
+	}
+	if (keynopeEngagementRuntime && keynopeEngagementOverlay) {
+	if (keynopeFormControlTarget(event.target)) { if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); closeEngagementRuntime(); } return; }
+    event.preventDefault(); event.stopImmediatePropagation();
+    if (event.key === 'Escape' || event.key.toLowerCase() === 'q') closeEngagementRuntime();
+    else if (event.key === 'Enter' || event.key === ' ') advanceEngagementRuntime();
+    else if (event.key.toLowerCase() === 'r') resetEngagementRuntime();
+    return;
+  }
+  if (!event.metaKey && !event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'g' && !keynopeFormControlTarget(event.target)) {
+    if (openEngagementRuntime(true)) { event.preventDefault(); event.stopImmediatePropagation(); }
+  }
+},true);
+activityMarker.addEventListener('pointerdown',event => {
+  event.preventDefault();
+  event.stopImmediatePropagation();
+});
+activityMarker.addEventListener('click',event => {
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if (window.KEYNOPE_PRESENTER && !keynopeEngagementControllerSurface) return;
+  openEngagementRuntime(true);
+});
 if (keynopeAppSurface) {
   document.documentElement.setAttribute('data-keynope-app', 'true');
   document.documentElement.setAttribute('data-keynope-notes', 'true');
@@ -4077,7 +4886,7 @@ function sizeCanvasToAspect(availableWidth, availableHeight, targetAspect) {
 }
 function sizeEditorCanvas(stageRect) {
   const targetAspect = 16 / 9;
-  const topChromeHeight = 52;
+  const topChromeHeight = 96;
   const bottomChromeHeight = 52;
   const notesHeight = editorSpeakerNotesVisible ? 132 : 0;
   const notesGap = editorSpeakerNotesVisible ? 8 : 0;
@@ -4138,6 +4947,7 @@ function label(page) {
   return n + '/' + page.slideCount;
 }
 function renderLines(lines) {
+  lines = foregroundConnectorLines(lines);
   let html = '';
   for (const line of lines || []) {
     if (line.role === 'transparent-text' || line.role === 'transparent-image') continue;
@@ -4148,7 +4958,11 @@ function renderLines(lines) {
   }
   return html;
 }
+function foregroundConnectorLines(lines) {
+  return (lines||[]).filter(line=>line.role!=='connector').concat((lines||[]).filter(line=>line.role==='connector'));
+}
 function drawCanvasLines(lines) {
+  lines = foregroundConnectorLines(lines);
   presenterContext.font = canvasFont;
   presenterContext.textBaseline = 'top';
   drawEditorCanvasSelection();
@@ -4156,6 +4970,10 @@ function drawCanvasLines(lines) {
   const textOutlineMasks = canvasTextPixelOutlineMasks(lines, textOutlineElements);
   const drawnTextOutlines = new Set();
   for (const line of lines || []) {
+    if (line.trueType) {
+      KeynopeTrueType.draw(presenterContext,line,canvasCharWidth,canvasCell,deck.cols,deck.rows,editorCanvasCaret);
+      continue;
+    }
     if (line.role === 'transparent-text' || line.role === 'transparent-image') continue;
     if (line.role === 'outline') {
       if (textOutlineElements.has(line.element)) continue;
@@ -4184,6 +5002,7 @@ function drawCanvasLines(lines) {
   drawEditorCanvasCaret(lines);
 }
 function drawEditorCanvasSelection() {
+  if (editorCanvasCaret && editorCanvasCaret.trueType) return;
   if (!keynopeAppSurface || !editorCanvasCaret || !editorCanvasCaret.selection) return;
   presenterContext.fillStyle = 'rgba(85, 170, 255, .58)';
   for (const row of editorCanvasCaret.selection) {
@@ -4191,6 +5010,7 @@ function drawEditorCanvasSelection() {
   }
 }
 function drawEditorCanvasCaret(lines) {
+  if (editorCanvasCaret && editorCanvasCaret.trueType) return;
   if (!keynopeAppSurface || !editorCanvasCaret || (performance.now() - editorCanvasCaret.started) % 900 >= 650) return;
   if (editorCanvasCaret.exact) {
     const caret = editorCanvasCaret.exact;
@@ -5033,11 +5853,13 @@ function drawCanvasLinkUnderlines(lines) {
 }
 function render() {
   const page = deck.pages[pageIndex];
+	if (keynopeEngagementRuntime && keynopeEngagementRuntime.slide !== page.slide) closeEngagementRuntime();
   stage.style.background = page.bg;
   effectLayer.style.color = page.fg;
   contentLayer.style.color = page.fg;
   chromeLayer.innerHTML = keynopeAppSurface && !page.hideChromePageNumber ? '<span class="page-no">' + esc(label(page)) + '</span>' : '';
   drawFrame();
+  renderActivityMarker();
   if (keynopeAppSurface) requestAnimationFrame(renderEditorCanvasOverlay);
 }
 function lineKey(line) {
@@ -5529,9 +6351,11 @@ function effectLines(page, frame) {
   }
   return out;
 }
+let getEditorConnectorPreview = () => [];
 function drawFrame() {
   const page = presenterPageAt(pageIndex);
   if (!page) return;
+  if (!keynopeAppSurface && page.tabOnly) { drawPresenterSnow(); return; }
   if (window.KEYNOPE_PRESENTER && !presenterPresenting && !presenterMainSurface && !keynopeAppSurface) {
     drawPresenterSnow();
     return;
@@ -5547,6 +6371,8 @@ function drawFrame() {
   const contentLines = presenterContentLinesFor(pageIndex, page);
   if (keynopeCanvasRenderer) {
     drawPresenterPage(page, frame, contentLines);
+    const connectorPreview = keynopeAppSurface ? getEditorConnectorPreview() : [];
+    if (connectorPreview.length) drawCanvasLines(connectorPreview);
     if (presenterTimerMode === 'running') drawPresenterTestCard();
     drawPresenterTimer();
     drawEditorExportConfirmation();
@@ -5561,7 +6387,7 @@ function drawFrame() {
   effectLayer.innerHTML = renderLines(applyBackdropTransparency(effectLinesWithBackground, page.transparency || []));
   contentLayer.innerHTML = renderLines(contentLines) + renderLinkUnderlines(contentLines) + renderLinkHitAreas(contentLines);
 }
-function drawPresenterPage(page, frameValue, contentLines) {
+function drawPresenterPage(page, frameValue, contentLines, hideChrome = false) {
   const effectLinesWithBackground = (page.backgroundLines || []).concat(effectLines(page, frameValue));
   presenterCanvas.style.display = 'block';
   linkLayer.style.display = 'block';
@@ -5576,12 +6402,13 @@ function drawPresenterPage(page, frameValue, contentLines) {
   drawCanvasBackdropTransparency(effectLinesWithBackground, page.transparency || []);
   drawCanvasLines(contentLines);
   drawCanvasLinkUnderlines(contentLines);
-  drawCanvasPageLabel(page);
+  if (!hideChrome) drawCanvasPageLabel(page);
   if (!keynopeAppSurface) drawPresenterPhosphor(presenterCanvas.width, presenterCanvas.height);
 }
 function drawPresenterPageFallback() {
   const page = presenterPageAt(pageIndex);
   if (!page) return;
+  if (!keynopeAppSurface && page.tabOnly) { drawPresenterSnow(); return; }
   presenterCanvas.style.display = 'block';
   effectLayer.style.display = 'none';
   contentLayer.style.display = 'none';
@@ -5599,6 +6426,12 @@ function presenterPageAt(index) {
   if (!deck.pages || !deck.pages.length) return null;
   index = Math.max(0, Math.min(deck.pages.length - 1, index));
   return deck.pages[index] || null;
+}
+function nextPresentationPage(index, delta) {
+  for (let i = index + delta; i >= 0 && i < deck.pages.length; i += delta) {
+    if (!deck.pages[i].tabOnly) return i;
+  }
+  return index;
 }
 function presenterContentLinesFor(index, page) {
   if (!page) return [];
@@ -5660,7 +6493,7 @@ function activateLink(target) {
   if (!target) return false;
   if (/^#?\d+$/.test(target)) {
     const slide = Math.max(1, parseInt(target.replace('#', ''), 10));
-    const index = deck.pages.findIndex(page => page.slide === slide - 1 && page.page === 0);
+    const index = deck.pages.findIndex(page => page.slide === slide - 1 && page.page === 0 && !page.tabOnly);
     if (index >= 0) {
       const previousPageIndex = pageIndex;
       pageIndex = index;
@@ -5676,10 +6509,25 @@ function activateLink(target) {
   }
   return false;
 }
+function canvasLinkAtPointer(event) {
+  if (!presenterCanvas || presenterCanvas.style.display === 'none') return '';
+  if (keynopeAppSurface && !keynopeEditorPresentationActive) return '';
+  const rect = presenterCanvas.getBoundingClientRect();
+  if (!rect.width || !rect.height || event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) return '';
+  const col = Math.floor((event.clientX - rect.left) * presenterCanvas.width / rect.width / Math.max(1,canvasCharWidth));
+  const row = Math.floor((event.clientY - rect.top) * presenterCanvas.height / rect.height / Math.max(1,canvasCell));
+  const page = deck.pages && deck.pages[pageIndex];
+  if (!page) return '';
+  const lines = presenterContentLinesFor(pageIndex,page);
+  for (const group of linkGroups(lines,true)) {
+    if (col >= group.minCol && col < group.maxCol && row >= group.minRow && row <= group.maxRow) return group.link || '';
+  }
+  return '';
+}
 addEventListener('pointerdown', e => {
   const link = e.target.closest && e.target.closest('[data-link]');
-  if (!link) return;
-  const target = link.getAttribute('data-link') || '';
+  const target = link ? (link.getAttribute('data-link') || '') : canvasLinkAtPointer(e);
+  if (!target) return;
   if (activateLink(target)) {
     e.preventDefault();
     e.stopPropagation();
@@ -5736,10 +6584,10 @@ addEventListener('keydown', e => {
       return;
     }
     const previousPageIndex = pageIndex;
-    if (['ArrowRight', ' ', 'n', 'PageDown'].includes(e.key)) pageIndex = Math.min(deck.pages.length - 1, pageIndex + 1);
-    else if (['ArrowLeft', 'PageUp'].includes(e.key)) pageIndex = Math.max(0, pageIndex - 1);
-    else if (e.key === 'Home') pageIndex = 0;
-    else if (e.key === 'End') pageIndex = deck.pages.length - 1;
+    if (['ArrowRight', ' ', 'n', 'PageDown'].includes(e.key)) pageIndex = nextPresentationPage(pageIndex, 1);
+    else if (['ArrowLeft', 'PageUp'].includes(e.key)) pageIndex = nextPresentationPage(pageIndex, -1);
+    else if (e.key === 'Home') { const first = nextPresentationPage(-1, 1); if (first >= 0) pageIndex = first; }
+    else if (e.key === 'End') { const last = nextPresentationPage(deck.pages.length, -1); if (last < deck.pages.length) pageIndex = last; }
     else if (e.key === '0') {
       presenterTimerMode = 'config';
       presenterTimerInput = '';
@@ -5768,10 +6616,10 @@ addEventListener('keydown', e => {
     return;
   }
   const previousPageIndex = pageIndex;
-  if (['ArrowRight', ' ', 'n', 'PageDown'].includes(e.key)) pageIndex = Math.min(deck.pages.length - 1, pageIndex + 1);
-  else if (['ArrowLeft', 'PageUp'].includes(e.key)) pageIndex = Math.max(0, pageIndex - 1);
-  else if (e.key === 'Home') pageIndex = 0;
-  else if (e.key === 'End') pageIndex = deck.pages.length - 1;
+  if (['ArrowRight', ' ', 'n', 'PageDown'].includes(e.key)) pageIndex = nextPresentationPage(pageIndex, 1);
+  else if (['ArrowLeft', 'PageUp'].includes(e.key)) pageIndex = nextPresentationPage(pageIndex, -1);
+  else if (e.key === 'Home') { const first = nextPresentationPage(-1, 1); if (first >= 0) pageIndex = first; }
+  else if (e.key === 'End') { const last = nextPresentationPage(deck.pages.length, -1); if (last < deck.pages.length) pageIndex = last; }
   else return;
   e.preventDefault();
   e.stopPropagation();
@@ -5786,11 +6634,14 @@ let presenterPresenting = false;
 let presenterTimerMode = '';
 let presenterTimerInput = '';
 let presenterTimerEndMS = 0;
+let presenterTimerBroadcast = false;
+let presenterTimerCanBroadcast = () => false;
 let presenterTransitionStarted = 0;
 let presenterTransitionUntil = 0;
 let presenterTransitionFromIndex = 0;
 let presenterTransitionToIndex = 0;
 function startPageTransition(fromIndex, toIndex) {
+  if (deck.pages[fromIndex]?.tabOnly || deck.pages[toIndex]?.tabOnly) { presenterTransitionUntil = 0; return; }
   if (fromIndex === toIndex || keynopeAppSurface) return;
   presenterTransitionStarted = performance.now();
   presenterTransitionUntil = presenterTransitionStarted + 180;
@@ -5802,7 +6653,7 @@ async function refreshPresenterSlide(slideIndex) {
     location.reload();
     return false;
   }
-  const response = await fetch('/slide?index=' + encodeURIComponent(slideIndex), {cache: 'no-store'});
+  const response = await fetch('/slide?index=' + encodeURIComponent(slideIndex), {cache: 'no-store',signal:AbortSignal.timeout(12000)});
   if (!response.ok) {
     return false;
   }
@@ -5826,14 +6677,27 @@ async function refreshPresenterSlide(slideIndex) {
 async function syncPresenterState() {
   if (!window.KEYNOPE_PRESENTER) return;
   try {
-    const response = await fetch('/state', {cache: 'no-store'});
+    const response = await fetch('/state', {cache: 'no-store',signal:AbortSignal.timeout(12000)});
     if (!response.ok) return;
     const state = await response.json();
+    if (Number.isFinite(state.version) && state.version < presenterVersion) return;
+    if (keynopeAppSurface) window.keynopeParticipantPosition = {slide:state.slide,page:state.page,key:[state.slide,state.page,state.deckVersion||0].join(':')};
     if (keynopeAppSurface && keynopeEditorMasterMode) return;
     const initialSync = presenterVersion < 0;
     let slideRefreshed = false;
     if (initialSync) {
-      presenterDeckVersion = state.deckVersion || 0;
+      // A newly opened presentation may have booted from the original HTML.
+      // Load every cached slide, not just the last one that was edited.
+      const snapshotResponse = await fetch('/slides', {cache:'no-store',signal:AbortSignal.timeout(12000)});
+      if (!snapshotResponse.ok) return;
+      const snapshot = await snapshotResponse.json();
+      if (!Array.isArray(snapshot.pages) || !snapshot.pages.length) return;
+      deck.pages = snapshot.pages;
+      presenterDeckVersion = snapshot.version;
+      contentAnimationCache.clear();
+      effectState.clear();
+      pageIndex = Math.min(pageIndex, deck.pages.length - 1);
+      slideRefreshed = true;
 	} else if ((state.deckVersion || 0) !== presenterDeckVersion) {
 		if (keynopeAppSurface && keynopeEditorVisualResizeActive) return;
 		presenterDeckVersion = state.deckVersion || 0;
@@ -5844,6 +6708,7 @@ async function syncPresenterState() {
     presenterVersion = state.version;
     const wasPresenting = presenterPresenting;
     presenterPresenting = !!state.presenting;
+	syncEngagementRuntime(state.engagement);
     if (!presenterMainSurface) {
       presenterTimerMode = state.timerMode || '';
       presenterTimerInput = state.timerInput || '';
@@ -6051,6 +6916,7 @@ if (keynopeAppSurface) {
   let editorElementClipboard = [];
   let editorActionQueue = Promise.resolve();
   let activeCanvasDrag = null;
+	let canvasMemberBounds = new Map();
   let activeCanvasVisualMenu = null;
   let activeCanvasTextEffectDropdown = null;
   let activeCanvasLinkDialog = null;
@@ -6060,8 +6926,14 @@ if (keynopeAppSurface) {
   let defaultEditorFont = null;
   let nativeEditorFontLibrary = null;
   let lastPublishedEditorDirty = null;
+  let lastPublishedEditorTabsAvailable = null;
   function publishEditorDirtyState() {
-    const dirty = !!(editorState && editorState.dirty);
+    const tabsAvailable = !!editorState?.hasActivities && !editorState?.masterMode;
+    if (tabsAvailable !== lastPublishedEditorTabsAvailable) {
+      lastPublishedEditorTabsAvailable = tabsAvailable;
+      window.webkit?.messageHandlers?.keynopePresenter?.postMessage({action:'editor-tabs-availability',available:tabsAvailable});
+    }
+    const dirty = !!(editorState && editorState.dirty) || !!activeInlineEditor?.isDirty();
     saveButton.disabled = !dirty;
     if (dirty === lastPublishedEditorDirty && !window.KEYNOPE_WEB_EDITOR) return;
     lastPublishedEditorDirty = dirty;
@@ -6074,8 +6946,8 @@ if (keynopeAppSurface) {
     return pending;
   }
   async function performEditorAction(action) {
-    const selectionOnly = action.action === 'select-element';
-    if (!['select-element','update-slide-notes','confirm-save','start-timer','stop-timer'].includes(action.action)) {
+    const selectionOnly = ['select-element','select-elements'].includes(action.action);
+    if (!['select-element','select-elements','enter-group','exit-group','update-slide-notes','confirm-save','start-timer','stop-timer'].includes(action.action)) {
       editorMutationPreviewSequence++;
     }
     const enteringMasters = action.action === 'toggle-master-mode' && editorState && !editorState.masterMode;
@@ -6348,6 +7220,244 @@ if (keynopeAppSurface) {
     wrapper.append(caption, button);
     parent.appendChild(wrapper);
   }
+  let activeEngagementEditor = null;
+  function engagementLines(value) {
+    return String(value || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean);
+  }
+  function engagementQuizLines(value) {
+    return engagementLines(value).map(line => {
+      const parts = line.split('|').map(item => item.trim()).filter(Boolean);
+      const prompt = parts.shift() || '';
+      let correct = parts.findIndex(item => item.startsWith('*'));
+      if (correct < 0) correct = 0;
+      return {prompt,options:parts.map(item => item.replace(/^\*/,'')),correct};
+    }).filter(item => item.prompt && item.options.length >= 2);
+  }
+  function engagementTrueFalseLines(value) {
+    return engagementLines(value).map(line => {
+      const parts = line.split('|').map(item => item.trim());
+      const answer = String(parts.shift() || '').toLowerCase();
+      const prompt = parts.join(' | ').trim();
+      return {prompt:answer === 'fact' || answer === 'fiction' ? prompt : '',options:['Fact','Fiction'],correct:answer === 'fiction' ? 1 : 0};
+    }).filter(item => item.prompt);
+  }
+  function closeEngagementEditor() {
+    if (!activeEngagementEditor) return;
+    activeEngagementEditor.remove();
+    activeEngagementEditor = null;
+  }
+  function openEngagementEditor() {
+    if (!editorState || editorState.masterMode) return;
+    closeEngagementEditor();
+    const slide = editorState.slides && editorState.slides[editorState.current];
+    const original = slide && slide.engagement ? slide.engagement : null;
+    let kind = original && original.kind || 'pulse';
+    let anonymous = original ? !original.named : true;
+    const blocker = document.createElement('div');
+    blocker.className = 'keynope-modal-blocker keynope-engagement-blocker';
+    const dialog = document.createElement('section');
+    dialog.className = 'keynope-engagement-dialog';
+    dialog.setAttribute('role','dialog');
+    dialog.setAttribute('aria-modal','true');
+    dialog.innerHTML = '<h2>Activity</h2>';
+    const kinds = document.createElement('div');
+    kinds.className = 'keynope-engagement-kind';
+    const form = document.createElement('div');
+    const actions = document.createElement('div');
+    actions.className = 'keynope-engagement-actions';
+    const remove = document.createElement('button');
+    remove.type = 'button'; remove.className = 'danger'; remove.textContent = 'Remove';
+    remove.hidden = !original;
+    const cancel = document.createElement('button');
+    cancel.type = 'button'; cancel.textContent = 'Cancel';
+    const save = document.createElement('button');
+    save.type = 'button'; save.textContent = 'Save activity';
+    let dotBudgetInput, stackDotsInput, prerequisiteInputs=[];
+    let promptInput, optionsInput, zonesInput, cardsInput, questionsInput, correctInput, groupSizeInput, groupCountInput, impostorCountInput, anonymousInput, timerEnabledInput, timerMinutesInput, timerSecondsInput, joinMinutesInput, joinSecondsInput, discussionMinutesInput, discussionSecondsInput;
+    const renderForm = () => {
+      form.replaceChildren();
+      const promptLabel = document.createElement('label');
+      promptLabel.textContent = 'Prompt';
+      promptInput = document.createElement('input');
+      promptInput.maxLength = 500;
+      promptInput.value = original && original.kind === kind ? (original.prompt || '') : '';
+      const placeholders = {onboarding:'Join this presentation',pulse:'How confident are we?',storm:'What should we try next?',sort:'Put every card where it belongs',dual:'Reflect on this session',quiz:'Knowledge check',truefalse:'Fact or Fiction',match:'Where could each card belong?',questions:'What would you like to ask?',wall:'Share some appreciation',draw:'Draw yourself',introduction:'Introduce yourself',pair:'Discuss this with your partner',expertise:'What expertise is in the room?',cards:'Meet your playing-card group',impostor:'Who among us is the impostor?'};
+      promptInput.placeholder = placeholders[kind] || 'Activity prompt';
+      promptLabel.appendChild(promptInput);
+      form.appendChild(promptLabel);
+      if (kind==='prerequisites') {
+        const help=document.createElement('p');help.textContent='List each prerequisite and its instructions. Participants check items off, then confirm I AM FINISHED. Stop, timeout or everyone finishing reveals balanced pairs: fastest with slowest; unfinished people are appended in random order. Named mode shows finishers and a timed ranking; Anonymous hides those. The participant checklist does not disclose pairing in advance.';form.appendChild(help);
+        prerequisiteInputs=[];
+        const list=document.createElement('div');form.appendChild(list);
+        const addItem=(item={title:'',instructions:''})=>{if(prerequisiteInputs.length>=40)return;const row=document.createElement('section');const titleLabel=document.createElement('label');titleLabel.textContent='Prerequisite';const title=document.createElement('input');title.maxLength=160;title.value=item.title;titleLabel.appendChild(title);const instructionsLabel=document.createElement('label');instructionsLabel.textContent='Instructions';const instructions=document.createElement('textarea');instructions.maxLength=4000;instructions.value=item.instructions;instructionsLabel.appendChild(instructions);const fields={title,instructions};const remove=engagementButton('Remove item','',()=>{prerequisiteInputs=prerequisiteInputs.filter(value=>value!==fields);row.remove();});row.append(titleLabel,instructionsLabel,remove);list.appendChild(row);prerequisiteInputs.push(fields);};
+        (original&&original.kind===kind?original.prerequisites||[]:[{title:'Item 1',instructions:''}]).forEach(addItem);
+        form.appendChild(engagementButton('Add prerequisite','',()=>addItem()));
+      } else if (KeynopeGames.has(kind)) {
+        const label=document.createElement('label');label.textContent=kind==='hunt'?'Possible findings — one per line; prefix each expected answer with *':kind==='gallery'?'Exhibits to review — one per line':kind==='teach'?'Topics — one per line':kind==='three'?'Presenter explanation (shown on reveal)':'Items / agreements — one per line';
+        optionsInput=document.createElement('textarea');optionsInput.value=original&&original.kind===kind?(original.options||[]).join('\n'):'';label.appendChild(optionsInput);
+        if(['gallery','hunt','teach','agreements','three'].includes(kind))form.appendChild(label);
+        if(kind==='gallery'||kind==='hunt'){
+          const help=document.createElement('p');
+          help.textContent=kind==='gallery'?'List the work people should review: a group project, proposal, scenario or idea per line. Include a short description. Participants choose an exhibit and submit a strength, question or suggestion. Only tallies appear during collection; feedback opens on reveal.':'Set the challenge in Prompt (for example: Which observations suggest fraud?). List relevant findings mixed with distractions below. Start expected answers with *; participants will not see those markers. They select all matching findings, then compare with your expected answers on reveal. This is a checklist exercise, not a document search.';
+          form.appendChild(help);
+          optionsInput.placeholder=kind==='gallery'?'Group 1 — Claims assessment workflow\nGroup 2 — Suspicious transaction triage':'*Multiple claims using the same receipt\nA customer updates their phone number\n*Conflicting incident dates';
+        }
+        if(kind==='teach'){const help=document.createElement('p');help.textContent='Create groups, prepare for 3 minutes, then teach for 1 minute per group. Use +1 min or pause to adjust live.';form.appendChild(help);}
+        if(kind==='three'){const help=document.createElement('p');help.textContent='Ask the group a question in Prompt. Three different participants each submit one answer before you give your explanation. Answers appear live; collection closes automatically after the third person responds. Use Reveal to show your explanation and compare the ideas together.';form.appendChild(help);promptInput.placeholder='How would you approach this problem?';}
+      } else if (kind === 'dots') {
+        const label=document.createElement('label');label.textContent='Options — one per line';optionsInput=document.createElement('textarea');optionsInput.value=original&&original.kind===kind?(original.options||[]).join('\n'):'First idea\nSecond idea\nThird idea';label.appendChild(optionsInput);form.appendChild(label);
+        const budget=document.createElement('label');budget.textContent='Dots per participant';dotBudgetInput=document.createElement('input');dotBudgetInput.type='number';dotBudgetInput.min='1';dotBudgetInput.max='20';dotBudgetInput.value=original&&original.dotBudget||3;budget.appendChild(dotBudgetInput);form.appendChild(budget);
+        const stacking=document.createElement('label');stackDotsInput=document.createElement('input');stackDotsInput.type='checkbox';stackDotsInput.checked=!!(original&&original.stackDots);stacking.append(stackDotsInput,document.createTextNode('Allow multiple dots per option'));form.appendChild(stacking);
+      } else if (kind === 'pulse') {
+        const label = document.createElement('label'); label.textContent = 'Choices — one per line';
+        optionsInput = document.createElement('textarea');
+        optionsInput.value = original && original.kind === kind ? (original.options || []).join('\n') : 'Not at all\nHardly\nMeh\nSomewhat\nQuite\nVery';
+        label.appendChild(optionsInput); form.appendChild(label);
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Use the confidence scale or replace it with your own poll choices.'; form.appendChild(help);
+      } else if (kind === 'sort' || kind === 'match') {
+        const zoneLabel = document.createElement('label'); zoneLabel.textContent = 'Destinations — one per line';
+        zonesInput = document.createElement('textarea'); zonesInput.value = original && original.kind === kind ? (original.zones || []).join('\n') : 'Now\nNext\nLater'; zoneLabel.appendChild(zonesInput);
+        const cardLabel = document.createElement('label'); cardLabel.textContent = 'Cards — one per line';
+        cardsInput = document.createElement('textarea'); cardsInput.value = original && original.kind === kind ? (original.cards || []).join('\n') : 'First idea\nSecond idea\nThird idea'; cardLabel.appendChild(cardsInput);
+        form.append(zoneLabel,cardLabel);
+        if (kind === 'match') { const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Unlike Sort, each card may be placed in more than one destination.'; form.appendChild(help); }
+      } else if (kind === 'dual' || kind === 'wall') {
+        const label = document.createElement('label'); label.textContent = kind === 'dual' ? 'Two response prompts — one per line' : 'Wall columns — one per line';
+        optionsInput = document.createElement('textarea');
+        optionsInput.value = original && original.kind === kind ? (original.options || []).join('\n') : kind === 'dual' ? 'What worked?\nWhat could improve?' : 'What went well\nWhat could be better\nWhat is your key takeaway';
+        label.appendChild(optionsInput); form.appendChild(label);
+      } else if (kind === 'quiz') {
+        const label = document.createElement('label'); label.textContent = 'Questions — question | answer | *correct answer';
+        questionsInput = document.createElement('textarea');
+        questionsInput.value = original && original.kind === kind ? (original.questions || []).map(question => [question.prompt].concat((question.options || []).map((option,index) => (index === question.correct ? '*' : '') + option)).join(' | ')).join('\n') : 'What is 2 + 2? | 3 | *4 | 5';
+        label.appendChild(questionsInput); form.appendChild(label);
+      } else if (kind === 'pair' || kind === 'cards' || kind === 'impostor') {
+        const label = document.createElement('label'); label.textContent = kind === 'pair' ? 'People per group (2 or 3)' : kind === 'cards' ? 'Target number of rank groups' : 'Number of impostors';
+        if (kind === 'pair') {
+          groupSizeInput = document.createElement('input'); groupSizeInput.type = 'number'; groupSizeInput.min = '2'; groupSizeInput.max = '3'; groupSizeInput.value = String(original && original.kind === kind && original.groupSize || 2);
+          label.appendChild(groupSizeInput);
+        } else if (kind === 'cards') {
+          groupCountInput = document.createElement('input'); groupCountInput.type = 'number'; groupCountInput.min = '2'; groupCountInput.max = '13'; groupCountInput.value = String(original && original.kind === kind && original.groupCount || 4);
+          label.appendChild(groupCountInput);
+		} else {
+		  impostorCountInput = document.createElement('input'); impostorCountInput.type = 'number'; impostorCountInput.min = '1'; impostorCountInput.max = '20'; impostorCountInput.value = String(original && original.kind === kind && original.impostorCount || 1);
+		  label.appendChild(impostorCountInput);
+        }
+        form.appendChild(label);
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = kind === 'cards' ? 'Participants are shuffled into balanced rank groups from Aces toward 2s.' : kind === 'impostor' ? 'Roles are assigned randomly when joining closes and shown only on each participant screen.' : 'Keynope creates balanced pairs or triads from joined participants.'; form.appendChild(help);
+      } else if (kind === 'draw') {
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Participants draw themselves on a fixed 20 × 20 block canvas. Reveal presents every portrait as a marquee.'; form.appendChild(help);
+      } else if (kind === 'introduction') {
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Participants compose a coloured character from faces, hair and features. Reveal introduces everyone as a marquee.'; form.appendChild(help);
+      } else if (kind === 'truefalse') {
+        const label = document.createElement('label'); label.textContent = 'Questions — Fact | question or Fiction | question (maximum 5)';
+        questionsInput = document.createElement('textarea'); questionsInput.maxLength = 1800;
+        questionsInput.value = original && original.kind === kind && (original.questions || []).length
+          ? original.questions.map(question => (Number(question.correct) === 1 ? 'Fiction' : 'Fact') + ' | ' + question.prompt).join('\n')
+          : 'Fact | Keynope decks are portable';
+        label.appendChild(questionsInput); form.appendChild(label);
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Participants answer each statement in sequence. Every correct answer is marked on reveal.'; form.appendChild(help);
+      } else if (kind === 'onboarding') {
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Creates the persistent presentation session. Participants join once, then use this page as their roster, chat and activity HUD.'; form.appendChild(help);
+      } else if (kind === 'questions') {
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'First collect questions (multiple per participant). Lock closes question submissions and opens voting: everyone gets three dots, with at most one dot per question. Reveal closes voting and lists questions from most to fewest dots. Ties keep submission order. Vote totals stay hidden until reveal.'; form.appendChild(help);
+      } else if (kind === 'expertise') {
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Participants add expertise one item at a time. Their entries appear as tags.'; form.appendChild(help);
+      } else if (kind === 'finishpair') {
+        const help=document.createElement('p');help.className='keynope-engagement-help';help.textContent='Give everyone the same task in Prompt. Participants press “I am finished!” when done. When everyone finishes, you lock collection, or the timer expires, Keynope pairs the fastest with the slowest, then the second-fastest with the second-slowest. Unfinished participants go after the slowest in random order. An odd number creates one group of three. The pairing method is not shown to participants; explain the task without revealing the twist.';form.appendChild(help);promptInput.placeholder='Complete the task, then press I am finished!';
+      } else if (kind === 'storm') {
+        const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = 'Ask a brainstorming question in Prompt. Participants submit ideas one at a time and can contribute repeatedly. During collection, show participation progress; use Reveal to explore the ideas. Names are shown on reveal only when Anonymous is unchecked.'; form.appendChild(help);
+      }
+      const anonymousLabel = document.createElement('label');
+      anonymousLabel.className = 'keynope-engagement-anonymous';
+      if(['dots','gallery','agreements'].includes(kind)&&keynopeRecentActivityItems.length)form.appendChild(engagementButton('Import ideas from last activity','',()=>{optionsInput.value=keynopeRecentActivityItems.join('\n');}));
+      anonymousInput = document.createElement('input'); anonymousInput.type = 'checkbox'; anonymousInput.checked = kind === 'impostor' ? true : kind === 'onboarding' || kind === 'cards' || kind === 'pair' || kind === 'draw' || kind === 'introduction' ? false : anonymous; anonymousInput.disabled = kind === 'onboarding' || kind === 'cards' || kind === 'pair' || kind === 'draw' || kind === 'introduction' || kind === 'impostor';
+      anonymousInput.addEventListener('change',() => { anonymous = anonymousInput.checked; });
+      if(kind==='prerequisites')anonymousInput.checked=original&&original.kind===kind?!original.named:false;
+      const anonymousText = document.createElement('span'); anonymousText.textContent = kind === 'cards' ? 'Names shown on reveal' : kind === 'pair' ? 'Names used for pairing' : kind === 'draw' ? 'Names shown with drawings' : kind === 'introduction' ? 'Names shown with introductions' : 'Anonymous';
+      anonymousLabel.append(anonymousInput,anonymousText);
+      if (kind !== 'ball' && kind !== 'teach' && kind !== 'finishpair' && kind !== 'onboarding' && kind !== 'cards' && kind !== 'pair' && kind !== 'impostor') form.appendChild(anonymousLabel);
+      if (kind === 'pair' || kind === 'cards' || kind === 'impostor') {
+        const pairDuration = (labelText,totalSeconds,prefix) => {
+          const label = document.createElement('label'); label.className = 'keynope-engagement-timer';
+          const text = document.createElement('span'); text.textContent = labelText;
+          const fields = document.createElement('span'); fields.className = 'keynope-engagement-time-fields';
+          const minutes = document.createElement('input'); minutes.type = 'number'; minutes.min = '0'; minutes.max = '99'; minutes.value = String(Math.floor(totalSeconds / 60)).padStart(2,'0'); minutes.setAttribute('aria-label',prefix + ' minutes');
+          const seconds = document.createElement('input'); seconds.type = 'number'; seconds.min = '0'; seconds.max = '59'; seconds.value = String(totalSeconds % 60).padStart(2,'0'); seconds.setAttribute('aria-label',prefix + ' seconds');
+          const colon = document.createElement('span'); colon.textContent = ':';
+          fields.append(minutes,colon,seconds); label.append(text,fields); form.appendChild(label);
+          return [minutes,seconds];
+        };
+        const timerName = kind === 'pair' ? 'Pair Share' : kind === 'cards' ? 'Playing Cards' : 'Impostor';
+        [joinMinutesInput,joinSecondsInput] = pairDuration('Join allowance',Number(original && original.joinSeconds) || 120,timerName + ' join time');
+        if (kind === 'pair') [discussionMinutesInput,discussionSecondsInput] = pairDuration('Discussion time',Number(original && original.discussionSeconds) || 300,'Pair Share discussion time');
+      } else if (kind !== 'onboarding') {
+        const timerLabel = document.createElement('label');
+        timerLabel.className = 'keynope-engagement-timer';
+        timerEnabledInput = document.createElement('input');
+        timerEnabledInput.type = 'checkbox';
+        timerEnabledInput.checked = !!(original && original.timerSeconds > 0);
+        const timerText = document.createElement('span'); timerText.textContent = 'Timer';
+        const timerFields = document.createElement('span'); timerFields.className = 'keynope-engagement-time-fields';
+        const originalSeconds = Number(original && original.timerSeconds) || 60;
+        timerMinutesInput = document.createElement('input'); timerMinutesInput.type = 'number'; timerMinutesInput.min = '0'; timerMinutesInput.max = '99'; timerMinutesInput.value = String(Math.floor(originalSeconds / 60)).padStart(2,'0'); timerMinutesInput.setAttribute('aria-label','Activity timer minutes');
+        timerSecondsInput = document.createElement('input'); timerSecondsInput.type = 'number'; timerSecondsInput.min = '0'; timerSecondsInput.max = '59'; timerSecondsInput.value = String(originalSeconds % 60).padStart(2,'0'); timerSecondsInput.setAttribute('aria-label','Activity timer seconds');
+        const colon = document.createElement('span'); colon.textContent = ':';
+        timerFields.append(timerMinutesInput,colon,timerSecondsInput);
+        timerFields.hidden = !timerEnabledInput.checked;
+        timerEnabledInput.addEventListener('change',() => { timerFields.hidden = !timerEnabledInput.checked; if (timerEnabledInput.checked) timerMinutesInput.focus(); });
+        timerLabel.append(timerEnabledInput,timerText,timerFields);
+        form.appendChild(timerLabel);
+      }
+      requestAnimationFrame(() => promptInput.focus());
+    };
+    for (const item of [...Object.entries(KeynopeGames.names),['onboarding','Onboarding'],['dots','Dot Voting'],['finishpair','The Race'],['prerequisites','Prerequisites'],['pulse','Pulse'],['storm','Storm'],['sort','Sort'],['dual','Dual'],['quiz','Quiz'],['truefalse','Fact or Fiction'],['match','Mix & Match'],['questions','Questions'],['wall','Feedback Wall'],['draw','Quick Draw'],['introduction','Introduction'],['pair','Pair Share'],['expertise','Expertise'],['cards','Playing Cards'],['impostor','Impostor']]) {
+      const button = document.createElement('button');
+      button.type = 'button'; button.textContent = item[1]; button.classList.toggle('active',kind === item[0]);
+      button.addEventListener('click',() => { kind = item[0]; for (const child of kinds.children) child.classList.toggle('active',child === button); renderForm(); });
+      kinds.appendChild(button);
+    }
+    remove.addEventListener('click',async () => { await editorAction({action:'remove-engagement'}); closeEngagementEditor(); });
+    cancel.addEventListener('click',closeEngagementEditor);
+    save.addEventListener('click',async () => {
+      const engagementData = {id:original && original.id || '',kind,prompt:(promptInput.value || '').trim(),named:!anonymousInput.checked};
+      if (kind === 'onboarding' && original && original.kind === kind && original.code) { engagementData.code = original.code; }
+      if (kind === 'prerequisites') engagementData.prerequisites=prerequisiteInputs.map(item=>({title:item.title.value.trim(),instructions:item.instructions.value.trim()})); if (kind === 'dots') { engagementData.options=engagementLines(optionsInput.value);engagementData.dotBudget=Number(dotBudgetInput.value);engagementData.stackDots=stackDotsInput.checked; }
+      if (KeynopeGames.has(kind))engagementData.options=engagementLines(optionsInput.value);
+      if (kind === 'pulse') engagementData.options = engagementLines(optionsInput.value);
+      if (kind === 'sort' || kind === 'match') { engagementData.zones = engagementLines(zonesInput.value); engagementData.cards = engagementLines(cardsInput.value); }
+      if (kind === 'dual' || kind === 'wall') engagementData.options = engagementLines(optionsInput.value);
+      if (kind === 'quiz') engagementData.questions = engagementQuizLines(questionsInput.value);
+      if (kind === 'truefalse') {
+        engagementData.questions = engagementTrueFalseLines(questionsInput.value);
+        if (!engagementData.questions.length || engagementData.questions.length > 5) { questionsInput.focus(); return; }
+      }
+      if (kind === 'pair') engagementData.groupSize = Number(groupSizeInput.value) || 2;
+      if (kind === 'cards') engagementData.groupCount = Number(groupCountInput.value) || 4;
+      if (kind === 'impostor') engagementData.impostorCount = Number(impostorCountInput.value) || 1;
+      if (kind === 'pair' || kind === 'cards' || kind === 'impostor') {
+        engagementData.joinSeconds = Math.max(0,Math.min(99,Number(joinMinutesInput.value) || 0)) * 60 + Math.max(0,Math.min(59,Number(joinSecondsInput.value) || 0));
+        if (!engagementData.joinSeconds) { joinSecondsInput.focus(); return; }
+        if (kind === 'pair') {
+          engagementData.discussionSeconds = Math.max(0,Math.min(99,Number(discussionMinutesInput.value) || 0)) * 60 + Math.max(0,Math.min(59,Number(discussionSecondsInput.value) || 0));
+          if (!engagementData.discussionSeconds) { discussionSecondsInput.focus(); return; }
+        }
+      } else if (timerEnabledInput && timerEnabledInput.checked) {
+        const minutes = Math.max(0,Math.min(99,Number(timerMinutesInput.value) || 0));
+        const seconds = Math.max(0,Math.min(59,Number(timerSecondsInput.value) || 0));
+        engagementData.timerSeconds = minutes * 60 + seconds;
+        if (!engagementData.timerSeconds) { timerSecondsInput.focus(); return; }
+      }
+      try { await editorAction({action:'set-engagement',engagementData}); closeEngagementEditor(); }
+      catch (error) { const help = document.createElement('p'); help.className = 'keynope-engagement-help'; help.textContent = error && error.message || 'Could not save activity'; form.appendChild(help); }
+    });
+    blocker.addEventListener('pointerdown',event => { if (event.target === blocker) closeEngagementEditor(); });
+    blocker.addEventListener('keydown',event => { event.stopPropagation(); if (event.key === 'Escape') closeEngagementEditor(); });
+    actions.append(remove,cancel,save);
+    dialog.append(kinds,form,actions); blocker.appendChild(dialog); document.body.appendChild(blocker);
+    activeEngagementEditor = blocker;
+    renderForm();
+  }
   const topbar = document.createElement('div');
   topbar.className = 'keynope-editor-topbar';
   const saveButton = document.createElement('button');
@@ -6356,7 +7466,9 @@ if (keynopeAppSurface) {
   saveButton.innerHTML = '<svg viewBox="0 0 800 800" aria-hidden="true"><g transform="translate(0 800) scale(1 -1)"><path d="M120 85h450l110 110v520H120Z" fill="none" stroke="#fff" stroke-width="34" stroke-linejoin="round"/><path d="M225 140v170h320V140M455 175v95" fill="none" stroke="#9b9b9b" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/><rect x="220" y="430" width="360" height="285" rx="28" fill="none" stroke="#fff" stroke-width="32"/><path d="M285 515h230M285 590h230" fill="none" stroke="#9b9b9b" stroke-width="28" stroke-linecap="round"/></g></svg>';
   saveButton.title = 'Save presentation';
   saveButton.disabled = true;
-  saveButton.addEventListener('click', () => {
+  saveButton.setAttribute('aria-label','Save presentation');
+  saveButton.addEventListener('click', async () => {
+    if(activeInlineEditor)await activeInlineEditor.finish(true);
     const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
     if (handler && editorState && editorState.dirty) handler.postMessage({action: 'save-presentation'});
   });
@@ -6365,7 +7477,43 @@ if (keynopeAppSurface) {
   const selectionTopbar = document.createElement('div');
   selectionTopbar.className = 'keynope-topbar-mode';
   selectionTopbar.hidden = true;
-  topbar.append(saveButton, mainTopbar, selectionTopbar);
+  const ribbonHeader=document.createElement('div');ribbonHeader.className='keynope-ribbon-header';
+  const quickTools=document.createElement('div');quickTools.className='keynope-ribbon-quick';
+  const ribbonTabs=document.createElement('div');ribbonTabs.className='keynope-ribbon-tabs';ribbonTabs.setAttribute('role','tablist');ribbonTabs.setAttribute('aria-label','Editor actions');
+  const trailingTools=document.createElement('div');trailingTools.className='keynope-ribbon-trailing';
+  quickTools.append(saveButton);ribbonHeader.append(quickTools,ribbonTabs,trailingTools);
+  topbar.append(ribbonHeader,mainTopbar,selectionTopbar);
+  const ribbonPanels={};
+  for(const id of ['insert','slide','content','style','arrange']){
+    const panel=document.createElement('div');panel.className='keynope-ribbon-panel';panel.id='keynope-ribbon-'+id;panel.dataset.ribbon=id;panel.setAttribute('role','tabpanel');panel.setAttribute('aria-labelledby','keynope-ribbon-tab-'+id);ribbonPanels[id]=panel;
+  }
+  let ribbonContext='',ribbonActive='',ribbonEditing=false;
+  const ribbonChoices=new Map();
+  function selectRibbonTab(id,focus=false){
+    if(ribbonTabs.querySelector('[data-ribbon-tab="'+id+'"]')?.disabled)return;
+    if(ribbonActive!==id)closeCanvasVisualMenu();
+    ribbonActive=id;ribbonChoices.set(ribbonContext,id);
+    closeCanvasTextEffectDropdown();
+    for(const [key,panel] of Object.entries(ribbonPanels))panel.hidden=key!==id;
+    for(const button of ribbonTabs.children){const active=button.dataset.ribbonTab===id;button.setAttribute('aria-selected',String(active));button.tabIndex=active?0:-1;if(active&&focus)button.focus();}
+  }
+  function configureRibbon(context,editing){
+    const labels=context==='main'||context==='master'?[['insert','Insert'],['slide','Slide']]:context==='Line'?[['content','Line']]:[['content',context],['style','Style'],['arrange','Arrange']];
+    if(context!==ribbonContext){
+      ribbonContext=context;ribbonTabs.replaceChildren();
+      for(const [id,label] of labels){
+        const button=canvasTool(label,'keynope-ribbon-tab',()=>selectRibbonTab(id));
+        button.id='keynope-ribbon-tab-'+id;button.dataset.ribbonTab=id;button.setAttribute('role','tab');button.setAttribute('aria-controls',ribbonPanels[id].id);
+        button.addEventListener('keydown',event=>{event.stopPropagation();if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();const items=[...ribbonTabs.children].filter(b=>!b.disabled),i=items.indexOf(button);const next=event.key==='Home'?0:event.key==='End'?items.length-1:(i+(event.key==='ArrowRight'?1:-1)+items.length)%items.length;selectRibbonTab(items[next].dataset.ribbonTab,true);});
+        ribbonTabs.append(button);
+      }
+      ribbonActive=ribbonChoices.get(context)||labels[0][0];
+    }
+    for(const button of ribbonTabs.children)button.disabled=editing&&button.dataset.ribbonTab==='arrange';
+    if(editing&&!ribbonEditing)ribbonActive='content';
+    ribbonEditing=editing;
+    selectRibbonTab(ribbonActive);
+  }
   function svgToolbarButton(title, drawing, action) {
     const button = document.createElement('button');
     button.type = 'button';
@@ -6413,7 +7561,29 @@ if (keynopeAppSurface) {
   }
   addElementIconButton('Add title', 'heading', '<path d="M3 4v12M11 4v12M3 10h8"/><path d="M14 7h3v9M14 16h5"/>', 1);
   addElementIconButton('Add subtitle', 'heading', '<path d="M3 4v12M11 4v12M3 10h8"/><text x="13" y="17" fill="currentColor" stroke="none" font-size="11" font-family="-apple-system, sans-serif" font-weight="700">2</text>', 2);
-  addElementIconButton('Add text', 'text', '<path d="M3 4h14M10 4v12M7 16h6"/>');
+  let insertTextDefaults={};
+  try{const saved=JSON.parse(localStorage.getItem('keynope-insert-text-defaults-v1')||'{}');for(const [key,max] of [['size',512],['width',200]])if(Number.isInteger(saved?.[key])&&saved[key]>=1&&saved[key]<=max)insertTextDefaults[key]=saved[key];}catch(_err){}
+  const insertTextControls=[];
+  function insertTextDefaultControl(key,caption,max,fallback){
+    const stack=document.createElement('span');stack.className='keynope-text-size-stack';
+    const label=document.createElement('label');label.className='keynope-ttf-width-control';label.append(caption);
+    const input=document.createElement('input');input.type='number';input.min=1;input.max=max;input.step=1;input.className='keynope-ttf-size';input.setAttribute('aria-label','Default '+caption.toLowerCase());
+    const refresh=()=>{if(document.activeElement!==input)input.value=String(insertTextDefaults[key]??fallback());};refresh();insertTextControls.push(refresh);
+    input.addEventListener('keydown',event=>event.stopPropagation());
+    input.addEventListener('change',()=>{if(!input.value||!input.checkValidity()){refresh();return;}insertTextDefaults[key]=Number(input.value);try{localStorage.setItem('keynope-insert-text-defaults-v1',JSON.stringify(insertTextDefaults));}catch(_err){}});
+    for(const [text,delta,verb] of [['+',1,'Increase'],['−',-1,'Decrease']]){
+      const button=canvasTool(text,'',()=>{input.value=String(Math.max(1,Math.min(max,Number(input.value)+delta)));input.dispatchEvent(new Event('change'));});button.title=verb+' default '+caption.toLowerCase();button.setAttribute('aria-label',button.title);stack.append(button);
+    }
+    label.append(input);mainTopbar.append(stack,label);return input;
+  }
+  addElementIconButton('Add text', 'text', '<path d="M3 4h14M10 4v12M7 16h6"/>',0,async()=>{
+    await KeynopeTrueType.ready;
+    const size=insertTextDefaults.size??KeynopeTrueType.presetSize(0),width=insertTextDefaults.width??KeynopeTrueType.widthPercent({});
+    const text='Text',bounds=KeynopeTrueType.initialBounds(text,size,deck.cols,deck.rows,width);
+    await editorAction({action:'add-element',kind:'text',elementData:{kind:'text',text,query:'render=truetype&ttf-size='+size+'&ttf-width='+width+'&width='+bounds.width+'&height='+bounds.height+'&text-box=1&top=10&left_pct=0.1'}}).catch(()=>{});
+  });
+  insertTextDefaultControl('size','Text size',512,()=>KeynopeTrueType.presetSize(0));
+  insertTextDefaultControl('width','Font width (%)',200,()=>KeynopeTrueType.widthPercent({}));
   addElementIconButton('Add bullet point', 'bullet', '<circle cx="4" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="4" cy="14" r="1" fill="currentColor" stroke="none"/><path d="M8 6h9M8 14h9"/>');
   addElementIconButton('Add code', 'code', '<path d="M7 5 3 10l4 5M13 5l4 5-4 5M11 3 9 17"/>');
   addElementIconButton('Add emoji', 'text', '<circle cx="10" cy="10" r="7"/><circle cx="7.5" cy="8" r=".8" fill="currentColor" stroke="none"/><circle cx="12.5" cy="8" r=".8" fill="currentColor" stroke="none"/><path d="M6.5 11.5c1.5 2.5 5.5 2.5 7 0"/>', 0, button => openEmojiPicker(button, -1, 'add'));
@@ -7113,6 +8283,8 @@ if (keynopeAppSurface) {
     addShapeMenu.style.top = Math.max(8, Math.min(innerHeight - menuRect.height - 8, rect.bottom + 6)) + 'px';
   }
   const addShapeButton = addElementIconButton('Add shape', 'shape', '<circle cx="7" cy="8" r="4"/><path d="m13 7 4 8H9z"/>', 0, toggleAddShapeMenu);
+  const connectDrawing = '<rect x="1" y="2" width="5" height="5"/><rect x="14" y="13" width="5" height="5"/><path d="M6 4.5h4v11h4"/><circle cx="6" cy="4.5" r="1"/><circle cx="14" cy="15.5" r="1"/>';
+  const connectShapesButton = addElementIconButton('Connect shapes', 'connector', connectDrawing, 0, toggleShapeConnecting);
   for (const [shape, label, drawing] of [
     ['circle','Circle','<circle cx="20" cy="18" r="13"/>'],
     ['square','Square','<rect x="7" y="5" width="26" height="26" rx="1"/>'],
@@ -7171,12 +8343,18 @@ if (keynopeAppSurface) {
   const editSeparator = document.createElement('span');
   editSeparator.className = 'keynope-editor-separator';
   mainTopbar.appendChild(editSeparator);
-  const undoButton = editorButton('⟲', {action: 'undo'}, mainTopbar);
+  const undoButton = canvasTool('⟲', '', async () => {
+    if(activeInlineEditor)await activeInlineEditor.finish(true);
+    await editorAction({action:'undo'});
+  });
   undoButton.classList.add('keynope-icon-button', 'keynope-history-button');
   undoButton.innerHTML = '<span class="keynope-history-icon" aria-hidden="true">⟲</span><span class="keynope-history-label">UNDO</span>';
   undoButton.title = 'Undo';
   undoButton.setAttribute('aria-label', 'Undo');
-  const redoButton = editorButton('⟳', {action: 'redo'}, mainTopbar);
+  const redoButton = canvasTool('⟳', '', async () => {
+    if(activeInlineEditor)await activeInlineEditor.finish(true);
+    await editorAction({action:'redo'});
+  });
   redoButton.classList.add('keynope-icon-button', 'keynope-history-button');
   redoButton.innerHTML = '<span class="keynope-history-icon" aria-hidden="true">⟳</span><span class="keynope-history-label">REDO</span>';
   redoButton.title = 'Redo';
@@ -7189,17 +8367,88 @@ if (keynopeAppSurface) {
     if (handler) handler.postMessage({action: 'export-html'});
   });
   mainTopbar.appendChild(exportButton);
+  const settingsMenu = document.createElement('details');
+  settingsMenu.className = 'keynope-settings-menu';
+  const settingsTitle = document.createElement('summary');
+  settingsTitle.textContent = 'Settings';
+  const tabsButton = canvasTool('Tabs', '', () => { settingsMenu.open=false; openDeckTabsDialog(); });
+  tabsButton.title = 'Configure participant tabs';
+  settingsMenu.append(settingsTitle,tabsButton);
+  settingsMenu.addEventListener('toggle',()=>{
+    if(!settingsMenu.open)return;
+    const rect=settingsTitle.getBoundingClientRect();
+    tabsButton.style.top=(rect.bottom+4)+'px';
+    tabsButton.style.left=Math.min(rect.left,innerWidth-130)+'px';
+  });
+  // The Mac app exposes Settings in its native menu bar. Browsers still
+  // need an in-page entry point because they have no application menu.
+  if (window.KEYNOPE_WEB_EDITOR) mainTopbar.appendChild(settingsMenu);
+  window.keynopeOpenParticipantTabs = openDeckTabsDialog;
+  function openDeckTabsDialog() {
+    if (!editorState?.hasActivities || editorState.masterMode) return;
+    closeCanvasLinkDialog();
+    const overlay=document.createElement('div');overlay.className='keynope-tabs-overlay';
+    const dialog=document.createElement('form');dialog.className='keynope-tabs-dialog';dialog.setAttribute('role','dialog');dialog.setAttribute('aria-modal','true');dialog.setAttribute('aria-label','Participant tabs');
+    const title=document.createElement('h3');title.textContent='Participant tabs';
+    const hint=document.createElement('p');hint.textContent='Shown after Presentation, before #lobby. Choose a URL or a fixed slide for each tab. Some websites do not allow embedding.';
+    const list=document.createElement('div');list.className='keynope-tabs-list';
+    const error=document.createElement('p');error.setAttribute('role','alert');
+    let draft=(editorState.tabs||[]).map(tab=>({...tab}));
+    const render=()=>{
+      list.replaceChildren();
+      draft.forEach((tab,index)=>{
+        const row=document.createElement('fieldset');
+        const name=document.createElement('input');name.value=tab.name;name.placeholder='Tab name';name.required=true;name.maxLength=80;name.setAttribute('aria-label','Tab name');name.oninput=()=>tab.name=name.value;
+        const mode=document.createElement('select');mode.setAttribute('aria-label','Tab destination');
+        for(const [value,label] of [['url','URL'],['page','Slide']]){const o=document.createElement('option');o.value=value;o.textContent=label;mode.append(o);}mode.value=tab.url?'url':'page';
+        const url=document.createElement('input');url.type='url';url.placeholder='https://example.com';url.value=tab.url||'';url.setAttribute('aria-label','Tab URL');url.oninput=()=>tab.url=url.value;
+        const page=document.createElement('select');page.setAttribute('aria-label','Tab slide');
+        mode.disabled=page.disabled=!!tab.slideTab;
+        url.className=page.className='keynope-tab-target';
+        (editorState.slides||[]).forEach((slide,i)=>{const o=document.createElement('option');o.value=String(i+1);o.textContent=slideTitle(slide,i);page.append(o);});page.value=String(tab.page||1);page.onchange=()=>tab.page=Number(page.value);
+        const refresh=()=>{url.hidden=mode.value!=='url';url.required=!url.hidden;page.hidden=!url.hidden;};refresh();
+        mode.onchange=()=>{if(mode.value==='url'){delete tab.page;tab.url=url.value;}else{delete tab.url;tab.page=Number(page.value);}refresh();};
+        const up=canvasTool('↑','',()=>{[draft[index-1],draft[index]]=[draft[index],draft[index-1]];render();});up.disabled=index===0;up.title='Move tab earlier';
+        const down=canvasTool('↓','',()=>{[draft[index+1],draft[index]]=[draft[index],draft[index+1]];render();});down.disabled=index===draft.length-1;down.title='Move tab later';
+        const actions=document.createElement('div');actions.className='keynope-tab-actions';
+        actions.append(up,down,canvasTool('Remove','',()=>{draft.splice(index,1);render();}));
+        row.append(name,mode,url,page,actions);list.append(row);
+      });
+    };
+    const add=canvasTool('Add tab','',()=>{if(draft.length>=20)return;draft.push({id:'tab-'+crypto.randomUUID(),name:'New tab',page:1});render();list.lastElementChild?.querySelector('input').focus();});
+    const close=()=>{overlay.remove();activeCanvasLinkDialog=null;if(settingsTitle.isConnected)settingsTitle.focus();else stage.focus();};
+    const save=canvasTool('Apply','',()=>dialog.requestSubmit());
+    dialog.onsubmit=async event=>{event.preventDefault();save.disabled=true;try{await editorAction({action:'set-tabs',tabs:draft});close();}catch(e){error.textContent=e.message||'Could not save tabs';save.disabled=false;}};
+    dialog.append(title,hint,list,error,add,save,canvasTool('Cancel','',close));overlay.append(dialog);document.body.append(overlay);activeCanvasLinkDialog=overlay;render();
+    overlay.addEventListener('keydown',event=>{event.stopPropagation();if(event.key==='Escape'){event.preventDefault();close();}if(event.key==='Tab'){const nodes=[...dialog.querySelectorAll('input:not([hidden]),select:not([hidden]),button:not(:disabled)')];const first=nodes[0],last=nodes[nodes.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}});
+    (list.querySelector('input')||add).focus();
+  }
   exportButton.classList.add('keynope-icon-button', 'keynope-monochrome-icon', 'keynope-export-button');
   exportButton.title = 'Export to HTML';
   exportButton.setAttribute('aria-label', 'Export to HTML');
   deleteSlideButton.classList.add('keynope-toolbar-delete');
-  mainTopbar.appendChild(deleteSlideButton);
+  const commitButton=canvasTool('✓','',async()=>{
+    if(shapeConnecting){toggleShapeConnecting();return;}
+    if(activeInlineEditor)await activeInlineEditor.finish(true);
+    else await editorAction({action:'select-element',element:-1});
+  });
+  quickTools.append(undoButton,redoButton);
+  trailingTools.append(commitButton,deleteSlideButton);
+  slideSeparator.remove();editSeparator.remove();
+  const slideTools=[addSlideButton,cloneSlideButton,appearanceButton,exportButton];
+  if(window.KEYNOPE_WEB_EDITOR)slideTools.push(settingsMenu);
+  for(const tool of slideTools)ribbonPanels.slide.append(tool);
+  ribbonPanels.insert.append(...mainTopbar.childNodes);
+  mainTopbar.replaceChildren(ribbonPanels.insert,ribbonPanels.slide);
+  selectionTopbar.replaceChildren(ribbonPanels.content,ribbonPanels.style,ribbonPanels.arrange);
   document.body.appendChild(topbar);
 
   const slidesPanel = document.createElement('aside');
   slidesPanel.className = 'keynope-editor-panel keynope-editor-slides';
   document.body.appendChild(slidesPanel);
   let draggedMasterIndex = -1;
+  let draggingMasterMode = false;
+  let draggingTabSection = false;
   let draggedMasterButton = null;
   let masterDropDestination = -1;
   let masterDropPlaceholder = null;
@@ -7217,11 +8466,12 @@ if (keynopeAppSurface) {
     masterDragImage = null;
   }
   function updateMasterDropPlaceholder(clientY) {
-    if (draggedMasterIndex <= 0 || !draggedMasterButton) return;
+    if (draggedMasterIndex < 0 || !draggedMasterButton) return;
+    const first = draggingMasterMode ? 1 : 0;
     const remaining = Array.from(slidesPanel.querySelectorAll('.keynope-slide-item[data-master-index]'))
-      .filter(item => Number(item.dataset.masterIndex) > 0 && Number(item.dataset.masterIndex) !== draggedMasterIndex);
+      .filter(item => (draggingMasterMode || (item.dataset.slideSection === 'tabs') === draggingTabSection) && Number(item.dataset.masterIndex) >= first && Number(item.dataset.masterIndex) !== draggedMasterIndex);
     const reference = remaining.find(item => clientY < item.getBoundingClientRect().top + item.getBoundingClientRect().height / 2) || null;
-    masterDropDestination = reference ? remaining.indexOf(reference) + 1 : remaining.length + 1;
+    masterDropDestination = (reference ? remaining.indexOf(reference) : remaining.length) + first;
     if (!masterDropPlaceholder) {
       masterDropPlaceholder = document.createElement('div');
       masterDropPlaceholder.className = 'keynope-master-drop-placeholder';
@@ -7229,10 +8479,10 @@ if (keynopeAppSurface) {
       masterDropPlaceholder.style.height = Math.max(30, draggedMasterButton.getBoundingClientRect().height) + 'px';
     }
     if (reference) slidesPanel.insertBefore(masterDropPlaceholder, reference);
-    else slidesPanel.appendChild(masterDropPlaceholder);
+    else slidesPanel.insertBefore(masterDropPlaceholder, !draggingMasterMode && !draggingTabSection ? slidesPanel.querySelector('.keynope-tabs-section-heading') : null);
   }
   slidesPanel.addEventListener('dragover', event => {
-    if (draggedMasterIndex <= 0) return;
+    if (draggedMasterIndex < 0) return;
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
     updateMasterDropPlaceholder(event.clientY);
@@ -7241,14 +8491,20 @@ if (keynopeAppSurface) {
     else if (event.clientY > panelRect.bottom - 36) slidesPanel.scrollBy({top: 18});
   });
   slidesPanel.addEventListener('drop', event => {
-    if (draggedMasterIndex <= 0) return;
+    if (draggedMasterIndex < 0) return;
     event.preventDefault();
     updateMasterDropPlaceholder(event.clientY);
     const source = draggedMasterIndex;
-    const destination = masterDropDestination;
+    let destination = masterDropDestination;
+    if (!draggingMasterMode && !draggingTabSection) {
+      const normal = Array.from(slidesPanel.querySelectorAll('[data-slide-section="slides"]'));
+      destination = Number(normal[destination]?.dataset.masterIndex ?? -1);
+    }
     finishMasterDrag();
-    if (destination > 0 && destination !== source) {
-      editorAction({action: 'reorder-master', slide: source, value: destination}).catch(() => {});
+    if (destination >= (draggingMasterMode ? 1 : 0) && (draggingTabSection || destination !== source)) {
+      if (draggingMasterMode) editorAction({action: 'reorder-master', slide: source, value: destination}).catch(() => {});
+      else if (draggingTabSection) editorAction({action: 'reorder-slide-tab', slide: source, value: destination}).catch(() => {});
+      else editorAction({action: 'reorder-slide', slide: source, value: destination}).catch(() => {});
     }
   });
   const masterModeButton = document.createElement('button');
@@ -7386,8 +8642,9 @@ if (keynopeAppSurface) {
       const payload = await response.json();
       const pages = Array.isArray(payload) ? payload : payload.pages;
       if (!activeInlineEditor || activeInlineEditor.element !== index || sequence !== editorPreviewSequence) return;
+      if(payload?.elementData&&activeInlineEditor.acceptPreview)activeInlineEditor.acceptPreview(payload.elementData);
       replaceEditorPreviewPages(editorState.current, pages);
-      if (payload && payload.caret && editorCanvasCaret) {
+      if (payload && payload.caret && editorCanvasCaret && !editorCanvasCaret.trueType) {
         editorCanvasCaret.exact = payload.caret;
         editorCanvasCaret.selection = Array.isArray(payload.selectionRows) && payload.selectionRows.length
           ? payload.selectionRows : null;
@@ -7654,7 +8911,7 @@ if (keynopeAppSurface) {
     await pendingEdit;
     if (transition !== inlineEditTransitionSequence || !editorState || !editorState.slides || !editorState.slides[editorState.current]) return;
     const original = editorState.slides[editorState.current].elements[index];
-    if (!original || !['heading','text','bullet','code'].includes(original.kind)) {
+    if (!original || !['heading','text','bullet','code','shape'].includes(original.kind)) {
       if (editorStatus) editorStatus.textContent = 'Select a text element to edit its content';
       return;
     }
@@ -7664,7 +8921,10 @@ if (keynopeAppSurface) {
       clearTimeout(pendingCanvasSelection);
       pendingCanvasSelection = null;
     }
-    const element = {...original};
+    let shapeOwner=original.kind==='shape'?{...original}:null;
+    let shapeNewlineCheckpoint=null;
+    const element = shapeOwner ? canvasShapeLabel(original) : {...original};
+    const authoredEdit=edited=>shapeOwner?withCanvasShapeLabel(shapeOwner,edited):edited;
     const originalText = element.text || '';
     const resolvedElement = editorElementIndexMaps().rawToResolved.get(index);
     const editor = document.createElement('textarea');
@@ -7706,7 +8966,6 @@ if (keynopeAppSurface) {
       editorCanvasCaret = null;
       mainTopbar.hidden = false;
       selectionTopbar.hidden = true;
-      selectionTopbar.replaceChildren();
       drawFrame();
       renderEditorTopbar();
       let completion = Promise.resolve();
@@ -7722,7 +8981,7 @@ if (keynopeAppSurface) {
         const originalPreview = editorPreviewOriginal;
         editorPreviewOriginal = null;
         element.text = text;
-        completion = editorAction({action: 'update-element', element: index, elementData: element}).catch(() => {
+        completion = editorAction({action: 'update-element', element: index, elementData: authoredEdit(element)}).catch(() => {
           editorPreviewOriginal = originalPreview;
           restoreEditorPreview();
           drawFrame();
@@ -7801,23 +9060,65 @@ if (keynopeAppSurface) {
       const selectionEnd = [...editor.value.slice(0, editor.selectionEnd || 0)].length;
       const cursor = editor.selectionDirection === 'backward' ? selectionStart : selectionEnd;
       editorCanvasCaret = {element: resolvedElement == null ? index : resolvedElement, text: editor.value, cursor,
-        kind: element.kind, query: element.query || '', started: performance.now()};
+        kind: element.kind, query: element.query || '', trueType:KeynopeTrueType.is(element), selectionStart, selectionEnd, started: performance.now()};
       drawFrame();
       const sequence = ++editorPreviewSequence;
-      previewEditorText(index, {...element, text:editor.value}, cursor, selectionStart, selectionEnd, sequence);
+      previewEditorText(index, authoredEdit({...element, text:editor.value}), cursor, selectionStart, selectionEnd, sequence);
     };
-    activeInlineEditor = {element: index, finish, editor};
+    activeInlineEditor = {element: index, finish, editor, isDirty:()=>normalizedText(editor.value)!==originalText};
+    if(shapeOwner)activeInlineEditor.acceptPreview=fitted=>{shapeOwner={...fitted};};
     keynopeEditorTextEditActive = true;
     renderEditorTopbar();
     editor.addEventListener('input', () => {
-      cleanupInlineEditorEmptyColorTags(editor);
+      if(element.kind!=='code')cleanupInlineEditorEmptyColorTags(editor);
       element.text = editor.value;
+      publishEditorDirtyState();
+      undoButton.disabled=!editorState?.canUndo && !activeInlineEditor.isDirty();
+      redoButton.disabled=!editorState?.canRedo || activeInlineEditor.isDirty();
       updateCaret();
     });
     editor.addEventListener('select', updateCaret);
     editor.addEventListener('click', updateCaret);
     editor.addEventListener('keyup', updateCaret);
     editor.addEventListener('keydown', keyEvent => {
+      if(KeynopeTrueType.is(element)){
+        if(element.kind!=='code'&&(keyEvent.key==='Backspace'||keyEvent.key==='Delete')&&
+          (deleteInlineEditorSelectionPreservingFormatting(editor)||deleteInlineEditorColorContent(editor,keyEvent.key==='Backspace'?-1:1)||deleteInlineEditorAcrossFormatting(editor,keyEvent.key==='Backspace'?-1:1))){keyEvent.preventDefault();}
+        else if(element.kind!=='code'&&(keyEvent.key==='ArrowLeft'||keyEvent.key==='ArrowRight')&&!keyEvent.metaKey&&!keyEvent.ctrlKey&&!keyEvent.altKey&&moveInlineEditorAcrossFormatting(editor,keyEvent.key==='ArrowLeft'?-1:1,keyEvent.shiftKey)){keyEvent.preventDefault();updateCaret();}
+        else if(keyEvent.key==='Escape'){keyEvent.preventDefault();confirmEscape();}
+        else if(keyEvent.key==='ArrowUp'||keyEvent.key==='ArrowDown'){
+          keyEvent.preventDefault();
+          const line=deck.pages[pageIndex]?.lines?.find(line=>line.trueType&&line.element===resolvedElement);
+          if(line){
+            const chars=Array.from(editor.value),position=Array.from(editor.value.slice(0,editor.selectionDirection==='backward'?editor.selectionStart:editor.selectionEnd)).length;
+            const rows=KeynopeTrueType.metrics({...line,trueType:{...line.trueType,text:editor.value}},deck.cols,deck.rows).rows;
+            let row=rows.findIndex((r,i)=>position>=r.start&&position<=r.end&&(!rows[i+1]||position<rows[i+1].start));if(row<0)row=rows.length-1;
+            const target=rows[Math.max(0,Math.min(rows.length-1,row+(keyEvent.key==='ArrowUp'?-1:1)))];
+            const x=rows[row].positions[Math.max(0,position-rows[row].start)]||0;
+            let column=0;for(let i=1;i<target.positions.length;i++)if(!target.styles[i]?.emojiContinuation&&Math.abs(target.positions[i]-x)<Math.abs(target.positions[column]-x))column=i;
+            const next=chars.slice(0,Math.min(target.end,target.start+column)).join('').length;
+            if(keyEvent.shiftKey){const anchor=editor.selectionDirection==='backward'?editor.selectionEnd:editor.selectionStart;editor.setSelectionRange(Math.min(anchor,next),Math.max(anchor,next),next<anchor?'backward':'forward');}
+            else editor.setSelectionRange(next,next);
+            updateCaret();
+          }
+        }
+        else if(keyEvent.key==='Enter'&&keyEvent.shiftKey&&element.kind==='bullet'){
+          keyEvent.preventDefault();editor.setRangeText('\n  ',editor.selectionStart,editor.selectionEnd,'end');editor.dispatchEvent(new Event('input',{bubbles:true}));
+        }
+        else if(keyEvent.key==='Enter'){
+          const pos=editor.selectionStart||0,start=editor.value.lastIndexOf('\n',Math.max(0,pos-1))+1,end=editor.value.indexOf('\n',pos);
+          if(!keyEvent.shiftKey&&!editor.value.slice(start,end<0?editor.value.length:end).trim()){
+            keyEvent.preventDefault();editor.setRangeText('',start>0?start-1:0,end<0?editor.value.length:end,'start');
+            // Discard the empty line's preview-only enlargement. The backend
+            // fits retained text if the last pre-newline preview was pending.
+            if(shapeOwner)shapeOwner={...(shapeNewlineCheckpoint?.text===editor.value?shapeNewlineCheckpoint.owner:original)};
+            finish(true);
+          }else if(shapeOwner){
+            shapeNewlineCheckpoint={text:editor.value,owner:{...shapeOwner}};
+          }
+        }
+        keyEvent.stopPropagation();return;
+      }
       if ((keyEvent.key === 'Backspace' || keyEvent.key === 'Delete') && deleteInlineEditorSelectionPreservingFormatting(editor)) {
         keyEvent.preventDefault();
       } else if (keyEvent.key === 'Backspace' && deleteInlineEditorColorContent(editor, -1)) {
@@ -7882,7 +9183,7 @@ if (keynopeAppSurface) {
     });
     canvasOverlay.appendChild(editor);
     editor.focus();
-    const initialCursor = inlineEditorInitialCursor(editor.value);
+    const initialCursor = KeynopeTrueType.is(element)?editor.value.length:inlineEditorInitialCursor(editor.value);
     editor.setSelectionRange(initialCursor, initialCursor);
     updateCaret();
     if (editorStatus) editorStatus.textContent = element.kind === 'bullet'
@@ -7949,9 +9250,14 @@ if (keynopeAppSurface) {
     return panel;
   }
 
-  function emojiPickerPreview(lines) {
+  function emojiPickerPreview(lines, trueType) {
     const preview = document.createElement('span');
     preview.className = 'keynope-emoji-preview';
+    if(trueType){
+      const canvas=document.createElement('canvas');canvas.width=96;canvas.height=96;canvas.style.cssText='width:100%;height:100%;display:block';preview.appendChild(canvas);
+      KeynopeTrueType.readyFor(trueType).then(()=>KeynopeTrueType.draw(canvas.getContext('2d'),{col:5,row:5,parts:[],trueType},1,1,1920,1080));
+      return preview;
+    }
     for (const line of lines || []) {
       for (const part of line.parts || []) {
         const span = document.createElement('span');
@@ -7988,7 +9294,7 @@ if (keynopeAppSurface) {
         button.type = 'button';
         button.title = item.name;
         button.setAttribute('aria-label', item.name);
-        button.appendChild(emojiPickerPreview(item.lines));
+        button.appendChild(emojiPickerPreview(item.lines,item.trueType));
         button.addEventListener('pointerdown', event => event.preventDefault());
         button.addEventListener('click', event => {
           event.preventDefault();
@@ -8008,7 +9314,7 @@ if (keynopeAppSurface) {
     const target = emojiPickerTarget;
     if (!target) return;
     if (target.mode === 'add') {
-      await editorAction({action:'add-element', kind:'text', elementData:{kind:'text', text:emoji, query:'render=text-image&source=bitmap&scale=5.00&text-size=25'}}).catch(() => {});
+      await editorAction({action:'add-element', kind:'text', elementData:{kind:'text', text:emoji, query:'render=truetype&ttf-size=512'}}).catch(() => {});
     } else {
       if (!activeInlineEditor || activeInlineEditor.element !== target.index) await beginInlineEdit(target.index);
       if (activeInlineEditor && activeInlineEditor.element === target.index) {
@@ -8047,10 +9353,165 @@ if (keynopeAppSurface) {
     }
   }, true);
 
+  function clearCanvasPlacementAnchors(query) {
+    for (const key of ['right','right_pct','bottom','row_delta','valign','left','left_pct']) query.delete(key);
+    // Justification formats lines inside the box; it is not a slide anchor.
+    if (query.get('align') !== 'justify') query.delete('align');
+  }
   function canvasElementAt(index) {
     if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return null;
     const element = editorState.slides[editorState.current].elements[index];
     return element ? {...element} : null;
+  }
+  function canvasShapeLabel(shape) {
+    let data={};
+    try{data=JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(new URLSearchParams(shape.query||'').get('shape-label')||''),c=>c.charCodeAt(0))));}catch(_err){}
+    const query=new URLSearchParams(data.query||'ttf-size=97&fg=%23ffffff');query.set('render','truetype');query.set('text-align','center');query.set('text-valign','middle');
+    return {kind:'text',id:shape.id,text:data.text||'',query:query.toString()};
+  }
+  function withCanvasShapeLabel(shape,label) {
+    const query=new URLSearchParams(shape.query||'');
+    if(label.text){const bytes=new TextEncoder().encode(JSON.stringify({text:label.text,query:label.query}));query.set('shape-label',btoa(Array.from(bytes,b=>String.fromCharCode(b)).join('')));}
+    else query.delete('shape-label');
+    return {...shape,query:query.toString()};
+  }
+  function appendShapeLabelTools(content,style,index,shape) {
+    const label=canvasShapeLabel(shape),q=new URLSearchParams(label.query||'');
+    const edit=canvasTool(label.text?'Edit shape text':'Add text','',()=>beginInlineEdit(index));
+    content.append(edit);
+    if(!label.text)return;
+    const heading=document.createElement('span');heading.textContent='Text';heading.style.cssText='color:#ffd166;border-left:1px solid #59616a;padding-left:8px';style.append(heading);
+    const update=(key,value)=>{
+      const current=canvasElementAt(editorElementIndexByID(shape.id,index));if(!current)return;
+      const text=canvasShapeLabel(current),query=new URLSearchParams(text.query||'');
+      if(value)query.set(key,value);else query.delete(key);
+      if(key==='gradient-dir'){
+        if(value){if(!query.has('gradient-start'))query.set('gradient-start','#ffffff');if(!query.has('gradient-end'))query.set('gradient-end','#55aaff');}
+        else {query.delete('gradient-start');query.delete('gradient-end');}
+      }
+      if((key==='gradient-start'||key==='gradient-end')&&value){
+        if(!query.has('gradient-dir'))query.set('gradient-dir','horizontal');
+        if(!query.has('gradient-start'))query.set('gradient-start','#ffffff');
+        if(!query.has('gradient-end'))query.set('gradient-end','#55aaff');
+      }
+      text.query=query.toString();updateEditorElementByID(shape.id,index,withCanvasShapeLabel(current,text)).catch(()=>{});
+    };
+    const number=(caption,key,value,min,max)=>{
+      const field=document.createElement('label');field.className='keynope-ttf-width-control';field.append(caption);
+      const input=document.createElement('input');input.type='number';input.className='keynope-ttf-size';input.min=min;input.max=max;input.step=1;input.value=value;input.setAttribute('aria-label',caption);
+      input.addEventListener('keydown',e=>e.stopPropagation());input.addEventListener('change',()=>{if(input.checkValidity())update(key,input.value);});field.append(input);content.append(field);
+    };
+    number('Shape text size','ttf-size',KeynopeTrueType.size(label),1,512);
+    number('Shape text width (%)','ttf-width',KeynopeTrueType.widthPercent(label),1,200);
+    const bold=canvasTool('B',q.get('ttf-weight')==='bold'?'active':'',()=>update('ttf-weight',q.get('ttf-weight')==='bold'?'':'bold'));bold.title='Bold shape text';bold.setAttribute('aria-label',bold.title);content.append(bold);
+    const colour=(caption,key,fallback)=>{
+      const shortLabel=key==='gradient-start'?'Start':key==='gradient-end'?'End':key==='shadow-color'?'Shadow':'A';
+      const button=canvasTool(shortLabel,'keynope-colour-tool',()=>openKeynopeColourPicker(button,q.get(key)||fallback,value=>update(key,value)));
+      button.title=caption;
+      if(shortLabel!=='A'){button.style.width='auto';button.style.minWidth='58px';button.style.padding='4px 8px';}
+      button.setAttribute('aria-label',caption);button.style.setProperty('--keynope-tool-colour',q.get(key)||fallback);style.append(button);
+    };
+    const choose=(caption,key,values)=>{
+      const field=document.createElement('label');field.className='keynope-ttf-width-control';field.append(caption);
+      const select=document.createElement('select');select.setAttribute('aria-label',caption);
+      for(const [value,title] of values){const option=new Option(title,value);option.selected=value===(q.get(key)||'');select.add(option);}
+      select.addEventListener('change',()=>update(key,select.value));field.append(select);style.append(field);
+    };
+    colour('Text colour','fg','#ffffff');
+    choose('Text gradient','gradient-dir',[['','Off'],['horizontal','Horizontal'],['vertical','Vertical'],['diagonal','Diagonal']]);
+    colour('Text gradient start','gradient-start','#ffffff');colour('Text gradient end','gradient-end','#55aaff');
+    choose('Text shadow','shadow',[['','Off'],['soft','Soft'],['solid','Hard']]);colour('Text shadow colour','shadow-color','#ffffff');
+    choose('Text outline','outline',[['','Off'],['dark','Dark'],['light','Light']]);
+    choose('Text rendering','glyph',[['','TrueType'],['blocks','Blocks'],['braille','Braille'],['ascii','ASCII']]);
+    const transparent=canvasTool('See through',q.get('transparent')==='1'?'active':'',()=>update('transparent',q.get('transparent')==='1'?'':'1'));
+    transparent.setAttribute('aria-label','Toggle text transparency');style.append(transparent);
+  }
+  function canvasGroupID(element) { return new URLSearchParams(element?.query || '').get('group') || ''; }
+  function canvasGroupMembers(index) {
+    const elements = editorState?.slides?.[editorState.current]?.elements || [];
+    const id = canvasGroupID(elements[index]);
+    return id && id !== editorState.editingGroup ? elements.map((e,i)=>canvasGroupID(e)===id?i:-1).filter(i=>i>=0) : [index];
+  }
+  function canvasUnionBounds(indices) {
+    const boxes=indices.map(i=>canvasMemberBounds.get(i)).filter(Boolean);
+    if(!boxes.length)return null;
+    return {minX:Math.min(...boxes.map(b=>b.minX)),minY:Math.min(...boxes.map(b=>b.minY)),maxX:Math.max(...boxes.map(b=>b.maxX)),maxY:Math.max(...boxes.map(b=>b.maxY))};
+  }
+  function canvasMoveSnapshot(indices) {
+    return indices.map(index=>({index,element:canvasElementAt(index),bounds:canvasMemberBounds.get(index)})).filter(item=>item.element&&item.bounds);
+  }
+  function clampCanvasMove(snapshot,dx,dy) {
+    if(!snapshot.length)return {dx:0,dy:0};
+    const left=Math.min(...snapshot.map(s=>s.bounds.minX)),top=Math.min(...snapshot.map(s=>s.bounds.minY));
+    const right=Math.max(...snapshot.map(s=>s.bounds.maxX)),bottom=Math.max(...snapshot.map(s=>s.bounds.maxY));
+    return {dx:Math.max(-left,Math.min(Math.max(0,deck.cols-right),dx)),dy:Math.max(-top,Math.min(Math.max(0,deck.rows-bottom),dy))};
+  }
+  function moveCanvasMembers(snapshot,dx,dy) {
+    ({dx,dy}=clampCanvasMove(snapshot,dx,dy));
+    if(!dx&&!dy)return Promise.resolve();
+    return queueEditorOperation(async()=>{
+      const indices=[],updates=[];
+      for(const {index,element,bounds} of snapshot){
+        const current=editorElementIndexByID(element.id,index);
+        if(current<0)throw Error('A selected element is no longer available');
+        const updated={...canvasElementAt(current)},q=new URLSearchParams(updated.query||'');
+        clearCanvasPlacementAnchors(q);
+        // Use the same canvas units for every member. Percentage positions use
+        // cols-1 in layout, not cols, and accumulate rounding drift on each drag.
+        q.set('left',String(Math.round(bounds.minX+dx)));q.set('top',String(Math.round(bounds.minY+dy)));
+        if(updated.kind==='shape')setCanvasShapeBounds(q,{minX:bounds.minX+dx,minY:bounds.minY+dy,maxX:bounds.maxX+dx,maxY:bounds.maxY+dy});
+        updated.query=q.toString();indices.push(current);updates.push(updated);
+      }
+      await performEditorAction({action:'update-elements',elementIndices:indices,elementsData:updates});
+    });
+  }
+  function alignCanvasGroup(index,alignment,vertical=false){
+    const indices=canvasSelectedIndices(index),grouped=indices.some(i=>canvasGroupMembers(i).length>1);
+    if(!grouped)return false;
+    const b=canvasUnionBounds(indices);if(!b)return false;
+    const dx=vertical?0:alignment==='left'?-b.minX:alignment==='right'?deck.cols-b.maxX:(deck.cols-b.maxX-b.minX)/2;
+    const dy=!vertical?0:alignment==='top'?-b.minY:alignment==='bottom'?deck.rows-b.maxY:(deck.rows-b.maxY-b.minY)/2;
+    moveCanvasMembers(canvasMoveSnapshot(indices),Math.round(dx),Math.round(dy)).catch(()=>{});return true;
+  }
+  function appendCanvasGroupTools(container,index){
+    const indices=canvasSelectedIndices(index),elements=editorState.slides[editorState.current].elements;
+    const ids=new Set(indices.map(i=>canvasGroupID(elements[i])).filter(Boolean));
+    const oneGroup=ids.size===1&&indices.every(i=>canvasGroupID(elements[i])===[...ids][0]);
+    const action=(label,name)=>canvasTool(label,'',()=>{closeSlideContextMenu();editorAction({action:name,element:index,elementData:{id:elements[index]?.id}}).catch(()=>{});});
+    if(indices.length>1&&!oneGroup)container.appendChild(action('Group','group-elements'));
+    if(ids.size)container.appendChild(action('Ungroup','ungroup-elements'));
+    if(oneGroup&&!editorState.editingGroup)container.appendChild(action('Edit group','enter-group'));
+    if(editorState.editingGroup)container.appendChild(action('Done editing group','exit-group'));
+  }
+  function beginCanvasGroupDrag(hit,event,index){
+    const members=canvasGroupMembers(index);
+    const selected=(editorState.selection||[]).includes(index);
+    const indices=selected?canvasSelectedIndices(index):members;
+    if(indices.length<2)return false;
+    if(event.shiftKey){editorAction({action:'select-element',element:index,name:'toggle',elementData:{id:canvasElementAt(index)?.id}}).catch(()=>{});return true;}
+    const snapshot=canvasMoveSnapshot(indices),bounds=canvasUnionBounds(indices);
+    if(!bounds)return false;
+    if(!selected){
+      editorState.selected=index;editorState.selection=indices;
+      editorAction({action:'select-element',element:index,elementData:{id:canvasElementAt(index)?.id}}).catch(()=>{});
+    }
+    const startX=event.clientX,startY=event.clientY;
+    const originals=[...canvasOverlay.querySelectorAll('.keynope-canvas-element')].filter(h=>indices.includes(Number(h.dataset.element))).map(h=>({hit:h,left:h.style.left,top:h.style.top}));
+    const token={hit,pointerId:event.pointerId,indices};activeCanvasDrag=token;
+    hit.classList.add('active');hit.setPointerCapture(event.pointerId);renderEditorTopbar();
+    const delta=e=>{const r=canvasOverlay.getBoundingClientRect();return clampCanvasMove(snapshot,Math.round((e.clientX-startX)*deck.cols/r.width),Math.round((e.clientY-startY)*deck.rows/r.height));};
+    const move=e=>{const {dx,dy}=delta(e);for(const item of originals){item.hit.style.left=(parseFloat(item.left)+dx/deck.cols*100)+'%';item.hit.style.top=(parseFloat(item.top)+dy/deck.rows*100)+'%';}};
+    const finish=async e=>{
+      hit.removeEventListener('pointermove',move);hit.removeEventListener('pointerup',finish);hit.removeEventListener('pointercancel',cancel);
+      if(activeCanvasDrag===token)activeCanvasDrag=null;
+      if(hit.hasPointerCapture(event.pointerId))hit.releasePointerCapture(event.pointerId);
+      const {dx,dy}=delta(e);
+      if(dx||dy){await moveCanvasMembers(snapshot,dx,dy).catch(()=>{});renderEditorCanvasOverlay();}
+      else refreshCanvasSelectionInPlace(); // Keep the hit target alive for dblclick.
+    };
+    const cancel=()=>{hit.removeEventListener('pointermove',move);hit.removeEventListener('pointerup',finish);if(activeCanvasDrag===token)activeCanvasDrag=null;renderEditorCanvasOverlay();};
+    hit.addEventListener('pointermove',move);hit.addEventListener('pointerup',finish);hit.addEventListener('pointercancel',cancel,{once:true});
+    return true;
   }
   function canvasSelectedIndices(index, compatible) {
     if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return [];
@@ -8058,6 +9519,67 @@ if (keynopeAppSurface) {
     let indices = (editorState.selection || []).length > 1 ? [...editorState.selection] : [index];
     return indices.filter(candidate => candidate >= 0 && candidate < elements.length && (!compatible || compatible(elements[candidate])));
   }
+  function beginCanvasMarquee(event) {
+    if(!event.shiftKey||event.button!==0||!editorState||activeCanvasDrag||canvasOverlay.hidden||presenterTimerMode||editorPresentationMode==='main')return;
+    if(event.target.closest?.('button,input,textarea,select,.keynope-inline-editor,.keynope-resize-handle'))return;
+    const rect=canvasOverlay.getBoundingClientRect();
+    if(!rect.width||!rect.height||event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)return;
+    event.preventDefault();event.stopImmediatePropagation();
+    if(activeInlineEditor){activeInlineEditor.finish(true);return;}
+    closeSlideContextMenu();
+    const elements=editorState.slides[editorState.current].elements;
+    const initial=new Set(editorState.selection||[]),hits=[...canvasOverlay.querySelectorAll('.keynope-canvas-element')];
+    const start={x:event.clientX-rect.left,y:event.clientY-rect.top};
+    const clicked=event.target.closest?.('.keynope-canvas-element');
+    const clickedIndex=clicked?Number(clicked.dataset.element):-1;
+    const marquee=document.createElement('div');marquee.className='keynope-canvas-marquee';marquee.hidden=true;
+    canvasOverlay.appendChild(marquee);
+    let dragged=false,candidates=new Set(initial);
+    const token={marquee:true,cancel:()=>finish(null)};activeCanvasDrag=token;
+    const move=e=>{
+      if(e.pointerId!==event.pointerId)return;
+      if(!dragged&&Math.hypot(e.clientX-event.clientX,e.clientY-event.clientY)<4)return;
+      dragged=true;marquee.hidden=false;
+      const x=Math.max(0,Math.min(rect.width,e.clientX-rect.left)),y=Math.max(0,Math.min(rect.height,e.clientY-rect.top));
+      const left=Math.min(start.x,x),top=Math.min(start.y,y),right=Math.max(start.x,x),bottom=Math.max(start.y,y);
+      Object.assign(marquee.style,{left:left+'px',top:top+'px',width:(right-left)+'px',height:(bottom-top)+'px'});
+      candidates=new Set(initial);
+      for(const hit of hits){
+        const index=Number(hit.dataset.element),members=canvasGroupMembers(index);
+        const b=canvasUnionBounds(members);if(!b)continue;
+        if(b.maxX/deck.cols*rect.width>left&&b.minX/deck.cols*rect.width<right&&b.maxY/deck.rows*rect.height>top&&b.minY/deck.rows*rect.height<bottom)members.forEach(i=>candidates.add(i));
+      }
+      for(const hit of hits){
+        const selected=canvasGroupMembers(Number(hit.dataset.element)).some(i=>candidates.has(i));
+        hit.classList.toggle('marquee-candidate',selected);hit.classList.toggle('active',selected);
+      }
+    };
+    const finish=e=>{
+      if(e&&e.pointerId!==event.pointerId)return;
+      if(e)move(e);
+      window.removeEventListener('pointermove',move,true);window.removeEventListener('pointerup',finish,true);
+      window.removeEventListener('pointercancel',cancel,true);window.removeEventListener('blur',cancel);
+      stage.removeEventListener('lostpointercapture',cancel);
+      if(activeCanvasDrag===token)activeCanvasDrag=null;
+      if(stage.hasPointerCapture(event.pointerId))stage.releasePointerCapture(event.pointerId);
+      marquee.remove();hits.forEach(h=>h.classList.remove('marquee-candidate'));
+      if(!e){refreshCanvasSelectionInPlace();return;}
+      e.preventDefault();e.stopImmediatePropagation();
+      if(!dragged){
+        refreshCanvasSelectionInPlace();
+        if(clickedIndex>=0)editorAction({action:'select-element',element:clickedIndex,name:'toggle',elementData:{id:elements[clickedIndex]?.id}}).catch(()=>{});
+        return;
+      }
+      const indices=[...candidates].sort((a,b)=>a-b);
+      editorAction({action:'select-elements',elementIndices:indices,elementsData:indices.map(i=>({id:elements[i].id}))}).catch(()=>refreshCanvasSelectionInPlace());
+    };
+    const cancel=()=>finish(null);
+    stage.setPointerCapture(event.pointerId);
+    stage.addEventListener('lostpointercapture',cancel);
+    window.addEventListener('pointermove',move,true);window.addEventListener('pointerup',finish,true);
+    window.addEventListener('pointercancel',cancel,true);window.addEventListener('blur',cancel);
+  }
+  stage.addEventListener('pointerdown',beginCanvasMarquee,true);
   function updateCanvasElements(index, compatible, mutate) {
     const indices = canvasSelectedIndices(index, compatible);
     if (!indices.length) return;
@@ -8104,7 +9626,7 @@ if (keynopeAppSurface) {
     const query = new URLSearchParams(element.query || '');
     const wasHeading = element.kind === 'heading';
     const colour = query.get(wasHeading ? 'header' : 'fg') || query.get(wasHeading ? 'fg' : 'header');
-    for (const key of ['render','source','scale','text-size']) query.delete(key);
+    for (const key of ['render','source','scale','text-size','ttf-size','ttf-weight']) query.delete(key);
     if (kind === 'heading') {
       query.delete('fg');
       if (colour) query.set('header', colour); else query.delete('header');
@@ -8125,19 +9647,53 @@ if (keynopeAppSurface) {
       editorAction({action: 'update-element', element: index, elementData: element}).catch(() => {});
     }
   }
+  async function setCanvasTrueType(index){
+    await KeynopeTrueType.ready;
+    if(KeynopeTrueType.is(canvasElementAt(index))){setCanvasTrueTypeKind(index,0);return;}
+    updateCanvasElements(index,e=>['heading','text','text-image','bullet','code'].includes(e.kind)&&!KeynopeTrueType.is(e),e=>{
+      const q=new URLSearchParams(e.query||''),colour=q.get(e.kind==='heading'?'header':'fg')||q.get('fg')||q.get('header');
+      const fontSize=KeynopeTrueType.presetSize(e.kind==='heading'?e.level:0);
+      const bounds=KeynopeTrueType.initialBounds(e.text||'',fontSize,deck.cols,deck.rows);
+      if(q.get('text-box')!=='1'){
+        if(['cw','ccw'].includes(q.get('orientation'))){const aspect=(1080/deck.rows)/(1920/deck.cols);q.set('width',String(Math.max(1,Math.round(bounds.height*aspect))));q.set('height',String(Math.max(1,Math.round(bounds.width/aspect))));}
+        else{q.set('width',String(bounds.width));q.set('height',String(bounds.height));}
+      }
+      for(const key of ['source','scale','text-size','font','glyph','header'])q.delete(key);
+      if(colour)q.set(e.kind==='heading'?'header':'fg',colour);q.set('render','truetype');q.delete('ttf-size');q.set('text-box','1');
+      if(!['heading','bullet','code'].includes(e.kind))e.kind='text';if(e.kind!=='heading')e.level=0;e.query=q.toString();
+    });
+  }
+  function setCanvasTrueTypeKind(index,level){
+    updateCanvasElements(index,KeynopeTrueType.is,e=>{
+      const q=new URLSearchParams(e.query||'');
+      const colour=q.get(e.kind==='heading'?'header':'fg')||q.get('fg')||q.get('header');
+      // Preserve the authored margins, alignment and visual effects. Presets
+      // change the font size, just like the explicit size control.
+      if(!['bullet','code'].includes(e.kind)){e.kind=level?'heading':'text';e.level=level;}
+      q.delete('header');q.delete('fg');if(colour)q.set(e.kind==='heading'?'header':'fg',colour);
+      q.set('ttf-size',String(KeynopeTrueType.presetSize(level)));e.query=q.toString();
+    });
+  }
+  function setCanvasGlyphRenderer(index){
+    updateCanvasElements(index,e=>['bullet','code'].includes(e.kind),e=>{const q=new URLSearchParams(e.query||'');for(const key of ['render','ttf-size','ttf-weight','ttf-width'])q.delete(key);e.query=q.toString();});
+  }
   function appendCanvasTextKindTools(container, index, element) {
+    const trueType=KeynopeTrueType.is(element);
+    const block=['bullet','code'].includes(element.kind);
     const choices = [
       ['H1', 'heading', 1, element.kind === 'heading' && element.level !== 2, false],
       ['H2', 'heading', 2, element.kind === 'heading' && element.level === 2, false],
-      ['T', 'text', 0, element.kind === 'text' || element.kind === 'text-image', false],
+      ['T', 'text', 0, block||element.kind === 'text' || element.kind === 'text-image', false],
       ['⏺', 'bullet', 0, element.kind === 'bullet', false],
       ['', 'code', 0, element.kind === 'code', true]
     ];
     for (const [label, kind, level, active, codeIcon] of choices) {
-      const button = canvasTool(label, (active ? 'active ' : '') + (codeIcon ? 'keynope-text-kind-code' : ''), () => setCanvasTextKind(index, kind, level));
+      if(block&&kind==='heading')continue;
+      const button = canvasTool(label, (active ? 'active ' : '') + (codeIcon ? 'keynope-text-kind-code' : ''), () => trueType&&(kind==='heading'||kind==='text')?setCanvasTrueTypeKind(index,level):setCanvasTextKind(index, kind, level));
       if (codeIcon) button.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5 3 10l4 5M13 5l4 5-4 5M11 3 9 17"/></svg>';
-      button.title = kind === 'heading' ? 'Convert to heading ' + level : kind === 'bullet' ? (active ? 'Convert bullets to text' : 'Convert to bullet points') : kind === 'code' ? (active ? 'Convert code block to text' : 'Convert to code block') : 'Convert to plain text';
+      button.title = kind==='truetype'?'Convert to TrueType text':kind === 'heading' ? 'Convert to heading ' + level : kind === 'bullet' ? (active ? 'Convert bullets to text' : 'Convert to bullet points') : kind === 'code' ? (active ? 'Convert code block to text' : 'Convert to code block') : 'Convert to plain text';
       button.setAttribute('aria-label', button.title);
+      button.setAttribute('aria-pressed',String(active));
       container.appendChild(button);
     }
   }
@@ -8180,6 +9736,7 @@ if (keynopeAppSurface) {
     return !!font && font.mode === 'figlet';
   }
   function canvasTextSize(element) {
+    if (KeynopeTrueType.is(element)) return KeynopeTrueType.size(element);
     const query = new URLSearchParams(element.query || '');
     const explicit = Number.parseInt(query.get('text-size'), 10);
     if (Number.isInteger(explicit)) return Math.max(-1, Math.min(25, explicit));
@@ -8196,6 +9753,9 @@ if (keynopeAppSurface) {
     return canvasTextNativeSize(element);
   }
   function applyCanvasTextSize(element, size) {
+    if (KeynopeTrueType.is(element)) {
+      const query=new URLSearchParams(element.query||'');query.set('ttf-size',String(Math.max(1,Math.min(512,Math.round(size)))));element.query=query.toString();return;
+    }
     size = Math.max(-1, Math.min(25, size));
     const query = new URLSearchParams(element.query || '');
     if (size === canvasTextNativeSize(element)) {
@@ -8276,8 +9836,18 @@ if (keynopeAppSurface) {
     return button;
   }
   function rotateCanvasText(index) {
-    updateCanvasElements(index, element => ['heading','text','text-image','bullet'].includes(element.kind), element => {
+    updateCanvasElements(index, element => KeynopeTrueType.is(element)||['heading','text','text-image','bullet'].includes(element.kind), (element,candidateIndex) => {
       const query = new URLSearchParams(element.query || '');
+      if(KeynopeTrueType.is(element)){
+        // Bounds use terminal cells, whose physical axes are not square.
+        // Swap the physical dimensions, retaining the font size and anchors.
+        const resolved=editorElementIndexMaps().rawToResolved.get(candidateIndex);
+        const line=deck.pages[pageIndex]?.lines?.find(line=>line.trueType&&line.element===resolved);
+        const width=Number(query.get('width'))||line?.trueType.width||110,height=Number(query.get('height'))||line?.trueType.height||10;
+        const aspect=(1080/deck.rows)/(1920/deck.cols);
+        query.set('width',String(Math.max(1,Math.min(deck.cols,Math.round(height*aspect)))));
+        query.set('height',String(Math.max(1,Math.min(deck.rows,Math.round(width/aspect)))));
+      }
       const orientation = query.get('orientation') || '';
       if (!orientation) query.set('orientation', 'cw');
       else if (orientation === 'cw') query.set('orientation', 'down');
@@ -8301,11 +9871,11 @@ if (keynopeAppSurface) {
     select.addEventListener('pointerdown', event => event.stopPropagation());
     select.addEventListener('change', event => {
       event.stopPropagation();
-      updateCanvasElements(index, updated => ['heading','text','text-image','bullet'].includes(updated.kind), updated => {
+      updateCanvasElements(index, updated => ['heading','text','text-image','bullet','code'].includes(updated.kind), updated => {
         const values = new URLSearchParams(updated.query || '');
         if (select.value) {
           values.set('glyph', select.value);
-          if (values.get('render') !== 'text-image') {
+          if (!KeynopeTrueType.is(updated) && values.get('render') !== 'text-image') {
             const size = canvasTextSize(updated);
             let scale = size < 0 ? 1 + size * .1 : size < 10 ? 1 + size / 10 : size < 20 ? 2 + (size - 10) * .2 : 4 + (size - 20) * .2;
             values.set('render', 'text-image');
@@ -8345,7 +9915,8 @@ if (keynopeAppSurface) {
       event.stopPropagation();
       updateCanvasElements(index, updated => ['heading','text','text-image','bullet','code'].includes(updated.kind), updated => {
         const values = new URLSearchParams(updated.query || '');
-        if (select.value) values.set('font',select.value); else values.delete('font');
+        if (select.value) {values.set('font',select.value);values.set('render','text-image');values.set('source','bitmap');}
+        else {values.delete('font');values.set('render','truetype');values.delete('source');}
         updated.query = values.toString();
       });
     });
@@ -8359,7 +9930,7 @@ if (keynopeAppSurface) {
     return button;
   }
   function canvasTextEffectCompatible(element) {
-    return ['heading','text','text-image','bullet','page-number','image'].includes(element.kind);
+    return ['heading','text','text-image','bullet','code','page-number','image'].includes(element.kind);
   }
   function canvasTextBaseColour(element) {
     const query = new URLSearchParams(element.query || '');
@@ -8543,7 +10114,7 @@ if (keynopeAppSurface) {
       event.stopPropagation();
       openKeynopeColourPicker(button,colour,next => {
         button.style.setProperty('--keynope-tool-colour',next);
-        updateCanvasElements(index, updated => ['heading','text','text-image','bullet','code','shape','page-number'].includes(updated.kind), updated => {
+        updateCanvasElements(index, updated => ['heading','text','text-image','bullet','code','shape','page-number','connector'].includes(updated.kind), updated => {
           const values = new URLSearchParams(updated.query || '');
           const key = updated.kind === 'heading' ? 'header' : 'fg';
           values.set(key,next);
@@ -8555,14 +10126,17 @@ if (keynopeAppSurface) {
     return button;
   }
   function setCanvasAlignment(index, alignment) {
+    if(alignCanvasGroup(index,alignment))return;
     updateCanvasElements(index, element => ['heading','text','text-image','bullet','code','shape','image','page-number'].includes(element.kind), element => {
       const query = new URLSearchParams(element.query || '');
+      if(query.get('align')==='justify'&&!query.has('text-align'))query.set('text-align','justify');
       query.set('align', alignment);
       for (const key of ['left','right','left_pct','right_pct']) query.delete(key);
       element.query = query.toString();
     });
   }
   function setCanvasVerticalAlignment(index, alignment) {
+    if(alignCanvasGroup(index,alignment,true))return;
     updateCanvasElements(index, element => ['heading','text','text-image','bullet','code','shape','image','page-number'].includes(element.kind), element => {
       const query = new URLSearchParams(element.query || '');
       query.set('valign', alignment);
@@ -8570,18 +10144,31 @@ if (keynopeAppSurface) {
       element.query = query.toString();
     });
   }
-  function canvasVerticalAlignmentTool(index, alignment, active) {
+  function canvasVerticalAlignmentTool(index, alignment, active, text=false) {
     const arrows = {
       top: 'M5 15V5M2.5 7.5 5 5l2.5 2.5',
       middle: 'M5 5v10M2.5 7.5 5 5l2.5 2.5M2.5 12.5 5 15l2.5-2.5',
       bottom: 'M5 5v10M2.5 12.5 5 15l2.5-2.5'
     };
     const titles = {top:'Align top', middle:'Align middle', bottom:'Align bottom'};
-    const button = canvasTool('', (active ? 'active ' : '') + 'keynope-vertical-align-button', () => setCanvasVerticalAlignment(index, alignment));
+    const button = canvasTool('', (active ? 'active ' : '') + 'keynope-vertical-align-button', () => text?setCanvasTextAlignment(index,'text-valign',alignment):setCanvasVerticalAlignment(index, alignment));
     button.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="' + arrows[alignment] + '"/><path d="M11 6v8M14 6v8M17 6v8"/></svg>';
-    button.title = titles[alignment];
+    button.title = text?'Align text '+alignment:titles[alignment];
     button.setAttribute('aria-label', button.title);
     return button;
+  }
+  function setCanvasTextAlignment(index,key,alignment){
+    updateCanvasElements(index,e=>['heading','text','text-image','bullet','code'].includes(e.kind),(e,candidateIndex)=>{
+      const q=new URLSearchParams(e.query||'');
+      const hit=canvasOverlay.querySelector('.keynope-canvas-element[data-element="'+candidateIndex+'"]');
+      if(hit){
+        if(!q.has('width'))q.set('width',String(Math.max(1,Math.round(parseFloat(hit.style.width)*deck.cols/100))));
+        if(!q.has('height'))q.set('height',String(Math.max(1,Math.round(parseFloat(hit.style.height)*deck.rows/100))));
+        if(!q.has('top')&&!q.has('bottom')&&!q.has('valign'))q.set('top',String(Math.round(parseFloat(hit.style.top)*deck.rows/100)));
+        if(!q.has('left')&&!q.has('left_pct')&&!q.has('right')&&!q.has('right_pct')&&!['left','center','right'].includes(q.get('align')))q.set('left',String(Math.round(parseFloat(hit.style.left)*deck.cols/100)));
+      }
+      q.set('text-box','1');q.set(key,alignment);e.query=q.toString();
+    });
   }
   function toggleCanvasMarkdownStyle(index, marker) {
     updateCanvasElements(index, element => ['heading','text','text-image','bullet'].includes(element.kind), element => {
@@ -8597,6 +10184,7 @@ if (keynopeAppSurface) {
   }
   function canvasElementSupportsTransparency(element) {
     if (!element || canvasElementIsGIF(element) || !['heading','text','text-image','bullet','code','shape','image'].includes(element.kind)) return false;
+    if (KeynopeTrueType.is(element)) return true;
     const glyph = (new URLSearchParams(element.query || '').get('glyph') || '').toLowerCase();
     return glyph === '' || glyph === 'blocks' || glyph === 'block';
   }
@@ -8682,7 +10270,7 @@ if (keynopeAppSurface) {
   }
   function canvasVisualMenu(index, element) {
     const button = canvasTool('', 'keynope-icon-button keynope-adjust-image-button', () => {
-      if (activeCanvasVisualMenu && activeCanvasVisualMenu.button === button) {
+      if (activeCanvasVisualMenu && activeCanvasVisualMenu.index === index) {
         closeCanvasVisualMenu();
         return;
       }
@@ -8694,7 +10282,7 @@ if (keynopeAppSurface) {
       panel.style.left = Math.max(8, Math.min(innerWidth - panelRect.width - 8, anchor.left)) + 'px';
       panel.style.top = Math.max(8, Math.min(innerHeight - panelRect.height - 8, anchor.bottom + 7)) + 'px';
       const dismiss = event => {
-        if (!panel.contains(event.target) && event.target !== button) closeCanvasVisualMenu();
+        if (!panel.contains(event.target) && event.target !== button && !event.target.closest?.('.keynope-colour-picker, .keynope-adjust-image-button')) closeCanvasVisualMenu();
       };
       activeCanvasVisualMenu = {index, button, panel, dismiss};
       document.addEventListener('pointerdown', dismiss, true);
@@ -8723,9 +10311,42 @@ if (keynopeAppSurface) {
       visualQueryControl(panel, index, 'Brightness', 'brightness', query.get('brightness'), {min:.2,max:2,step:.1,fallback:1});
       visualQueryControl(panel, index, 'Contrast', 'contrast', query.get('contrast'), {min:.2,max:2,step:.1,fallback:1});
       visualQueryControl(panel, index, 'Saturation', 'saturation', query.get('saturation'), {min:0,max:2,step:.1,fallback:1});
+      appendCanvasTintControls(panel,index,element);
       visualQueryControl(panel, index, 'Sharpness', 'sharpness', query.get('sharpness'), {min:.2,max:2,step:.1,fallback:1});
       visualQueryControl(panel, index, 'Alpha', 'alpha', query.get('alpha'), {min:0,max:255,step:16,fallback:96});
     }
+  }
+  function canvasHasEmoji(element) {
+    return KeynopeTrueType.is(element)&&/[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(element.text||'');
+  }
+  function appendCanvasTintControls(panel,index,element,emoji=false) {
+      const query=new URLSearchParams(element.query||'');
+      const tintLabel=document.createElement('label');
+      tintLabel.textContent=emoji?'Emoji tint':'Monochrome tint';
+      tintLabel.style.color='#eee';
+      const tintControls=document.createElement('div');
+      tintControls.style.cssText='display:flex;align-items:center;gap:8px';
+      const tintEnabled=document.createElement('input');
+      tintEnabled.type='checkbox';tintEnabled.style.width='auto';
+      tintEnabled.checked=query.has('tint');tintEnabled.setAttribute('aria-label',emoji?'Enable emoji tint':'Enable monochrome tint');
+      let tint=query.get('tint')||'#ffffff';
+      const applyTint=()=>updateCanvasElements(index,updated=>emoji?canvasHasEmoji(updated):updated.kind==='image',updated=>{
+        const values=new URLSearchParams(updated.query||'');
+        if(tintEnabled.checked)values.set('tint',tint);else values.delete('tint');
+        updated.query=values.toString();
+      });
+      const tintColour=canvasTool('','keynope-colour-tool',()=>{
+        openKeynopeColourPicker(tintColour,tint,next=>{
+          tint=next;tintEnabled.checked=true;refreshTint();applyTint();
+        });
+      });
+      tintColour.textContent='A';tintColour.title=emoji?'Choose emoji tint':'Choose monochrome tint';tintColour.setAttribute('aria-label',tintColour.title);
+      const refreshTint=()=>{
+        tintColour.style.setProperty('--keynope-tool-colour',tint);
+        tintColour.setAttribute('aria-pressed',String(tintEnabled.checked));
+      };
+      tintEnabled.addEventListener('change',()=>{refreshTint();applyTint();});
+      refreshTint();tintControls.append(tintEnabled,tintColour);panel.append(tintLabel,tintControls);
   }
   function closeCanvasVisualMenu() {
     if (!activeCanvasVisualMenu) return;
@@ -8735,22 +10356,37 @@ if (keynopeAppSurface) {
   }
   function canvasShapeSelectionBounds(element, pageNumber) {
     const query = new URLSearchParams(element.query || '');
-    const width = Math.max(1, Number.parseInt(query.get('width') || '12', 10));
-    const height = Math.max(1, Number.parseInt(query.get('height') || '6', 10));
+    const width = Math.max(.5, Number(query.get('width') || '12'));
+    const height = Math.max(.5, Number(query.get('height') || '6'));
+    const offsetX = element.kind === 'shape' ? Number(query.get('shape-offset-x') || 0) : 0;
+    const offsetY = element.kind === 'shape' ? Number(query.get('shape-offset-y') || 0) : 0;
+    const boxWidth = Math.ceil(width + offsetX), boxHeight = Math.ceil(height + offsetY);
     let left = 0;
     if (query.has('left_pct')) left = Math.round(Number(query.get('left_pct')) * Math.max(0, deck.cols - 1));
     else if (query.has('left')) left = Number.parseInt(query.get('left'), 10) || 0;
-    else if (query.get('align') === 'center') left = Math.floor((deck.cols - width) / 2);
-    else if (query.get('align') === 'right') left = deck.cols - width;
+    else if (query.get('align') === 'center') left = Math.floor((deck.cols - boxWidth) / 2);
+    else if (query.get('align') === 'right') left = deck.cols - boxWidth;
     let top = Number.parseInt(query.get('top') || '0', 10) - Math.max(0, pageNumber || 0) * deck.rows;
-    if (query.has('bottom')) top = deck.rows - height - (Number.parseInt(query.get('bottom'), 10) || 0);
-    else if (query.get('valign') === 'middle') top = Math.floor((deck.rows - height) / 2);
-    else if (query.get('valign') === 'bottom') top = deck.rows - height;
+    if (query.has('bottom')) top = deck.rows - boxHeight - (Number.parseInt(query.get('bottom'), 10) || 0);
+    else if (query.get('valign') === 'middle') top = Math.floor((deck.rows - boxHeight) / 2);
+    else if (query.get('valign') === 'bottom') top = deck.rows - boxHeight;
     else if (query.get('valign') === 'top') top = 0;
     if (top >= deck.rows || top + height <= 0) return null;
-    left = Math.max(0, Math.min(deck.cols - 1, left));
-    top = Math.max(0, Math.min(deck.rows - 1, top));
+    if(element.kind!=='shape'){
+      left = Math.max(0, Math.min(deck.cols - 1, left));
+      top = Math.max(0, Math.min(deck.rows - 1, top));
+    }
+    left += offsetX; top += offsetY;
     return {minX:left, minY:top, maxX:Math.min(deck.cols, left + width), maxY:Math.min(deck.rows, top + height), color:query.get('fg') || ''};
+  }
+  function setCanvasShapeBounds(query, next) {
+    clearCanvasPlacementAnchors(query);
+    const left = Math.floor(Math.max(0, next.minX)), top = Math.floor(Math.max(0, next.minY));
+    query.set('left', String(left)); query.set('top', String(top));
+    query.set('shape-offset-x', String(next.minX - left));
+    query.set('shape-offset-y', String(next.minY - top));
+    query.set('width', String(Math.max(.5, next.maxX - next.minX)));
+    query.set('height', String(Math.max(.5, next.maxY - next.minY)));
   }
   function applyCanvasLink(index, input, value) {
     value = value.trim();
@@ -8857,6 +10493,11 @@ if (keynopeAppSurface) {
     return button;
   }
   function renderEditorTopbar() {
+    connectShapesButton.disabled = (editorState?.slides?.[editorState.current]?.elements || []).filter(e=>e.kind==='shape').length < 2;
+    connectShapesButton.classList.toggle('active', !!shapeConnecting);
+    for(const refresh of insertTextControls)refresh();
+    tabsButton.disabled = !editorState?.hasActivities || !!editorState?.masterMode;
+    tabsButton.title = tabsButton.disabled ? 'Add an activity to configure participant tabs' : 'Configure participant tabs';
     closeCanvasTextEffectDropdown();
     publishEditorDirtyState();
     const slide = editorState && editorState.slides && editorState.slides[editorState.current];
@@ -8884,13 +10525,43 @@ if (keynopeAppSurface) {
     const shapeIndex = selectedIndices.find(candidate => slide.elements[candidate].kind === 'shape');
     const shapeElement = shapeIndex == null ? null : slide.elements[shapeIndex];
     if (activeCanvasVisualMenu && (!element || activeCanvasVisualMenu.index !== index)) closeCanvasVisualMenu();
-    const contextual = !suppressSelectionTopbar && (!!activeInlineEditor || !!element);
-    saveButton.hidden = contextual;
+    const contextual = !!shapeConnecting || (!suppressSelectionTopbar && (!!activeInlineEditor || !!element));
+    saveButton.hidden = false;
     const webDocumentControls = topbar.querySelector('.keynope-web-controls');
     if (webDocumentControls) webDocumentControls.hidden = contextual;
     mainTopbar.hidden = contextual;
     selectionTopbar.hidden = !contextual;
-    selectionTopbar.replaceChildren();
+    for(const id of ['content','style','arrange'])ribbonPanels[id].replaceChildren();
+    const content=ribbonPanels.content,style=ribbonPanels.style,arrange=ribbonPanels.arrange;
+    const allText=selectedElements.length>0&&selectedElements.every(e=>['heading','text','text-image','bullet','code','page-number'].includes(e.kind));
+    const allShape=selectedElements.length>0&&selectedElements.every(e=>e.kind==='shape');
+    const allImage=selectedElements.length>0&&selectedElements.every(e=>e.kind==='image');
+    configureRibbon(shapeConnecting||element?.kind==='connector'&&selectedElements.length===1?'Line':contextual?(allText?'Text':allShape?'Shape':allImage?'Image':'Edit'):(editorState?.masterMode?'master':'main'),!!activeInlineEditor);
+    undoButton.disabled=!editorState?.canUndo && !activeInlineEditor?.isDirty();
+    redoButton.disabled=!editorState?.canRedo || !!activeInlineEditor?.isDirty();
+    commitButton.disabled=!contextual;
+    commitButton.title=activeInlineEditor?'Commit':'Done';
+    commitButton.setAttribute('aria-label',commitButton.title);
+    const remove=contextual?canvasDeleteTool(index):deleteSlideButton;
+    if(contextual&&activeInlineEditor){
+      // Commit the editor before deleting so an in-flight preview cannot restore it.
+      remove.addEventListener('click',async event=>{
+        event.stopImmediatePropagation();
+        const id=element.id;
+        await activeInlineEditor.finish(true);
+        const current=editorState.slides[editorState.current];
+        const target=id?current.elements.findIndex(e=>e.id===id):-1;
+        if(target>=0)await editorAction({action:'delete-element',element:target});
+      },true);
+    }
+    trailingTools.replaceChildren(commitButton,remove);
+    if(shapeConnecting){
+      trailingTools.replaceChildren(commitButton);
+      const connect=canvasTool('', 'keynope-svg-button active', toggleShapeConnecting);
+      connect.innerHTML=connectShapesButton.innerHTML;connect.title='Connect shapes';connect.setAttribute('aria-label',connect.title);content.append(connect);
+      appendConnectorTools(content,-1,{kind:'connector',query:new URLSearchParams(connectorDefaults).toString()},true);
+      return;
+    }
     if (!contextual) return;
     if (activeInlineEditor) {
       const boldSelection = canvasTool('B', '', () => applyInlineSelectionWrapper('**'));
@@ -8899,39 +10570,77 @@ if (keynopeAppSurface) {
       const highlightSelection = canvasTool('H', '', () => applyInlineSelectionWrapper('*'));
       highlightSelection.title = 'Highlight selected text';
       highlightSelection.setAttribute('aria-label', highlightSelection.title);
-      selectionTopbar.append(boldSelection, highlightSelection, inlineSelectionColourTool());
-      selectionTopbar.appendChild(canvasEmojiTool(index));
-      selectionTopbar.appendChild(canvasTool('Commit', '', () => activeInlineEditor && activeInlineEditor.finish(true)));
-      selectionTopbar.appendChild(canvasTool('Cancel', '', () => activeInlineEditor && activeInlineEditor.finish(false)));
+      if(!KeynopeTrueType.is(element)&&element?.kind!=='shape'){
+        content.append(boldSelection, highlightSelection);
+        style.appendChild(inlineSelectionColourTool());
+        content.appendChild(canvasEmojiTool(index));
+      }
+      content.appendChild(canvasTool('Cancel', '', () => activeInlineEditor && activeInlineEditor.finish(false)));
       return;
     }
-    const done = canvasTool('✓', '', () => editorAction({action: 'select-element', element: -1}).catch(() => {}));
-    done.title = 'Done';
-    done.setAttribute('aria-label', 'Done');
-    selectionTopbar.appendChild(done);
     const query = new URLSearchParams(element.query || '');
+    appendCanvasGroupTools(arrange,index);
     const selectedText = !!textElement;
-    const rotatableText = selectedElements.some(candidate => ['heading','text','text-image','bullet'].includes(candidate.kind));
+    const rotatableText = selectedElements.some(candidate => KeynopeTrueType.is(candidate)||['heading','text','text-image','bullet'].includes(candidate.kind));
     const positionable = selectedElements.some(candidate => ['heading','text','text-image','bullet','code','shape','image','page-number'].includes(candidate.kind));
     if (selectedText) {
       if (selectedElements.length === 1) {
         const edit = canvasTool('✎', '', () => beginInlineEdit(textIndex));
         edit.title = 'Edit text';
         edit.setAttribute('aria-label', 'Edit text');
-        selectionTopbar.appendChild(edit);
+        content.appendChild(edit);
       }
-      appendCanvasTextKindTools(selectionTopbar, textIndex, textElement);
-      if (selectedElements.length === 1) selectionTopbar.appendChild(canvasEmojiTool(textIndex));
-      selectionTopbar.appendChild(canvasTool('−', '', () => changeCanvasTextSize(textIndex, -1)));
-      selectionTopbar.appendChild(canvasTool('+', '', () => changeCanvasTextSize(textIndex, 1)));
-      if (selectedElements.some(candidate => ['heading','text','text-image','bullet'].includes(candidate.kind))) {
+      appendCanvasTextKindTools(content, textIndex, textElement);
+      if (selectedElements.length === 1 && !KeynopeTrueType.is(textElement)) content.appendChild(canvasEmojiTool(textIndex));
+      const sizeStack = document.createElement('span');
+      sizeStack.className = 'keynope-text-size-stack';
+      for (const [label, delta, title] of [['+',1,'Increase font size'],['−',-1,'Decrease font size']]) {
+        const button = canvasTool(label, '', () => changeCanvasTextSize(textIndex, delta));
+        button.title = title;
+        button.setAttribute('aria-label', title);
+        sizeStack.appendChild(button);
+      }
+      content.appendChild(sizeStack);
+      if(KeynopeTrueType.is(textElement)){
+        const size=document.createElement('input');size.type='number';size.min='1';size.max='512';size.step='1';size.value=String(KeynopeTrueType.size(textElement));size.className='keynope-ttf-size';size.title='TrueType font size (1–512)';size.setAttribute('aria-label','TrueType font size');
+        size.addEventListener('keydown',event=>event.stopPropagation());size.addEventListener('change',()=>{if(!size.checkValidity())return;updateCanvasElements(textIndex,KeynopeTrueType.is,e=>applyCanvasTextSize(e,Number(size.value)));});
+        const sizeLabel=document.createElement('label');sizeLabel.className='keynope-ttf-width-control';sizeLabel.append('Font size',size);content.append(sizeLabel);
+        const widthStack=document.createElement('span');widthStack.className='keynope-text-size-stack';
+        const widthLabel=document.createElement('label');widthLabel.className='keynope-ttf-width-control';widthLabel.append('Font width (%)');
+        const width=document.createElement('input');width.type='number';width.min='1';width.max='200';width.step='1';
+        width.value=String(KeynopeTrueType.widthPercent(textElement));width.className='keynope-ttf-width';
+        width.title='Font width: 100% is the Keynope baseline (original × 0.4167). Does not resize the text box.';
+        width.setAttribute('aria-label','TrueType width percent');
+        width.addEventListener('keydown',event=>event.stopPropagation());
+        width.addEventListener('change',()=>{
+          if(!width.checkValidity())return;
+          const percent=Number(width.value);
+          updateCanvasElements(textIndex,KeynopeTrueType.is,(e,candidateIndex)=>{
+            const q=new URLSearchParams(e.query||'');
+            const resolved=editorElementIndexMaps().rawToResolved.get(candidateIndex);
+            const line=deck.pages[pageIndex]?.lines?.find(l=>l.trueType&&l.element===resolved);
+            // Freeze any implicitly sized box before changing glyph proportions.
+            if(line){if(!q.has('width'))q.set('width',String(line.trueType.width));if(!q.has('height'))q.set('height',String(line.trueType.height));}
+            q.set('ttf-width',String(percent));
+            e.query=q.toString();
+          });
+        });
+        for(const [label,delta,title] of [['+',1,'Increase font width'],['−',-1,'Decrease font width']]){
+          const button=canvasTool(label,'',()=>{width.value=String(Math.max(1,Math.min(200,Number(width.value)+delta)));width.dispatchEvent(new Event('change'));});
+          button.title=title;button.setAttribute('aria-label',title);widthStack.append(button);
+        }
+        widthLabel.append(width);content.append(widthStack,widthLabel);
+        const boldOn=new URLSearchParams(textElement.query||'').get('ttf-weight')==='bold';
+        const bold=canvasTool('B',boldOn?'active':'',()=>updateCanvasElements(textIndex,KeynopeTrueType.is,e=>{const q=new URLSearchParams(e.query||'');if(boldOn)q.delete('ttf-weight');else q.set('ttf-weight','bold');e.query=q.toString();}));bold.title='Bold TrueType text';bold.setAttribute('aria-label',bold.title);content.appendChild(bold);
+      }
+      if (!KeynopeTrueType.is(textElement)&&selectedElements.some(candidate => ['heading','text','text-image','bullet'].includes(candidate.kind))) {
         const bold = canvasTool('B', (textElement.text || '').startsWith('**') && (textElement.text || '').endsWith('**') ? 'active' : '', () => toggleCanvasMarkdownStyle(textIndex, '**'));
         bold.title = 'Bold';
         bold.setAttribute('aria-label', 'Bold');
         const highlight = canvasTool('H', (textElement.text || '').startsWith('*') && (textElement.text || '').endsWith('*') ? 'active' : '', () => toggleCanvasMarkdownStyle(textIndex, '*'));
         highlight.title = 'Highlight';
         highlight.setAttribute('aria-label', 'Highlight');
-        selectionTopbar.append(bold, highlight);
+        content.append(bold, highlight);
       }
     }
     if (positionable) {
@@ -8939,34 +10648,59 @@ if (keynopeAppSurface) {
         const button = canvasTool(symbol, query.get('align') === alignment ? 'active' : '', () => setCanvasAlignment(index, alignment));
         button.title = title;
         button.setAttribute('aria-label', title);
-        selectionTopbar.appendChild(button);
+        arrange.appendChild(button);
       }
-      for (const alignment of ['top','middle','bottom']) selectionTopbar.appendChild(canvasVerticalAlignmentTool(index, alignment, query.get('valign') === alignment));
+      for (const alignment of ['top','middle','bottom']) arrange.appendChild(canvasVerticalAlignmentTool(index, alignment, query.get('valign') === alignment));
     }
     if (selectedText) {
+      for(const [alignment,symbol,title] of [['left','≡←','Align text left'],['center','≡','Align text centre'],['right','→≡','Align text right']]){
+        const button=canvasTool(symbol,query.get('text-align')===alignment?'active':'',()=>setCanvasTextAlignment(textIndex,'text-align',alignment));
+        button.title=title;button.setAttribute('aria-label',title);content.append(button);
+      }
+      for(const alignment of ['top','middle','bottom'])content.append(canvasVerticalAlignmentTool(textIndex,alignment,query.get('text-valign')===alignment,true));
+      if (selectedElements.some(candidate => KeynopeTrueType.is(candidate)||['heading','text','text-image','bullet'].includes(candidate.kind))) {
+        const justified=(query.get('text-align')||query.get('align'))==='justify';
+        const justify = canvasTool('', 'keynope-svg-button' + (justified ? ' active' : ''), () => setCanvasTextAlignment(textIndex,'text-align','justify'));
+        justify.innerHTML = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 4h16M2 8h16M2 12h16M2 16h16"/></svg>';
+        justify.title = 'Justify text';
+        justify.setAttribute('aria-label', justify.title);
+        justify.setAttribute('aria-pressed', String(justified));
+        content.appendChild(justify);
+      }
       if (rotatableText) {
         const rotate = canvasTool('⟳', 'keynope-icon-button keynope-rotate-button', () => rotateCanvasText(textIndex));
         rotate.innerHTML = '<span class="keynope-rotate-icon" aria-hidden="true">⟳</span><span class="keynope-rotate-label">ROTATE</span>';
         rotate.title = 'Rotate';
         rotate.setAttribute('aria-label', 'Rotate');
-        selectionTopbar.appendChild(rotate);
+        arrange.appendChild(rotate);
       }
-      if (selectedElements.some(candidate => ['heading','text','text-image','bullet'].includes(candidate.kind))) selectionTopbar.appendChild(canvasStyleSelect(textIndex, textElement));
-      selectionTopbar.appendChild(canvasFontSelect(textIndex, textElement));
-      selectionTopbar.appendChild(canvasFontEditorTool(textElement));
-      selectionTopbar.appendChild(canvasColourTool(textIndex, textElement, ''));
-      if (selectedElements.some(canvasTextEffectCompatible)) appendCanvasTypographyEffectTools(selectionTopbar,textIndex,textElement);
-      if (selectedElements.length === 1) selectionTopbar.appendChild(canvasLinkTool(textIndex, query));
+      style.appendChild(canvasStyleSelect(textIndex, textElement));
+      content.appendChild(canvasFontSelect(textIndex, textElement));
+      content.appendChild(canvasFontEditorTool(textElement));
+      style.appendChild(canvasColourTool(textIndex, textElement, ''));
+      const emojiIndex=selectedIndices.find(candidate=>canvasHasEmoji(slide.elements[candidate]));
+      if(emojiIndex!=null)appendCanvasTintControls(style,emojiIndex,slide.elements[emojiIndex],true);
+      if (selectedElements.some(canvasTextEffectCompatible)) appendCanvasTypographyEffectTools(style,textIndex,textElement);
+      if (selectedElements.length === 1) style.appendChild(canvasLinkTool(textIndex, query));
     }
-    if (!selectedText && shapeElement) selectionTopbar.appendChild(canvasColourTool(shapeIndex, shapeElement, ''));
-    if (selectedElements.length === 1 && element.kind === 'shape') appendCanvasShapeKindTools(selectionTopbar, index, query);
-    if (selectedElements.length === 1 && element.kind === 'image') selectionTopbar.appendChild(canvasVisualMenu(index, element));
-    if (selectedElements.length === 1) selectionTopbar.appendChild(canvasOutlineTool(index, element, query));
-    if (selectedElements.length === 1) selectionTopbar.appendChild(canvasDuplicateTool(index));
-    if (selectedElements.length === 1) selectionTopbar.appendChild(canvasLayerTool(index, 'backward'));
-    if (selectedElements.length === 1) selectionTopbar.appendChild(canvasLayerTool(index, 'forward'));
-    if (selectedElements.length === 1 && canvasElementSupportsTransparency(element)) selectionTopbar.appendChild(canvasTransparencyTool(index, query));
-    selectionTopbar.appendChild(canvasDeleteTool(index));
+    if (!selectedText && shapeElement) style.appendChild(canvasColourTool(shapeIndex, shapeElement, ''));
+    if (shapeElement) {
+      const connect=canvasTool('', 'keynope-svg-button'+(shapeConnecting?' active':''), toggleShapeConnecting);
+      connect.innerHTML=connectShapesButton.innerHTML;connect.title='Connect shapes';connect.setAttribute('aria-label',connect.title);connect.disabled=connectShapesButton.disabled;content.append(connect);
+    }
+    if (element.kind==='connector' && selectedElements.length===1) {
+      appendConnectorTools(content,index,element);
+      trailingTools.replaceChildren(commitButton);
+      return; // Anchored lines have no independent box, font, rotation or size.
+    }
+    if (selectedElements.length === 1 && element.kind === 'shape') appendCanvasShapeKindTools(content, index, query);
+    if (selectedElements.length === 1 && element.kind === 'shape') appendShapeLabelTools(content,style,index,element);
+    if (selectedElements.length === 1 && element.kind === 'image') content.appendChild(canvasVisualMenu(index, element));
+    if (selectedElements.length === 1) style.appendChild(canvasOutlineTool(index, element, query));
+    if (selectedElements.length === 1) arrange.appendChild(canvasDuplicateTool(index));
+    if (selectedElements.length === 1) arrange.appendChild(canvasLayerTool(index, 'backward'));
+    if (selectedElements.length === 1) arrange.appendChild(canvasLayerTool(index, 'forward'));
+    if (selectedElements.length === 1 && canvasElementSupportsTransparency(element)) style.appendChild(canvasTransparencyTool(index, query));
   }
 
   function appendCanvasResizeHandles(hit) {
@@ -8982,8 +10716,9 @@ if (keynopeAppSurface) {
   function refreshCanvasSelectionInPlace() {
     if (!editorState) return;
     if (activeCanvasDrag) {
+      if(activeCanvasDrag.marquee)return;
       for (const hit of canvasOverlay.querySelectorAll('.keynope-canvas-element')) {
-        hit.classList.toggle('active', hit === activeCanvasDrag.hit);
+        hit.classList.toggle('active', activeCanvasDrag.indices ? activeCanvasDrag.indices.includes(Number(hit.dataset.element)) : hit === activeCanvasDrag.hit);
       }
       return;
     }
@@ -8991,12 +10726,158 @@ if (keynopeAppSurface) {
     if (editorState.selected >= 0) selected.add(editorState.selected);
     for (const hit of canvasOverlay.querySelectorAll('.keynope-canvas-element')) {
       const index = Number(hit.dataset.element);
-      hit.classList.toggle('active', selected.has(index));
+      hit.classList.toggle('active', canvasGroupMembers(index).some(i=>selected.has(i)));
       for (const handle of hit.querySelectorAll('.keynope-resize-handle')) handle.remove();
-      if (index === editorState.selected) appendCanvasResizeHandles(hit);
+      if (index === editorState.selected && !hit.dataset.group && selected.size===1) appendCanvasResizeHandles(hit);
     }
   }
 
+  let shapeConnecting = null;
+  const connectorDefaults = {'connector-mode':'elbow','connector-arrows':'none','connector-width':'1','connector-arrow-width':'6'};
+  getEditorConnectorPreview = () => shapeConnecting?.previewLines || [];
+  let editingConnector = '';
+  function appendConnectorTools(container,index,element,defaults=false){
+    const q=new URLSearchParams(element.query||'');
+    const set=(key,value)=>{
+      if(value){q.set(key,value);connectorDefaults[key]=value;}else{q.delete(key);delete connectorDefaults[key];}
+      if(defaults){shapeConnecting?.updatePreview?.();return;}
+      updateCanvasElement(index,e=>{const v=new URLSearchParams(e.query||'');if(value)v.set(key,value);else v.delete(key);if(key==='connector-mode')v.delete('connector-route');e.query=v.toString();});
+    };
+    const choice=(label,key,options,fallback)=>{const field=document.createElement('label');field.className='keynope-ttf-width-control';field.append(label);const select=document.createElement('select');select.setAttribute('aria-label',label);for(const [value,name]of options){const opt=document.createElement('option');opt.value=value;opt.textContent=name;select.append(opt)}select.value=q.get(key)||fallback;select.addEventListener('change',()=>set(key,select.value));field.append(select);container.append(field);};
+    choice('Line path','connector-mode',[['elbow','Elbow'],['straight','Straight']],'straight');
+    choice('Arrowheads','connector-arrows',[['none','None'],['end','End'],['start','Start'],['both','Both ends']],'none');
+    for(const [label,key,fallback,max]of [['Line width','connector-width',1,8],['Arrow width','connector-arrow-width',6,20]]){
+      const field=document.createElement('label');field.className='keynope-ttf-width-control';field.append(label);const input=document.createElement('input');input.type='number';input.min=key==='connector-width'?'1':'.5';input.max=String(max);input.step='.5';input.value=String(Math.max(Number(input.min),Number(q.get(key)||fallback)));input.style.width='65px';input.setAttribute('aria-label',label);input.addEventListener('keydown',e=>e.stopPropagation());input.addEventListener('change',()=>{if(input.checkValidity())set(key,input.value)});field.append(input);container.append(field);
+    }
+    const inheritedColour='#'+(parseCSSColor(deck.pages[pageIndex]?.fg)||[255,255,255]).map(v=>v.toString(16).padStart(2,'0')).join('');
+    const colour=canvasTool('','keynope-colour-tool',()=>openKeynopeColourPicker(colour,q.get('fg')||inheritedColour,value=>{colour.style.setProperty('--keynope-tool-colour',value);set('fg',value);inherit.disabled=false;}));
+    colour.title='Line color';colour.setAttribute('aria-label','Line color');colour.innerHTML='<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M3 17 21 7" stroke="currentColor" stroke-width="3"/></svg>';colour.style.setProperty('--keynope-tool-colour',q.get('fg')||inheritedColour);container.append(colour);
+    const inherit=canvasTool('Inherit color','',()=>{set('fg','');colour.style.setProperty('--keynope-tool-colour',inheritedColour);inherit.disabled=true;});inherit.title='Use the slide or master text color';inherit.disabled=!q.has('fg');container.append(inherit);
+    if(defaults)return;
+    const edit=canvasTool('Edit bends',editingConnector===element.id?'active':'',()=>{editingConnector=editingConnector===element.id?'':element.id;renderEditorTopbar();renderEditorCanvasOverlay()});edit.disabled=q.get('connector-mode')!=='elbow';container.append(edit);
+    const reset=canvasTool('Auto-route','',()=>{editingConnector='';updateCanvasElement(index,e=>{const v=new URLSearchParams(e.query||'');v.delete('connector-route');v.set('connector-mode','elbow');e.query=v.toString()})});container.append(reset);
+    container.append(canvasDeleteTool(index));
+  }
+  function compactConnectorPoints(points){
+    const out=[];for(const p of points){const last=out.at(-1);if(last&&last.x===p.x&&last.y===p.y)continue;out.push({...p});while(out.length>=3){const a=out.at(-3),b=out.at(-2),c=out.at(-1);if(a.x===b.x&&b.x===c.x||a.y===b.y&&b.y===c.y)out.splice(out.length-2,1);else break}}return out;
+  }
+  function displacedConnectorSegment(original,segment,delta){
+    let points=original.map(p=>({...p}));
+    if(points.length>2&&segment===points.length-2){points.reverse();return displacedConnectorSegment(points,0,delta).reverse()}
+    const a=points[segment],b=points[segment+1],horizontal=a.y===b.y;
+    const shift=p=>horizontal?{x:p.x,y:p.y+delta}:{x:p.x+delta,y:p.y};
+    if(points.length===2){const first={x:a.x+(b.x-a.x)/3,y:a.y+(b.y-a.y)/3},last={x:a.x+(b.x-a.x)*2/3,y:a.y+(b.y-a.y)*2/3};return[a,first,shift(first),shift(last),last,b]}
+    if(segment===0){const stub={x:(a.x+b.x)/2,y:(a.y+b.y)/2};return[a,stub,shift(stub),shift(b),...points.slice(2)]}
+    points[segment]=shift(a);points[segment+1]=shift(b);return points;
+  }
+  function beginConnectorSegmentDrag(event,handle,element,points,segment){
+    if(event.button!==0)return;event.preventDefault();event.stopPropagation();
+    const horizontal=points[segment].y===points[segment+1].y,origin=horizontal?event.clientY:event.clientX;
+    const token={connector:true,elementID:element.id},originalPages=deck.pages.slice();activeCanvasDrag=token;
+    let moved=points,delta=0,pending=null,pumping=false;
+    const edited=()=>{const e={...element},q=new URLSearchParams(e.query||'');q.set('connector-mode','elbow');q.set('connector-route',JSON.stringify(moved));e.query=q.toString();return e};
+    const pump=async()=>{if(pumping)return;pumping=true;while(pending&&activeCanvasDrag===token){const e=pending;pending=null;await previewCanvasMutation(editorElementIndexByID(element.id),e,false)}pumping=false};
+    const move=e=>{const r=canvasOverlay.getBoundingClientRect();delta=Math.round(((horizontal?e.clientY:e.clientX)-origin)*(horizontal?deck.rows/r.height:deck.cols/r.width)*2)/2;moved=displacedConnectorSegment(points,segment,delta);handle.style[horizontal?'top':'left']=((horizontal?(points[segment].y+delta)/deck.rows:(points[segment].x+delta)/deck.cols)*100)+'%';pending=edited();pump();};
+    const cleanup=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);window.removeEventListener('pointercancel',cancel);activeCanvasDrag=null;pending=null};
+    const cancel=()=>{cleanup();editorMutationPreviewSequence++;deck.pages=originalPages;drawFrame();renderEditorCanvasOverlay()};token.cancel=cancel;
+    const up=async()=>{cleanup();if(delta){await updateEditorElementByID(element.id,editorElementIndexByID(element.id),edited()).catch(()=>{});}else{editorMutationPreviewSequence++;deck.pages=originalPages;}drawFrame();renderEditorCanvasOverlay()};
+    window.addEventListener('pointermove',move);window.addEventListener('pointerup',up,{once:true});window.addEventListener('pointercancel',cancel,{once:true});
+  }
+  function toggleShapeConnecting() {
+    if(activeInlineEditor){activeInlineEditor.finish(true).then(toggleShapeConnecting);return;}
+    shapeConnecting = shapeConnecting ? null : {slide:editorState.current,master:!!editorState.masterMode,source:null};
+    closeAddShapeMenu();renderEditorTopbar();renderEditorCanvasOverlay();drawFrame();
+  }
+  function canvasConnectorPorts(page) {
+    const ids=new Set((editorState.slides[editorState.current]?.elements||[]).filter(e=>e.kind==='shape').map(e=>e.id));
+    return (page.shapePorts||[]).filter(p=>ids.has(p.id)&&p.x>=0&&p.y>=0&&p.x<=deck.cols&&p.y<=deck.rows);
+  }
+  function appendCanvasConnectors(page) {
+    const ports=canvasConnectorPorts(page),elements=editorState.slides[editorState.current]?.elements||[];
+    const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+    svg.setAttribute('viewBox','0 0 '+deck.cols+' '+deck.rows);svg.setAttribute('preserveAspectRatio','none');
+    svg.style.cssText='position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none';
+    // Hit-test only the path. The actual line is always painted on the canvas,
+    // independently of whether this editing overlay is selected or rebuilt.
+    elements.forEach((e,index)=>{
+      if(e.kind!=='connector')return;
+      const q=new URLSearchParams(e.query||''),a=ports.find(p=>p.id===q.get('connector-from')&&p.side===q.get('connector-from-side')),b=ports.find(p=>p.id===q.get('connector-to')&&p.side===q.get('connector-to-side'));
+      if(!a||!b)return;
+      const points=compactConnectorPoints((page.connectors||[]).find(c=>c.id===e.id)?.points||[a,b]);
+      const path=(color,width)=>{const p=document.createElementNS(svg.namespaceURI,'polyline');p.setAttribute('points',points.map(p=>p.x+','+p.y).join(' '));p.setAttribute('fill','none');p.setAttribute('stroke',color);p.setAttribute('stroke-width',width);p.setAttribute('vector-effect','non-scaling-stroke');svg.append(p);return p};
+      const selected=index===editorState.selected||(editorState.selection||[]).includes(index);
+      const hit=path('transparent',Math.max(14,Number(q.get('connector-width')||1)*3));hit.classList.add('keynope-connector-hit');hit.dataset.element=String(index);hit.dataset.id=e.id;hit.style.pointerEvents=shapeConnecting?'none':'stroke';hit.style.cursor='pointer';
+      hit.addEventListener('pointerdown',event=>{event.preventDefault();event.stopPropagation();editorAction({action:'select-element',element:index,name:event.shiftKey?'toggle':'',elementData:{id:e.id}}).catch(()=>{});});
+      hit.addEventListener('dblclick',async event=>{event.preventDefault();event.stopPropagation();editingConnector=e.id;if(q.get('connector-mode')!=='elbow'){const el={...e},v=new URLSearchParams(el.query||'');v.set('connector-mode','elbow');el.query=v.toString();await updateEditorElementByID(e.id,index,el).catch(()=>{});}renderEditorTopbar();renderEditorCanvasOverlay();});
+      hit.addEventListener('contextmenu',event=>{event.preventDefault();event.stopPropagation();});
+      if(editingConnector===e.id&&selected&&!shapeConnecting){
+        for(let i=0;i<points.length-1;i++){const p=points[i],n=points[i+1];if(p.x===n.x&&p.y===n.y)continue;const horizontal=p.y===n.y;
+          const handle=document.createElement('button');handle.type='button';handle.className='keynope-connector-segment';handle.dataset.segment=String(i);handle.setAttribute('aria-label',horizontal?'Move horizontal segment':'Move vertical segment');handle.title=horizontal?'Drag up or down':'Drag left or right';handle.textContent=horizontal?'↕':'↔';
+          handle.style.cssText='position:absolute;z-index:4;left:'+((p.x+n.x)/2/deck.cols*100)+'%;top:'+((p.y+n.y)/2/deck.rows*100)+'%;transform:translate(-50%,-50%);width:22px;height:22px;min-width:0;padding:0;background:#15191f;color:#ffd166;border:1px solid #ffd166;pointer-events:auto;cursor:'+(horizontal?'ns-resize':'ew-resize');
+          handle.addEventListener('pointerdown',event=>beginConnectorSegmentDrag(event,handle,e,points,i));canvasOverlay.append(handle);
+        }
+      }
+    });
+    canvasOverlay.append(svg);
+    if(!shapeConnecting)return;
+    if(shapeConnecting.slide!==editorState.current||shapeConnecting.master!==!!editorState.masterMode){shapeConnecting=null;return;}
+    const mode=shapeConnecting;
+    const catcher=document.createElement('div');catcher.style.cssText='position:absolute;inset:0;cursor:crosshair;pointer-events:auto';
+    canvasOverlay.append(catcher);
+    const hint=document.createElement('div');hint.className='keynope-connector-hint';hint.textContent=mode.source?'Choose an edge on another shape · Esc to cancel':'Connect shapes: drag between dots, or click two dots · Esc to cancel';
+    hint.style.cssText='position:absolute;left:50%;top:8px;transform:translateX(-50%);padding:7px 12px;background:#15191fee;color:#ffd166;border:1px solid #ffd166;border-radius:5px;pointer-events:none;font-size:13px;white-space:nowrap';canvasOverlay.append(hint);
+    const source=()=>ports.find(p=>p.id===mode.source?.id&&p.side===mode.source?.side);
+    let pending=null,pumping=false,lastEvent=null;
+    const point=event=>{const r=canvasOverlay.getBoundingClientRect();return{x:Math.max(0,Math.min(deck.cols,(event.clientX-r.left)/r.width*deck.cols)),y:Math.max(0,Math.min(deck.rows,(event.clientY-r.top)/r.height*deck.rows))};};
+    const nearest=event=>{const r=canvasOverlay.getBoundingClientRect();return ports.find(p=>p.id!==mode.source?.id&&Math.hypot((p.x/deck.cols*r.width+r.left)-event.clientX,(p.y/deck.rows*r.height+r.top)-event.clientY)<18);};
+    const pump=async()=>{
+      if(pumping)return;pumping=true;
+      try{while(pending&&shapeConnecting===mode){const request=pending;pending=null;
+        try{const response=await fetch('/api/editor/connector-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request.body)});
+          if(!response.ok)continue;const preview=await response.json();
+          if(shapeConnecting!==mode)continue;
+          mode.previewLines=preview.lines||[];mode.previewPoints=preview.points||[];drawFrame();
+        }catch(_err){}
+      }}finally{pumping=false;}
+    };
+    const showPreview=event=>{
+      const a=source();if(!a||shapeConnecting!==mode)return;
+      lastEvent={clientX:event.clientX,clientY:event.clientY};
+      const target=nearest(event),b=target||point(event);
+      if(!target)b.side=Math.abs(b.x-a.x)>2*Math.abs(b.y-a.y)?(b.x>a.x?'left':'right'):(b.y>a.y?'top':'bottom');
+      pending={body:{element:{kind:'connector',query:new URLSearchParams(connectorDefaults).toString()},from:a,to:b,cols:deck.cols,rows:deck.rows,page:page.page||0}};
+      pump();
+      for(const dot of canvasOverlay.querySelectorAll('.keynope-connect-dot'))dot.style.background=target&&dot.dataset.id===target.id&&dot.dataset.side===target.side?'#fff':'#ffd166';
+    };
+    mode.updatePreview=()=>{if(lastEvent)showPreview(lastEvent)};
+    const complete=async target=>{
+      const a=source();if(!a||target.id===a.id||shapeConnecting!==mode)return;
+      shapeConnecting=null;renderEditorTopbar();renderEditorCanvasOverlay();
+      const q=new URLSearchParams({...connectorDefaults,'connector-from':a.id,'connector-from-side':a.side,'connector-to':target.id,'connector-to-side':target.side});
+      try {await editorAction({action:'add-element',kind:'connector',elementData:{kind:'connector',query:q.toString()}});}
+      catch(error){if(editorStatus)editorStatus.textContent='Could not connect shapes: '+error.message;}
+    };
+    catcher.addEventListener('pointermove',showPreview);
+    catcher.addEventListener('pointerdown',event=>{event.preventDefault();event.stopPropagation();shapeConnecting=null;renderEditorTopbar();renderEditorCanvasOverlay();});
+    for(const port of ports){
+      const dot=document.createElement('button');dot.type='button';dot.className='keynope-connect-dot';dot.dataset.id=port.id;dot.dataset.side=port.side;
+      const selected=port.id===mode.source?.id&&port.side===mode.source?.side;
+      dot.setAttribute('aria-label','Connect '+port.side+' of shape '+(elements.findIndex(e=>e.id===port.id)+1));dot.title=port.side[0].toUpperCase()+port.side.slice(1);
+      dot.style.cssText='position:absolute;z-index:3;left:'+(port.x/deck.cols*100)+'%;top:'+(port.y/deck.rows*100)+'%;transform:translate(-50%,-50%);width:14px;height:14px;min-width:0;padding:0;border:2px solid #15191f;border-radius:50%;background:#ffd166;box-shadow:0 0 0 '+(selected?3:1)+'px #fff;cursor:crosshair;pointer-events:auto';
+      dot.addEventListener('pointermove',showPreview);
+      dot.addEventListener('pointerdown',event=>{
+        if(event.button!==0)return;event.preventDefault();event.stopPropagation();
+        if(source()&&port.id!==mode.source.id){complete(port).catch(()=>{});return;}
+        mode.source=port;hint.textContent='Choose an edge on another shape · Esc to cancel';
+        dot.style.boxShadow='0 0 0 3px #fff';
+        const move=e=>showPreview(e);
+        const up=e=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);window.removeEventListener('pointercancel',cancel);const target=nearest(e);if(target&&shapeConnecting===mode)complete(target).catch(()=>{});};
+        const cancel=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);window.removeEventListener('pointercancel',cancel);};
+        window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);window.addEventListener('pointercancel',cancel,{once:true});
+      });
+      canvasOverlay.append(dot);
+    }
+  }
   renderEditorCanvasOverlay = () => {
     if (!editorState || !deck.pages || !deck.pages.length) return;
     if (activeCanvasDrag) return;
@@ -9008,9 +10889,11 @@ if (keynopeAppSurface) {
     const groups = new Map();
     const resolvedToRaw = editorElementIndexMaps().resolvedToRaw;
     for (const line of page.lines || []) {
+      if(line.role==='shape-label'||line.role==='connector')continue; // Labels belong to shapes; lines have stroke-only hit targets.
       if (!Number.isInteger(line.element) || line.element < 0) continue;
       const rawElement = resolvedToRaw.get(line.element);
       if (rawElement == null) continue;
+      if (line.role === 'outline' && editorState.slides[editorState.current].elements[rawElement]?.kind === 'shape') continue;
       let group = groups.get(rawElement);
       if (!group) group = {minX: deck.cols, minY: deck.rows, maxX: 0, maxY: 0, color: ''};
       for (const part of line.parts || []) {
@@ -9022,45 +10905,71 @@ if (keynopeAppSurface) {
         if (!group.color && part.color) group.color = part.color;
       }
       groups.set(rawElement, group);
+      if(line.trueType)groups.set(rawElement,{minX:line.col,minY:line.row,maxX:line.col+line.trueType.width,maxY:line.row+line.trueType.height,color:line.parts?.[0]?.color||''});
     }
     const authoredElements = editorState.slides[editorState.current].elements || [];
     authoredElements.forEach((element, index) => {
       const query = new URLSearchParams(element.query || '');
-      if (element.kind === 'shape' && query.get('transparent') === '1') {
+      if (element.kind === 'shape' && groups.has(index)) {
+        const group = groups.get(index);
+        group.minX += Number(query.get('shape-offset-x') || 0);
+        group.minY += Number(query.get('shape-offset-y') || 0);
+        group.maxX = Math.min(deck.cols, group.minX + Number(query.get('width') || 12));
+        group.maxY = Math.min(deck.rows, group.minY + Number(query.get('height') || 6));
+      }
+      if (query.get('text-box') === '1' || element.kind === 'shape' && query.get('transparent') === '1') {
         const bounds = canvasShapeSelectionBounds(element, page.page);
         if (bounds) groups.set(index, bounds);
       }
     });
-    for (const [index, bounds] of groups) {
+    canvasMemberBounds=new Map([...groups].map(([i,b])=>[i,{...b}]));
+    const collapsed=new Map();
+    for(const [i] of groups){const id=canvasGroupID(authoredElements[i]);if(id&&id!==editorState.editingGroup){if(!collapsed.has(id))collapsed.set(id,[]);collapsed.get(id).push(i);}}
+    for(const [id,indices] of collapsed){
+      if(indices.length<2)continue;
+      const representative=indices.includes(editorState.selected)?editorState.selected:indices[0];
+      const bounds=canvasUnionBounds(indices);for(const i of indices)groups.delete(i);groups.set(representative,{...bounds,groupID:id});
+    }
+    if(editorState.editingGroup){
+      const indices=authoredElements.map((e,i)=>canvasGroupID(e)===editorState.editingGroup?i:-1).filter(i=>i>=0),b=canvasUnionBounds(indices);
+      if(b){const outline=document.createElement('div');outline.className='keynope-group-edit-boundary';outline.style.cssText='position:absolute;pointer-events:none;border:1px dashed #ffd166;left:'+(b.minX/deck.cols*100)+'%;top:'+(b.minY/deck.rows*100)+'%;width:'+((b.maxX-b.minX)/deck.cols*100)+'%;height:'+((b.maxY-b.minY)/deck.rows*100)+'%';canvasOverlay.appendChild(outline);}
+    }
+    // Group whitespace must not block unrelated elements inside its rectangle.
+    for (const [index, bounds] of [...groups].sort((a,b)=>Number(!!b[1].groupID)-Number(!!a[1].groupID))) {
       if (index >= (editorState.slides[editorState.current].elements || []).length) continue;
       const hit = document.createElement('div');
       hit.className = 'keynope-canvas-element' + ((index === editorState.selected || (editorState.selection || []).includes(index)) ? ' active' : '');
       hit.dataset.element = String(index);
+      if(bounds.groupID){hit.dataset.group=bounds.groupID;hit.classList.toggle('active',canvasGroupMembers(index).some(i=>(editorState.selection||[]).includes(i)));}
       hit.dataset.color = bounds.color || '';
       hit.style.left = (bounds.minX / deck.cols * 100) + '%';
       hit.style.top = (bounds.minY / deck.rows * 100) + '%';
-      hit.style.width = (Math.max(1, bounds.maxX - bounds.minX) / deck.cols * 100) + '%';
-      hit.style.height = (Math.max(1, bounds.maxY - bounds.minY) / deck.rows * 100) + '%';
+      hit.style.width = (Math.max(.5, bounds.maxX - bounds.minX) / deck.cols * 100) + '%';
+      hit.style.height = (Math.max(.5, bounds.maxY - bounds.minY) / deck.rows * 100) + '%';
       hit.title = 'Element ' + (index + 1);
+      if(bounds.groupID)hit.title='Group — double-click to edit members';
       hit.addEventListener('dblclick', event => {
         event.preventDefault();
         event.stopPropagation();
+        if(bounds.groupID){editorAction({action:'enter-group',element:index,elementData:{id:authoredElements[index]?.id}}).catch(()=>{});return;}
         beginInlineEdit(index, hit);
       });
       hit.addEventListener('contextmenu', event => {
         event.preventDefault();
         event.stopPropagation();
         const open = () => showElementContextMenu(index, event.clientX, event.clientY);
-        if (editorState.selected === index) open();
+        if (editorState.selected === index || (editorState.selection||[]).includes(index)) open();
         else editorAction({action: 'select-element', element: index}).then(open).catch(() => {});
       });
       hit.addEventListener('pointerdown', event => {
+        if(event.button!==0)return;
         event.preventDefault();
         event.stopPropagation();
         if (activeInlineEditor) {
           activeInlineEditor.finish(true).then(() => editorAction({action: 'select-element', element: index, name: event.shiftKey ? 'toggle' : ''}).catch(() => {}));
           return;
         }
+        if(!event.target.closest('.keynope-resize-handle')&&beginCanvasGroupDrag(hit,event,index))return;
         const originX = event.clientX;
         const originY = event.clientY;
         const start = {...bounds};
@@ -9069,6 +10978,9 @@ if (keynopeAppSurface) {
         const resizing = resizeCorner !== '';
         const sourceElement = {...editorState.slides[editorState.current].elements[index]};
         const sourceElementID = sourceElement.id || '';
+        const shapeResize = resizing && sourceElement.kind === 'shape';
+        const resizeStep = shapeResize ? .5 : 1;
+        const snapDrag = value => Math.round(value / resizeStep) * resizeStep;
         const fittingText = resizing && ['heading','text','text-image','bullet','code'].includes(sourceElement.kind);
 		const resizingVisual = resizing && (sourceElement.kind === 'shape' || sourceElement.kind === 'image');
 		if (resizingVisual) keynopeEditorVisualResizeActive = true;
@@ -9097,10 +11009,10 @@ if (keynopeAppSurface) {
         };
         const resizedBounds = (dx, dy) => {
           let minX = start.minX, minY = start.minY, maxX = start.maxX, maxY = start.maxY;
-          if (resizeCorner.includes('w')) minX = Math.min(maxX - 1, minX + dx);
-          if (resizeCorner.includes('e')) maxX = Math.max(minX + 1, maxX + dx);
-          if (resizeCorner.includes('n')) minY = Math.min(maxY - 1, minY + dy);
-          if (resizeCorner.includes('s')) maxY = Math.max(minY + 1, maxY + dy);
+          if (resizeCorner.includes('w')) minX = Math.min(maxX - resizeStep, minX + dx);
+          if (resizeCorner.includes('e')) maxX = Math.max(minX + resizeStep, maxX + dx);
+          if (resizeCorner.includes('n')) minY = Math.min(maxY - resizeStep, minY + dy);
+          if (resizeCorner.includes('s')) maxY = Math.max(minY + resizeStep, maxY + dy);
           minX = Math.max(0, minX); minY = Math.max(0, minY);
           maxX = Math.min(deck.cols, maxX); maxY = Math.min(deck.rows, maxY);
           return {minX, minY, maxX, maxY};
@@ -9108,16 +11020,25 @@ if (keynopeAppSurface) {
         const fitElementForBounds = next => {
           const element = {...sourceElement};
           const query = new URLSearchParams(element.query || '');
-          for (const key of ['right','right_pct','bottom','row_delta','valign','align','left','width','height']) query.delete(key);
+          clearCanvasPlacementAnchors(query);
+          query.delete('width'); query.delete('height');
           query.set('left_pct', Math.max(0, Math.min(1, next.minX / deck.cols)).toFixed(6));
           query.set('top', String(next.minY));
+          query.set('width', String(Math.max(1, next.maxX - next.minX)));
+          query.set('height', String(Math.max(1, next.maxY - next.minY)));
+          query.set('text-box', '1');
           element.query = query.toString();
           return element;
         };
 		const resizedElementForBounds = next => {
 			const element = {...sourceElement};
 			const query = new URLSearchParams(element.query || '');
-			for (const key of ['right','right_pct','bottom','row_delta','valign','align','left']) query.delete(key);
+			if (element.kind === 'shape') {
+              setCanvasShapeBounds(query, next);
+              element.query = query.toString();
+              return element;
+            }
+			clearCanvasPlacementAnchors(query);
 			if (element.kind === 'image') query.delete('scale');
           query.set('left_pct', Math.max(0, Math.min(1, next.minX / deck.cols)).toFixed(6));
           query.set('top', String(next.minY));
@@ -9151,10 +11072,9 @@ if (keynopeAppSurface) {
             const task = pendingFit;
             pendingFit = null;
             try {
-              const result = await fitCanvasTextElement(index, fitElementForBounds(task.bounds), task.bounds.maxX - task.bounds.minX, task.bounds.maxY - task.bounds.minY);
-              lastFit = {key: task.key, element: result.element};
-              replaceEditorPreviewPages(editorState.current, result.pages);
-              drawFrame();
+              const element = fitElementForBounds(task.bounds);
+              await previewCanvasMutation(editorElementIndexByID(sourceElementID, index), element, false);
+              lastFit = {key: task.key, element};
             } catch (_err) {}
           }
           fitting = false;
@@ -9176,8 +11096,8 @@ if (keynopeAppSurface) {
         };
         const move = moveEvent => {
           const rect = canvasOverlay.getBoundingClientRect();
-          const dx = Math.round((moveEvent.clientX - originX) * deck.cols / Math.max(1, rect.width));
-          const dy = Math.round((moveEvent.clientY - originY) * deck.rows / Math.max(1, rect.height));
+          const dx = snapDrag((moveEvent.clientX - originX) * deck.cols / Math.max(1, rect.width));
+          const dy = snapDrag((moveEvent.clientY - originY) * deck.rows / Math.max(1, rect.height));
           if (resizing) {
             const next = resizedBounds(dx, dy);
             hit.style.left = (next.minX / deck.cols * 100) + '%';
@@ -9189,6 +11109,9 @@ if (keynopeAppSurface) {
           } else {
             hit.style.left = ((start.minX + dx) / deck.cols * 100) + '%';
             hit.style.top = ((start.minY + dy) / deck.rows * 100) + '%';
+            if(sourceElement.kind==='shape'&&(editorState.slides[editorState.current].elements||[]).some(e=>e.kind==='connector')){
+              queueVisualPreview({minX:Math.max(0,start.minX+dx),minY:Math.max(0,start.minY+dy),maxX:Math.max(0,start.minX+dx)+start.maxX-start.minX,maxY:Math.max(0,start.minY+dy)+start.maxY-start.minY});
+            }
           }
         };
 		const up = async upEvent => {
@@ -9200,8 +11123,8 @@ if (keynopeAppSurface) {
           visualPreviewFrame = 0;
           pendingVisualPreview = null;
           const rect = canvasOverlay.getBoundingClientRect();
-          const dx = Math.round((upEvent.clientX - originX) * deck.cols / Math.max(1, rect.width));
-          const dy = Math.round((upEvent.clientY - originY) * deck.rows / Math.max(1, rect.height));
+          const dx = snapDrag((upEvent.clientX - originX) * deck.cols / Math.max(1, rect.width));
+          const dy = snapDrag((upEvent.clientY - originY) * deck.rows / Math.max(1, rect.height));
           if (!dx && !dy) {
             if (resizing) return;
             if (pendingCanvasSelection) clearTimeout(pendingCanvasSelection);
@@ -9218,22 +11141,32 @@ if (keynopeAppSurface) {
             if (fitted) updateEditorElementByID(sourceElementID, index, fitted).catch(() => {});
             return;
           }
+          if (!resizing) {
+            await moveCanvasMembers([{index,element:sourceElement,bounds:start}],dx,dy).catch(()=>{});
+            renderEditorCanvasOverlay();
+            return;
+          }
           const element = {...sourceElement};
           const query = new URLSearchParams(element.query || '');
 		if (resizing) {
 			const next = resizedBounds(dx, dy);
-			query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('valign'); query.delete('align'); query.delete('left');
+			clearCanvasPlacementAnchors(query);
 			if (element.kind === 'image') query.delete('scale');
             query.set('left_pct', Math.max(0, Math.min(1, next.minX / deck.cols)).toFixed(6));
             query.set('top', String(next.minY));
             query.set('width', String(Math.max(1, next.maxX - next.minX)));
             query.set('height', String(Math.max(1, next.maxY - next.minY)));
           } else {
-            query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('valign'); query.delete('align'); query.delete('left');
+            clearCanvasPlacementAnchors(query);
             query.set('left_pct', Math.max(0, Math.min(1, (start.minX + dx) / deck.cols)).toFixed(6));
             query.set('top', String(Math.max(0, start.minY + dy)));
           }
           element.query = query.toString();
+          if (sourceElement.kind === 'shape') {
+            const next = resizing ? resizedBounds(dx, dy) : {minX:Math.max(0,start.minX+dx),minY:Math.max(0,start.minY+dy),maxX:Math.max(0,start.minX+dx)+start.maxX-start.minX,maxY:Math.max(0,start.minY+dy)+start.maxY-start.minY};
+            setCanvasShapeBounds(query, next);
+            element.query = query.toString();
+          }
           const currentIndex = editorElementIndexByID(sourceElementID, index);
 		  previewCanvasMutation(currentIndex, element, false, canvasElementIsGIF(element));
           updateEditorElementByID(sourceElementID, currentIndex, element).catch(() => {});
@@ -9246,11 +11179,12 @@ if (keynopeAppSurface) {
           requestAnimationFrame(renderEditorCanvasOverlay);
         }, {once:true});
       });
-      if (index === editorState.selected) {
+      if (index === editorState.selected && !bounds.groupID && (editorState.selection||[]).length<=1) {
         appendCanvasResizeHandles(hit);
       }
       canvasOverlay.appendChild(hit);
     }
+    appendCanvasConnectors(page);
   };
 
   canvasOverlay.addEventListener('pointerdown', event => {
@@ -9309,6 +11243,11 @@ if (keynopeAppSurface) {
     editorColor(slideContextMenu, 'Foreground', slide.fg || '', '#f3efe0', value => { slide.fg = value; slide.fgSet = true; updateSlide(); });
     editorColor(slideContextMenu, 'Background colour', slide.bg || '', '#000000', value => { slide.bg = value; slide.bgSet = true; updateSlide(); });
     editorColor(slideContextMenu, 'Header colour', slide.headerFg || '', '#ffffff', value => { slide.headerFg = value; slide.headerFgSet = true; updateSlide(); });
+    const defaults=deck.pages.find(page=>page.slide===index)||{};
+    const sizeDefault=editorNumber(slideContextMenu,'Font size (TTF)',slide.ttfSize||'',{min:1,max:512,step:1},value=>{if(value!==''&&(!Number.isInteger(Number(value))||Number(value)<1||Number(value)>512))return;slide.ttfSize=Number(value)||0;updateSlide();});
+    sizeDefault.placeholder=String(defaults.ttfSize||97);
+    const widthDefault=editorNumber(slideContextMenu,'Font width (%)',slide.ttfWidth||'',{min:1,max:200,step:1},value=>{if(value!==''&&(!Number.isFinite(Number(value))||Number(value)<1||Number(value)>200))return;slide.ttfWidth=Number(value)||0;updateSlide();});
+    widthDefault.placeholder=String(defaults.ttfWidth||100);
     if (!editorState.masterMode) {
       const reset = document.createElement('button');
       reset.type = 'button';
@@ -9319,6 +11258,7 @@ if (keynopeAppSurface) {
         slide.fg = ''; slide.fgSet = false;
         slide.bg = ''; slide.bgSet = false;
         slide.headerFg = ''; slide.headerFgSet = false;
+        slide.ttfSize = 0; slide.ttfWidth = 0;
         closeSlideContextMenu();
         updateSlide();
       });
@@ -9339,17 +11279,32 @@ if (keynopeAppSurface) {
     slideContextMenu.appendChild(heading);
     const actions = document.createElement('div');
     actions.className = 'keynope-editor-actions';
+    const indices=canvasSelectedIndices(index);
+    if(element.kind!=='connector')appendCanvasGroupTools(actions,index);
+    if(indices.length>1){
+      const groupID=canvasGroupID(slide.elements[indices[0]]);
+      heading.textContent=(groupID&&indices.every(i=>canvasGroupID(slide.elements[i])===groupID)?'Group':'Selection')+' actions ('+indices.length+' items)';
+      const note=document.createElement('p');note.textContent='Text tools affect text; colour affects text and shapes.';slideContextMenu.appendChild(note);
+      const textIndex=indices.find(i=>['heading','text','text-image','bullet','code'].includes(slide.elements[i].kind));
+      if(textIndex!=null){appendCanvasTextKindTools(actions,textIndex,slide.elements[textIndex]);actions.appendChild(canvasTool('−','',()=>changeCanvasTextSize(textIndex,-1)));actions.appendChild(canvasTool('+','',()=>changeCanvasTextSize(textIndex,1)));}
+      if(indices.some(i=>['heading','text','text-image','bullet','code','shape','page-number'].includes(slide.elements[i].kind)))actions.appendChild(canvasColourTool(index,element,''));
+      for(const [label,alignment] of [['Left','left'],['Centre','center'],['Right','right']])actions.appendChild(canvasTool(label,'',()=>setCanvasAlignment(index,alignment)));
+      for(const alignment of ['top','middle','bottom'])actions.appendChild(canvasVerticalAlignmentTool(index,alignment,false));
+      actions.appendChild(canvasDeleteTool(index));slideContextMenu.appendChild(actions);
+      slideContextMenu.classList.add('open');const r=slideContextMenu.getBoundingClientRect();
+      slideContextMenu.style.left=Math.max(8,Math.min(innerWidth-r.width-8,clientX))+'px';slideContextMenu.style.top=Math.max(8,Math.min(innerHeight-r.height-8,clientY))+'px';return;
+    }
     const query = new URLSearchParams(element.query || '');
     const selectedText = ['heading','text','text-image','bullet','code'].includes(element.kind);
-    const rotatableText = ['heading','text','text-image','bullet'].includes(element.kind);
+    const rotatableText = KeynopeTrueType.is(element)||['heading','text','text-image','bullet'].includes(element.kind);
     const positionable = selectedText || element.kind === 'shape' || element.kind === 'image' || element.kind === 'page-number';
     if (selectedText) {
       actions.appendChild(canvasTool('✎', '', () => beginInlineEdit(index)));
       appendCanvasTextKindTools(actions, index, element);
-      actions.appendChild(canvasEmojiTool(index));
+      if(!KeynopeTrueType.is(element))actions.appendChild(canvasEmojiTool(index));
       actions.appendChild(canvasTool('−', '', () => changeCanvasTextSize(index, -1)));
       actions.appendChild(canvasTool('+', '', () => changeCanvasTextSize(index, 1)));
-      if (element.kind !== 'code') {
+      if (element.kind !== 'code'&&!KeynopeTrueType.is(element)) {
         actions.appendChild(canvasTool('Bold', '', () => toggleCanvasMarkdownStyle(index, '**')));
         actions.appendChild(canvasTool('Highlight', '', () => toggleCanvasMarkdownStyle(index, '*')));
       }
@@ -9360,16 +11315,19 @@ if (keynopeAppSurface) {
       actions.appendChild(canvasTool('Right', '', () => setCanvasAlignment(index, 'right')));
       for (const alignment of ['top','middle','bottom']) actions.appendChild(canvasVerticalAlignmentTool(index, alignment, query.get('valign') === alignment));
     }
-    if (rotatableText) actions.appendChild(canvasTool('⟳', '', () => rotateCanvasText(index)));
-    if (selectedText && element.kind !== 'code') actions.appendChild(canvasStyleSelect(index, element));
+    if (KeynopeTrueType.is(element)) actions.appendChild(canvasTool('Justify', query.get('align')==='justify'?'active':'',()=>updateCanvasElement(index,e=>{const q=new URLSearchParams(e.query||'');q.set('align','justify');e.query=q.toString();})));
+    if (rotatableText) {const rotate=canvasTool('⟳', '', () => rotateCanvasText(index));rotate.title='Rotate';rotate.setAttribute('aria-label','Rotate');actions.appendChild(rotate);}
+    if (selectedText) actions.appendChild(canvasStyleSelect(index, element));
     if (selectedText || element.kind === 'shape') actions.appendChild(canvasColourTool(index, element, ''));
     if (canvasTextEffectCompatible(element)) appendCanvasTypographyEffectTools(actions,index,element);
     if (selectedText) actions.appendChild(canvasLinkTool(index, query));
     if (element.kind === 'shape') appendCanvasShapeKindTools(actions, index, query);
-    actions.appendChild(canvasOutlineTool(index, element, query));
-    actions.appendChild(canvasDuplicateTool(index));
-    actions.appendChild(canvasLayerTool(index, 'backward'));
-    actions.appendChild(canvasLayerTool(index, 'forward'));
+    if(element.kind!=='connector'){
+      actions.appendChild(canvasOutlineTool(index, element, query));
+      actions.appendChild(canvasDuplicateTool(index));
+      actions.appendChild(canvasLayerTool(index, 'backward'));
+      actions.appendChild(canvasLayerTool(index, 'forward'));
+    }
     if (canvasElementSupportsTransparency(element)) actions.appendChild(canvasTransparencyTool(index, query));
     actions.appendChild(canvasDeleteTool(index));
     slideContextMenu.appendChild(actions);
@@ -9397,6 +11355,9 @@ if (keynopeAppSurface) {
     showSlideContextMenu(editorState ? editorState.current : -1, event.clientX, event.clientY);
   });
   function renderEditorPanels() {
+    window.keynopeParticipantTabs = editorState?.hasActivities ? (editorState.tabs||[]) : [];
+    window.keynopePresentationDocumentVersion = editorState?.version || 0;
+    if (draggedMasterButton) return;
     if (!editorState || !editorState.slides || !editorState.slides.length) return;
     slidesPanel.replaceChildren();
     const slidesHeader = document.createElement('div');
@@ -9417,12 +11378,24 @@ if (keynopeAppSurface) {
     masterModeButton.setAttribute('aria-label', masterModeButton.title);
     masterModeButton.classList.toggle('active', !!editorState.masterMode);
     refreshEditorBottomToolbarVisibility();
-    editorState.slides.forEach((slide, index) => {
+    const normalIndices = editorState.slides.map((slide,index) => !slide.tabId || editorState.masterMode ? index : -1).filter(index => index >= 0);
+    const tabIndices = editorState.masterMode ? [] : (editorState.tabs || []).filter(tab => tab.slideTab).map(tab => editorState.slides.findIndex(slide => slide.tabId === tab.id)).filter(index => index >= 0);
+    [...normalIndices, ...tabIndices].forEach((index, position) => {
+      const slide = editorState.slides[index];
+      const tabOnly = !editorState.masterMode && !!slide.tabId;
+      if (tabOnly && position === normalIndices.length) {
+        const heading = document.createElement('h3');
+        heading.className = 'keynope-tabs-section-heading';
+        heading.textContent = 'Tabs';
+        heading.title = 'Participant tabs · drag to reorder · toggle Tab off to restore a slide';
+        slidesPanel.appendChild(heading);
+      }
       const button = document.createElement('button');
       button.className = 'keynope-slide-item' + (index === editorState.current ? ' active' : '');
+      button.dataset.slideSection = tabOnly ? 'tabs' : 'slides';
       button.textContent = editorState.masterMode
         ? (index === 0 ? 'Base Master' : ((editorState.masters.layouts[index - 1] && editorState.masters.layouts[index - 1].name) || ('Master ' + index)))
-        : slideTitle(slide, index);
+        : tabOnly ? ((editorState.tabs || []).find(tab => tab.id === slide.tabId)?.name || 'Tab') : slideTitle(slide, position);
       button.addEventListener('click', () => editorAction({action: 'select-slide', slide: index}).catch(() => {}));
       button.addEventListener('contextmenu', event => {
         event.preventDefault();
@@ -9431,14 +11404,16 @@ if (keynopeAppSurface) {
         if (editorState.current === index) open();
         else editorAction({action: 'select-slide', slide: index}).then(open).catch(() => {});
       });
-      if (editorState.masterMode) {
+      {
         button.dataset.masterIndex = String(index);
-        if (index > 0) {
+        if (!editorState.masterMode || index > 0) {
           button.draggable = true;
           button.classList.add('master-reorderable');
-          button.title = 'Drag to reorder master slide';
+          button.title = editorState.masterMode ? 'Drag to reorder master slide' : tabOnly ? 'Drag to reorder participant tab' : 'Drag to reorder slide';
           button.addEventListener('dragstart', event => {
             draggedMasterIndex = index;
+            draggingMasterMode = !!editorState.masterMode;
+            draggingTabSection = tabOnly;
             draggedMasterButton = button;
             button.classList.add('master-drag-outline');
             if (event.dataTransfer) {
@@ -9463,7 +11438,7 @@ if (keynopeAppSurface) {
               if (draggedMasterButton === button) button.classList.add('master-dragging');
             });
           });
-          button.addEventListener('dragend', finishMasterDrag);
+          button.addEventListener('dragend', () => { finishMasterDrag(); renderEditorPanels(); });
         }
       }
       slidesPanel.appendChild(button);
@@ -9535,7 +11510,7 @@ if (keynopeAppSurface) {
       const updateElement = () => editorAction({action: 'update-element', element: selected, elementData: element}).catch(() => {});
       const help = document.createElement('p');
       help.className = 'keynope-editor-help';
-      help.textContent = 'Drag on the canvas to move. Drag any blue corner to resize in that direction. Double-click or press Enter to edit text.';
+      help.textContent = 'Drag on the canvas to move. Drag a yellow corner to change the text area and wrapping; use +/− to change font size. Double-click to edit text.';
       elementSection.appendChild(help);
       const actions = document.createElement('div');
       actions.className = 'keynope-editor-actions';
@@ -9569,8 +11544,8 @@ if (keynopeAppSurface) {
       const leftValue = query.has('left_pct') ? (Number(query.get('left_pct')) * 100).toFixed(1) : '';
       editorNumber(elementSection, 'Left (%)', leftValue, {min: 0, max: 100, step: .5}, value => setQuery('left_pct', value === '' ? '' : Math.max(0, Math.min(100, Number(value))) / 100));
       editorNumber(elementSection, 'Top (rows)', query.get('top') || '', {min: 0, step: 1}, value => setQuery('top', value));
-      editorNumber(elementSection, 'Width (columns)', query.get('width') || '', {min: 1, step: 1}, value => setQuery('width', value));
-      editorNumber(elementSection, 'Height (rows)', query.get('height') || '', {min: 1, step: 1}, value => setQuery('height', value));
+      editorNumber(elementSection, 'Width (columns)', query.get('width') || '', {min: element.kind === 'shape' ? .5 : 1, step: element.kind === 'shape' ? .5 : 1}, value => setQuery('width', value));
+      editorNumber(elementSection, 'Height (rows)', query.get('height') || '', {min: element.kind === 'shape' ? .5 : 1, step: element.kind === 'shape' ? .5 : 1}, value => setQuery('height', value));
       editorNumber(elementSection, 'Scale', query.get('scale') || '1', {min: .1, max: 10, step: .1}, value => setQuery('scale', value));
       if (element.kind === 'shape') {
         editorSelect(elementSection, 'Shape', query.get('shape') || 'rectangle', ['rectangle','square','circle','triangle','diamond'], value => setQuery('shape', value));
@@ -9758,14 +11733,20 @@ if (keynopeAppSurface) {
   setSpeakerNotesVisible(false, false);
   const timerButton = document.createElement('button');
   timerButton.type = 'button';
-  timerButton.className = 'keynope-app-icon-button';
+  timerButton.className = 'keynope-app-icon-button keynope-app-tag-button keynope-timer-button';
   timerButton.title = 'Timer';
   timerButton.setAttribute('aria-label', 'Timer');
   timerButton.innerHTML = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="345" y="45" width="110" height="65" rx="18" fill="#fff"/><path d="M400 105v45" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round"/><path d="m555 145 44 44" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round"/><circle cx="400" cy="340" r="195" fill="none" stroke="#fff" stroke-width="30"/><path d="M400 190v35M400 455v35M250 340h35M515 340h35" fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round"/><path d="M400 340V235M400 340l92 52" fill="none" stroke="#fff" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/><circle cx="400" cy="340" r="22" fill="#fff"/></svg>';
   let externalDisplayAvailable = false;
+  const timerTag = document.createElement('span');
+  timerTag.className = 'keynope-app-button-tag';
+  timerTag.hidden = true;
+  timerButton.append(timerTag);
   let editorPresentationMode = 'none';
   let editorPresentationPaused = false;
+  presenterTimerCanBroadcast = () => editorPresentationMode !== 'none' && !!editorState?.hasActivities && !editorState?.masterMode;
   function openEditorTimer() {
+    presenterTimerBroadcast = false;
     presenterTimerMode = 'config';
     presenterTimerInput = '';
     presenterTimerEndMS = 0;
@@ -9781,39 +11762,52 @@ if (keynopeAppSurface) {
     presenterTimerEndMS = Date.now() + seconds * 1000;
     refreshEditorPresenterControls();
     drawFrame();
-    editorAction({action: 'start-timer', value: seconds}).catch(() => cancelEditorTimerInput());
+    editorAction({action: 'start-timer', value: seconds}).then(()=>window.keynopePublishParticipantPage()).catch(() => cancelEditorTimerInput());
   }
   function cancelEditorTimerInput() {
+    presenterTimerBroadcast = false;
     presenterTimerMode = '';
     presenterTimerInput = '';
     presenterTimerEndMS = 0;
     refreshEditorPresenterControls();
     drawFrame();
+    window.keynopePublishParticipantPage();
   }
   function stopEditorTimer() {
     const running = presenterTimerMode === 'running';
     cancelEditorTimerInput();
     if (running) editorAction({action: 'stop-timer'}).catch(() => syncEditorState());
   }
-  timerButton.addEventListener('click', () => {
-    if (presenterTimerMode === 'running') stopEditorTimer();
-    else if (presenterTimerMode === 'config') cancelEditorTimerInput();
-    else openEditorTimer();
-  });
+  function cycleEditorTimer() {
+    if (!presenterTimerMode) { openEditorTimer(); return; }
+    if (presenterTimerBroadcast || !presenterTimerCanBroadcast()) { stopEditorTimer(); return; }
+    presenterTimerBroadcast = true;
+    refreshEditorPresenterControls();
+    window.keynopePublishParticipantPage();
+  }
+  timerButton.addEventListener('click', cycleEditorTimer);
   refreshEditorPresenterControls = () => {
+    if (presenterTimerBroadcast && !presenterTimerCanBroadcast()) {
+      presenterTimerBroadcast = false;
+      window.keynopePublishParticipantPage();
+    }
     const running = presenterTimerMode === 'running';
     const active = presenterTimerMode === 'config' || running;
-    timerButton.title = active ? 'Stop timer' : 'Timer';
+    timerButton.title = active ? (presenterTimerBroadcast || !presenterTimerCanBroadcast() ? 'Stop timer' : 'Broadcast timer to web viewer') : 'Timer';
     timerButton.setAttribute('aria-label', timerButton.title);
     timerButton.classList.toggle('active', active);
     timerButton.setAttribute('aria-pressed', active ? 'true' : 'false');
+    timerButton.dataset.timerAudience = active ? (presenterTimerBroadcast ? 'broadcast' : 'local') : 'off';
+    timerTag.hidden = !active;
+    timerTag.textContent = presenterTimerBroadcast ? 'BROADCAST' : 'LOCAL';
     timerInputBlocker.hidden = !active;
     canvasOverlay.hidden = active;
     document.documentElement.setAttribute('data-keynope-timer-active', active ? 'true' : 'false');
     for (const button of toolbar.querySelectorAll('button')) {
       button.disabled = active && button !== timerButton && button !== stopPresentationButton && button !== pauseButton;
     }
-    externalButton.disabled = !!(editorState && editorState.masterMode) || active || !externalDisplayAvailable;
+    presentButton.disabled = active || currentSlideIsTab();
+    externalButton.disabled = !!(editorState && editorState.masterMode) || active || currentSlideIsTab() || !externalDisplayAvailable;
     for (const button of slidesPanel.querySelectorAll('button')) button.disabled = active;
     speakerNotesInput.disabled = active;
   };
@@ -9837,7 +11831,7 @@ if (keynopeAppSurface) {
   async function navigateEditorPage(delta) {
     if (!deck.pages || !deck.pages.length || !editorState || editorState.masterMode) return;
     if (activeInlineEditor) await activeInlineEditor.finish(true);
-    const targetIndex = Math.max(0, Math.min(deck.pages.length - 1, pageIndex + delta));
+    const targetIndex = nextPresentationPage(pageIndex, delta);
     if (targetIndex === pageIndex) return;
     const target = deck.pages[targetIndex];
     pageIndex = targetIndex;
@@ -9851,6 +11845,8 @@ if (keynopeAppSurface) {
   const nextSlideSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><g transform="translate(800 0) scale(-1 1)"><rect x="220" y="95" width="430" height="390" rx="28" fill="none" stroke="#fff" stroke-width="26"/><circle cx="410" cy="230" r="54" fill="#fff"/><path d="M500 210h85M500 260h85M340 360h245" fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round"/><path d="M185 215 65 300l120 85M80 300h310" fill="none" stroke="#30343a" stroke-width="62" stroke-linecap="round" stroke-linejoin="round"/><path d="M185 215 65 300l120 85M80 300h310" fill="none" stroke="#c8ccd2" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/></g></svg>';
   const presentMainSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="165" y="70" width="470" height="355" rx="30" fill="none" stroke="#fff" stroke-width="28"/><path d="m350 175 150 72-150 72Z" fill="#fff" stroke="#fff" stroke-width="12" stroke-linejoin="round"/><path d="M145 445h510l67 62c13 12 4 33-14 33H92c-18 0-27-21-14-33Z" fill="#fff"/><rect x="332" y="465" width="136" height="18" rx="9" fill="none" stroke="#fff" stroke-width="10"/></svg>';
   const presentExternalSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="55" y="300" width="270" height="190" rx="22" fill="none" stroke="#fff" stroke-width="24"/><path d="M38 505h304l35 34c9 9 3 24-10 24H13c-13 0-19-15-10-24Z" fill="#fff"/><path d="M315 265h80M350 220l45 45-45 45" fill="none" stroke="#fff" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/><rect x="430" y="55" width="330" height="330" rx="28" fill="none" stroke="#fff" stroke-width="28"/><path d="m555 145 100 75-100 75Z" fill="#fff" stroke="#fff" stroke-width="8" stroke-linejoin="round"/><path d="M595 385v100M515 500h160" fill="none" stroke="#fff" stroke-width="28" stroke-linecap="round"/></svg>';
+	const engagementRunSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><circle cx="160" cy="285" r="62" fill="none" stroke="#fff" stroke-width="28"/><circle cx="400" cy="175" r="62" fill="none" stroke="#fff" stroke-width="28"/><circle cx="640" cy="285" r="62" fill="none" stroke="#fff" stroke-width="28"/><path d="M90 470c18-105 122-105 140 0M300 455c28-145 172-145 200 0M570 470c18-105 122-105 140 0" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round"/></svg>';
+	const engagementRunButton = appToolbarIconButton('Activities',engagementRunSVG,openEngagementEditor);
 
   const previousButton = appToolbarIconButton('Previous', previousSlideSVG, () => navigateEditorPage(-1).catch(() => {}));
   const nextButton = appToolbarIconButton('Next', nextSlideSVG, () => navigateEditorPage(1).catch(() => {}));
@@ -9880,12 +11876,23 @@ if (keynopeAppSurface) {
     const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
     if (handler) handler.postMessage({action: 'show-about'});
   });
+	const slideTabButton = appToolbarIconButton('Tab', '<svg viewBox="0 0 800 600" aria-hidden="true"><path d="M100 155h185l45-65h180l45 65h145v355H100Z" fill="none" stroke="#fff" stroke-width="30" stroke-linejoin="round"/><path d="M185 260h430M185 335h300M185 410h365" fill="none" stroke="#9b9b9b" stroke-width="26" stroke-linecap="round"/></svg><span class="keynope-app-icon-label">Tab</span>', async () => {
+      if (activeInlineEditor) await activeInlineEditor.finish(true);
+      await editorAction({action: 'toggle-slide-tab'});
+    });
+	slideTabButton.classList.add('keynope-app-tag-button');
+	slideTabButton.querySelector('span').className = 'keynope-app-button-tag';
+	toolbar.insertBefore(slideTabButton, aboutButton);
+	toolbar.insertBefore(engagementRunButton, aboutButton);
+  function currentSlideIsTab() { return !editorState?.masterMode && !!editorState?.slides?.[editorState.current]?.tabId; }
   function refreshEditorBottomToolbarVisibility() {
     const masterMode = !!(editorState && editorState.masterMode);
     const presenting = editorPresentationMode !== 'none';
     if (masterMode && editorSpeakerNotesVisible) setSpeakerNotesVisible(false, false);
     notesToggleButton.hidden = masterMode;
     timerButton.hidden = masterMode;
+	engagementRunButton.hidden = masterMode;
+	engagementRunButton.classList.toggle('active',!!currentEngagementDefinition());
     previousButton.hidden = masterMode;
     nextButton.hidden = masterMode;
     presentButton.hidden = masterMode || presenting;
@@ -9893,16 +11900,24 @@ if (keynopeAppSurface) {
     pauseButton.hidden = masterMode || !presenting;
     stopPresentationButton.hidden = masterMode || !presenting;
     aboutButton.hidden = false;
+    slideTabButton.hidden = masterMode;
+    slideTabButton.classList.toggle('active', currentSlideIsTab());
+    slideTabButton.setAttribute('aria-pressed', String(currentSlideIsTab()));
+    slideTabButton.title = currentSlideIsTab() ? 'Restore this tab to Slides' : 'Use this slide as a participant tab';
+    const timerActive = presenterTimerMode === 'config' || presenterTimerMode === 'running';
+    presentButton.disabled = masterMode || currentSlideIsTab() || timerActive;
+    externalButton.disabled = presentButton.disabled || !externalDisplayAvailable;
   }
   externalButton.disabled = true;
   window.keynopeSetExternalDisplayAvailable = available => {
     externalDisplayAvailable = !!available;
-    externalButton.disabled = !!(editorState && editorState.masterMode) || presenterTimerMode === 'config' || presenterTimerMode === 'running' || !externalDisplayAvailable;
+    externalButton.disabled = !!(editorState && editorState.masterMode) || currentSlideIsTab() || presenterTimerMode === 'config' || presenterTimerMode === 'running' || !externalDisplayAvailable;
   };
   window.keynopeSetPresentationState = (mode, paused) => {
     editorPresentationMode = mode === 'main' || mode === 'external' ? mode : 'none';
     editorPresentationPaused = !!paused && editorPresentationMode !== 'none';
     const active = editorPresentationMode !== 'none';
+	keynopeEditorPresentationActive = active && !editorPresentationPaused;
     const baseSVG = editorPresentationMode === 'main' ? presentMainSVG : presentExternalSVG;
     if (active) {
       const pauseGlyph = editorPresentationPaused ? '▶︎' : '⏸︎';
@@ -9914,6 +11929,9 @@ if (keynopeAppSurface) {
     }
     document.documentElement.setAttribute('data-keynope-presentation-mode', editorPresentationMode);
     refreshEditorBottomToolbarVisibility();
+    refreshEditorPresenterControls();
+	if (!active && keynopeEngagementRuntime) closeEngagementRuntime();
+	renderActivityMarker();
   };
   const presenterHandler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
   if (presenterHandler) presenterHandler.postMessage({action: 'query-display-state'});
@@ -9922,21 +11940,8 @@ if (keynopeAppSurface) {
   function nudgeSelected(dx, dy) {
     if (!editorState || editorState.selected < 0) return false;
     const index = editorState.selected;
-    const slide = editorState.slides[editorState.current];
-    const element = slide && slide.elements[index];
-    const elementID = element && element.id || '';
-    const hit = canvasOverlay.querySelector('[data-element="' + index + '"]');
-    if (!element || !hit) return false;
-    const updated = {...element};
-    const query = new URLSearchParams(updated.query || '');
-    const renderedLeft = parseFloat(hit.style.left || '0') / 100;
-    const renderedTop = Math.round(parseFloat(hit.style.top || '0') * deck.rows / 100);
-    query.delete('right'); query.delete('right_pct'); query.delete('bottom'); query.delete('row_delta'); query.delete('valign'); query.delete('align'); query.delete('left');
-    query.set('left_pct', Math.max(0, Math.min(1, Number(query.get('left_pct') || renderedLeft) + dx / deck.cols)).toFixed(6));
-    query.set('top', String(Math.max(0, Number(query.get('top') || renderedTop) + dy)));
-    updated.query = query.toString();
-    previewCanvasMutation(index, updated, false);
-    updateEditorElementByID(elementID, index, updated).catch(() => {});
+    const indices=canvasSelectedIndices(index);
+    moveCanvasMembers(canvasMoveSnapshot(indices),dx,dy).catch(()=>{});
     return true;
   }
   function cycleCanvasSelection(reverse) {
@@ -9944,11 +11949,18 @@ if (keynopeAppSurface) {
     queueEditorOperation(async () => {
       if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return;
       const selectableKinds = new Set(['heading','text','text-image','bullet','code','shape','image','page-number']);
+      const seenGroups=new Set();
       const indices = (editorState.slides[editorState.current].elements || [])
-        .map((element, index) => selectableKinds.has(element.kind) ? index : -1)
+        .map((element, index) => {
+          if(!selectableKinds.has(element.kind))return -1;
+          const id=canvasGroupID(element);
+          if(editorState.editingGroup&&id!==editorState.editingGroup)return -1;
+          if(id&&id!==editorState.editingGroup){if(seenGroups.has(id))return -1;seenGroups.add(id);}
+          return index;
+        })
         .filter(index => index >= 0);
       if (!indices.length) return;
-      const position = indices.indexOf(editorState.selected);
+      const position = indices.findIndex(i=>i===editorState.selected||canvasGroupMembers(i).includes(editorState.selected));
       const next = position < 0
         ? (reverse ? indices[indices.length - 1] : indices[0])
         : indices[(position + (reverse ? -1 : 1) + indices.length) % indices.length];
@@ -9957,6 +11969,7 @@ if (keynopeAppSurface) {
     return true;
   }
   addEventListener('keydown', e => {
+    if (e.target?.closest?.('.keynope-tabs-overlay')) return;
     if (presenterTimerMode === 'config' && !e.metaKey && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -9991,7 +12004,11 @@ if (keynopeAppSurface) {
       save().catch(() => {});
       return;
     }
+    // Escape cancels connection mode even while its ribbon button has focus.
+    if(e.key==='Escape'&&shapeConnecting){e.preventDefault();e.stopImmediatePropagation();shapeConnecting=null;renderEditorTopbar();renderEditorCanvasOverlay();return;}
     if (keynopeFormControlTarget(e.target)) return;
+    // Ribbon keyboard navigation belongs to the focused control, not the slide.
+    if (!e.metaKey && !e.ctrlKey && e.target?.closest?.('.keynope-editor-topbar')) return;
     if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'Tab') {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -10004,6 +12021,13 @@ if (keynopeAppSurface) {
       closeSlideContextMenu();
       return;
     }
+    if(shapeConnecting){
+      if(e.key==='Escape'){e.preventDefault();e.stopImmediatePropagation();shapeConnecting=null;renderEditorTopbar();renderEditorCanvasOverlay();}
+      else if(!e.metaKey&&!e.ctrlKey){e.preventDefault();e.stopImmediatePropagation();}
+      return;
+    }
+    if(e.key==='Escape'&&(activeCanvasDrag?.marquee||activeCanvasDrag?.connector)){e.preventDefault();e.stopImmediatePropagation();activeCanvasDrag.cancel();return;}
+    if(e.key==='Escape'&&editorState?.editingGroup&&!activeInlineEditor){e.preventDefault();e.stopImmediatePropagation();editorAction({action:'exit-group'}).catch(()=>{});return;}
     if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'm') {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -10130,6 +12154,12 @@ tick();
 
 func slideStyleComment(slide Slide) string {
 	var fields []string
+	if slide.TTFSize > 0 {
+		fields = append(fields, "ttf-default-size="+strconv.Itoa(slide.TTFSize))
+	}
+	if slide.TTFWidth > 0 {
+		fields = append(fields, "ttf-default-width="+strconv.FormatFloat(slide.TTFWidth, 'f', -1, 64))
+	}
 	if slide.FGSet || (slide.FG != "" && slide.FG != "37") {
 		value := slide.FG
 		if value == "" {
@@ -10197,6 +12227,7 @@ func splitSlides(text string) []string {
 var effectRE = regexp.MustCompile(`<!--\s*effect=([a-zA-Z0-9_-]+)\s*-->`)
 var backgroundRE = regexp.MustCompile(`<!--\s*background=([a-zA-Z0-9_-]+)\s*-->`)
 var notesRE = regexp.MustCompile(`<!--\s*notes=base64:([A-Za-z0-9+/=]+)\s*-->`)
+var trueTypeTextRE = regexp.MustCompile(`<!--\s*truetype-text=base64:([A-Za-z0-9+/=]*)(?:\s+kind=(text|bullet|code|heading|text-image))?(?:\s+level=([12]))?\s*-->`)
 var layoutRE = regexp.MustCompile(`<!--\s*layout=([a-zA-Z0-9_-]+)\s*-->`)
 var pageNumberRE = regexp.MustCompile(`<!--\s*page-number=(show|hide)\s*-->`)
 var masterSlotRE = regexp.MustCompile(`<!--\s*master-slot=([a-zA-Z0-9_-]+)(?:\s+placeholder=(true))?\s*-->`)
@@ -10219,7 +12250,12 @@ func parseSlide(text, base string) Slide {
 
 	flushParagraph := func() {
 		if len(paragraph) > 0 {
-			slide.Elements = append(slide.Elements, Element{Kind: "text", Text: strings.Join(paragraph, " "), Query: pendingQuery, MasterSlotID: pendingMasterSlot, Placeholder: pendingPlaceholder})
+			separator := " "
+			values, _ := url.ParseQuery(pendingQuery)
+			if values.Get("text-box") == "1" {
+				separator = "\n"
+			}
+			slide.Elements = append(slide.Elements, Element{Kind: "text", Text: strings.Join(paragraph, separator), Query: pendingQuery, MasterSlotID: pendingMasterSlot, Placeholder: pendingPlaceholder})
 			pendingQuery = ""
 			pendingMasterSlot = ""
 			pendingPlaceholder = false
@@ -10262,8 +12298,18 @@ func parseSlide(text, base string) Slide {
 			slide.LayoutID = match[1]
 			continue
 		}
+		if match := slideTabRE.FindStringSubmatch(trimmed); match != nil {
+			slide.TabID = match[1]
+			continue
+		}
 		if match := pageNumberRE.FindStringSubmatch(trimmed); match != nil {
 			slide.PageNumber = match[1]
+			continue
+		}
+		if engagementMetaRE.MatchString(trimmed) {
+			if definition, err := decodeEngagementMetadata(trimmed); err == nil {
+				slide.Engagement = definition
+			}
 			continue
 		}
 		if match := masterSlotRE.FindStringSubmatch(trimmed); match != nil {
@@ -10276,6 +12322,25 @@ func parseSlide(text, base string) Slide {
 			if decoded, err := base64.StdEncoding.DecodeString(match[1]); err == nil {
 				slide.Notes = string(decoded)
 			}
+			continue
+		}
+		if match := trueTypeTextRE.FindStringSubmatch(trimmed); match != nil {
+			flushParagraph()
+			if decoded, err := base64.StdEncoding.DecodeString(match[1]); err == nil {
+				kind := match[2]
+				if kind == "" {
+					kind = "text"
+				}
+				level := 0
+				if kind == "heading" {
+					level = 1
+					if match[3] == "2" {
+						level = 2
+					}
+				}
+				slide.Elements = append(slide.Elements, Element{Kind: kind, Level: level, Text: string(decoded), Query: pendingQuery, MasterSlotID: pendingMasterSlot, Placeholder: pendingPlaceholder})
+			}
+			pendingQuery, pendingMasterSlot, pendingPlaceholder = "", "", false
 			continue
 		}
 		if nextNonEmptyLine(lines, lineIndex) == "" && applySlideStyle(trimmed, &slide) {
@@ -10326,6 +12391,12 @@ func parseSlide(text, base string) Slide {
 			pendingPlaceholder = false
 			continue
 		}
+		if trimmed == "[connector]" {
+			flushParagraph()
+			slide.Elements = append(slide.Elements, Element{Kind: "connector", Query: pendingQuery})
+			pendingQuery, pendingMasterSlot, pendingPlaceholder = "", "", false
+			continue
+		}
 		if match := shapeRE.FindStringSubmatch(trimmed); match != nil {
 			flushParagraph()
 			query := pendingQuery
@@ -10372,6 +12443,14 @@ func parseSlide(text, base string) Slide {
 	}
 	flushParagraph()
 	flushCode()
+	for i := range slide.Elements {
+		q, _ := url.ParseQuery(slide.Elements[i].Query)
+		if id := q.Get("element-id"); id != "" {
+			slide.Elements[i].ID = id
+			q.Del("element-id")
+			slide.Elements[i].Query = q.Encode()
+		}
+	}
 	return slide
 }
 
@@ -10401,7 +12480,7 @@ func applySlideStyle(line string, slide *Slide) bool {
 			return false
 		}
 		switch strings.ToLower(strings.TrimSpace(key)) {
-		case "fg", "bg", "header":
+		case "fg", "bg", "header", "ttf-default-size", "ttf-default-width":
 		default:
 			return false
 		}
@@ -10413,6 +12492,16 @@ func applySlideStyle(line string, slide *Slide) bool {
 			continue
 		}
 		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "ttf-default-size":
+			if n, err := strconv.Atoi(value); err == nil && n > 0 {
+				slide.TTFSize = max(1, min(512, n))
+				applied = true
+			}
+		case "ttf-default-width":
+			if n, err := strconv.ParseFloat(value, 64); err == nil && n > 0 && !math.IsInf(n, 0) {
+				slide.TTFWidth = math.Max(1, math.Min(200, n))
+				applied = true
+			}
 		case "fg":
 			value = strings.Trim(value, `"'`)
 			if strings.EqualFold(value, "none") {
@@ -10458,7 +12547,12 @@ func textPlacementComment(line string) (string, bool) {
 	}
 	values := url.Values{}
 	if parsed, err := url.ParseQuery(match[1]); err == nil {
-		for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "font", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "link", "slide", "master-clear"} {
+		for _, key := range []string{"text-align", "text-valign", "group"} {
+			for _, value := range parsed[key] {
+				addPlacementValue(values, key, value)
+			}
+		}
+		for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "ttf-size", "ttf-weight", "ttf-width", "font", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "tint", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "link", "slide", "master-clear"} {
 			for _, value := range parsed[key] {
 				addPlacementValue(values, key, value)
 			}
@@ -10481,11 +12575,71 @@ func addPlacementValue(values url.Values, key, value string) {
 	key = strings.ToLower(strings.TrimSpace(key))
 	value = strings.Trim(value, `"'`)
 	switch key {
-	case "top", "bottom", "left", "right", "width", "height":
+	case "text-align":
+		if value == "left" || value == "center" || value == "right" || value == "justify" {
+			values.Set(key, value)
+		}
+	case "text-valign":
+		if value == "top" || value == "middle" || value == "bottom" {
+			values.Set(key, value)
+		}
+	case "connector-from-side", "connector-to-side":
+		if value == "top" || value == "bottom" || value == "left" || value == "right" {
+			values.Set(key, value)
+		}
+	case "connector-mode":
+		if value == "straight" || value == "elbow" {
+			values.Set(key, value)
+		}
+	case "connector-arrows":
+		if value == "none" || value == "start" || value == "end" || value == "both" {
+			values.Set(key, value)
+		}
+	case "connector-width", "connector-arrow-width":
+		q := url.Values{key: {value}}
+		limit := 8.0
+		fallback := 1.0
+		if key == "connector-arrow-width" {
+			limit = 20
+			fallback = 6
+		}
+		values.Set(key, strconv.FormatFloat(connectorNumber(q, key, fallback, limit), 'f', -1, 64))
+	case "connector-route":
+		if decoded, err := url.QueryUnescape(value); err == nil {
+			value = decoded
+		}
+		if points := decodeConnectorRoute(value); len(points) > 0 {
+			data, _ := json.Marshal(points)
+			values.Set(key, string(data))
+		}
+	case "group", "element-id", "connector-from", "connector-to":
+		if len(value) > 0 && len(value) <= 100 && strings.IndexFunc(value, func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_')
+		}) < 0 {
+			values.Set(key, value)
+		}
+	case "participant-inherited", "text-box":
+		if value == "1" {
+			values.Set(key, value)
+		}
+	case "participant-kind":
+		if value == "page-number" {
+			values.Set(key, value)
+		}
+	case "width", "height":
+		if parsed, err := strconv.ParseFloat(value, 64); err == nil && !math.IsNaN(parsed) && !math.IsInf(parsed, 0) && parsed >= 0 {
+			values.Set(key, strconv.FormatFloat(math.Max(.5, parsed), 'f', -1, 64))
+		}
+	case "shape-offset-x", "shape-offset-y":
+		if parsed, err := strconv.ParseFloat(value, 64); err == nil && (parsed == 0 || parsed == .5) {
+			values.Set(key, strconv.FormatFloat(parsed, 'f', -1, 64))
+		}
+	case "top", "left":
+		if parsed, err := strconv.Atoi(value); err == nil {
+			values.Set(key, strconv.Itoa(clampInt(parsed, -1000, 10000)))
+		}
+	case "bottom", "right":
 		if parsed, err := strconv.Atoi(value); err == nil && parsed >= 0 {
-			if key == "width" || key == "height" {
-				parsed = max(1, parsed)
-			}
 			values.Set(key, strconv.Itoa(parsed))
 		}
 	case "row_delta":
@@ -10521,7 +12675,7 @@ func addPlacementValue(values url.Values, key, value string) {
 			values.Set(key, fmt.Sprintf("%.6f", clampFloat(parsed, 0, 1)))
 		}
 	case "align":
-		if value == "left" || value == "center" || value == "right" {
+		if value == "left" || value == "center" || value == "right" || value == "justify" {
 			values.Set(key, value)
 		}
 	case "valign":
@@ -10529,8 +12683,20 @@ func addPlacementValue(values url.Values, key, value string) {
 			values.Set(key, value)
 		}
 	case "render":
-		if value == "text-image" {
+		if value == "text-image" || value == "truetype" {
 			values.Set(key, value)
+		}
+	case "ttf-size":
+		if parsed, err := strconv.Atoi(value); err == nil {
+			values.Set(key, strconv.Itoa(max(1, min(trueTypeMaxSize, parsed))))
+		}
+	case "ttf-weight":
+		if value == "bold" {
+			values.Set(key, value)
+		}
+	case "ttf-width":
+		if parsed, err := strconv.ParseFloat(value, 64); err == nil && !math.IsNaN(parsed) && !math.IsInf(parsed, 0) {
+			values.Set(key, strconv.FormatFloat(math.Max(1, math.Min(200, parsed)), 'f', -1, 64))
 		}
 	case "source":
 		switch value {
@@ -10565,6 +12731,10 @@ func addPlacementValue(values url.Values, key, value string) {
 		if _, ok := ansiFG(value); ok {
 			values.Set(key, normalizeColourValue(value))
 		}
+	case "tint":
+		if r, g, b, ok := parseHexColour(value); ok {
+			values.Set(key, fmt.Sprintf("#%02x%02x%02x", r, g, b))
+		}
 	case "gradient-dir":
 		switch strings.ToLower(value) {
 		case "horizontal", "vertical", "diagonal":
@@ -10591,6 +12761,10 @@ func addPlacementValue(values url.Values, key, value string) {
 		case "subject", "contrast", "saturation", "luma", "alpha", "circle", "square", "triangle", "diamond":
 			values.Set("shape", strings.ToLower(value))
 		}
+	case "shape-label":
+		if raw, err := base64.StdEncoding.DecodeString(value); err == nil && len(raw) <= 65536 && json.Valid(raw) {
+			values.Set(key, value)
+		}
 	case "brightness", "contrast", "saturation", "sharpness":
 		if parsed, err := strconv.ParseFloat(value, 64); err == nil {
 			values.Set(key, fmt.Sprintf("%.1f", parsed))
@@ -10600,6 +12774,9 @@ func addPlacementValue(values url.Values, key, value string) {
 			values.Set("alpha", strconv.Itoa(max(0, min(255, parsed))))
 		}
 	case "link":
+		if decoded, err := url.QueryUnescape(value); err == nil {
+			value = decoded
+		}
 		if link, ok := normalizeLinkValue(value, 0); ok {
 			setLinkValues(values, link)
 		}
@@ -10628,13 +12805,21 @@ func placementCommentText(query string) string {
 		return query
 	}
 	var fields []string
-	for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "font", "fg", "bg", "header", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "slide", "link", "master-clear"} {
+	for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "ttf-size", "ttf-weight", "ttf-width", "font", "fg", "bg", "header", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "tint", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "slide", "link", "master-clear"} {
 		if value := values.Get(key); value != "" {
 			if key == "link" {
 				fields = append(fields, key+"="+url.QueryEscape(value))
 			} else {
 				fields = append(fields, key+"="+value)
 			}
+		}
+	}
+	for _, key := range []string{"participant-inherited", "participant-kind", "text-box", "text-align", "text-valign", "shape-offset-x", "shape-offset-y", "group", "shape-label", "element-id", "connector-from", "connector-to", "connector-from-side", "connector-to-side", "connector-mode", "connector-arrows", "connector-width", "connector-arrow-width", "connector-route"} {
+		if value := values.Get(key); value != "" {
+			if key == "connector-route" {
+				value = url.QueryEscape(value)
+			}
+			fields = append(fields, key+"="+value)
 		}
 	}
 	return strings.Join(fields, " ")
@@ -10749,33 +12934,6 @@ func elementLink(query string) string {
 		return ""
 	}
 	return target.Value
-}
-
-func setElementLink(element *Element, link string, slideCount int) bool {
-	if element == nil {
-		return false
-	}
-	values, _ := url.ParseQuery(element.Query)
-	if strings.TrimSpace(link) == "" {
-		values.Del("link")
-		values.Del("slide")
-		element.Query = values.Encode()
-		return true
-	}
-	sanitized, ok := normalizeLinkValue(link, slideCount)
-	if !ok {
-		return false
-	}
-	setLinkValues(values, sanitized)
-	element.Query = values.Encode()
-	return true
-}
-
-func openElementLink(target linkTarget) bool {
-	if target.URL == "" {
-		return false
-	}
-	return exec.Command("open", target.URL).Start() == nil
 }
 
 func textRenderMode(query string) string {
@@ -10906,27 +13064,6 @@ func fittedTerminalContentGeometry(width, height int) terminalContentGeometry {
 	return geometry
 }
 
-func updateViewportFitWarning(width, height int) {
-	geometry := fittedTerminalContentGeometry(width, height)
-	if !geometry.Fitted {
-		viewportWarning = viewportFitWarning{}
-		return
-	}
-	authorWidth, authorHeight := authoredRenderSize(width, height)
-	key := fmt.Sprintf("%dx%d:%dx%d", width, height, authorWidth, authorHeight)
-	if viewportWarning.Key == key {
-		return
-	}
-	viewportWarning = viewportFitWarning{
-		Key: key,
-		Text: fmt.Sprintf(
-			"Viewport %dx%d; deck %dx%d — scaled %.0f%%. Decrease font or enlarge window for full fidelity.",
-			width, height, authorWidth, authorHeight, geometry.Scale*100,
-		),
-		ExpiresAt: time.Now().Add(8 * time.Second),
-	}
-}
-
 func offsetTerminalLines(lines []Line, offsetX, offsetY int) []Line {
 	if offsetX == 0 && offsetY == 0 {
 		return lines
@@ -10974,22 +13111,6 @@ func drawTerminalSlideCanvas(slide Slide, width, height int, drawLocal func(term
 	return frame, geometry
 }
 
-func terminalScaleX(width, height int) float64 {
-	authorWidth, _ := authoredRenderSize(width, height)
-	if authorWidth <= 0 || width <= 0 {
-		return 1
-	}
-	return float64(fittedTerminalContentGeometry(width, height).Width) / float64(authorWidth)
-}
-
-func terminalScaleY(width, height int) float64 {
-	_, authorHeight := authoredRenderSize(width, height)
-	if authorHeight <= 0 || height <= 0 {
-		return 1
-	}
-	return float64(fittedTerminalContentGeometry(width, height).Height) / float64(authorHeight)
-}
-
 func displayLines(slide Slide, width, height, page int) []Line {
 	pages := displayPages(slide, width, height)
 	if page < 0 || page >= len(pages) {
@@ -11000,17 +13121,21 @@ func displayLines(slide Slide, width, height, page int) []Line {
 
 func displayPages(slide Slide, width, height int) [][]Line {
 	geometry := fittedTerminalContentGeometry(width, height)
-	lines := layout(scaleSlideForTerminal(slide, geometry.Width, geometry.Height), geometry.Width, geometry.Height)
+	scaled := scaleSlideForTerminal(slide, geometry.Width, geometry.Height)
+	lines := layout(scaled, geometry.Width, geometry.Height)
 	var repeatedPageNumber []Line
 	var content []Line
 	for _, line := range lines {
+		if line.Role == "connector" {
+			continue
+		} // Re-anchor after pagination; lines cannot create continuation pages.
 		if line.Element >= 0 && line.Element < len(slide.Elements) && slide.Elements[line.Element].Kind == "page-number" {
 			repeatedPageNumber = append(repeatedPageNumber, line)
 			continue
 		}
 		content = append(content, line)
 	}
-	pages := paginateLayout(content, geometry.Height)
+	pages := paginateLayout(content, geometry.Height, slide.Elements)
 	if len(repeatedPageNumber) > 0 {
 		for index := range pages {
 			pageNumber := append([]Line(nil), repeatedPageNumber...)
@@ -11018,32 +13143,10 @@ func displayPages(slide Slide, width, height int) [][]Line {
 		}
 	}
 	for index := range pages {
+		pages[index] = append(pages[index], shapeConnectorLines(scaled, pages[index], geometry.Width, geometry.Height)...)
 		pages[index] = offsetTerminalLines(pages[index], geometry.OffsetX, geometry.OffsetY)
 	}
 	return pages
-}
-
-func authoredStep(direction string, step, width, height, authorWidth, authorHeight int) int {
-	if step <= 0 {
-		return 1
-	}
-	switch direction {
-	case "left", "right":
-		if width > 0 && authorWidth > 0 {
-			return max(1, int(math.Round(float64(step)*float64(authorWidth)/float64(width))))
-		}
-	case "up", "down":
-		if height > 0 && authorHeight > 0 {
-			return max(1, int(math.Round(float64(step)*float64(authorHeight)/float64(height))))
-		}
-	}
-	return step
-}
-
-func displayLayout(slide Slide, width, height int) []Line {
-	geometry := fittedTerminalContentGeometry(width, height)
-	lines := layout(scaleSlideForTerminal(slide, geometry.Width, geometry.Height), geometry.Width, geometry.Height)
-	return offsetTerminalLines(lines, geometry.OffsetX, geometry.OffsetY)
 }
 
 func scaleSlideForTerminal(slide Slide, width, height int) Slide {
@@ -11062,13 +13165,19 @@ func scaleSlideForTerminal(slide Slide, width, height int) Slide {
 }
 
 func scaleElementForTerminal(element Element, scaleX, scaleY float64) Element {
+	originalQuery := element.Query
 	element.Query = scalePlacementQueryForTerminal(element.Query, scaleX, scaleY)
 	switch {
 	case element.Kind == "image":
 		element.Query = scaleQueryFloatForTerminal(element.Query, "scale", 1.0, scaleX, 0.1, 1.0)
 	case element.Kind == "shape":
-		element.Query = scaleQueryIntForTerminal(element.Query, "width", 12, scaleX, 1, 1000)
-		element.Query = scaleQueryIntForTerminal(element.Query, "height", 6, scaleY, 1, 1000)
+		// Placement scaling already touches integer width/height; use authored
+		// dimensions here so integral and fractional sizes scale exactly once.
+		original, _ := url.ParseQuery(originalQuery)
+		element.Query = setQueryValue(element.Query, "width", original.Get("width"))
+		element.Query = setQueryValue(element.Query, "height", original.Get("height"))
+		element.Query = scaleQueryFloatForTerminal(element.Query, "width", 12, scaleX, .5, 1000)
+		element.Query = scaleQueryFloatForTerminal(element.Query, "height", 6, scaleY, .5, 1000)
 	case rendersAsTextImage(element):
 		element.Query = scaleQueryFloatForTerminal(element.Query, "scale", 1.0, scaleX, 0.1, 10.0)
 	case shouldAutoScaleTextElement(element, scaleX):
@@ -11079,6 +13188,9 @@ func scaleElementForTerminal(element Element, scaleX, scaleY float64) Element {
 }
 
 func shouldAutoScaleTextElement(element Element, scaleX float64) bool {
+	if isTrueType(element) {
+		return false
+	}
 	if math.Abs(scaleX-1) < 0.02 || rendersAsTextImage(element) {
 		return false
 	}
@@ -11145,21 +13257,6 @@ func scaleQueryIntForTerminal(query, key string, defaultValue int, factor float6
 	return values.Encode()
 }
 
-func renderSlide(slide Slide, width, height, page int, view ViewState) {
-	flushTerminalFrame(func() {
-		clearPhysicalTerminalViewport()
-		backgroundFrame, _ := drawTerminalSlideCanvas(slide, width, height, nil)
-		lines := displayLines(slide, width, height, page)
-		backgroundLines := ansiFrameToExportLines(backgroundFrame, width, height, ansiCSSColour(slideFG(slide)))
-		drawTransparentShapeBackdrop(lines, backgroundLines, width, height, slide)
-		drawOverlayLines(lines, width, height, slide)
-		drawLinkUnderlines(lines, width, height, slide)
-		drawViewChrome(width, height, view)
-		drawViewOverlays(width, height, view)
-		termPrint("\033[0m")
-	})
-}
-
 func repaintFrameBackground(bg string, width, height int) {
 	if width <= 0 || height <= 0 {
 		return
@@ -11212,38 +13309,6 @@ func termPrintf(format string, args ...any) {
 	fmt.Printf(format, args...)
 }
 
-func playAnimatedSlide(slide Slide, width, height, page int, view ViewState) string {
-	ticker := time.NewTicker(70 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		if action := pollKey(); action != "" {
-			return action
-		}
-		renderSlide(slide, width, height, page, view)
-		<-ticker.C
-	}
-}
-
-func playStaticSlide(slide Slide, width, height, page int, view ViewState) string {
-	if view.TimerMode == "" && !viewportFitWarningActive() {
-		renderSlide(slide, width, height, page, view)
-		return waitKey()
-	}
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		if view.TimerMode == "" && !viewportFitWarningActive() {
-			renderSlide(slide, width, height, page, view)
-			return waitKey()
-		}
-		if action := pollKey(); action != "" {
-			return action
-		}
-		renderSlide(slide, width, height, page, view)
-		<-ticker.C
-	}
-}
-
 func slideHasAnimatedImage(slide Slide) bool {
 	for _, element := range slide.Elements {
 		if element.Kind != "image" {
@@ -11255,16 +13320,6 @@ func slideHasAnimatedImage(slide Slide) bool {
 		}
 	}
 	return false
-}
-
-func prewarmImageCache(slides []Slide, width, height int) {
-	prewarmingImageCache = true
-	defer func() { prewarmingImageCache = false }()
-	for _, slide := range slides {
-		if slideHasAnimatedImage(slide) {
-			_ = displayLayout(slide, width, height)
-		}
-	}
 }
 
 func drawOverlayLines(lines []Line, width, height int, slide Slide) {
@@ -11303,98 +13358,6 @@ func drawOverlayLineSet(lines []Line, width, height int, slide Slide, rows map[i
 	}
 }
 
-func drawTransparentShapeBackdrop(lines []Line, backdrop []exportLine, width, height int, slide Slide) {
-	transparency := transparentShapeCells(lines, width, height, slide)
-	if len(transparency) == 0 {
-		return
-	}
-	for row, cells := range transparency {
-		if row < 0 || row >= height || len(cells) == 0 {
-			continue
-		}
-		cols := make([]int, 0, len(cells))
-		for col := range cells {
-			cols = append(cols, col)
-		}
-		sort.Ints(cols)
-		start := cols[0]
-		prev := cols[0]
-		bg := cells[start]
-		flush := func(end int, runBG string) {
-			termPrintf("\033[0;%s;%sm\033[%d;%dH%s", slideFG(slide), runBG, row+1, start+1, strings.Repeat(" ", end-start+1))
-		}
-		for _, col := range cols[1:] {
-			if col == prev+1 && cells[col] == bg {
-				prev = col
-				continue
-			}
-			flush(prev, bg)
-			start = col
-			prev = col
-			bg = cells[col]
-		}
-		flush(prev, bg)
-	}
-	for _, line := range backdrop {
-		if line.Row < 0 || line.Row >= height {
-			continue
-		}
-		for _, part := range line.Parts {
-			fg := cssColourToFG(part.Color, slideFG(slide))
-			for offset, r := range []rune(part.Text) {
-				col := part.Col + offset
-				if r == ' ' || col < 0 || col >= width {
-					continue
-				}
-				rowCells := transparency[line.Row]
-				if rowCells == nil {
-					continue
-				}
-				bg := rowCells[col]
-				if bg == "" {
-					continue
-				}
-				termPrintf("\033[0;%s;%sm\033[%d;%dH%s", blendFGForTransparency(fg, bg), bg, line.Row+1, col+1, string(r))
-			}
-		}
-	}
-}
-
-func drawOverlayRows(lines []Line, width, height int, slide Slide, rows map[int]bool) {
-	if len(rows) == 0 {
-		return
-	}
-	geometry := fittedTerminalContentGeometry(width, height)
-	blank := strings.Repeat(" ", geometry.Width)
-	for row := range rows {
-		if row < geometry.OffsetY || row >= geometry.OffsetY+geometry.Height {
-			continue
-		}
-		termPrintf("\033[%sm\033[%d;%dH%s", slideBG(slide), row+1, geometry.OffsetX+1, blank)
-	}
-	drawOverlayLineSet(lines, width, height, slide, rows)
-}
-
-func lineStyle(slide Slide, line Line, heading bool) string {
-	underline := "0"
-	if elementLink(line.Query) != "" && line.Role != "image" {
-		underline = "4"
-	}
-	if fg := elementFG(line.Query, heading); fg != "" {
-		return fmt.Sprintf("\033[%s;%s;%sm", underline, fg, slideBG(slide))
-	}
-	if underline == "4" {
-		if heading {
-			return fmt.Sprintf("\033[4;%s;%sm", slideHeaderFG(slide), slideBG(slide))
-		}
-		return fmt.Sprintf("\033[4;%s;%sm", slideFG(slide), slideBG(slide))
-	}
-	if heading {
-		return slideHeaderStyle(slide)
-	}
-	return slideStyle(slide, false)
-}
-
 func lineFG(slide Slide, line Line, heading bool) string {
 	if fg := elementFG(line.Query, heading); fg != "" {
 		return fg
@@ -11403,10 +13366,6 @@ func lineFG(slide Slide, line Line, heading bool) string {
 		return slideHeaderFG(slide)
 	}
 	return slideFG(slide)
-}
-
-func codeBlockStyle(slide Slide, line Line) string {
-	return fmt.Sprintf("\033[0;%s;%sm", codeLineFG(slide, line), codeLineBG(line))
 }
 
 func codeLineFG(slide Slide, line Line) string {
@@ -11748,18 +13707,6 @@ func lightenCSSColour(css string) string {
 	return ansiCSSColour(lightenFG(fg))
 }
 
-func slideStyle(slide Slide, bold bool) string {
-	weight := "0"
-	if bold {
-		weight = "1"
-	}
-	return fmt.Sprintf("\033[%s;%s;%sm", weight, slideFG(slide), slideBG(slide))
-}
-
-func slideHeaderStyle(slide Slide) string {
-	return fmt.Sprintf("\033[0;%s;%sm", slideHeaderFG(slide), slideBG(slide))
-}
-
 func slideHeaderFG(slide Slide) string {
 	if slide.HeaderFG != "" {
 		return slide.HeaderFG
@@ -11808,1582 +13755,12 @@ func elementBG(query string) string {
 	return ""
 }
 
-func drawTransparentTextAt(row, startCol int, text string, width int) {
-	if startCol < 1 {
-		startCol = 1
-	}
-	runes := []rune(crop(text, max(0, width-startCol+1)))
-	for col := 0; col < len(runes); {
-		for col < len(runes) && runes[col] == ' ' {
-			col++
-		}
-		if col >= len(runes) {
-			break
-		}
-		start := col
-		for col < len(runes) && runes[col] != ' ' {
-			col++
-		}
-		termPrintf("\033[%d;%dH%s", row, startCol+start, string(runes[start:col]))
-	}
-}
-
-func drawSolidTextAt(row, startCol int, text string, width int) {
-	if startCol < 1 {
-		text = runeSliceWithPadding(text, 1-startCol, displayWidth(text))
-		startCol = 1
-	}
-	if startCol > width {
-		return
-	}
-	termPrintf("\033[%d;%dH%s", row, startCol, crop(text, max(0, width-startCol+1)))
-}
-
-func hasExplicitAlign(query string) bool {
-	values, err := url.ParseQuery(query)
-	if err != nil {
-		return false
-	}
-	switch values.Get("align") {
-	case "left", "center", "right":
-		return true
-	default:
-		return false
-	}
-}
-
-func drawTransparentANSI(row, startCol int, text string, width int) {
-	if startCol < 1 {
-		startCol = 1
-	}
-	col := startCol
-	active := ""
-	for i := 0; i < len(text) && col <= width; {
-		if text[i] == 0x1b {
-			end := i + 1
-			for end < len(text) && text[end] != 'm' {
-				end++
-			}
-			if end < len(text) {
-				active += text[i : end+1]
-				i = end + 1
-				continue
-			}
-		}
-		r, size := utf8.DecodeRuneInString(text[i:])
-		if r == utf8.RuneError && size == 0 {
-			break
-		}
-		if r != ' ' {
-			termPrintf("\033[%d;%dH%s%c", row, col, active, r)
-			active = ""
-		}
-		col++
-		i += size
-	}
-	if active != "" {
-		termPrint("\033[0m")
-	}
-}
-
-func editState(states map[int]*EditState, slideIndex int) *EditState {
-	state := states[slideIndex]
-	if state == nil {
-		state = &EditState{Selected: -1, LastSelected: -1, Cursor: map[int]int{}, MultiSelected: map[int]bool{}}
-		states[slideIndex] = state
-	}
-	if state.Cursor == nil {
-		state.Cursor = map[int]int{}
-	}
-	if state.MultiSelected == nil {
-		state.MultiSelected = map[int]bool{}
-	}
-	return state
-}
-
 type editModeOptions struct {
 	Master               bool
 	MasterName           string
 	Persist              func() bool
 	TogglePageNumber     func(*Slide) string
 	EditVisualProperties func(*Slide) bool
-}
-
-func playEditMode(deck *Deck, current int, width, height, page int, deckPath string, state *EditState, options editModeOptions) string {
-	slides := &deck.Slides
-	workingSlide := deck.ResolveSlide(current, true)
-	slide := &workingSlide
-	entryPage := page
-	modeOriginal := cloneSlide(*slide)
-	selected := state.Selected
-	if selected < 0 || selected >= len(slide.Elements) || !isSelectableElement(slide.Elements[selected]) {
-		selected = -1
-	}
-	multiSelected := state.MultiSelected
-	if multiSelected == nil {
-		multiSelected = map[int]bool{}
-		state.MultiSelected = multiSelected
-	}
-	pruneSelectionSet(multiSelected, *slide)
-	cursor := state.Cursor
-	if cursor == nil {
-		cursor = map[int]int{}
-		state.Cursor = cursor
-	}
-	if selected >= 0 && isEditableElement(slide.Elements[selected]) {
-		ensureCursor(slide, cursor, selected)
-	}
-	state.Selected = selected
-	mode := "select"
-	status := ""
-	textSelectionMoved := false
-	imageSelectionMoved := false
-	clipboard := state.Clipboard
-	authorWidth, authorHeight := 0, 0
-	axisScaleMode := ""
-	axisScaleLastMode := ""
-	notesOpen := state.ShowNotes
-	notesEditing := false
-	slideListOpen := state.ShowSlides
-	notesCursor := max(0, min(len([]rune(slide.Notes)), state.NotesCursor))
-	notesDraft := slide.Notes
-	slideNavIndex := state.SlideNavIndex
-	if slideNavIndex < 0 || slideNavIndex >= len(*slides) {
-		slideNavIndex = current
-	}
-	slideNavScroll := max(0, state.SlideNavScroll)
-	fullEditRedraw := true
-	editDirty := true
-	var currentLines []Line
-	persist := func() bool {
-		deck.StoreResolvedSlide(current, *slide)
-		if options.Persist != nil {
-			return options.Persist()
-		}
-		return persistDeck(deckPath, *deck)
-	}
-	commit := func(before Slide) {
-		commitSlideSnapshot(state, before, *slide)
-		persist()
-		modeOriginal = cloneSlide(*slide)
-		fullEditRedraw = true
-		editDirty = true
-		currentLines = nil
-	}
-	beginSelectionMove := func() {
-		if !textSelectionMoved && !imageSelectionMoved {
-			modeOriginal = cloneSlide(*slide)
-		}
-	}
-	commitPendingSelectionMove := func() bool {
-		if !textSelectionMoved && !imageSelectionMoved {
-			return false
-		}
-		commit(modeOriginal)
-		textSelectionMoved = false
-		imageSelectionMoved = false
-		return true
-	}
-	clearSelection := func() {
-		selected = -1
-		status = ""
-		state.Selected = selected
-		for index := range multiSelected {
-			delete(multiSelected, index)
-		}
-		textSelectionMoved = false
-		imageSelectionMoved = false
-	}
-	reconcileSelection := func() {
-		pruneSelectionSet(multiSelected, *slide)
-		if selected < 0 || selected >= len(slide.Elements) || !isSelectableElement(slide.Elements[selected]) {
-			selected = -1
-			status = ""
-			if mode == "text" || mode == "move" {
-				mode = "select"
-			}
-			return
-		}
-		if mode == "text" && !isEditableElement(slide.Elements[selected]) {
-			selected = -1
-			status = ""
-			mode = "select"
-			return
-		}
-		if isEditableElement(slide.Elements[selected]) {
-			ensureCursor(slide, cursor, selected)
-		}
-		if elementPage, ok := pageForElement(*slide, width, height, selected); ok {
-			page = elementPage
-		}
-	}
-	activeIndices := func() []int {
-		return activeSelectionIndices(multiSelected, selected, *slide)
-	}
-	removeSelected := func(copyToClipboard bool) bool {
-		if selected < 0 || selected >= len(slide.Elements) {
-			return false
-		}
-		before := cloneSlide(*slide)
-		if copyToClipboard {
-			element := clipboardElementFromSelection(*slide, selected, width, height)
-			clipboard = &element
-			state.Clipboard = clipboard
-		}
-		slide.Elements = append(slide.Elements[:selected], slide.Elements[selected+1:]...)
-		delete(cursor, selected)
-		shiftCursorKeys(cursor, selected, -1)
-		clearSelection()
-		commit(before)
-		return true
-	}
-	removeSelection := func(copyToClipboard bool) bool {
-		indices := activeIndices()
-		if len(indices) == 0 {
-			return false
-		}
-		if len(indices) == 1 {
-			return removeSelected(copyToClipboard)
-		}
-		before := cloneSlide(*slide)
-		if copyToClipboard {
-			element := clipboardElementFromSelection(*slide, indices[len(indices)-1], width, height)
-			clipboard = &element
-			state.Clipboard = clipboard
-		}
-		sort.Sort(sort.Reverse(sort.IntSlice(indices)))
-		for _, index := range indices {
-			if index < 0 || index >= len(slide.Elements) {
-				continue
-			}
-			slide.Elements = append(slide.Elements[:index], slide.Elements[index+1:]...)
-			delete(cursor, index)
-			shiftCursorKeys(cursor, index, -1)
-		}
-		clearSelection()
-		commit(before)
-		return true
-	}
-	fillImagePlaceholder := func(index int) bool {
-		if index < 0 || index >= len(slide.Elements) || slide.Elements[index].Kind != "image" || !slide.Elements[index].Placeholder || slide.Elements[index].MasterSlotID == "" {
-			return false
-		}
-		path, ok := chooseImageFile()
-		if !ok {
-			setUINotice("Image selection cancelled")
-			return false
-		}
-		path, ok = copyImageToDeckDir(path, deckPath)
-		if !ok {
-			setUIError("Image copy failed")
-			return false
-		}
-		slide.Elements[index].Path = path
-		slide.Elements[index].Text = ""
-		slide.Elements[index].Placeholder = false
-		if slide.Elements[index].ID == "" {
-			slide.Elements[index].ID = newStableID("slide-element")
-		}
-		return true
-	}
-	beginBatchMove := func(indices []int) {
-		if len(indices) == 0 {
-			return
-		}
-		beginSelectionMove()
-		if selectionContainsText(*slide, indices) {
-			textSelectionMoved = true
-		}
-		if selectionContainsPositioned(*slide, indices) {
-			imageSelectionMoved = true
-		}
-	}
-	moveBatch := func(direction string, step int) {
-		indices := activeIndices()
-		if len(indices) == 0 {
-			return
-		}
-		beginBatchMove(indices)
-		for _, index := range indices {
-			moveSelectedElement(slide, index, direction, authorWidth, authorHeight, authoredStep(direction, step, width, height, authorWidth, authorHeight))
-		}
-		status = selectionStatus(*slide, selected, multiSelected)
-		persist()
-	}
-	beginAxisScale := func(picked string) bool {
-		if picked == "" || picked == axisScaleClose || selected < 0 || selected >= len(slide.Elements) || !isAxisScalableElement(slide.Elements[selected]) {
-			axisScaleMode = ""
-			return false
-		}
-		axisScaleLastMode = picked
-		modeOriginal = cloneSlide(*slide)
-		beginElementResize(slide, selected, authorWidth, authorHeight)
-		mode = "resize"
-		axisScaleMode = picked
-		for index := range multiSelected {
-			delete(multiSelected, index)
-		}
-		status = selectionStatus(*slide, selected, multiSelected)
-		return true
-	}
-	var prevLines []Line
-	prevSelected := -1
-	prevMultiSelected := map[int]bool{}
-	prevStatus := ""
-	prevMode := ""
-	lastEditWidth, lastEditHeight := -1, -1
-	lastAnimationFrame := time.Now()
-	animationFrame := 0
-	var editMatrix *matrixEffect
-	var editStars *starsEffect
-	var editBursts *burstEffect
-	for {
-		width, height = terminalSize()
-		if width != lastEditWidth || height != lastEditHeight {
-			lastEditWidth, lastEditHeight = width, height
-			fullEditRedraw = true
-			editDirty = true
-		}
-		if (slideListOpen || notesOpen || state.TimerMode != "" || selected < 0 && slideHasAnimatedImage(*slide) || slide.Effect != "") && time.Since(lastAnimationFrame) >= 70*time.Millisecond {
-			lastAnimationFrame = time.Now()
-			animationFrame++
-			editDirty = true
-			fullEditRedraw = true
-		}
-		authorWidth, authorHeight = authoredRenderSize(width, height)
-		reconcileSelection()
-		initialEvent := false
-		event := KeyEvent{}
-		if queuedEditEvent != nil {
-			event = *queuedEditEvent
-			queuedEditEvent = nil
-			initialEvent = true
-		} else {
-			if editDirty {
-				flushTerminalFrame(func() {
-					fastImageRender = true
-					defer func() { fastImageRender = false }()
-					currentLines = displayLines(*slide, width, height, page)
-					transparentSelection := selected >= 0 && selected < len(slide.Elements) && elementTransparent(slide.Elements[selected])
-					previousTransparentSelection := prevSelected >= 0 && prevSelected < len(slide.Elements) && elementTransparent(slide.Elements[prevSelected])
-					if fullEditRedraw || len(prevLines) == 0 || transparentSelection || previousTransparentSelection {
-						clearPhysicalTerminalViewport()
-						geometry := fittedTerminalContentGeometry(width, height)
-						if slide.Effect != "" && (editMatrix == nil || editMatrix.width != geometry.Width || editMatrix.height != geometry.Height) {
-							editMatrix = newMatrix(geometry.Width, geometry.Height)
-							editStars = newStars(geometry.Width, geometry.Height)
-							editBursts = newBursts(slide.Effect, geometry.Width, geometry.Height)
-						}
-						canvasFrame, _ := drawTerminalSlideCanvas(*slide, width, height, func(canvas terminalContentGeometry) {
-							if slide.Effect != "" {
-								drawEffectFrame(slide.Effect, canvas.Width, canvas.Height, animationFrame, editMatrix, editStars, editBursts, slideBG(*slide))
-							}
-						})
-						backdropLines := ansiFrameToExportLines(canvasFrame, width, height, ansiCSSColour(slideFG(*slide)))
-						drawTransparentShapeBackdrop(currentLines, backdropLines, width, height, *slide)
-						drawOverlayLines(currentLines, width, height, *slide)
-						drawLinkUnderlines(currentLines, width, height, *slide)
-					} else {
-						rows := map[int]bool{height - 1: true}
-						addSelectedElementRows(rows, prevLines, prevSelected, height)
-						addSelectedElementRows(rows, currentLines, selected, height)
-						addSelectionSetRows(rows, prevLines, prevMultiSelected, width, height)
-						addSelectionSetRows(rows, currentLines, multiSelected, width, height)
-						addSelectionUnderlineRow(rows, prevLines, prevSelected, width, height, prevStatus == "image selected")
-						addSelectionUnderlineRow(rows, currentLines, selected, width, height, status == "image selected")
-						if prevMode == "text" {
-							addSelectedElementRows(rows, prevLines, prevSelected, height)
-						}
-						if mode == "text" {
-							addSelectedElementRows(rows, currentLines, selected, height)
-						}
-						drawOverlayRows(currentLines, width, height, *slide, rows)
-						drawLinkUnderlines(currentLines, width, height, *slide)
-					}
-					if (mode == "select" || mode == "move") && selectionSetCount(multiSelected) > 1 {
-						drawSelectedSetHighlight(currentLines, multiSelected, selected, width, height)
-						if selected >= 0 && selected < len(slide.Elements) && slide.Elements[selected].Kind == "image" {
-							drawSelectedImageHighlight(currentLines, selected, width, height)
-						} else if selected >= 0 {
-							drawSelectedElementHighlight(currentLines, selected, width, height)
-						}
-					} else if (mode == "select" || mode == "move" || mode == "resize") && selected >= 0 && (status == "text selected" || status == "code text selected" || status == "shape selected" || status == "page number selected") {
-						drawSelectedElementHighlight(currentLines, selected, width, height)
-					} else if (mode == "select" || mode == "move" || mode == "resize") && selected >= 0 && status == "image selected" {
-						drawSelectedImageHighlight(currentLines, selected, width, height)
-					} else if mode == "text" && selected >= 0 && selected < len(slide.Elements) && isEditableElement(slide.Elements[selected]) {
-						drawEditCursor(currentLines, selected, cursor[selected], width, height, *slide)
-					}
-					if slideListOpen {
-						drawSlideNavigatorOverlay(deck.ResolvedSlides(), slideNavIndex, &slideNavScroll, width, height)
-					}
-					if notesOpen {
-						drawSpeakerNotesPanel(notesDraft, notesCursor, notesEditing, width, height)
-					}
-					if state.TimerMode != "" {
-						drawTimerOverlay(width, height, state.TimerMode, state.TimerInput, state.TimerDeadline)
-					}
-					if slideListOpen {
-						drawSlideNavigatorToolbar(width, height, slideNavIndex, len(*slides))
-					} else if notesOpen {
-						drawSpeakerNotesToolbar(width, height, notesEditing)
-					} else {
-						drawEditToolbar(width, height, current, len(*slides), page, slidePageCount(*slide, width, height), mode, status, *slide, selected, axisScaleMode, options)
-					}
-					termPrint("\033[0m")
-					prevLines = currentLines
-					prevSelected = selected
-					prevMultiSelected = cloneBoolMap(multiSelected)
-					prevStatus = status
-					prevMode = mode
-					fullEditRedraw = false
-					editDirty = false
-				})
-			}
-			if slideListOpen {
-				event = readSlideNavigatorKeyEvent()
-			} else if notesOpen && notesEditing {
-				event = readSpeakerNotesKeyEvent()
-			} else if notesOpen {
-				event = readSpeakerNotesViewKeyEvent()
-			} else {
-				event = readEditKeyEventForMode(mode)
-			}
-		}
-		if event.Action == "" {
-			time.Sleep(20 * time.Millisecond)
-			continue
-		}
-		editDirty = true
-		if state.TimerMode != "" && applyTimerEvent(state, event) {
-			fullEditRedraw = true
-			continue
-		}
-		if event.Action == "text" && event.Text == "?" && mode != "text" && !slideListOpen && !notesOpen {
-			title, items := editShortcutHelp(mode, status, *slide, selected, axisScaleMode, options.Master)
-			replayed := playShortcutHelp(title, items, *slide, page, width, height, readEditKeyEvent)
-			fullEditRedraw = true
-			if shortcutHelpDismissed(replayed) {
-				continue
-			}
-			event = replayed
-		}
-		if slideListOpen {
-			switch event.Action {
-			case "slide-list", "escape":
-				slideListOpen = false
-				state.ShowSlides = false
-				fullEditRedraw = true
-			case "up":
-				slideNavIndex = max(0, slideNavIndex-1)
-				fullEditRedraw = true
-			case "down":
-				slideNavIndex = min(len(*slides)-1, slideNavIndex+1)
-				fullEditRedraw = true
-			case "enter":
-				state.ShowSlides = false
-				state.SlideNavIndex = slideNavIndex
-				state.SlideNavScroll = slideNavScroll
-				state.Selected = selected
-				state.Cursor = cursor
-				state.Clipboard = clipboard
-				return fmt.Sprintf("jump-slide:%d", slideNavIndex)
-			case "mouse-click":
-				if target, ok := slideNavigatorIndexAtPoint(event.X, event.Y, slideNavScroll, len(*slides), width, height); ok {
-					slideNavIndex = target
-					fullEditRedraw = true
-				}
-			}
-			state.SlideNavIndex = slideNavIndex
-			state.SlideNavScroll = slideNavScroll
-			continue
-		}
-		if notesOpen && !notesEditing {
-			switch event.Action {
-			case "escape", "controls":
-				notesOpen = false
-				notesEditing = false
-				notesDraft = slide.Notes
-				notesCursor = min(notesCursor, len([]rune(notesDraft)))
-				state.ShowNotes = false
-				fullEditRedraw = true
-				continue
-			case "tab":
-				notesCursor = min(notesCursor, len([]rune(notesDraft)))
-				notesEditing = true
-				fullEditRedraw = true
-				continue
-			case "enter":
-				notesEditing = true
-				fullEditRedraw = true
-				continue
-			case "mouse-click":
-				if noteCursor, ok := notesCursorAtPoint(notesDraft, event.X, event.Y, width, height); ok {
-					notesCursor = noteCursor
-					notesEditing = true
-					fullEditRedraw = true
-					continue
-				}
-			}
-		}
-		if notesOpen && notesEditing {
-			switch event.Action {
-			case "escape":
-				notesOpen = false
-				notesEditing = false
-				notesDraft = slide.Notes
-				notesCursor = min(notesCursor, len([]rune(notesDraft)))
-				state.ShowNotes = false
-				fullEditRedraw = true
-			case "left":
-				notesCursor = max(0, notesCursor-1)
-				fullEditRedraw = true
-			case "right":
-				notesCursor = min(len([]rune(notesDraft)), notesCursor+1)
-				fullEditRedraw = true
-			case "up":
-				notesCursor = moveNotesCursorVertical(notesDraft, notesCursor, -1)
-				fullEditRedraw = true
-			case "down":
-				notesCursor = moveNotesCursorVertical(notesDraft, notesCursor, 1)
-				fullEditRedraw = true
-			case "enter":
-				before := cloneSlide(*slide)
-				slide.Notes = notesDraft
-				notesEditing = false
-				state.NotesCursor = notesCursor
-				commitSlideSnapshot(state, before, *slide)
-				persist()
-				modeOriginal = cloneSlide(*slide)
-				fullEditRedraw = true
-			case "backspace":
-				if notesCursor > 0 {
-					runes := []rune(notesDraft)
-					runes = append(runes[:notesCursor-1], runes[notesCursor:]...)
-					notesDraft = string(runes)
-					notesCursor--
-				}
-				fullEditRedraw = true
-			case "insert-newline":
-				notesDraft, notesCursor, _ = insertNotesText(notesDraft, notesCursor, "\n", width, height)
-				fullEditRedraw = true
-			case "text":
-				notesDraft, notesCursor, _ = insertNotesText(notesDraft, notesCursor, event.Text, width, height)
-				fullEditRedraw = true
-			}
-			state.NotesCursor = notesCursor
-			continue
-		}
-		ctx := interactionContextFor(mode, *slide, selected, multiSelected, status)
-		ctx.Master = options.Master
-		if !actionAllowedInContext(ctx, event.Action) {
-			continue
-		}
-		switch event.Action {
-		case "next":
-			return "next-slide"
-		case "prev":
-			if current > 0 {
-				return fmt.Sprintf("jump-slide:%d", current-1)
-			}
-			return ""
-		case "present", "controls":
-			return ""
-		case "export":
-			exportHTMLWithNotice(deckPath, deck.ResolvedSlides(), width, height)
-		case "jump":
-			target, _ := playJumpMode(deck.ResolvedSlides(), current, page, width, height)
-			return fmt.Sprintf("jump-slide:%d", target)
-		case "search":
-			query := ""
-			target, _ := playSearchMode(deck.ResolvedSlides(), current, page, width, height, &query)
-			return fmt.Sprintf("jump-slide:%d", target)
-		case "slide-list":
-			if mode == "text" {
-				insertTextAtCursor(slide, selected, cursor, "1")
-				break
-			}
-			commitPendingSelectionMove()
-			slideListOpen = true
-			notesOpen = false
-			state.ShowSlides = true
-			state.ShowNotes = false
-			slideNavIndex = current
-			slideNavScroll = 0
-			fullEditRedraw = true
-		case "speaker-notes":
-			if mode == "text" {
-				insertTextAtCursor(slide, selected, cursor, "2")
-				break
-			}
-			commitPendingSelectionMove()
-			notesOpen = true
-			notesEditing = false
-			slideListOpen = false
-			state.ShowNotes = true
-			state.ShowSlides = false
-			notesDraft = slide.Notes
-			notesCursor = len([]rune(slide.Notes))
-			fullEditRedraw = true
-		case "timer":
-			if mode == "text" {
-				insertTextAtCursor(slide, selected, cursor, "0")
-				break
-			}
-			state.TimerMode = "config"
-			state.TimerInput = ""
-			state.TimerDeadline = time.Time{}
-			fullEditRedraw = true
-		case "page-number":
-			if options.TogglePageNumber != nil && mode != "text" {
-				commitPendingSelectionMove()
-				before := cloneSlide(*slide)
-				label := options.TogglePageNumber(slide)
-				clearSelection()
-				commit(before)
-				setUINotice("Page number: " + label)
-				fullEditRedraw = true
-				currentLines = nil
-			}
-		case "visual-properties":
-			if options.EditVisualProperties != nil && mode != "text" {
-				commitPendingSelectionMove()
-				if options.EditVisualProperties(slide) {
-					clearSelection()
-					persist()
-					modeOriginal = cloneSlide(*slide)
-					setUINotice("Visual properties updated")
-				}
-				fullEditRedraw = true
-				currentLines = nil
-			}
-		case "shift-mouse-click":
-			commitPendingSelectionMove()
-			lines := currentLines
-			if len(lines) == 0 {
-				lines = displayLines(*slide, width, height, page)
-				currentLines = lines
-			}
-			elementIndex := elementAtPoint(lines, event.X, event.Y)
-			if elementIndex < 0 || elementIndex >= len(slide.Elements) {
-				break
-			}
-			selected = elementIndex
-			state.LastSelected = selected
-			toggleSelection(multiSelected, selected)
-			mode = "select"
-			status = selectionStatus(*slide, selected, multiSelected)
-			if isEditableElement(slide.Elements[selected]) {
-				ensureCursor(slide, cursor, selected)
-			}
-			textSelectionMoved = false
-			imageSelectionMoved = false
-		case "mouse-click":
-			commitPendingSelectionMove()
-			lines := currentLines
-			if len(lines) == 0 {
-				lines = displayLines(*slide, width, height, page)
-				currentLines = lines
-			}
-			elementIndex := elementAtPoint(lines, event.X, event.Y)
-			if elementIndex < 0 || elementIndex >= len(slide.Elements) {
-				if initialEvent {
-					return ""
-				}
-				break
-			}
-			if isPositionedElement(slide.Elements[elementIndex]) {
-				selected = elementIndex
-				state.LastSelected = selected
-				for index := range multiSelected {
-					delete(multiSelected, index)
-				}
-				mode = "select"
-				status = selectionStatus(*slide, selected, multiSelected)
-				textSelectionMoved = false
-				imageSelectionMoved = false
-				continue
-			}
-			if isEditableElement(slide.Elements[elementIndex]) {
-				if slide.Elements[elementIndex].Kind == "code" && codeTextAtPoint(lines, elementIndex, event.X, event.Y) {
-					selected = elementIndex
-					state.LastSelected = selected
-					for index := range multiSelected {
-						delete(multiSelected, index)
-					}
-					ensureCursor(slide, cursor, selected)
-					cursor[selected] = cursorForClick(slide.Elements[selected], event.X, event.Y, lines, selected, width)
-					mode = "select"
-					status = "code text selected"
-					textSelectionMoved = false
-					imageSelectionMoved = false
-					continue
-				}
-				if mode == "select" && selected == elementIndex && status == "text selected" {
-					normalizeFlowRelativePlacements(slide, authorWidth, authorHeight)
-					modeOriginal = cloneSlide(*slide)
-					materializePlaceholder(slide, selected, cursor)
-					cursor[selected] = cursorForClick(slide.Elements[selected], event.X, event.Y, lines, selected, width)
-					mode = "text"
-					status = ""
-				} else {
-					selected = elementIndex
-					state.LastSelected = selected
-					for index := range multiSelected {
-						delete(multiSelected, index)
-					}
-					ensureCursor(slide, cursor, selected)
-					mode = "select"
-					status = "text selected"
-					textSelectionMoved = false
-					imageSelectionMoved = false
-				}
-			}
-		case "quit":
-			commitPendingSelectionMove()
-			state.Selected = selected
-			state.Cursor = cursor
-			return "quit"
-		case "escape":
-			if mode == "select" {
-				commitPendingSelectionMove()
-				clearSelection()
-				state.Selected = -1
-				state.Cursor = cursor
-				return ""
-			}
-			*slide = modeOriginal
-			mode = "select"
-			axisScaleMode = ""
-			status = selectionStatus(*slide, selected, multiSelected)
-			fullEditRedraw = true
-			editDirty = true
-			currentLines = nil
-			continue
-		case "save":
-			state.Selected = selected
-			state.Cursor = cursor
-			if persist() {
-				setUINotice("Saved")
-			}
-			modeOriginal = cloneSlide(*slide)
-			return ""
-		case "undo":
-			commitPendingSelectionMove()
-			if undoSlideSnapshot(state, slide) {
-				persist()
-				modeOriginal = cloneSlide(*slide)
-				clearSelection()
-			}
-		case "redo":
-			commitPendingSelectionMove()
-			if redoSlideSnapshot(state, slide) {
-				persist()
-				modeOriginal = cloneSlide(*slide)
-				clearSelection()
-			}
-		case "tab", "shift-tab":
-			commitPendingSelectionMove()
-			lines := currentLines
-			if len(lines) == 0 {
-				lines = displayLines(*slide, width, height, page)
-				currentLines = lines
-			}
-			if selected < 0 && state.LastSelected >= 0 && state.LastSelected < len(slide.Elements) && isSelectableElement(slide.Elements[state.LastSelected]) {
-				selected = state.LastSelected
-			} else {
-				direction := 1
-				if event.Action == "shift-tab" {
-					direction = -1
-				}
-				selected = selectableElementByPosition(*slide, lines, selected, direction)
-			}
-			applySelectionState(slide, cursor, selected, &mode, &status)
-			textSelectionMoved = false
-			imageSelectionMoved = false
-			if selected >= 0 {
-				state.LastSelected = selected
-			}
-			for index := range multiSelected {
-				delete(multiSelected, index)
-			}
-		case "copy":
-			commitPendingSelectionMove()
-			if selected >= 0 && selected < len(slide.Elements) {
-				element := clipboardElementFromSelection(*slide, selected, width, height)
-				clipboard = &element
-				state.Clipboard = clipboard
-				status = selectionStatus(*slide, selected, multiSelected)
-				setUINotice("Copied " + elementKindLabel(element))
-			}
-		case "cut":
-			if mode == "select" {
-				commitPendingSelectionMove()
-				if removeSelection(true) {
-					setUINotice("Cut selection")
-				}
-			}
-		case "paste":
-			commitPendingSelectionMove()
-			if clipboard != nil {
-				before := cloneSlide(*slide)
-				if initialEvent {
-					page = entryPage
-				}
-				element := elementForPastePage(*clipboard, page, width, height)
-				insertAt := insertElementAfter(slide, selected, element)
-				shiftCursorKeys(cursor, insertAt, 1)
-				selected = insertAt
-				ensureCursor(slide, cursor, selected)
-				mode = "select"
-				applySelectionState(slide, cursor, selected, &mode, &status)
-				state.LastSelected = selected
-				for index := range multiSelected {
-					delete(multiSelected, index)
-				}
-				commit(before)
-				setUINotice("Pasted " + elementKindLabel(element))
-				fullEditRedraw = true
-				currentLines = nil
-			} else {
-				setUINotice("Nothing to paste")
-			}
-		case "up":
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) {
-				moveBatch(event.Action, 1)
-			} else if mode == "resize" && selected >= 0 && selected < len(slide.Elements) && isAxisScalableElement(slide.Elements[selected]) {
-				resizeElementByAxisMode(slide, selected, event.Action, authorWidth, authorHeight, axisScaleMode)
-			} else if mode == "text" && selected >= 0 && selected < len(slide.Elements) && slide.Elements[selected].Kind == "code" {
-				cursor[selected] = moveCodeCursorVertical(slide.Elements[selected], cursor[selected], -1, width)
-			}
-		case "down":
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) {
-				moveBatch(event.Action, 1)
-			} else if mode == "resize" && selected >= 0 && selected < len(slide.Elements) && isAxisScalableElement(slide.Elements[selected]) {
-				resizeElementByAxisMode(slide, selected, event.Action, authorWidth, authorHeight, axisScaleMode)
-			} else if mode == "text" && selected >= 0 && selected < len(slide.Elements) && slide.Elements[selected].Kind == "code" {
-				cursor[selected] = moveCodeCursorVertical(slide.Elements[selected], cursor[selected], 1, width)
-			}
-		case "left":
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) {
-				moveBatch(event.Action, 1)
-			} else if mode == "resize" && selected >= 0 && selected < len(slide.Elements) && isAxisScalableElement(slide.Elements[selected]) {
-				resizeElementByAxisMode(slide, selected, event.Action, authorWidth, authorHeight, axisScaleMode)
-			} else if mode == "text" && selected >= 0 && selected < len(slide.Elements) && cursor[selected] > 0 {
-				cursor[selected]--
-			}
-		case "right":
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) {
-				moveBatch(event.Action, 1)
-			} else if mode == "resize" && selected >= 0 && selected < len(slide.Elements) && isAxisScalableElement(slide.Elements[selected]) {
-				resizeElementByAxisMode(slide, selected, event.Action, authorWidth, authorHeight, axisScaleMode)
-			} else if mode == "text" && selected >= 0 && selected < len(slide.Elements) {
-				cursor[selected] = min(cursor[selected]+1, len([]rune(slide.Elements[selected].Text)))
-			}
-		case "shift-up", "shift-down", "shift-left", "shift-right":
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) {
-				direction := strings.TrimPrefix(event.Action, "shift-")
-				moveBatch(direction, 10)
-			}
-		case "shape-toggle":
-			if mode == "text" {
-				insertTextAtCursor(slide, selected, cursor, "g")
-				break
-			}
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) && isAxisScalableElement(slide.Elements[selected]) {
-				if picked, ok := playAxisScalePicker(*slide, page, width, height, axisScaleLastMode); ok {
-					commitPendingSelectionMove()
-					if picked == axisScaleClose {
-						axisScaleLastMode = ""
-					} else {
-						beginAxisScale(picked)
-					}
-				}
-				status = selectionStatus(*slide, selected, multiSelected)
-				fullEditRedraw = true
-			}
-		case "move":
-			if mode == "text" {
-				insertTextAtCursor(slide, selected, cursor, "m")
-				break
-			}
-		case "toggle-selection":
-			if mode == "text" {
-				insertTextAtCursor(slide, selected, cursor, " ")
-				break
-			}
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) {
-				commitPendingSelectionMove()
-				toggleSelection(multiSelected, selected)
-				status = selectionStatus(*slide, selected, multiSelected)
-			}
-		case "align-left", "align-center", "align-right":
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) && (status == "text selected" || status == "image selected" || status == "shape selected") {
-				commitPendingSelectionMove()
-				before := cloneSlide(*slide)
-				for _, index := range activeIndices() {
-					if index >= 0 && index < len(slide.Elements) && isEditableElement(slide.Elements[index]) {
-						normalizeTextPlacement(slide, index, authorWidth, authorHeight)
-					}
-					alignElement(&slide.Elements[index], strings.TrimPrefix(event.Action, "align-"))
-				}
-				commit(before)
-			} else if mode == "select" && selectionSetCount(multiSelected) > 1 {
-				commitPendingSelectionMove()
-				before := cloneSlide(*slide)
-				for _, index := range activeIndices() {
-					if index >= 0 && index < len(slide.Elements) && isEditableElement(slide.Elements[index]) {
-						normalizeTextPlacement(slide, index, authorWidth, authorHeight)
-					}
-					alignElement(&slide.Elements[index], strings.TrimPrefix(event.Action, "align-"))
-				}
-				commit(before)
-			}
-		case "layer-back", "layer-front":
-			if mode == "text" {
-				if event.Action == "layer-back" {
-					insertTextAtCursor(slide, selected, cursor, "[")
-				} else {
-					insertTextAtCursor(slide, selected, cursor, "]")
-				}
-				break
-			}
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) && (status == "image selected" || status == "shape selected") {
-				commitPendingSelectionMove()
-				before := cloneSlide(*slide)
-				layer := "front"
-				if event.Action == "layer-back" {
-					layer = "back"
-				}
-				setElementLayer(&slide.Elements[selected], layer)
-				commit(before)
-				fullEditRedraw = true
-			}
-		case "color":
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) && (status == "text selected" || status == "code text selected" || status == "shape selected" || status == "page number selected") {
-				commitPendingSelectionMove()
-				before := cloneSlide(*slide)
-				if colour, ok := playTextColorPicker(*slide, selected, width, height, page); ok {
-					if status == "code text selected" {
-						setElementTextColour(&slide.Elements[selected], colour)
-					} else {
-						setElementColour(&slide.Elements[selected], colour)
-					}
-					selected = -1
-					status = ""
-					commit(before)
-				}
-				fullEditRedraw = true
-			} else if mode == "text" {
-				insertTextAtCursor(slide, selected, cursor, "c")
-			}
-		case "outline":
-			if mode == "text" {
-				insertTextAtCursor(slide, selected, cursor, "o")
-				break
-			}
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) && (strings.Contains(status, " selected") || selectionSetCount(multiSelected) > 0) {
-				commitPendingSelectionMove()
-				before := cloneSlide(*slide)
-				for _, index := range activeIndices() {
-					if index >= 0 && index < len(slide.Elements) && isSelectableElement(slide.Elements[index]) {
-						toggleElementOutline(&slide.Elements[index])
-					}
-				}
-				commit(before)
-				status = selectionStatus(*slide, selected, multiSelected)
-				fullEditRedraw = true
-			}
-		case "placeholder-role":
-			if options.Master && mode == "select" && selected >= 0 && selected < len(slide.Elements) {
-				commitPendingSelectionMove()
-				before := cloneSlide(*slide)
-				if role, ok := playPlaceholderRolePicker(*slide, page, width, height, slide.Elements[selected].PlaceholderRole); ok {
-					applyPlaceholderRole(&slide.Elements[selected], role)
-					commit(before)
-					status = selectionStatus(*slide, selected, multiSelected)
-				}
-				fullEditRedraw = true
-			}
-		case "toggle-bold", "toggle-highlight":
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) && status == "text selected" {
-				commitPendingSelectionMove()
-				before := cloneSlide(*slide)
-				ensureCursor(slide, cursor, selected)
-				marker := "**"
-				label := "Bold"
-				if event.Action == "toggle-highlight" {
-					marker = "*"
-					label = "Highlight"
-				}
-				removing := hasMarkdownStyleWrapper(slide.Elements[selected].Text, marker)
-				slide.Elements[selected].Text = toggleMarkdownStyle(slide.Elements[selected].Text, marker)
-				markerWidth := len([]rune(marker))
-				if removing {
-					cursor[selected] = max(0, cursor[selected]-markerWidth)
-				} else {
-					cursor[selected] += markerWidth
-				}
-				ensureCursor(slide, cursor, selected)
-				commit(before)
-				setUINotice(label + " toggled")
-				status = selectionStatus(*slide, selected, multiSelected)
-				fullEditRedraw = true
-				currentLines = nil
-			}
-		case "rotate", "rotate-ccw":
-			if mode == "text" {
-				if event.Action == "rotate-ccw" {
-					insertTextAtCursor(slide, selected, cursor, "R")
-				} else {
-					insertTextAtCursor(slide, selected, cursor, "r")
-				}
-				break
-			}
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) && status == "text selected" {
-				commitPendingSelectionMove()
-				before := cloneSlide(*slide)
-				for _, index := range activeIndices() {
-					if index >= 0 && index < len(slide.Elements) && isRotatableTextElement(slide.Elements[index]) {
-						if event.Action == "rotate-ccw" {
-							rotateTextOrientationCounterClockwise(&slide.Elements[index])
-						} else {
-							rotateTextOrientation(&slide.Elements[index])
-						}
-						ensureCursor(slide, cursor, index)
-					}
-				}
-				commit(before)
-				status = selectionStatus(*slide, selected, multiSelected)
-				fullEditRedraw = true
-			}
-		case "transparency":
-			if mode == "text" {
-				insertTextAtCursor(slide, selected, cursor, "/")
-				break
-			}
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) && elementSupportsTransparency(slide.Elements[selected]) && (status == "text selected" || status == "code text selected" || status == "image selected" || status == "shape selected") {
-				commitPendingSelectionMove()
-				before := cloneSlide(*slide)
-				toggleElementTransparency(&slide.Elements[selected])
-				commit(before)
-				status = selectionStatus(*slide, selected, multiSelected)
-				fullEditRedraw = true
-			}
-		case "style", "settings":
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) && status == "image selected" {
-				commitPendingSelectionMove()
-				before := cloneSlide(*slide)
-				if query, ok := playImageSettingsDialog(*slide, selected, width, height, page); ok {
-					slide.Elements[selected].Query = query
-					commit(before)
-				}
-				fullEditRedraw = true
-			} else if mode == "select" && selected >= 0 && selected < len(slide.Elements) && (status == "text selected" || status == "page number selected") {
-				commitPendingSelectionMove()
-				before := cloneSlide(*slide)
-				normalizeFlowRelativePlacements(slide, authorWidth, authorHeight)
-				preview := cloneSlide(*slide)
-				ensureTextImageRender(&preview.Elements[selected])
-				if query, ok := playImageSettingsDialog(preview, selected, width, height, page); ok {
-					ensureTextImageRender(&slide.Elements[selected])
-					slide.Elements[selected].Query = query
-					ensureCursor(slide, cursor, selected)
-					commit(before)
-				}
-				fullEditRedraw = true
-			} else if mode == "select" && selected >= 0 && selected < len(slide.Elements) && status == "shape selected" {
-				commitPendingSelectionMove()
-				before := cloneSlide(*slide)
-				if shape, ok := playShapePicker(*slide, width, height, page, shapeName(slide.Elements[selected])); ok {
-					slide.Elements[selected].Query = setQueryValue(slide.Elements[selected].Query, "shape", shape)
-					commit(before)
-				}
-				fullEditRedraw = true
-			} else if mode == "text" {
-				insertTextAtCursor(slide, selected, cursor, "s")
-			} else if mode == "select" {
-				commitPendingSelectionMove()
-				if shape, ok := playShapePicker(*slide, width, height, page, ""); ok {
-					before := cloneSlide(*slide)
-					top, left := insertedTextPlacementAnchor(before, selected, width, height, page)
-					insertAt := insertElementAfter(slide, selected, newShapeElement(shape))
-					initializeInsertedShapePlacement(slide, insertAt, top, left, width)
-					selected = insertAt
-					setSingleSelection(multiSelected, selected)
-					state.LastSelected = selected
-					mode = "select"
-					status = "shape selected"
-					commit(before)
-				}
-				fullEditRedraw = true
-			}
-		case "link":
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) && (status == "text selected" || status == "image selected" || status == "shape selected" || selectionSetCount(multiSelected) > 0) {
-				commitPendingSelectionMove()
-				before := cloneSlide(*slide)
-				currentLink := elementLink(slide.Elements[selected].Query)
-				if link, ok := playLinkInput(*slide, width, height, page, currentLink, len(*slides)); ok {
-					applied := false
-					for _, index := range activeIndices() {
-						if index >= 0 && index < len(slide.Elements) && isSelectableElement(slide.Elements[index]) {
-							if setElementLink(&slide.Elements[index], link, len(*slides)) {
-								applied = true
-							}
-						}
-					}
-					if applied {
-						commit(before)
-						status = selectionStatus(*slide, selected, multiSelected)
-					}
-				}
-				fullEditRedraw = true
-			} else if mode == "text" {
-				insertTextAtCursor(slide, selected, cursor, "l")
-			}
-		case "promote":
-			if mode == "resize" && selected >= 0 && selected < len(slide.Elements) && isAxisScalableElement(slide.Elements[selected]) {
-				break
-			}
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) && (status == "text selected" || status == "shape selected" || status == "page number selected" || selectionSetCount(multiSelected) > 1) {
-				commitPendingSelectionMove()
-				before := cloneSlide(*slide)
-				for _, index := range activeIndices() {
-					if isEditableElement(slide.Elements[index]) {
-						normalizeFlowRelativePlacements(slide, authorWidth, authorHeight)
-						changeTextLevel(&slide.Elements[index], 1)
-						ensureCursor(slide, cursor, index)
-					} else if slide.Elements[index].Kind == "image" {
-						withFastImageRender(func() {
-							normalizeImagePlacement(slide, index, authorWidth, authorHeight)
-						})
-						scaleImageElement(&slide.Elements[index], 0.1)
-					} else if slide.Elements[index].Kind == "shape" {
-						resizeShapeElement(&slide.Elements[index], 1)
-					} else if slide.Elements[index].Kind == "page-number" {
-						changeTextLevel(&slide.Elements[index], 1)
-					}
-				}
-				commit(before)
-			} else if mode == "select" && selected >= 0 && selected < len(slide.Elements) && status == "image selected" {
-				beginSelectionMove()
-				withFastImageRender(func() {
-					normalizeImagePlacement(slide, selected, authorWidth, authorHeight)
-				})
-				scaleImageElement(&slide.Elements[selected], 0.1)
-				imageSelectionMoved = true
-				persist()
-			}
-		case "demote":
-			if mode == "resize" && selected >= 0 && selected < len(slide.Elements) && isAxisScalableElement(slide.Elements[selected]) {
-				break
-			}
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) && (status == "text selected" || status == "shape selected" || status == "page number selected" || selectionSetCount(multiSelected) > 1) {
-				commitPendingSelectionMove()
-				before := cloneSlide(*slide)
-				for _, index := range activeIndices() {
-					if isEditableElement(slide.Elements[index]) {
-						normalizeFlowRelativePlacements(slide, authorWidth, authorHeight)
-						changeTextLevel(&slide.Elements[index], -1)
-						ensureCursor(slide, cursor, index)
-					} else if slide.Elements[index].Kind == "image" {
-						withFastImageRender(func() {
-							normalizeImagePlacement(slide, index, authorWidth, authorHeight)
-						})
-						scaleImageElement(&slide.Elements[index], -0.1)
-					} else if slide.Elements[index].Kind == "shape" {
-						resizeShapeElement(&slide.Elements[index], -1)
-					} else if slide.Elements[index].Kind == "page-number" {
-						changeTextLevel(&slide.Elements[index], -1)
-					}
-				}
-				commit(before)
-			} else if mode == "select" && selected >= 0 && selected < len(slide.Elements) && status == "image selected" {
-				beginSelectionMove()
-				withFastImageRender(func() {
-					normalizeImagePlacement(slide, selected, authorWidth, authorHeight)
-				})
-				scaleImageElement(&slide.Elements[selected], -0.1)
-				imageSelectionMoved = true
-				persist()
-			}
-		case "backspace":
-			if mode == "select" {
-				commitPendingSelectionMove()
-				if removeSelection(false) {
-					setUINotice("Deleted selection")
-				}
-			} else if mode == "text" && selected >= 0 && selected < len(slide.Elements) {
-				selected = editBackspace(slide, selected, cursor)
-			}
-		case "insert-newline":
-			if mode == "text" && selected >= 0 && selected < len(slide.Elements) {
-				switch slide.Elements[selected].Kind {
-				case "code":
-					insertTextAtCursor(slide, selected, cursor, "\n")
-				case "bullet":
-					insertTextAtCursor(slide, selected, cursor, "\n  ")
-				}
-			}
-		case "enter":
-			if mode == "move" || mode == "resize" {
-				commit(modeOriginal)
-				mode = "select"
-				axisScaleMode = ""
-				status = selectionStatus(*slide, selected, multiSelected)
-				if selected >= 0 && selected < len(slide.Elements) && isAxisScalableElement(slide.Elements[selected]) {
-					if picked, ok := playAxisScalePicker(*slide, page, width, height, axisScaleLastMode); ok {
-						if picked == axisScaleClose {
-							axisScaleLastMode = ""
-						} else {
-							beginAxisScale(picked)
-						}
-					}
-					fullEditRedraw = true
-				}
-				break
-			}
-			if mode == "select" {
-				if selected >= 0 && selected < len(slide.Elements) && (status == "text selected" || status == "code text selected") {
-					if textSelectionMoved {
-						commitPendingSelectionMove()
-						clearSelection()
-						state.Cursor = cursor
-						state.Clipboard = clipboard
-						return ""
-					}
-					normalizeFlowRelativePlacements(slide, authorWidth, authorHeight)
-					ensureCursor(slide, cursor, selected)
-					modeOriginal = cloneSlide(*slide)
-					materializePlaceholder(slide, selected, cursor)
-					mode = "text"
-					status = ""
-					break
-				}
-				if selected >= 0 && selected < len(slide.Elements) && (status == "image selected" || status == "shape selected") {
-					if status == "image selected" && slide.Elements[selected].Placeholder && slide.Elements[selected].MasterSlotID != "" {
-						before := cloneSlide(*slide)
-						if fillImagePlaceholder(selected) {
-							commit(before)
-							status = "image selected"
-						}
-						break
-					}
-					if imageSelectionMoved {
-						commitPendingSelectionMove()
-					}
-					clearSelection()
-					state.Cursor = cursor
-					state.Clipboard = clipboard
-					return ""
-				}
-				if initialEvent {
-					return ""
-				}
-			} else if mode == "text" && selected >= 0 && selected < len(slide.Elements) {
-				insertedLine := false
-				switch slide.Elements[selected].Kind {
-				case "bullet":
-					if !bulletItemAtCursorEmpty(slide.Elements[selected].Text, cursor[selected]) {
-						insertTextAtCursor(slide, selected, cursor, "\n")
-						insertedLine = true
-					}
-				case "code":
-					if !bulletItemAtCursorEmpty(slide.Elements[selected].Text, cursor[selected]) {
-						insertTextAtCursor(slide, selected, cursor, "\n")
-						insertedLine = true
-					} else {
-						cursor[selected] = removeEmptyTextLineAtCursor(&slide.Elements[selected], cursor[selected])
-					}
-				}
-				if insertedLine {
-					break
-				}
-				selected = finalizeTextEdit(slide, selected, cursor)
-				commit(modeOriginal)
-				mode = "select"
-				clearSelection()
-				state.Cursor = cursor
-				state.Clipboard = clipboard
-				return ""
-			}
-		case "edit-selected":
-			if mode == "text" && selected >= 0 && selected < len(slide.Elements) {
-				insertTextAtCursor(slide, selected, cursor, "e")
-				break
-			}
-			if mode == "select" && selected >= 0 && selected < len(slide.Elements) && status == "text selected" {
-				normalizeFlowRelativePlacements(slide, authorWidth, authorHeight)
-				ensureCursor(slide, cursor, selected)
-				modeOriginal = cloneSlide(*slide)
-				materializePlaceholder(slide, selected, cursor)
-				mode = "text"
-				status = ""
-			}
-		case "insert-image":
-			if mode != "select" {
-				if mode == "text" && selected >= 0 && selected < len(slide.Elements) {
-					insertTextAtCursor(slide, selected, cursor, "i")
-				}
-				break
-			}
-			if selected >= 0 && selected < len(slide.Elements) && slide.Elements[selected].Kind == "image" && slide.Elements[selected].Placeholder && slide.Elements[selected].MasterSlotID != "" {
-				before := cloneSlide(*slide)
-				if fillImagePlaceholder(selected) {
-					commit(before)
-					status = "image selected"
-				}
-				break
-			}
-			imageOriginal := cloneSlide(*slide)
-			path, ok := chooseImageFile()
-			if !ok {
-				setUINotice("Image insert cancelled")
-				break
-			}
-			path, ok = copyImageToDeckDir(path, deckPath)
-			if !ok {
-				setUIError("Image copy failed")
-				break
-			}
-			imageIndex := insertImageElement(slide, selected, path)
-			initializeInsertedImagePlacement(slide, imageIndex)
-			result := playImagePlacementMode(slide, current, len(*slides), imageIndex, width, height, page, imageOriginal, &clipboard, persist)
-			state.Clipboard = clipboard
-			if result.Action == "quit" {
-				return "quit"
-			}
-			if result.Action == "save" {
-				state.Selected = selected
-				state.Cursor = cursor
-				commitSlideSnapshot(state, imageOriginal, *slide)
-				if persist() {
-					setUINotice("Image inserted")
-				}
-				return ""
-			}
-			selected = firstEditableElement(*slide)
-			state.Selected = selected
-			state.Cursor = cursor
-			state.Clipboard = clipboard
-			return ""
-		case "insert-text":
-			if mode == "text" && selected >= 0 && selected < len(slide.Elements) {
-				insertTextAtCursor(slide, selected, cursor, "t")
-				break
-			}
-			commitPendingSelectionMove()
-			before := cloneSlide(*slide)
-			top, left := insertedTextPlacementAnchor(before, selected, width, height, page)
-			insertAt := insertElementAfter(slide, selected, Element{Kind: "text", Text: "Your text here", Placeholder: true})
-			initializeInsertedTextPlacement(slide, insertAt, top, left, width)
-			selected = insertAt
-			setSingleSelection(multiSelected, selected)
-			state.LastSelected = selected
-			ensureCursor(slide, cursor, selected)
-			mode = "select"
-			status = "text selected"
-			commit(before)
-		case "shape-picker":
-			if mode == "text" && selected >= 0 && selected < len(slide.Elements) {
-				insertTextAtCursor(slide, selected, cursor, "s")
-				break
-			}
-			commitPendingSelectionMove()
-			if shape, ok := playShapePicker(*slide, width, height, page, ""); ok {
-				before := cloneSlide(*slide)
-				top, left := insertedTextPlacementAnchor(before, selected, width, height, page)
-				insertAt := insertElementAfter(slide, selected, newShapeElement(shape))
-				initializeInsertedShapePlacement(slide, insertAt, top, left, width)
-				selected = insertAt
-				setSingleSelection(multiSelected, selected)
-				state.LastSelected = selected
-				mode = "select"
-				status = "shape selected"
-				commit(before)
-			}
-			fullEditRedraw = true
-		case "text":
-			if mode == "select" {
-				break
-			}
-			if selected < 0 || selected >= len(slide.Elements) {
-				slide.Elements = append(slide.Elements, Element{Kind: "text"})
-				selected = len(slide.Elements) - 1
-			}
-			ensureCursor(slide, cursor, selected)
-			insertTextAtCursor(slide, selected, cursor, event.Text)
-			status = ""
-		}
-		state.Selected = selected
-		state.Cursor = cursor
-		state.Clipboard = clipboard
-	}
-}
-
-func drawEditCursor(lines []Line, selected, cursor, width, height int, slide Slide) {
-	startRow := -1
-	startCol := 0
-	for _, line := range lines {
-		if line.Element != selected {
-			continue
-		}
-		if startRow == -1 || line.Row < startRow {
-			startRow = line.Row
-			startCol = line.Col
-		} else if line.Row == startRow {
-			startCol = min(startCol, line.Col)
-		}
-	}
-	if startRow == -1 {
-		return
-	}
-	if selected >= 0 && selected < len(slide.Elements) && slide.Elements[selected].Kind == "code" {
-		visualLine, col := codeCursorVisualLineCol(slide.Elements[selected].Text, codeCharsPerVisualLineForElement(slide.Elements[selected], width-startCol), cursor)
-		glyphWidth := editGlyphWidth(slide.Elements[selected])
-		glyphHeight := codeGlyphHeight(slide.Elements[selected])
-		row := startRow + codeBlockPadY + visualLine*glyphHeight + glyphHeight - 1
-		if row < 0 || row >= height {
-			return
-		}
-		col = min(max(0, startCol+codeBlockPadX+col*glyphWidth), max(0, width-1))
-		cursorWidth := min(glyphWidth, max(1, width-col))
-		termPrint("\033[0;33m")
-		termPrintf("\033[%d;%dH%s", row+1, col+1, strings.Repeat("▀", cursorWidth))
-		return
-	}
-	prefixRows := editableRowsForElementPrefix(slide.Elements[selected], width, cursor)
-	if len(prefixRows) == 0 {
-		prefixRows = []string{""}
-	}
-	glyphWidth := editGlyphWidth(slide.Elements[selected])
-	row := startRow + max(1, len(prefixRows))
-	if rendersAsTextImage(slide.Elements[selected]) {
-		fullRows := editableRowsForElementPrefix(slide.Elements[selected], width, len([]rune(slide.Elements[selected].Text)))
-		row = startRow + max(1, len(fullRows))
-	}
-	if row < 0 || row >= height {
-		return
-	}
-	col := 0
-	if cursor > 0 {
-		col = editCursorColumn(slide.Elements[selected], prefixRows, cursor)
-	}
-	col += startCol
-	col = min(max(0, col), max(0, width-1))
-	cursorWidth := min(glyphWidth, max(1, width-col))
-	termPrint("\033[0;33m")
-	termPrintf("\033[%d;%dH%s", row+1, col+1, strings.Repeat("▀", cursorWidth))
-}
-
-func drawSelectedElementHighlight(lines []Line, selected, width, height int) {
-	drawSelectionUnderline(lines, selected, width, height, false)
-}
-
-func addSelectedElementRows(rows map[int]bool, lines []Line, selected, height int) {
-	if selected < 0 {
-		return
-	}
-	maxRow := -1
-	for _, line := range lines {
-		if line.Element != selected || line.Row < 0 || line.Row >= height {
-			continue
-		}
-		rows[line.Row] = true
-		maxRow = max(maxRow, line.Row)
-	}
-	if maxRow >= 0 && maxRow+1 < height {
-		rows[maxRow+1] = true
-	}
-}
-
-func addSelectionUnderlineRow(rows map[int]bool, lines []Line, selected, width, height int, imageOnly bool) {
-	row := selectionUnderlineRow(lines, selected, width, height, imageOnly)
-	if row >= 0 {
-		rows[row] = true
-	}
-}
-
-func addSelectionSetRows(rows map[int]bool, lines []Line, selection map[int]bool, width, height int) {
-	for selected := range selection {
-		addSelectedElementRows(rows, lines, selected, height)
-		addSelectionUnderlineRow(rows, lines, selected, width, height, false)
-		addSelectionUnderlineRow(rows, lines, selected, width, height, true)
-	}
-}
-
-func selectionUnderlineRow(lines []Line, selected, width, height int, imageOnly bool) int {
-	minCol := width
-	maxCol := -1
-	maxRow := -1
-	for _, line := range lines {
-		if line.Element != selected || line.Row < 0 || line.Row >= height {
-			continue
-		}
-		if imageOnly && line.Role != "image" {
-			continue
-		}
-		if !imageOnly && line.Role == "image" {
-			continue
-		}
-		left, right, ok := visibleTextBounds(line.Text)
-		if !ok {
-			continue
-		}
-		minCol = min(minCol, line.Col+left)
-		maxCol = max(maxCol, line.Col+right)
-		maxRow = max(maxRow, line.Row)
-	}
-	if maxCol < minCol || maxRow < 0 {
-		return -1
-	}
-	row := maxRow + 1
-	if row >= height {
-		row = maxRow
-	}
-	return row
-}
-
-func drawSelectionUnderline(lines []Line, selected, width, height int, imageOnly bool) {
-	drawSelectionUnderlineColor(lines, selected, width, height, imageOnly, "33")
-}
-
-func drawSelectionUnderlineColor(lines []Line, selected, width, height int, imageOnly bool, color string) {
-	minCol := width
-	maxCol := -1
-	maxRow := -1
-	for _, line := range lines {
-		if line.Element != selected || line.Row < 0 || line.Row >= height {
-			continue
-		}
-		if imageOnly && line.Role != "image" {
-			continue
-		}
-		if !imageOnly && line.Role == "image" {
-			continue
-		}
-		left, right, ok := visibleTextBounds(line.Text)
-		if !ok {
-			continue
-		}
-		minCol = min(minCol, line.Col+left)
-		maxCol = max(maxCol, line.Col+right)
-		maxRow = max(maxRow, line.Row)
-	}
-	if maxCol < minCol || maxRow < 0 {
-		return
-	}
-	row := maxRow + 1
-	if row >= height {
-		row = maxRow
-	}
-	start := max(0, min(width-1, minCol))
-	end := max(0, min(width-1, maxCol))
-	if end < start {
-		return
-	}
-	termPrintf("\033[0;%sm", color)
-	termPrintf("\033[%d;%dH%s", row+1, start+1, strings.Repeat("▀", end-start+1))
 }
 
 func drawLinkUnderlines(lines []Line, width, height int, slide Slide) {
@@ -13489,413 +13866,10 @@ func visibleTextBounds(text string) (int, int, bool) {
 	return left, right, true
 }
 
-func elementAtPoint(lines []Line, x, y int) int {
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := lines[i]
-		if line.Element < 0 || line.Row != y {
-			continue
-		}
-		lineWidth := maxLineDisplayWidth([]string{line.Text})
-		if x >= line.Col && x < line.Col+max(1, lineWidth) {
-			return line.Element
-		}
-	}
-	return -1
-}
-
-func codeTextAtPoint(lines []Line, elementIndex, x, y int) bool {
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := lines[i]
-		if line.Element != elementIndex || line.Role != "code" || line.Row != y {
-			continue
-		}
-		left, right, ok := visibleTextBounds(line.Text)
-		if !ok {
-			continue
-		}
-		return x >= line.Col+left && x <= line.Col+right
-	}
-	return false
-}
-
-func linkAtPoint(slide Slide, lines []Line, x, y, slideCount int) (linkTarget, bool) {
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := lines[i]
-		if line.Element < 0 || line.Element >= len(slide.Elements) || line.Row != y {
-			continue
-		}
-		target, ok := linkTargetFromQuery(slide.Elements[line.Element].Query, slideCount)
-		if !ok {
-			continue
-		}
-		lineWidth := maxLineDisplayWidth([]string{line.Text})
-		if x < line.Col || x >= line.Col+max(1, lineWidth) {
-			continue
-		}
-		if line.Role == "image" {
-			return target, true
-		}
-		if line.Role == "outline" {
-			continue
-		}
-		left, right, ok := visibleTextBounds(line.Text)
-		if !ok || x < line.Col+left || x > line.Col+right {
-			continue
-		}
-		return target, true
-	}
-	return linkTarget{}, false
-}
-
 type positionedElement struct {
 	index int
 	row   int
 	col   int
-}
-
-func selectableElementByPosition(slide Slide, lines []Line, current, direction int) int {
-	positions := map[int]positionedElement{}
-	for _, line := range lines {
-		if line.Element < 0 || line.Element >= len(slide.Elements) || !isSelectableElement(slide.Elements[line.Element]) {
-			continue
-		}
-		if line.Row < 0 {
-			continue
-		}
-		position, ok := positions[line.Element]
-		if !ok || line.Row < position.row || line.Row == position.row && line.Col < position.col {
-			positions[line.Element] = positionedElement{index: line.Element, row: line.Row, col: line.Col}
-		}
-	}
-	if len(positions) == 0 {
-		return -1
-	}
-	ordered := make([]positionedElement, 0, len(positions))
-	for _, position := range positions {
-		ordered = append(ordered, position)
-	}
-	sort.SliceStable(ordered, func(i, j int) bool {
-		if ordered[i].row != ordered[j].row {
-			return ordered[i].row < ordered[j].row
-		}
-		if ordered[i].col != ordered[j].col {
-			return ordered[i].col < ordered[j].col
-		}
-		return ordered[i].index < ordered[j].index
-	})
-	for i, position := range ordered {
-		if position.index == current {
-			if direction < 0 {
-				return ordered[(i-1+len(ordered))%len(ordered)].index
-			}
-			return ordered[(i+1)%len(ordered)].index
-		}
-	}
-	if direction < 0 {
-		return ordered[len(ordered)-1].index
-	}
-	return ordered[0].index
-}
-
-func applySelectionState(slide *Slide, cursor map[int]int, selected int, mode, status *string) {
-	if selected < 0 || selected >= len(slide.Elements) {
-		return
-	}
-	*mode = "select"
-	if slide.Elements[selected].Kind == "image" {
-		*status = "image selected"
-		return
-	}
-	if slide.Elements[selected].Kind == "shape" {
-		*status = "shape selected"
-		return
-	}
-	if slide.Elements[selected].Kind == "page-number" {
-		*status = "page number selected"
-		return
-	}
-	*status = "text selected"
-	ensureCursor(slide, cursor, selected)
-}
-
-func pruneSelectionSet(selection map[int]bool, slide Slide) {
-	for index := range selection {
-		if index < 0 || index >= len(slide.Elements) || !isSelectableElement(slide.Elements[index]) {
-			delete(selection, index)
-		}
-	}
-}
-
-func selectionSetCount(selection map[int]bool) int {
-	count := 0
-	for _, ok := range selection {
-		if ok {
-			count++
-		}
-	}
-	return count
-}
-
-func cloneBoolMap(values map[int]bool) map[int]bool {
-	out := map[int]bool{}
-	for key, value := range values {
-		if value {
-			out[key] = true
-		}
-	}
-	return out
-}
-
-func activeSelectionIndices(selection map[int]bool, selected int, slide Slide) []int {
-	pruneSelectionSet(selection, slide)
-	var indices []int
-	if selectionSetCount(selection) > 0 {
-		for index := range selection {
-			if index >= 0 && index < len(slide.Elements) && isSelectableElement(slide.Elements[index]) {
-				indices = append(indices, index)
-			}
-		}
-		sort.Ints(indices)
-		return indices
-	}
-	if selected >= 0 && selected < len(slide.Elements) && isSelectableElement(slide.Elements[selected]) {
-		return []int{selected}
-	}
-	return nil
-}
-
-func setSingleSelection(selection map[int]bool, selected int) {
-	for index := range selection {
-		delete(selection, index)
-	}
-	if selected >= 0 {
-		selection[selected] = true
-	}
-}
-
-func toggleSelection(selection map[int]bool, selected int) {
-	if selected < 0 {
-		return
-	}
-	if selection[selected] {
-		delete(selection, selected)
-	} else {
-		selection[selected] = true
-	}
-}
-
-func selectionStatus(slide Slide, selected int, selection map[int]bool) string {
-	count := selectionSetCount(selection)
-	if count > 1 {
-		return fmt.Sprintf("%d selected", count)
-	}
-	if count == 1 {
-		for index := range selection {
-			selected = index
-			break
-		}
-	}
-	if selected < 0 || selected >= len(slide.Elements) {
-		return ""
-	}
-	if slide.Elements[selected].Kind == "image" {
-		return "image selected"
-	}
-	if slide.Elements[selected].Kind == "shape" {
-		return "shape selected"
-	}
-	if slide.Elements[selected].Kind == "page-number" {
-		return "page number selected"
-	}
-	return "text selected"
-}
-
-func selectionContainsText(slide Slide, indices []int) bool {
-	for _, index := range indices {
-		if index >= 0 && index < len(slide.Elements) && isEditableElement(slide.Elements[index]) {
-			return true
-		}
-	}
-	return false
-}
-
-func selectionContainsImage(slide Slide, indices []int) bool {
-	for _, index := range indices {
-		if index >= 0 && index < len(slide.Elements) && slide.Elements[index].Kind == "image" {
-			return true
-		}
-	}
-	return false
-}
-
-func selectionContainsPositioned(slide Slide, indices []int) bool {
-	for _, index := range indices {
-		if index >= 0 && index < len(slide.Elements) && isPositionedElement(slide.Elements[index]) {
-			return true
-		}
-	}
-	return false
-}
-
-func cursorForClick(element Element, x, y int, lines []Line, elementIndex, width int) int {
-	startRow := -1
-	startCol := 0
-	for _, line := range lines {
-		if line.Element != elementIndex {
-			continue
-		}
-		if startRow == -1 || line.Row < startRow {
-			startRow = line.Row
-			startCol = line.Col
-		}
-		if line.Row == y {
-			startCol = line.Col
-		}
-	}
-	if startRow < 0 {
-		return len([]rune(element.Text))
-	}
-	x = max(0, x-startCol)
-	switch element.Kind {
-	case "heading":
-		return max(0, min(len([]rune(element.Text)), x/max(1, editGlyphWidth(element))))
-	case "code":
-		lineOffset := max(0, y-startRow-codeBlockPadY) / codeGlyphHeight(element)
-		col := max(0, x-codeBlockPadX) / max(1, editGlyphWidth(element))
-		return codeCursorIndexForVisualLineCol(element.Text, codeCharsPerVisualLineForElement(element, width-startCol), lineOffset, col)
-	default:
-		lineOffset := max(0, y-startRow)
-		bodyCol := max(0, x/4)
-		charsPerLine := max(1, width/4)
-		return max(0, min(len([]rune(element.Text)), lineOffset*charsPerLine+bodyCol))
-	}
-}
-
-func drawEditToolbar(width, height, slideIndex, slideCount, page, pageCount int, mode, status string, slide Slide, selected int, axisScaleMode string, options editModeOptions) {
-	if height <= 0 || width <= 0 {
-		return
-	}
-	slideLabel := slideNumberLabel(ViewState{
-		SlideIndex: slideIndex,
-		SlideCount: slideCount,
-		Page:       page,
-		PageCount:  pageCount,
-	})
-	contextLabel := editContextLabel(mode, status, slide, selected, axisScaleMode)
-	if options.Master {
-		contextLabel = "MASTER · " + options.MasterName
-		if mode == "text" {
-			contextLabel += " / Editing"
-		}
-	}
-	right := []toolbarSegment{
-		{Long: contextLabel, Short: shortEditContextLabel(contextLabel), Required: true, Priority: 0},
-	}
-	if presenter, short := presenterStatusLabels(); presenter != "" {
-		right = append(right, toolbarSegment{Long: presenter, Short: short, Required: true, Priority: 1})
-	}
-	if notice := currentUINotice(); notice != "" {
-		right = append(right, toolbarSegment{Long: notice, Short: "status", Priority: 4})
-	}
-	right = append(right, toolbarSegment{Long: slideLabel, Short: slideLabel, Required: true, Priority: 0})
-	if mode == "resize" && selected >= 0 && selected < len(slide.Elements) && isAxisScalableElement(slide.Elements[selected]) {
-		drawAdaptiveToolbarLine(width, height, "43", legacyToolbarSegments(axisScaleToolbar(axisScaleMode)), right)
-		return
-	}
-	ctx := interactionContextFor(mode, slide, selected, nil, status)
-	ctx.Master = options.Master
-	specs := editActionSpecs(ctx)
-	if ctx.Mode == editorModeText && (selected < 0 || selected >= len(slide.Elements) || slide.Elements[selected].Kind != "code") {
-		specs = filterActionSpecs(specs, "insert-newline")
-	}
-	prefix := strings.ToUpper(string(ctx.Selection))
-	if ctx.Selection == selectionNone {
-		prefix = "EDIT"
-	}
-	if ctx.Mode == editorModeText {
-		prefix = "TEXT"
-		if ctx.Selection == selectionCode {
-			prefix = "CODE"
-		}
-	} else if ctx.Mode == editorModeMove {
-		prefix = "MOVE"
-	}
-	left := []toolbarSegment{{Long: prefix, Short: prefix, Required: true, Priority: 0}}
-	left = append(left, toolbarSegmentsFromActions(specs)...)
-	if ctx.Mode != editorModeText {
-		left = append(left, toolbarSegment{Long: "? shortcuts", Short: "?", Required: true, Priority: 0})
-	}
-	drawAdaptiveToolbarLine(width, height, "43", left, right)
-}
-
-func shortEditContextLabel(label string) string {
-	replacer := strings.NewReplacer(
-		"SELECT · ", "SEL:",
-		"EDIT · ", "ED:",
-		"AXIS SCALE · ", "AXIS:",
-	)
-	return replacer.Replace(label)
-}
-
-func editContextLabel(mode, status string, slide Slide, selected int, axisScaleMode string) string {
-	switch mode {
-	case "text":
-		if selected >= 0 && selected < len(slide.Elements) && slide.Elements[selected].Kind == "code" {
-			return "EDIT · Code"
-		}
-		return "EDIT · Text"
-	case "resize":
-		return "AXIS SCALE · " + titleCaseASCII(axisScaleModeLabel(axisScaleMode))
-	case "move":
-		return "MOVE"
-	}
-	if count := selectionCountFromStatus(status); count > 1 {
-		return fmt.Sprintf("SELECT · %d / %s active", count, selectedElementKindLabel(slide, selected))
-	}
-	switch status {
-	case "text selected":
-		return "SELECT · Text"
-	case "code text selected":
-		return "SELECT · Code"
-	case "image selected":
-		return "SELECT · Image"
-	case "shape selected":
-		return "SELECT · Shape"
-	case "":
-		return "EDIT"
-	default:
-		return "EDIT"
-	}
-}
-
-func selectionCountFromStatus(status string) int {
-	fields := strings.Fields(status)
-	if len(fields) != 2 || fields[1] != "selected" {
-		return 0
-	}
-	count, _ := strconv.Atoi(fields[0])
-	return count
-}
-
-func selectedElementKindLabel(slide Slide, selected int) string {
-	if selected < 0 || selected >= len(slide.Elements) {
-		return "Element"
-	}
-	return titleCaseASCII(elementKindLabel(slide.Elements[selected]))
-}
-
-func titleCaseASCII(text string) string {
-	if text == "" {
-		return text
-	}
-	return strings.ToUpper(text[:1]) + text[1:]
-}
-
-func drawToolbarLine(width, height int, bgCode, controls, label string) {
-	if width <= 0 || height <= 0 {
-		return
-	}
-	drawAdaptiveToolbarLine(width, height, bgCode, legacyToolbarSegments(controls), []toolbarSegment{{Long: label, Short: shortToolbarLabel(label), Required: true}})
 }
 
 type toolbarSegment struct {
@@ -13903,170 +13877,6 @@ type toolbarSegment struct {
 	Short    string
 	Required bool
 	Priority int
-}
-
-func legacyToolbarSegments(controls string) []toolbarSegment {
-	fields := strings.Split(strings.TrimSpace(controls), "  ")
-	segments := make([]toolbarSegment, 0, len(fields))
-	for index, field := range fields {
-		field = strings.TrimSpace(field)
-		if field == "" {
-			continue
-		}
-		required := index == 0 || strings.Contains(field, "Enter") || strings.Contains(field, "Esc") || strings.Contains(field, "? shortcuts")
-		priority := 3
-		if required {
-			priority = 0
-		} else if strings.Contains(strings.ToLower(field), "arrow") {
-			priority = 1
-		}
-		segments = append(segments, toolbarSegment{Long: field, Short: compactToolbarText(field), Required: required, Priority: priority})
-	}
-	return segments
-}
-
-func compactToolbarText(text string) string {
-	replacements := []struct{ old, new string }{
-		{"Space/→ next", "→"}, {"← prev", "←"}, {"Shift-arrows jump 10", "⇧arrows"},
-		{"Shift-arrows ×10", "⇧arrows"}, {"arrows cursor", "arrows"}, {"arrows move", "arrows"},
-		{"Enter commit", "Enter"}, {"Enter save", "Enter"}, {"Esc cancel", "Esc"},
-		{"? shortcuts", "?"}, {"speaker notes", "notes"},
-	}
-	for _, replacement := range replacements {
-		if text == replacement.old {
-			return replacement.new
-		}
-	}
-	return text
-}
-
-func shortToolbarLabel(label string) string {
-	if index := strings.Index(label, "  "); index >= 0 {
-		return label[:index]
-	}
-	return label
-}
-
-func toolbarSegmentsFromActions(specs []actionSpec) []toolbarSegment {
-	segments := make([]toolbarSegment, 0, len(specs))
-	for _, spec := range specs {
-		if !spec.Core || strings.TrimSpace(spec.Toolbar) == "" {
-			continue
-		}
-		short := spec.Short
-		if short == "" {
-			short = compactToolbarText(spec.Toolbar)
-		}
-		segments = append(segments, toolbarSegment{
-			Long: spec.Toolbar, Short: short, Required: spec.Priority == 0, Priority: spec.Priority,
-		})
-	}
-	return segments
-}
-
-func drawAdaptiveToolbarLine(width, height int, bgCode string, left, right []toolbarSegment) {
-	if width <= 0 || height <= 0 {
-		return
-	}
-	leftText, rightText := fitToolbarSegments(width, left, right)
-	termPrintf("\033[0;30;%sm\033[%d;1H%s", bgCode, height, strings.Repeat(" ", width))
-	if leftText != "" {
-		termPrintf("\033[0;30;%sm\033[%d;1H%s", bgCode, height, leftText)
-	}
-	if rightText != "" {
-		col := max(1, width-displayWidth(rightText)+1)
-		termPrintf("\033[0;30;%sm\033[%d;%dH%s", bgCode, height, col, rightText)
-	}
-}
-
-func fitToolbarSegments(width int, left, right []toolbarSegment) (string, string) {
-	left = append([]toolbarSegment(nil), left...)
-	right = append([]toolbarSegment(nil), right...)
-	leftVisible := make([]bool, len(left))
-	rightVisible := make([]bool, len(right))
-	leftShort := make([]bool, len(left))
-	rightShort := make([]bool, len(right))
-	for index := range leftVisible {
-		leftVisible[index] = strings.TrimSpace(left[index].Long) != ""
-	}
-	for index := range rightVisible {
-		rightVisible[index] = strings.TrimSpace(right[index].Long) != ""
-	}
-	render := func(segments []toolbarSegment, visible, short []bool) string {
-		var parts []string
-		for index, segment := range segments {
-			if !visible[index] {
-				continue
-			}
-			value := segment.Long
-			if short[index] && segment.Short != "" {
-				value = segment.Short
-			}
-			if value = strings.TrimSpace(value); value != "" {
-				parts = append(parts, value)
-			}
-		}
-		return strings.Join(parts, "  ")
-	}
-	fits := func() bool {
-		leftText := render(left, leftVisible, leftShort)
-		rightText := render(right, rightVisible, rightShort)
-		gap := 0
-		if leftText != "" && rightText != "" {
-			gap = 2
-		}
-		return displayWidth(leftText)+gap+displayWidth(rightText) <= width
-	}
-	type candidate struct{ right, index, priority int }
-	var candidates []candidate
-	for index, segment := range left {
-		if segment.Short != "" && segment.Short != segment.Long {
-			candidates = append(candidates, candidate{index: index, priority: segment.Priority})
-		}
-	}
-	for index, segment := range right {
-		if segment.Short != "" && segment.Short != segment.Long {
-			candidates = append(candidates, candidate{right: 1, index: index, priority: segment.Priority})
-		}
-	}
-	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].priority > candidates[j].priority })
-	for _, candidate := range candidates {
-		if fits() {
-			break
-		}
-		if candidate.right == 1 {
-			rightShort[candidate.index] = true
-		} else {
-			leftShort[candidate.index] = true
-		}
-	}
-	for priority := 9; priority >= 0 && !fits(); priority-- {
-		for index := len(left) - 1; index >= 0 && !fits(); index-- {
-			if leftVisible[index] && !left[index].Required && left[index].Priority == priority {
-				leftVisible[index] = false
-			}
-		}
-		for index := 0; index < len(right) && !fits(); index++ {
-			if rightVisible[index] && !right[index].Required && right[index].Priority == priority {
-				rightVisible[index] = false
-			}
-		}
-	}
-	leftText := render(left, leftVisible, leftShort)
-	rightText := render(right, rightVisible, rightShort)
-	if displayWidth(leftText)+displayWidth(rightText)+2 > width {
-		leftText = ""
-	}
-	for index := 0; index < len(right)-1 && displayWidth(rightText) > width; index++ {
-		if rightVisible[index] {
-			rightVisible[index] = false
-			rightText = render(right, rightVisible, rightShort)
-		}
-	}
-	if displayWidth(rightText) > width {
-		rightText = ""
-	}
-	return leftText, rightText
 }
 
 const (
@@ -14077,96 +13887,9 @@ const (
 	axisScaleClose             = "close-menu"
 )
 
-func axisScaleModeLabel(mode string) string {
-	switch mode {
-	case axisScaleStretchHorizontal:
-		return "stretch horizontal"
-	case axisScaleShrinkHorizontal:
-		return "shrink horizontal"
-	case axisScaleStretchVertical:
-		return "stretch vertical"
-	case axisScaleShrinkVertical:
-		return "shrink vertical"
-	default:
-		return "axis scale"
-	}
-}
-
-func axisScaleToolbar(mode string) string {
-	switch mode {
-	case axisScaleStretchHorizontal:
-		return " STRETCH HORIZONTAL  ← stretch left side  → stretch right side  Enter commit  Esc cancel "
-	case axisScaleShrinkHorizontal:
-		return " SHRINK HORIZONTAL  ← shrink right side  → shrink left side  Enter commit  Esc cancel "
-	case axisScaleStretchVertical:
-		return " STRETCH VERTICAL  ↑ stretch up  ↓ stretch bottom  Enter commit  Esc cancel "
-	case axisScaleShrinkVertical:
-		return " SHRINK VERTICAL  ↑ shrink bottom  ↓ shrink top  Enter commit  Esc cancel "
-	default:
-		return " AXIS SCALE  Enter commit  Esc cancel "
-	}
-}
-
 type shortcutHelpItem struct {
 	Key  string
 	Text string
-}
-
-func playShortcutHelp(title string, items []shortcutHelpItem, slide Slide, page, width, height int, readEvent func() KeyEvent) KeyEvent {
-	if len(items) == 0 {
-		return KeyEvent{}
-	}
-	var result KeyEvent
-	renderer := &liveSlideRenderer{}
-	runOverlayLoop(overlayLoopSpec{
-		Draw: func(frame int) {
-			width, height = terminalSize()
-			renderer.draw(slide, width, height, page, frame, func(lines []Line) { drawShortcutHelp(title, items, width, height) })
-		},
-		Read: readEvent,
-		Handle: func(event KeyEvent) overlayDecision {
-			result = event
-			return overlayDecision{Disposition: overlayPassthrough, Event: event}
-		},
-	})
-	return result
-}
-
-func shortcutHelpDismissed(event KeyEvent) bool {
-	if event.Action == "" || event.Action == "controls" || event.Action == "escape" || event.Action == "enter" || event.Action == "shortcuts" {
-		return true
-	}
-	return event.Action == "text" && event.Text == "?"
-}
-
-func drawShortcutHelp(title string, items []shortcutHelpItem, width, height int) {
-	if width <= 0 || height <= 0 {
-		return
-	}
-	boxW := min(max(44, width/2), max(28, width-4))
-	boxH := min(height-2, len(items)+5)
-	x := max(0, (width-boxW)/2)
-	y := max(0, (height-boxH)/2)
-	for row := 0; row < boxH; row++ {
-		termPrintf("\033[0;37;40m\033[%d;%dH%s", y+row+1, x+1, strings.Repeat(" ", boxW))
-	}
-	termPrintf("\033[1;37;40m\033[%d;%dH%s", y+2, x+3, crop(title, max(0, boxW-4)))
-	row := y + 4
-	keyW := 0
-	for _, item := range items {
-		keyW = max(keyW, displayWidth(item.Key))
-	}
-	keyW = min(keyW, 16)
-	for _, item := range items {
-		if row >= y+boxH {
-			break
-		}
-		termPrintf("\033[1;36;40m\033[%d;%dH%s", row, x+3, padRight(crop(item.Key, keyW), keyW))
-		termPrintf("\033[0;37;40m\033[%d;%dH%s", row, x+5+keyW, crop(item.Text, max(0, boxW-keyW-7)))
-		row++
-	}
-	termPrintf("\033[0;90;40m\033[%d;%dH%s", y+boxH-1, x+3, crop("esc/enter return", max(0, boxW-4)))
-	termPrint("\033[0m")
 }
 
 type axisScaleOption struct {
@@ -14175,647 +13898,7 @@ type axisScaleOption struct {
 	Help  string
 }
 
-func playAxisScalePicker(slide Slide, page, width, height int, initialMode string) (string, bool) {
-	options := []axisScaleOption{
-		{Title: "Stretch horizontal", Mode: axisScaleStretchHorizontal, Help: "left stretches left side, right stretches right side"},
-		{Title: "Shrink horizontal", Mode: axisScaleShrinkHorizontal, Help: "left shrinks right side, right shrinks left side"},
-		{Title: "Stretch vertical", Mode: axisScaleStretchVertical, Help: "up stretches up, down stretches bottom"},
-		{Title: "Shrink vertical", Mode: axisScaleShrinkVertical, Help: "up shrinks bottom, down shrinks top"},
-		{},
-		{Title: "Close menu", Mode: axisScaleClose, Help: "return to selection"},
-	}
-	selected := axisScaleOptionIndex(options, initialMode)
-	result := ""
-	renderer := &liveSlideRenderer{}
-	decision := runOverlayLoop(overlayLoopSpec{
-		Draw: func(frame int) {
-			width, height = terminalSize()
-			renderer.draw(slide, width, height, page, frame, func(lines []Line) {
-				drawAxisScalePicker(width, height, options, selected)
-			})
-		},
-		Read: readStartupKeyEvent,
-		Handle: func(event KeyEvent) overlayDecision {
-			switch event.Action {
-			case "escape", "quit":
-				return overlayDecision{Disposition: overlayCancel}
-			case "enter":
-				result = options[selected].Mode
-				return overlayDecision{Disposition: overlayCommit}
-			case "up":
-				selected = previousAxisScaleOption(options, selected)
-			case "down", "tab":
-				selected = nextAxisScaleOption(options, selected)
-			}
-			return overlayDecision{Disposition: overlayContinue}
-		},
-	})
-	return result, decision.Disposition == overlayCommit
-}
-
-func axisScaleOptionIndex(options []axisScaleOption, mode string) int {
-	for index, option := range options {
-		if option.Title != "" && option.Mode == mode {
-			return index
-		}
-	}
-	return 0
-}
-
-func previousAxisScaleOption(options []axisScaleOption, selected int) int {
-	for i := 0; i < len(options); i++ {
-		selected = (selected + len(options) - 1) % len(options)
-		if options[selected].Title != "" {
-			return selected
-		}
-	}
-	return 0
-}
-
-func nextAxisScaleOption(options []axisScaleOption, selected int) int {
-	for i := 0; i < len(options); i++ {
-		selected = (selected + 1) % len(options)
-		if options[selected].Title != "" {
-			return selected
-		}
-	}
-	return 0
-}
-
-func drawAxisScalePicker(width, height int, options []axisScaleOption, selected int) {
-	if width <= 0 || height <= 0 {
-		return
-	}
-	boxW := min(max(62, width/2), max(32, width-4))
-	boxH := min(height-2, 6+len(options)*2)
-	x := max(0, (width-boxW)/2)
-	y := max(0, (height-boxH)/2)
-	for row := 0; row < boxH; row++ {
-		termPrintf("\033[0;37;40m\033[%d;%dH%s", y+row+1, x+1, strings.Repeat(" ", boxW))
-	}
-	termPrintf("\033[1;37;40m\033[%d;%dH%s", y+2, x+3, crop("Axis scaling", max(0, boxW-4)))
-	row := y + 4
-	for index, option := range options {
-		if option.Title == "" {
-			termPrintf("\033[0;90;40m\033[%d;%dH%s", row, x+3, strings.Repeat("-", max(0, boxW-6)))
-			row++
-			continue
-		}
-		prefix := "  "
-		mode := "\033[0;37;40m"
-		if index == selected {
-			prefix = "> "
-			mode = "\033[7;37;40m"
-		}
-		termPrintf("%s\033[%d;%dH%s\033[0m", mode, row, x+3, padRight(crop(prefix+option.Title, max(0, boxW-6)), max(0, boxW-6)))
-		if row+1 < y+boxH {
-			termPrintf("\033[0;90;40m\033[%d;%dH%s", row+1, x+5, crop(option.Help, max(0, boxW-8)))
-		}
-		row += 2
-	}
-	termPrintf("\033[0;90;40m\033[%d;%dH%s", y+boxH-1, x+3, crop("up/down select  enter confirm  esc cancel", max(0, boxW-4)))
-	termPrint("\033[0m")
-}
-
-func mainShortcutHelp() []shortcutHelpItem {
-	return shortcutItemsFromActionSpecs(mainActionSpecs())
-}
-
-func editShortcutHelp(mode, status string, slide Slide, selected int, axisScaleMode string, master bool) (string, []shortcutHelpItem) {
-	if mode == "resize" {
-		switch axisScaleMode {
-		case axisScaleStretchHorizontal:
-			return "Stretch horizontal", []shortcutHelpItem{
-				{"Left", "stretch left side to the left"},
-				{"Right", "stretch right side to the right"},
-				{"Enter", "commit axis scaling"},
-				{"Esc", "cancel axis scaling"},
-			}
-		case axisScaleShrinkHorizontal:
-			return "Shrink horizontal", []shortcutHelpItem{
-				{"Left", "shrink the right side"},
-				{"Right", "shrink the left side"},
-				{"Enter", "commit axis scaling"},
-				{"Esc", "cancel axis scaling"},
-			}
-		case axisScaleStretchVertical:
-			return "Stretch vertical", []shortcutHelpItem{
-				{"Up", "stretch up"},
-				{"Down", "stretch bottom"},
-				{"Enter", "commit axis scaling"},
-				{"Esc", "cancel axis scaling"},
-			}
-		case axisScaleShrinkVertical:
-			return "Shrink vertical", []shortcutHelpItem{
-				{"Up", "shrink bottom"},
-				{"Down", "shrink top"},
-				{"Enter", "commit axis scaling"},
-				{"Esc", "cancel axis scaling"},
-			}
-		default:
-			return "Axis scaling", []shortcutHelpItem{
-				{"Enter", "commit axis scaling"},
-				{"Esc", "cancel axis scaling"},
-			}
-		}
-	}
-	ctx := interactionContextFor(mode, slide, selected, nil, status)
-	ctx.Master = master
-	specs := editActionSpecs(ctx)
-	if ctx.Mode == editorModeText && (selected < 0 || selected >= len(slide.Elements) || slide.Elements[selected].Kind != "code") {
-		specs = filterActionSpecs(specs, "insert-newline")
-	}
-	title := "Edit shortcuts"
-	switch {
-	case ctx.Mode == editorModeMove:
-		title = "Move shortcuts"
-	case ctx.Mode == editorModeText && ctx.Selection == selectionCode:
-		title = "Code edit shortcuts"
-	case ctx.Mode == editorModeText:
-		title = "Text edit shortcuts"
-	case ctx.Selection == selectionText:
-		title = "Selected text shortcuts"
-	case ctx.Selection == selectionCode:
-		title = "Selected code shortcuts"
-	case ctx.Selection == selectionImage:
-		title = "Selected image shortcuts"
-	case ctx.Selection == selectionShape:
-		title = "Selected shape shortcuts"
-	case ctx.Selection == selectionMulti:
-		title = "Multi-selection shortcuts"
-	}
-	if ctx.Selection == selectionNone && ctx.Mode == editorModeSelect {
-		specs = append(specs,
-			action("1 / 2", "slides or notes", "", "", false, 4, "slide-list", "speaker-notes"),
-			action("/ / j", "search or jump", "", "", false, 4, "search", "jump"),
-			action("x", "export HTML", "", "", false, 4, "export"),
-			action("q", "quit", "", "", false, 4, "quit"),
-		)
-	}
-	return title, shortcutItemsFromActionSpecs(specs)
-}
-
-func shortcutItemsFromActionSpecs(specs []actionSpec) []shortcutHelpItem {
-	items := make([]shortcutHelpItem, 0, len(specs))
-	for _, spec := range specs {
-		if spec.Key == "" || spec.Help == "" {
-			continue
-		}
-		items = append(items, shortcutHelpItem{Key: spec.Key, Text: spec.Help})
-	}
-	return items
-}
-
-func filterActionSpecs(specs []actionSpec, actionName string) []actionSpec {
-	out := make([]actionSpec, 0, len(specs))
-	for _, spec := range specs {
-		if actionSpecsAllow([]actionSpec{spec}, actionName) {
-			continue
-		}
-		out = append(out, spec)
-	}
-	return out
-}
-
 const speakerNotesPanelHeight = 6
-
-func drawSpeakerNotesPanel(notes string, cursor int, editing bool, width, height int) {
-	x, y, w, h := notesPanelRect(width, height)
-	if w <= 0 || h <= 0 {
-		return
-	}
-	for row := 0; row < h; row++ {
-		termPrintf("\033[0;30;47m\033[%d;%dH%s", y+row+1, x+1, strings.Repeat(" ", w))
-	}
-	title := " Speaker notes "
-	termPrintf("\033[1;30;47m\033[%d;%dH%s", y+1, x+2, crop(title, max(0, w-2)))
-	lines := strings.Split(notes, "\n")
-	bodyRows := max(1, h-2)
-	cursorRow, cursorCol := notesCursorLineCol(notes, cursor)
-	scroll := max(0, cursorRow-bodyRows+1)
-	for i := 0; i < bodyRows; i++ {
-		lineIndex := scroll + i
-		text := ""
-		if lineIndex < len(lines) {
-			text = lines[lineIndex]
-		}
-		termPrintf("\033[0;37;40m\033[%d;%dH%s", y+2+i, x+2, crop(text, max(0, w-4)))
-	}
-	if editing && cursorRow >= scroll && cursorRow < scroll+bodyRows {
-		cursorX := x + 2 + min(cursorCol, max(0, w-5))
-		cursorY := y + 2 + cursorRow - scroll
-		if cursorY+1 < y+h {
-			termPrintf("\033[0;90;40m\033[%d;%dH▀\033[0m", cursorY+1, cursorX)
-		} else {
-			termPrintf("\033[0;90;40m\033[%d;%dH▄\033[0m", cursorY, cursorX)
-		}
-	}
-}
-
-func drawSlideNavigatorToolbar(width, height, selected, count int) {
-	label := fmt.Sprintf("%d/%d", min(selected+1, count), count)
-	drawAdaptiveToolbarLine(width, height, "43",
-		legacyToolbarSegments(" SLIDES  ↑/↓ select  Enter go  1/Esc close "),
-		[]toolbarSegment{{Long: "SLIDES · Overview", Short: "SLIDES", Required: true}, {Long: label, Short: label, Required: true}},
-	)
-}
-
-func drawSpeakerNotesToolbar(width, height int, editing bool) {
-	if editing {
-		drawAdaptiveToolbarLine(width, height, "43",
-			legacyToolbarSegments(" NOTES  Enter commit  Shift-Enter newline  arrows cursor  Esc cancel "),
-			[]toolbarSegment{{Long: "NOTES · Editing", Short: "NOTES", Required: true}},
-		)
-		return
-	}
-	drawAdaptiveToolbarLine(width, height, "43",
-		legacyToolbarSegments(" NOTES  Enter edit  Tab select field  Esc close  slide controls active "),
-		[]toolbarSegment{{Long: "NOTES · Viewing", Short: "NOTES", Required: true}},
-	)
-}
-
-func timerInputDuration(input string) time.Duration {
-	input = strings.TrimSpace(input)
-	if input == "" {
-		return 0
-	}
-	for len(input) < 4 {
-		input = "0" + input
-	}
-	minutes, _ := strconv.Atoi(input[:len(input)-2])
-	seconds, _ := strconv.Atoi(input[len(input)-2:])
-	if seconds > 59 {
-		seconds = 59
-	}
-	return time.Duration(minutes*60+seconds) * time.Second
-}
-
-func applyTimerEvent(state *EditState, event KeyEvent) bool {
-	if state == nil || state.TimerMode == "" {
-		return false
-	}
-	if event.Action == "escape" || event.Action == "controls" {
-		state.TimerMode = ""
-		state.TimerInput = ""
-		state.TimerDeadline = time.Time{}
-		return true
-	}
-	if event.Action == "timer" {
-		if state.TimerMode == "config" {
-			if len(state.TimerInput) < 4 {
-				state.TimerInput += "0"
-			}
-		} else {
-			state.TimerMode = "config"
-			state.TimerInput = ""
-			state.TimerDeadline = time.Time{}
-		}
-		return true
-	}
-	if state.TimerMode != "config" {
-		return false
-	}
-	switch event.Action {
-	case "slide-list":
-		if len(state.TimerInput) < 4 {
-			state.TimerInput += "1"
-		}
-	case "speaker-notes":
-		if len(state.TimerInput) < 4 {
-			state.TimerInput += "2"
-		}
-	case "backspace":
-		if state.TimerInput != "" {
-			state.TimerInput = state.TimerInput[:len(state.TimerInput)-1]
-		}
-	case "enter":
-		if duration := timerInputDuration(state.TimerInput); duration > 0 {
-			state.TimerMode = "running"
-			state.TimerDeadline = time.Now().Add(duration)
-		}
-	case "text":
-		for _, r := range event.Text {
-			if r >= '0' && r <= '9' && len(state.TimerInput) < 4 {
-				state.TimerInput += string(r)
-			}
-		}
-	default:
-		return false
-	}
-	return true
-}
-
-func timerDisplayText(mode, input string, deadline time.Time) (string, bool) {
-	if mode == "config" {
-		padded := input
-		for len(padded) < 4 {
-			padded = "0" + padded
-		}
-		if len(padded) > 4 {
-			padded = padded[len(padded)-4:]
-		}
-		return padded[:2] + ":" + padded[2:], false
-	}
-	remaining := time.Until(deadline)
-	done := remaining <= 0
-	if done {
-		remaining = 0
-	}
-	total := int(math.Ceil(remaining.Seconds()))
-	minutes := total / 60
-	seconds := total % 60
-	if minutes > 99 {
-		minutes = 99
-		seconds = 59
-	}
-	return fmt.Sprintf("%02d:%02d", minutes, seconds), done
-}
-
-func drawTimerOverlay(width, height int, mode, input string, deadline time.Time) {
-	text, done := timerDisplayText(mode, input, deadline)
-	if done && time.Now().UnixMilli()/400%2 == 0 {
-		return
-	}
-	scale := timerFontScale(width, height, text)
-	gap := max(1, scale)
-	contentW, contentH := timerFontTextSize(text, scale, gap)
-	panelW := contentW + 4
-	panelH := contentH + 4
-	x := max(0, (width-panelW)/2)
-	y := max(0, (height-panelH)/2)
-	for row := 0; row < panelH && y+row < height; row++ {
-		termPrintf("\033[0;37;40m\033[%d;%dH%s", y+row+1, x+1, strings.Repeat(" ", min(panelW, width-x)))
-	}
-	title := " TIMER "
-	if mode == "config" {
-		title = " TIMER SETUP "
-	}
-	termPrintf("\033[1;37;40m\033[%d;%dH%s", y+1, x+2, crop(title, max(0, panelW-4)))
-	color := "\033[1;31;40m"
-	if done {
-		color = "\033[1;37;41m"
-	}
-	if mode == "config" {
-		drawTimerFontSetup(x+2, max(0, y+1), text, input, scale, gap)
-	} else {
-		drawTimerFontText(x+2, max(0, y+1), text, scale, gap, color)
-	}
-	if mode == "config" {
-		hint := "type MMSS, Enter start, Esc cancel"
-		termPrintf("\033[0;37;40m\033[%d;%dH%s", y+panelH, x+2, crop(hint, max(0, panelW-4)))
-	}
-	termPrint("\033[0m")
-}
-
-func timerFontScale(width, height int, text string) int {
-	if width <= 0 || height <= 0 {
-		return 1
-	}
-	for scale := 2; scale >= 1; scale-- {
-		w, h := timerFontTextSize(text, scale, max(1, scale))
-		if w+4 <= width && h+4 <= height {
-			return scale
-		}
-	}
-	return 1
-}
-
-func timerFontTextSize(text string, scale, gap int) (int, int) {
-	width, height := 0, 0
-	for i, ch := range text {
-		rows := timerFontGlyphRows(ch, scale)
-		if i > 0 {
-			width += gap
-		}
-		width += maxLineDisplayWidth(rows)
-		height = max(height, len(rows))
-	}
-	return width, height
-}
-
-func timerFontGlyphRows(ch rune, scale int) []string {
-	rows := renderFull(string(ch), scale)
-	if len(rows) == 0 {
-		return []string{""}
-	}
-	return rows
-}
-
-func drawTimerFontText(x, y int, text string, scale, gap int, color string) {
-	cursor := x
-	for _, ch := range text {
-		rows := timerFontGlyphRows(ch, scale)
-		drawTimerFontGlyph(cursor, y, rows, color)
-		cursor += maxLineDisplayWidth(rows) + gap
-	}
-}
-
-func drawTimerFontSetup(x, y int, text, input string, scale, gap int) {
-	typed := max(0, min(4, len([]rune(input))))
-	typedFrom := 4 - typed
-	digitIndex := 0
-	cursor := x
-	for _, ch := range text {
-		rows := timerFontGlyphRows(ch, scale)
-		color := "\033[1;90;40m"
-		if ch != ':' && digitIndex >= typedFrom {
-			color = "\033[1;36;40m"
-		}
-		drawTimerFontGlyph(cursor, y, rows, color)
-		cursor += maxLineDisplayWidth(rows) + gap
-		if ch != ':' {
-			digitIndex++
-		}
-	}
-}
-
-func drawTimerFontGlyph(x, y int, rows []string, color string) {
-	for row, line := range rows {
-		termPrintf("%s\033[%d;%dH%s", color, y+row+1, x+1, line)
-	}
-}
-
-func notesPanelRect(width, height int) (int, int, int, int) {
-	h := min(speakerNotesPanelHeight, max(1, height-1))
-	return 0, max(0, height-h-1), width, h
-}
-
-func notesCapacity(width, height int) (int, int) {
-	_, _, w, h := notesPanelRect(width, height)
-	return max(1, h-2), max(1, w-4)
-}
-
-func insertNotesText(notes string, cursor int, text string, width, height int) (string, int, bool) {
-	maxLines, maxCols := notesCapacity(width, height)
-	changed := false
-	runes := []rune(notes)
-	cursor = max(0, min(len(runes), cursor))
-	for _, ch := range text {
-		if ch == '\r' {
-			continue
-		}
-		row, col := notesCursorLineCol(string(runes), cursor)
-		lines := strings.Split(string(runes), "\n")
-		if ch == '\n' {
-			if len(lines) >= maxLines {
-				continue
-			}
-		} else {
-			if row >= len(lines) || col >= maxCols || len([]rune(lines[row])) >= maxCols {
-				continue
-			}
-		}
-		runes = append(runes[:cursor], append([]rune{ch}, runes[cursor:]...)...)
-		cursor++
-		changed = true
-	}
-	return string(runes), cursor, changed
-}
-
-func notesCursorAtPoint(notes string, x, y, width, height int) (int, bool) {
-	panelX, panelY, panelW, panelH := notesPanelRect(width, height)
-	if x < panelX+1 || x >= panelX+panelW-1 || y < panelY+1 || y >= panelY+panelH {
-		return 0, false
-	}
-	lines := strings.Split(notes, "\n")
-	bodyRows := max(1, panelH-2)
-	cursorRow, _ := notesCursorLineCol(notes, len([]rune(notes)))
-	scroll := max(0, cursorRow-bodyRows+1)
-	lineIndex := min(len(lines)-1, max(0, scroll+y-(panelY+1)))
-	col := max(0, x-(panelX+1))
-	return notesOffsetForLineCol(notes, lineIndex, col), true
-}
-
-func notesCursorLineCol(notes string, cursor int) (int, int) {
-	runes := []rune(notes)
-	cursor = max(0, min(len(runes), cursor))
-	row, col := 0, 0
-	for i := 0; i < cursor; i++ {
-		if runes[i] == '\n' {
-			row++
-			col = 0
-		} else {
-			col++
-		}
-	}
-	return row, col
-}
-
-func notesOffsetForLineCol(notes string, row, col int) int {
-	runes := []rune(notes)
-	curRow, curCol := 0, 0
-	for i, r := range runes {
-		if curRow == row && curCol >= col {
-			return i
-		}
-		if r == '\n' {
-			if curRow == row {
-				return i
-			}
-			curRow++
-			curCol = 0
-		} else {
-			curCol++
-		}
-	}
-	return len(runes)
-}
-
-func moveNotesCursorVertical(notes string, cursor, delta int) int {
-	row, col := notesCursorLineCol(notes, cursor)
-	targetRow := max(0, row+delta)
-	return notesOffsetForLineCol(notes, targetRow, col)
-}
-
-func drawSlideNavigatorOverlay(slides []Slide, selected int, scroll *int, width, height int) {
-	x, y, w, h := slideNavigatorRect(width, height)
-	if w <= 0 || h <= 0 || len(slides) == 0 {
-		return
-	}
-	itemH := slideNavigatorItemHeight()
-	visible := max(1, h/itemH)
-	if selected < *scroll {
-		*scroll = selected
-	}
-	if selected >= *scroll+visible {
-		*scroll = selected - visible + 1
-	}
-	*scroll = max(0, min(max(0, len(slides)-visible), *scroll))
-	for row := 0; row < h; row++ {
-		termPrintf("\033[0;37;40m\033[%d;%dH%s", y+row+1, x+1, strings.Repeat(" ", w))
-	}
-	for slot := 0; slot < visible; slot++ {
-		index := *scroll + slot
-		if index >= len(slides) {
-			break
-		}
-		itemY := y + slot*itemH
-		drawSlideNavigatorItem(slides[index], index, selected == index, x, itemY, w, itemH)
-	}
-}
-
-func slideNavigatorRect(width, height int) (int, int, int, int) {
-	w := min(max(20, width/6), max(1, width/3))
-	h := max(1, height-1)
-	return 0, 0, w, h
-}
-
-func slideNavigatorItemHeight() int {
-	return 7
-}
-
-func drawSlideNavigatorItem(slide Slide, index int, selected bool, x, y, w, h int) {
-	bg := "40"
-	fg := "37"
-	if selected {
-		bg = "47"
-		fg = "30"
-	}
-	for row := 0; row < h; row++ {
-		termPrintf("\033[0;%s;%sm\033[%d;%dH%s", fg, bg, y+row+1, x+1, strings.Repeat(" ", w))
-	}
-	label := fmt.Sprintf("%d %s", index+1, slideNavigatorTitle(slide, max(0, w-4)))
-	termPrintf("\033[1;%s;%sm\033[%d;%dH%s", fg, bg, y+1, x+2, crop(label, max(0, w-2)))
-	thumbW := max(4, w-4)
-	thumbH := max(2, h-2)
-	lines := displayLines(slide, thumbW, thumbH, 0)
-	for _, line := range lines {
-		if line.Row < 0 || line.Row >= thumbH {
-			continue
-		}
-		text := crop(line.Text, thumbW)
-		if text == "" {
-			continue
-		}
-		termPrintf("\033[0;%s;%sm\033[%d;%dH%s", fg, bg, y+2+line.Row, x+2+max(0, min(thumbW-1, line.Col)), crop(text, max(0, thumbW-line.Col)))
-	}
-}
-
-func slideNavigatorTitle(slide Slide, maxChars int) string {
-	for _, element := range slide.Elements {
-		if element.Kind == "heading" && strings.TrimSpace(element.Text) != "" {
-			return crop(strings.TrimSpace(element.Text), maxChars)
-		}
-	}
-	for _, element := range slide.Elements {
-		if element.Kind != "image" && element.Kind != "shape" && strings.TrimSpace(element.Text) != "" {
-			return crop(strings.TrimSpace(element.Text), maxChars)
-		}
-	}
-	return ""
-}
-
-func slideNavigatorIndexAtPoint(x, y, scroll, slideCount, width, height int) (int, bool) {
-	panelX, panelY, panelW, panelH := slideNavigatorRect(width, height)
-	if x < panelX || x >= panelX+panelW || y < panelY || y >= panelY+panelH {
-		return 0, false
-	}
-	index := scroll + (y-panelY)/slideNavigatorItemHeight()
-	if index < 0 || index >= slideCount {
-		return 0, false
-	}
-	return index, true
-}
 
 var availableEffects = []string{
 	"none",
@@ -14875,36 +13958,6 @@ type overlayLoopSpec struct {
 	Handle func(KeyEvent) overlayDecision
 }
 
-func runOverlayLoop(spec overlayLoopSpec) overlayDecision {
-	if spec.Draw == nil || spec.Read == nil || spec.Handle == nil {
-		return overlayDecision{Disposition: overlayCancel}
-	}
-	ticker := time.NewTicker(70 * time.Millisecond)
-	defer ticker.Stop()
-	frame := 0
-	dirty := true
-	for {
-		if dirty {
-			spec.Draw(frame)
-			dirty = false
-		}
-		if event := spec.Read(); event.Action != "" {
-			decision := spec.Handle(event)
-			if decision.Disposition != overlayContinue {
-				return decision
-			}
-			dirty = true
-		}
-		select {
-		case <-ticker.C:
-			frame++
-			dirty = true
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-}
-
 type liveSlideRenderer struct {
 	effect    string
 	width     int
@@ -14941,545 +13994,10 @@ func (renderer *liveSlideRenderer) draw(slide Slide, width, height, page, frame 
 	})
 }
 
-func playEffectPicker(slide Slide, width, height int) (string, bool) {
-	current := slide.Effect
-	if current == "" {
-		current = "none"
-	}
-	selected := 0
-	for i, effect := range availableEffects {
-		if effect == current {
-			selected = i
-			break
-		}
-	}
-	frame := 0
-	lastEffect := ""
-	var matrix *matrixEffect
-	var stars *starsEffect
-	var fireworks *burstEffect
-	result := ""
-	decision := runOverlayLoop(overlayLoopSpec{
-		Draw: func(tick int) {
-			width, height = terminalSize()
-			geometry := fittedTerminalContentGeometry(width, height)
-			previewEffect := availableEffects[selected]
-			if previewEffect != lastEffect || matrix == nil || matrix.width != geometry.Width || matrix.height != geometry.Height {
-				matrix = newMatrix(geometry.Width, geometry.Height)
-				stars = newStars(geometry.Width, geometry.Height)
-				fireworks = newBursts(previewEffect, geometry.Width, geometry.Height)
-				lastEffect = previewEffect
-				frame = 0
-			}
-			flushTerminalFrame(func() {
-				clearPhysicalTerminalViewport()
-				drawTerminalSlideCanvas(slide, width, height, func(canvas terminalContentGeometry) {
-					if previewEffect != "none" {
-						drawEffectFrame(previewEffect, canvas.Width, canvas.Height, frame, matrix, stars, fireworks, slideBG(slide))
-					}
-				})
-				drawOverlayLines(displayLines(slide, width, height, 0), width, height, slide)
-				drawEffectPicker(width, height, selected)
-				termPrint("\033[0m")
-			})
-			frame++
-		},
-		Read: readEffectPickerKeyEvent,
-		Handle: func(event KeyEvent) overlayDecision {
-			switch event.Action {
-			case "escape", "quit":
-				return overlayDecision{Disposition: overlayCancel}
-			case "enter":
-				result = availableEffects[selected]
-				return overlayDecision{Disposition: overlayCommit}
-			case "up", "left":
-				selected = (selected - 1 + len(availableEffects)) % len(availableEffects)
-			case "down", "right":
-				selected = (selected + 1) % len(availableEffects)
-			case "mouse-click":
-				if index, ok := effectAtPoint(event.X, event.Y, width, height); ok {
-					if index == selected {
-						result = availableEffects[selected]
-						return overlayDecision{Disposition: overlayCommit}
-					}
-					selected = index
-				}
-			}
-			return overlayDecision{Disposition: overlayContinue}
-		},
-	})
-	return result, decision.Disposition == overlayCommit
-}
-
-func playShapePicker(slide Slide, width, height, page int, current string) (string, bool) {
-	selected := 0
-	for i, shape := range availableShapes {
-		if shape == current {
-			selected = i
-			break
-		}
-	}
-	result := ""
-	renderer := &liveSlideRenderer{}
-	decision := runOverlayLoop(overlayLoopSpec{
-		Draw: func(frame int) {
-			width, height = terminalSize()
-			renderer.draw(slide, width, height, page, frame, func(lines []Line) { drawShapePicker(width, height, selected) })
-		},
-		Read: readEffectPickerKeyEvent,
-		Handle: func(event KeyEvent) overlayDecision {
-			switch event.Action {
-			case "escape", "quit":
-				return overlayDecision{Disposition: overlayCancel}
-			case "enter":
-				result = availableShapes[selected]
-				return overlayDecision{Disposition: overlayCommit}
-			case "up", "left":
-				selected = (selected - 1 + len(availableShapes)) % len(availableShapes)
-			case "down", "right":
-				selected = (selected + 1) % len(availableShapes)
-			case "mouse-click":
-				if index, ok := shapeAtPoint(event.X, event.Y, width, height); ok {
-					if index == selected {
-						result = availableShapes[selected]
-						return overlayDecision{Disposition: overlayCommit}
-					}
-					selected = index
-				}
-			}
-			return overlayDecision{Disposition: overlayContinue}
-		},
-	})
-	return result, decision.Disposition == overlayCommit
-}
-
-func playBackgroundPicker(slide Slide, width, height int) (string, bool) {
-	current := slide.Background
-	if current == "" {
-		current = "none"
-	}
-	selected := 0
-	for i, background := range availableBackgrounds {
-		if background == current {
-			selected = i
-			break
-		}
-	}
-	result := ""
-	renderer := &liveSlideRenderer{}
-	decision := runOverlayLoop(overlayLoopSpec{
-		Draw: func(frame int) {
-			width, height = terminalSize()
-			preview := slide
-			previewBackground := availableBackgrounds[selected]
-			if previewBackground == "none" {
-				preview.Background = ""
-			} else {
-				preview.Background = previewBackground
-			}
-			renderer.draw(preview, width, height, 0, frame, func(lines []Line) { drawBackgroundPicker(width, height, selected) })
-		},
-		Read: readEffectPickerKeyEvent,
-		Handle: func(event KeyEvent) overlayDecision {
-			switch event.Action {
-			case "escape", "quit":
-				return overlayDecision{Disposition: overlayCancel}
-			case "enter":
-				result = availableBackgrounds[selected]
-				return overlayDecision{Disposition: overlayCommit}
-			case "up", "left":
-				selected = (selected - 1 + len(availableBackgrounds)) % len(availableBackgrounds)
-			case "down", "right":
-				selected = (selected + 1) % len(availableBackgrounds)
-			case "mouse-click":
-				if index, ok := backgroundAtPoint(event.X, event.Y, width, height); ok {
-					if index == selected {
-						result = availableBackgrounds[selected]
-						return overlayDecision{Disposition: overlayCommit}
-					}
-					selected = index
-				}
-			}
-			return overlayDecision{Disposition: overlayContinue}
-		},
-	})
-	return result, decision.Disposition == overlayCommit
-}
-
-func drawEffectPicker(width, height, selected int) {
-	panelWidth := min(width, 44)
-	panelHeight := min(height, len(availableEffects)+5)
-	left := max(0, (width-panelWidth)/2)
-	top := max(0, (height-panelHeight)/2)
-	panelBG := "48;2;18;18;18"
-	for row := 0; row < panelHeight; row++ {
-		termPrintf("\033[0;37;%sm\033[%d;%dH%s", panelBG, top+row+1, left+1, strings.Repeat(" ", panelWidth))
-	}
-	termPrintf("\033[0;37;%sm\033[%d;%dH%s", panelBG, top+1, left+3, "Effect")
-	for i, effect := range availableEffects {
-		if i+3 >= panelHeight {
-			break
-		}
-		bg := panelBG
-		fg := "37"
-		if i == selected {
-			bg = "43"
-			fg = "30"
-		}
-		termPrintf("\033[0;%s;%sm\033[%d;%dH%s", fg, bg, top+3+i, left+3, padRight(crop(effect, panelWidth-6), panelWidth-6))
-	}
-	help := " arrows select  Enter save  Esc cancel "
-	termPrintf("\033[0;30;43m\033[%d;%dH%s", top+panelHeight-1, left+3, padRight(crop(help, panelWidth-6), panelWidth-6))
-}
-
-func drawBackgroundPicker(width, height, selected int) {
-	panelWidth := min(width, 44)
-	panelHeight := min(height, len(availableBackgrounds)+5)
-	left := max(0, (width-panelWidth)/2)
-	top := max(0, (height-panelHeight)/2)
-	panelBG := "48;2;18;18;18"
-	for row := 0; row < panelHeight; row++ {
-		termPrintf("\033[0;37;%sm\033[%d;%dH%s", panelBG, top+row+1, left+1, strings.Repeat(" ", panelWidth))
-	}
-	termPrintf("\033[0;37;%sm\033[%d;%dH%s", panelBG, top+1, left+3, "Background")
-	for i, background := range availableBackgrounds {
-		if i+3 >= panelHeight {
-			break
-		}
-		bg := panelBG
-		fg := "37"
-		if i == selected {
-			bg = "43"
-			fg = "30"
-		}
-		termPrintf("\033[0;%s;%sm\033[%d;%dH%s", fg, bg, top+3+i, left+3, padRight(crop(background, panelWidth-6), panelWidth-6))
-	}
-	help := " arrows select  Enter save  Esc cancel "
-	termPrintf("\033[0;30;43m\033[%d;%dH%s", top+panelHeight-1, left+3, padRight(crop(help, panelWidth-6), panelWidth-6))
-}
-
-func drawShapePicker(width, height, selected int) {
-	panelWidth := min(width, 52)
-	panelHeight := min(height, len(availableShapes)*3+5)
-	left := max(0, (width-panelWidth)/2)
-	top := max(0, (height-panelHeight)/2)
-	panelBG := "48;2;18;18;18"
-	for row := 0; row < panelHeight; row++ {
-		termPrintf("\033[0;37;%sm\033[%d;%dH%s", panelBG, top+row+1, left+1, strings.Repeat(" ", panelWidth))
-	}
-	termPrintf("\033[0;37;%sm\033[%d;%dH%s", panelBG, top+1, left+3, "Shapes")
-	for i, shape := range availableShapes {
-		itemTop := top + 3 + i*3
-		if itemTop >= top+panelHeight-2 {
-			break
-		}
-		bg := panelBG
-		fg := "37"
-		if i == selected {
-			bg = "43"
-			fg = "30"
-		}
-		preview := shapePreview(shape)
-		label := fmt.Sprintf("%-10s %s", shape, preview)
-		termPrintf("\033[0;%s;%sm\033[%d;%dH%s", fg, bg, itemTop, left+3, padRight(crop(label, panelWidth-6), panelWidth-6))
-	}
-	help := " arrows select  Enter insert  Esc cancel "
-	termPrintf("\033[0;30;43m\033[%d;%dH%s", top+panelHeight-1, left+3, padRight(crop(help, panelWidth-6), panelWidth-6))
-}
-
-func shapePreview(shape string) string {
-	switch shape {
-	case "circle":
-		return "  ███  "
-	case "square":
-		return "  ████ "
-	case "triangle":
-		return "   ▲   "
-	case "diamond":
-		return "   ◆   "
-	default:
-		return "  ███  "
-	}
-}
-
-func effectAtPoint(x, y, width, height int) (int, bool) {
-	panelWidth := min(width, 44)
-	panelHeight := min(height, len(availableEffects)+5)
-	left := max(0, (width-panelWidth)/2)
-	top := max(0, (height-panelHeight)/2)
-	index := y - (top + 2)
-	if x < left+2 || x >= left+panelWidth-2 || index < 0 || index >= len(availableEffects) || index+3 >= panelHeight {
-		return 0, false
-	}
-	return index, true
-}
-
-func backgroundAtPoint(x, y, width, height int) (int, bool) {
-	panelWidth := min(width, 44)
-	panelHeight := min(height, len(availableBackgrounds)+5)
-	left := max(0, (width-panelWidth)/2)
-	top := max(0, (height-panelHeight)/2)
-	index := y - (top + 2)
-	if x < left+2 || x >= left+panelWidth-2 || index < 0 || index >= len(availableBackgrounds) || index+3 >= panelHeight {
-		return 0, false
-	}
-	return index, true
-}
-
-func shapeAtPoint(x, y, width, height int) (int, bool) {
-	panelWidth := min(width, 52)
-	panelHeight := min(height, len(availableShapes)*3+5)
-	left := max(0, (width-panelWidth)/2)
-	top := max(0, (height-panelHeight)/2)
-	index := (y - (top + 2)) / 3
-	itemY := top + 2 + index*3
-	if x < left+2 || x >= left+panelWidth-2 || y != itemY || index < 0 || index >= len(availableShapes) || itemY >= top+panelHeight-2 {
-		return 0, false
-	}
-	return index, true
-}
-
-func readEffectPickerKeyEvent() KeyEvent {
-	var buf [32]byte
-	n, _ := inputRead(buf[:])
-	if n == 0 {
-		return KeyEvent{}
-	}
-	b := buf[:n]
-	if event := parseMouseEvent(b); event.Action != "" {
-		return event
-	}
-	if event := editEscapeEvent(b); event.Action != "" {
-		return event
-	}
-	if bytes.Contains(b, []byte{'\r'}) || bytes.Contains(b, []byte{'\n'}) {
-		return KeyEvent{Action: "enter"}
-	}
-	if bytes.Contains(b, []byte{'q'}) {
-		return KeyEvent{Action: "quit"}
-	}
-	return KeyEvent{}
-}
-
 type pickerColour struct {
 	Hex     string
 	FG, BG  string
 	R, G, B int
-}
-
-func playTextColorPicker(slide Slide, selected, width, height, page int) (string, bool) {
-	return playColorPicker(slide, currentElementHexForElement(slide.Elements[selected]), selected, width, height, page)
-}
-
-func playSlideColorPicker(slide Slide, current string, width, height int) (string, bool) {
-	return playColorPicker(slide, current, -1, width, height, 0)
-}
-
-func playColorPicker(slide Slide, current string, selected, width, height, page int) (string, bool) {
-	palette := colourPickerPalette()
-	index := nearestPickerColourIndex(current, palette)
-	field := palette[index].Hex
-	result := ""
-	renderer := &liveSlideRenderer{}
-	decision := runOverlayLoop(overlayLoopSpec{
-		Draw: func(frame int) {
-			width, height = terminalSize()
-			withFastImageRender(func() {
-				renderer.draw(slide, width, height, page, frame, func(lines []Line) {
-					if selected >= 0 && selected < len(slide.Elements) {
-						if slide.Elements[selected].Kind == "image" {
-							drawSelectedImageHighlight(lines, selected, width, height)
-						} else {
-							drawSelectedElementHighlight(lines, selected, width, height)
-						}
-					}
-					drawColorPicker(width, height, palette, index, field)
-				})
-			})
-		},
-		Read: readColorPickerKeyEvent,
-		Handle: func(event KeyEvent) overlayDecision {
-			switch event.Action {
-			case "escape", "quit":
-				return overlayDecision{Disposition: overlayCancel}
-			case "enter":
-				if hex, ok := normalizeHexColour(field); ok {
-					result = hex
-					return overlayDecision{Disposition: overlayCommit}
-				}
-			case "left":
-				if index%8 > 0 {
-					index--
-					field = palette[index].Hex
-				}
-			case "right":
-				if index%8 < 7 {
-					index++
-					field = palette[index].Hex
-				}
-			case "up":
-				if index >= 8 {
-					index -= 8
-					field = palette[index].Hex
-				}
-			case "down":
-				if index < 56 {
-					index += 8
-					field = palette[index].Hex
-				}
-			case "backspace":
-				if len(field) > 0 {
-					field = field[:len(field)-1]
-				}
-			case "mouse-click":
-				if clicked, ok := colorPickerIndexAt(event.X, event.Y, width, height); ok {
-					index = clicked
-					field = palette[index].Hex
-					result = field
-					return overlayDecision{Disposition: overlayCommit}
-				}
-			case "text":
-				for _, r := range event.Text {
-					if r == '#' && !strings.Contains(field, "#") {
-						field = "#" + field
-						continue
-					}
-					if len(field) < 7 && ((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
-						field += strings.ToLower(string(r))
-					}
-				}
-			}
-			return overlayDecision{Disposition: overlayContinue}
-		},
-	})
-	return result, decision.Disposition == overlayCommit
-}
-
-func colourPickerPalette() []pickerColour {
-	levels := []int{0x00, 0x55, 0xaa, 0xff}
-	out := make([]pickerColour, 0, 64)
-	for r := 0; r < 4; r++ {
-		for g := 0; g < 4; g++ {
-			for b := 0; b < 4; b++ {
-				red, green, blue := levels[r], levels[g], levels[b]
-				hex := fmt.Sprintf("#%02x%02x%02x", red, green, blue)
-				fg := "37"
-				if red+green+blue > 384 {
-					fg = "30"
-				}
-				out = append(out, pickerColour{
-					Hex: hex,
-					FG:  fg,
-					BG:  fmt.Sprintf("48;2;%d;%d;%d", red, green, blue),
-					R:   red,
-					G:   green,
-					B:   blue,
-				})
-			}
-		}
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		left := colourLuminance(out[i])
-		right := colourLuminance(out[j])
-		if left != right {
-			return left < right
-		}
-		if out[i].R != out[j].R {
-			return out[i].R < out[j].R
-		}
-		if out[i].G != out[j].G {
-			return out[i].G < out[j].G
-		}
-		return out[i].B < out[j].B
-	})
-	return out
-}
-
-func colourLuminance(colour pickerColour) int {
-	return 299*colour.R + 587*colour.G + 114*colour.B
-}
-
-func drawColorPicker(width, height int, palette []pickerColour, selected int, field string) {
-	gridWidth, gridHeight := colorPickerGridSize()
-	panelWidth := min(width, gridWidth+4)
-	panelHeight := min(height, gridHeight+7)
-	panelLeft := max(0, (width-panelWidth)/2)
-	panelTop := max(0, (height-panelHeight)/2)
-	left := min(width-1, panelLeft+2)
-	top := min(height-1, panelTop+1)
-	panelBG := "48;2;18;18;18"
-	for row := 0; row < panelHeight; row++ {
-		termPrintf("\033[0;37;%sm\033[%d;%dH%s", panelBG, panelTop+row+1, panelLeft+1, strings.Repeat(" ", panelWidth))
-	}
-	title := " COLOR "
-	termPrintf("\033[0;37;%sm\033[%d;%dH%s", panelBG, panelTop+1, left+1, padRight(title, min(gridWidth, max(0, width-left))))
-	for i, colour := range palette {
-		row := i / 8
-		col := i % 8
-		x := left + col*colorPickerCellStrideX()
-		y := top + row*colorPickerCellStrideY()
-		if x+colorPickerCellWidth() > width || y >= height {
-			continue
-		}
-		borderFG := "38;2;230;230;230"
-		borderBG := "48;2;72;72;72"
-		if i == selected {
-			borderFG = "38;2;0;0;0"
-			borderBG = "48;2;255;170;0"
-		}
-		termPrintf("\033[0;%s;%sm\033[%d;%dH▐", borderFG, borderBG, y+1, x+1)
-		termPrintf("\033[0;%s;%sm  ", colour.FG, colour.BG)
-		termPrintf("\033[0;%s;%sm▌", borderFG, borderBG)
-	}
-	fieldLabel := " HTML " + field
-	termPrintf("\033[0;30;43m\033[%d;%dH%s", top+gridHeight+2, left+1, padRight(crop(fieldLabel, gridWidth), gridWidth))
-	help := " arrows/mouse select  type hex  Enter choose  Esc cancel "
-	termPrintf("\033[0;30;43m\033[%d;%dH%s", top+gridHeight+3, left+1, padRight(crop(help, gridWidth), gridWidth))
-}
-
-func colorPickerIndexAt(x, y, width, height int) (int, bool) {
-	gridWidth, gridHeight := colorPickerGridSize()
-	panelWidth := min(width, gridWidth+4)
-	panelHeight := min(height, gridHeight+7)
-	panelLeft := max(0, (width-panelWidth)/2)
-	panelTop := max(0, (height-panelHeight)/2)
-	left := min(width-1, panelLeft+2)
-	top := min(height-1, panelTop+1)
-	if x < left || x >= left+gridWidth || y < top || y >= top+gridHeight {
-		return 0, false
-	}
-	localX := x - left
-	localY := y - top
-	if localX%colorPickerCellStrideX() >= colorPickerCellWidth() || localY%colorPickerCellStrideY() >= colorPickerCellHeight() {
-		return 0, false
-	}
-	col := localX / colorPickerCellStrideX()
-	row := localY / colorPickerCellStrideY()
-	index := row*8 + col
-	if index < 0 || index >= 64 {
-		return 0, false
-	}
-	return index, true
-}
-
-func colorPickerCellWidth() int {
-	return 4
-}
-
-func colorPickerCellHeight() int {
-	return 1
-}
-
-func colorPickerCellStrideX() int {
-	return colorPickerCellWidth() + 1
-}
-
-func colorPickerCellStrideY() int {
-	return colorPickerCellHeight() + 1
-}
-
-func colorPickerGridSize() (int, int) {
-	return 8*colorPickerCellStrideX() - 1, 8*colorPickerCellStrideY() - 1
 }
 
 func currentElementHexForElement(element Element) string {
@@ -15503,54 +14021,10 @@ func currentElementHexForElement(element Element) string {
 	return ""
 }
 
-func nearestPickerColourIndex(hex string, palette []pickerColour) int {
-	r, g, b, ok := parseHexColour(hex)
-	if !ok {
-		return 63
-	}
-	bestIndex := 0
-	bestDistance := int(^uint(0) >> 1)
-	for index, colour := range palette {
-		dr, dg, db := r-colour.R, g-colour.G, b-colour.B
-		distance := dr*dr + dg*dg + db*db
-		if distance < bestDistance {
-			bestIndex = index
-			bestDistance = distance
-		}
-	}
-	return bestIndex
-}
-
-func setElementColour(element *Element, colour string) {
-	if element == nil {
-		return
-	}
-	if hex, ok := normalizeHexColour(colour); ok {
-		if element.Kind == "heading" {
-			element.Query = removeImageQueryKeys(element.Query, "fg")
-			element.Query = setQueryValue(element.Query, "header", hex)
-			return
-		}
-		if element.Kind == "code" {
-			element.Query = setQueryValue(element.Query, "bg", hex)
-			return
-		}
-		element.Query = setQueryValue(element.Query, "fg", hex)
-	}
-}
-
-func setElementTextColour(element *Element, colour string) {
-	if element == nil {
-		return
-	}
-	if hex, ok := normalizeHexColour(colour); ok {
-		element.Query = setQueryValue(element.Query, "fg", hex)
-	}
-}
-
 func cloneSlide(slide Slide) Slide {
 	copySlide := slide
 	copySlide.Elements = append([]Element(nil), slide.Elements...)
+	copySlide.Engagement = cloneEngagement(slide.Engagement)
 	return copySlide
 }
 
@@ -15564,116 +14038,6 @@ func cloneSlides(slides []Slide) []Slide {
 
 const editHistoryLimit = 100
 
-func commitSlideSnapshot(state *EditState, before, after Slide) bool {
-	if state == nil || reflect.DeepEqual(before, after) {
-		return false
-	}
-	snapshot := SlideSnapshot{Before: cloneSlide(before), After: cloneSlide(after)}
-	state.Undo = append(state.Undo, snapshot)
-	if len(state.Undo) > editHistoryLimit {
-		state.Undo = append([]SlideSnapshot(nil), state.Undo[len(state.Undo)-editHistoryLimit:]...)
-	}
-	state.Redo = nil
-	return true
-}
-
-func undoSlideSnapshot(state *EditState, slide *Slide) bool {
-	if state == nil || slide == nil || len(state.Undo) == 0 {
-		return false
-	}
-	snapshot := state.Undo[len(state.Undo)-1]
-	state.Undo = state.Undo[:len(state.Undo)-1]
-	state.Redo = append(state.Redo, snapshot)
-	if len(state.Redo) > editHistoryLimit {
-		state.Redo = append([]SlideSnapshot(nil), state.Redo[len(state.Redo)-editHistoryLimit:]...)
-	}
-	*slide = cloneSlide(snapshot.Before)
-	return true
-}
-
-func redoSlideSnapshot(state *EditState, slide *Slide) bool {
-	if state == nil || slide == nil || len(state.Redo) == 0 {
-		return false
-	}
-	snapshot := state.Redo[len(state.Redo)-1]
-	state.Redo = state.Redo[:len(state.Redo)-1]
-	state.Undo = append(state.Undo, snapshot)
-	if len(state.Undo) > editHistoryLimit {
-		state.Undo = append([]SlideSnapshot(nil), state.Undo[len(state.Undo)-editHistoryLimit:]...)
-	}
-	*slide = cloneSlide(snapshot.After)
-	return true
-}
-
-func commitDeckSnapshot(state *EditState, before, after []Slide, beforeIndex, afterIndex int) bool {
-	if state == nil || reflect.DeepEqual(before, after) {
-		return false
-	}
-	snapshot := DeckSnapshot{
-		Before:      cloneSlides(before),
-		After:       cloneSlides(after),
-		BeforeIndex: beforeIndex,
-		AfterIndex:  afterIndex,
-	}
-	state.DeckUndo = append(state.DeckUndo, snapshot)
-	if len(state.DeckUndo) > editHistoryLimit {
-		state.DeckUndo = append([]DeckSnapshot(nil), state.DeckUndo[len(state.DeckUndo)-editHistoryLimit:]...)
-	}
-	state.DeckRedo = nil
-	return true
-}
-
-func commitFullDeckSnapshot(state *EditState, before, after Deck, beforeIndex, afterIndex int) bool {
-	if state == nil || reflect.DeepEqual(before, after) {
-		return false
-	}
-	snapshot := DeckSnapshot{
-		Before: cloneSlides(before.Slides), After: cloneSlides(after.Slides),
-		BeforeMasters: before.Masters.Clone(), AfterMasters: after.Masters.Clone(), HasMasters: true,
-		BeforeIndex: beforeIndex, AfterIndex: afterIndex,
-	}
-	state.DeckUndo = append(state.DeckUndo, snapshot)
-	if len(state.DeckUndo) > editHistoryLimit {
-		state.DeckUndo = append([]DeckSnapshot(nil), state.DeckUndo[len(state.DeckUndo)-editHistoryLimit:]...)
-	}
-	state.DeckRedo = nil
-	return true
-}
-
-func undoDeckSnapshot(state *EditState, deck *Deck) (int, bool) {
-	if state == nil || deck == nil || len(state.DeckUndo) == 0 {
-		return 0, false
-	}
-	snapshot := state.DeckUndo[len(state.DeckUndo)-1]
-	state.DeckUndo = state.DeckUndo[:len(state.DeckUndo)-1]
-	state.DeckRedo = append(state.DeckRedo, snapshot)
-	if len(state.DeckRedo) > editHistoryLimit {
-		state.DeckRedo = append([]DeckSnapshot(nil), state.DeckRedo[len(state.DeckRedo)-editHistoryLimit:]...)
-	}
-	deck.Slides = cloneSlides(snapshot.Before)
-	if snapshot.HasMasters {
-		deck.Masters = snapshot.BeforeMasters.Clone()
-	}
-	return max(0, min(len(deck.Slides)-1, snapshot.BeforeIndex)), true
-}
-
-func redoDeckSnapshot(state *EditState, deck *Deck) (int, bool) {
-	if state == nil || deck == nil || len(state.DeckRedo) == 0 {
-		return 0, false
-	}
-	snapshot := state.DeckRedo[len(state.DeckRedo)-1]
-	state.DeckRedo = state.DeckRedo[:len(state.DeckRedo)-1]
-	state.DeckUndo = append(state.DeckUndo, snapshot)
-	if len(state.DeckUndo) > editHistoryLimit {
-		state.DeckUndo = append([]DeckSnapshot(nil), state.DeckUndo[len(state.DeckUndo)-editHistoryLimit:]...)
-	}
-	deck.Slides = cloneSlides(snapshot.After)
-	if snapshot.HasMasters {
-		deck.Masters = snapshot.AfterMasters.Clone()
-	}
-	return max(0, min(len(deck.Slides)-1, snapshot.AfterIndex)), true
-}
-
 func insertElementAfter(slide *Slide, selected int, element Element) int {
 	insertAt := selected + 1
 	if selected < 0 || selected >= len(slide.Elements) {
@@ -15684,11 +14048,6 @@ func insertElementAfter(slide *Slide, selected int, element Element) int {
 	copy(slide.Elements[insertAt+1:], slide.Elements[insertAt:])
 	slide.Elements[insertAt] = element
 	return insertAt
-}
-
-func insertImageElement(slide *Slide, selected int, path string) int {
-	element := Element{Kind: "image", Path: filepath.Clean(path)}
-	return insertElementAfter(slide, selected, element)
 }
 
 func newShapeElement(shape string) Element {
@@ -15707,7 +14066,7 @@ func newShapeElement(shape string) Element {
 	default:
 		query = setShapeSize(query, 10, 6)
 	}
-	return Element{Kind: "shape", Query: query}
+	return Element{Kind: "shape", ID: newStableID("shape"), Query: query}
 }
 
 func placeholderSlide() Slide {
@@ -15717,239 +14076,9 @@ func placeholderSlide() Slide {
 	}}
 }
 
-func chooseImageFile() (string, bool) {
-	script := `POSIX path of (choose file of type {"public.image"} with prompt "Select image")`
-	out, err := exec.Command("osascript", "-e", script).Output()
-	if err != nil {
-		return "", false
-	}
-	path := strings.TrimSpace(string(out))
-	return path, path != ""
-}
-
-func copyImageToDeckDir(sourcePath, deckPath string) (string, bool) {
-	deckDir := filepath.Dir(deckPath)
-	sourceAbs, err := filepath.Abs(sourcePath)
-	if err != nil {
-		return "", false
-	}
-	sourceAbs = filepath.Clean(sourceAbs)
-	if rel, err := filepath.Rel(deckDir, sourceAbs); err == nil && !strings.HasPrefix(rel, "..") {
-		return sourceAbs, true
-	}
-	base := filepath.Base(sourceAbs)
-	ext := filepath.Ext(base)
-	name := strings.TrimSuffix(base, ext)
-	target := filepath.Join(deckDir, base)
-	for i := 2; fileExists(target); i++ {
-		target = filepath.Join(deckDir, fmt.Sprintf("%s-%d%s", name, i, ext))
-	}
-	in, err := os.Open(sourceAbs)
-	if err != nil {
-		return "", false
-	}
-	defer in.Close()
-	out, err := os.Create(target)
-	if err != nil {
-		return "", false
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return "", false
-	}
-	if out.Close() != nil {
-		return "", false
-	}
-	return target, true
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
 type imagePlacementResult struct {
 	Accepted bool
 	Action   string
-}
-
-func playImagePlacementMode(slide *Slide, slideIndex, slideCount, imageIndex, width, height, page int, original Slide, clipboard **Element, persist func() bool) imagePlacementResult {
-	width, height = terminalSize()
-	withFastImageRender(func() {
-		normalizeImagePlacement(slide, imageIndex, width, height)
-	})
-	if imageIndex < 0 || imageIndex >= len(slide.Elements) {
-		return imagePlacementResult{Accepted: true}
-	}
-	result := imagePlacementResult{}
-	renderer := &liveSlideRenderer{}
-	decision := runOverlayLoop(overlayLoopSpec{
-		Draw: func(frame int) {
-			if imageIndex < 0 || imageIndex >= len(slide.Elements) {
-				return
-			}
-			width, height = terminalSize()
-			background := cloneSlide(*slide)
-			background.Elements = append(background.Elements[:imageIndex], background.Elements[imageIndex+1:]...)
-			withFastImageRender(func() {
-				renderer.draw(background, width, height, page, frame, func(lines []Line) {
-					drawImagePlacementPreview(slide.Elements[imageIndex], width, height, page)
-					drawImagePlacementToolbar(width, height, slideIndex, slideCount, page, slidePageCount(background, width, height), imageScale(slide.Elements[imageIndex].Query))
-				})
-			})
-		},
-		Read: readImagePlacementKeyEvent,
-		Handle: func(event KeyEvent) overlayDecision {
-			if imageIndex < 0 || imageIndex >= len(slide.Elements) {
-				result = imagePlacementResult{Accepted: true}
-				return overlayDecision{Disposition: overlayCommit}
-			}
-			switch event.Action {
-			case "quit":
-				result = imagePlacementResult{Action: "quit"}
-				return overlayDecision{Disposition: overlayPassthrough, Event: event}
-			case "escape":
-				*slide = original
-				return overlayDecision{Disposition: overlayCancel}
-			case "save":
-				withFastImageRender(func() { normalizeImagePlacement(slide, imageIndex, width, height) })
-				persist()
-				result = imagePlacementResult{Accepted: true, Action: "save"}
-				return overlayDecision{Disposition: overlayCommit}
-			case "copy":
-				withFastImageRender(func() { normalizeImagePlacement(slide, imageIndex, width, height) })
-				element := clipboardElementFromSelection(*slide, imageIndex, width, height)
-				*clipboard = &element
-			case "cut":
-				withFastImageRender(func() { normalizeImagePlacement(slide, imageIndex, width, height) })
-				element := clipboardElementFromSelection(*slide, imageIndex, width, height)
-				*clipboard = &element
-				slide.Elements = append(slide.Elements[:imageIndex], slide.Elements[imageIndex+1:]...)
-				persist()
-				result = imagePlacementResult{Accepted: true}
-				return overlayDecision{Disposition: overlayCommit}
-			case "paste":
-				if clipboard != nil && *clipboard != nil && (*clipboard).Kind == "image" {
-					element := elementForPastePage(**clipboard, page, width, height)
-					imageIndex = insertElementAfter(slide, imageIndex, element)
-					persist()
-					original = cloneSlide(*slide)
-				}
-			case "backspace":
-				slide.Elements = append(slide.Elements[:imageIndex], slide.Elements[imageIndex+1:]...)
-				persist()
-				result = imagePlacementResult{Accepted: true}
-				return overlayDecision{Disposition: overlayCommit}
-			case "up", "down", "left", "right":
-				withFastImageRender(func() { normalizeImagePlacement(slide, imageIndex, width, height) })
-				moveImageElement(&slide.Elements[imageIndex], event.Action, width, height, page, 1)
-			case "shift-up", "shift-down", "shift-left", "shift-right":
-				withFastImageRender(func() { normalizeImagePlacement(slide, imageIndex, width, height) })
-				moveImageElement(&slide.Elements[imageIndex], strings.TrimPrefix(event.Action, "shift-"), width, height, page, 10)
-			case "align-left", "align-center", "align-right":
-				alignElement(&slide.Elements[imageIndex], strings.TrimPrefix(event.Action, "align-"))
-			case "settings":
-				if query, ok := playImageSettingsDialog(*slide, imageIndex, width, height, page); ok {
-					slide.Elements[imageIndex].Query = query
-					persist()
-					original = cloneSlide(*slide)
-				}
-			case "scale-up":
-				scaleImageElement(&slide.Elements[imageIndex], 0.1)
-				persist()
-				original = cloneSlide(*slide)
-			case "scale-down":
-				scaleImageElement(&slide.Elements[imageIndex], -0.1)
-				persist()
-				original = cloneSlide(*slide)
-			}
-			return overlayDecision{Disposition: overlayContinue}
-		},
-	})
-	if decision.Disposition == overlayPassthrough && decision.Event.Action == "quit" {
-		return imagePlacementResult{Action: "quit"}
-	}
-	return result
-}
-
-func withFastImageRender(fn func()) {
-	previous := fastImageRender
-	fastImageRender = true
-	defer func() { fastImageRender = previous }()
-	fn()
-}
-
-func drawSelectedImageHighlight(lines []Line, imageIndex, width, height int) {
-	drawSelectionUnderline(lines, imageIndex, width, height, true)
-}
-
-func drawSelectedSetHighlight(lines []Line, selection map[int]bool, active, width, height int) {
-	for selected := range selection {
-		if selected == active {
-			continue
-		}
-		imageOnly := false
-		for _, line := range lines {
-			if line.Element == selected && line.Role == "image" {
-				imageOnly = true
-				break
-			}
-		}
-		drawSelectionUnderlineColor(lines, selected, width, height, imageOnly, "36")
-	}
-}
-
-func drawImagePlacementPreview(element Element, width, height, page int) {
-	element = scaleElementForTerminal(element, terminalScaleX(width, height), terminalScaleY(width, height))
-	placement := parseImagePlacement(element.Query)
-	rows := renderFastASCIIImage(element.Path, element.Query, width, height)
-	if len(rows) == 0 {
-		return
-	}
-	imageWidth := maxLineDisplayWidth(rows)
-	row, col := 0, 0
-	if placement.top != nil {
-		row = *placement.top - page*max(1, height)
-	} else {
-		row = placementTopRow(placement, height, len(rows), 0)
-	}
-	if placement.hasHorizontalOffset() {
-		col = placementLeftCol(placement, width, imageWidth)
-	} else {
-		switch placement.align {
-		case "center":
-			col = (width - imageWidth) / 2
-		case "right":
-			col = rightAlignedCol(width, imageWidth, 0)
-		}
-	}
-	col = clampBlockCol(col, width, imageWidth)
-	termPrint("\033[43m")
-	for offset, text := range rows {
-		if row+offset < 0 || row+offset >= height {
-			continue
-		}
-		if strings.Contains(text, "\033[") {
-			drawTransparentANSI(row+offset+1, col+1, text, width)
-		} else {
-			drawTransparentTextAt(row+offset+1, col+1, text, width)
-		}
-	}
-	termPrint("\033[0m")
-}
-
-func drawImagePlacementToolbar(width, height, slideIndex, slideCount, page, pageCount int, scale float64) {
-	if height <= 0 || width <= 0 {
-		return
-	}
-	label := fmt.Sprintf("%s  scale %.1f", slideNumberLabel(ViewState{
-		SlideIndex: slideIndex,
-		SlideCount: slideCount,
-		Page:       page,
-		PageCount:  pageCount,
-	}), scale)
-	controls := " IMAGE  arrows move  Shift-arrows jump 10  +/- scale  s settings  < left  = center  > right  Enter save  Esc cancel  Backspace delete  q quit "
-	drawToolbarLine(width, height, "43", controls, label)
 }
 
 type imageSettingField struct {
@@ -15975,463 +14104,6 @@ var textSettingFields = []imageSettingField{
 	{Key: "glyph", Label: "Glyph", Values: []string{"blocks", "braille", "ascii", "dense"}},
 }
 
-func playImageSettingsDialog(slide Slide, imageIndex, width, height, page int) (string, bool) {
-	if imageIndex < 0 || imageIndex >= len(slide.Elements) {
-		return "", false
-	}
-	selected := 0
-	textSettings := slide.Elements[imageIndex].Kind != "image"
-	fields := imageSettingFields
-	title := " IMAGE SETTINGS "
-	if textSettings {
-		fields = textSettingFields
-		title = " TEXT GLYPH "
-	}
-	query := normalizeImageSettingsQuery(slide.Elements[imageIndex].Query)
-	if textSettings {
-		query = normalizeTextSettingsQuery(slide.Elements[imageIndex].Query)
-	}
-	result := ""
-	renderer := &liveSlideRenderer{}
-	decision := runOverlayLoop(overlayLoopSpec{
-		Draw: func(frame int) {
-			width, height = terminalSize()
-			preview := cloneSlide(slide)
-			preview.Elements[imageIndex].Query = query
-			withFastImageRender(func() {
-				renderer.draw(preview, width, height, page, frame, func(lines []Line) {
-					if preview.Elements[imageIndex].Kind == "image" {
-						drawSelectedImageHighlight(lines, imageIndex, width, height)
-					} else {
-						drawSelectedElementHighlight(lines, imageIndex, width, height)
-					}
-					drawImageSettingsDialog(width, height, query, selected, fields, title)
-				})
-			})
-		},
-		Read: readImageSettingsKeyEvent,
-		Handle: func(event KeyEvent) overlayDecision {
-			switch event.Action {
-			case "quit", "escape":
-				return overlayDecision{Disposition: overlayCancel}
-			case "enter":
-				if textSettings {
-					result = compactTextSettingsQuery(query)
-				} else {
-					result = compactImageSettingsQuery(query)
-				}
-				return overlayDecision{Disposition: overlayCommit}
-			case "up":
-				selected = (selected - 1 + len(fields)) % len(fields)
-			case "down":
-				selected = (selected + 1) % len(fields)
-			case "left":
-				query = changeImageSetting(query, fields[selected], -1)
-			case "right":
-				query = changeImageSetting(query, fields[selected], 1)
-			case "reset":
-				query = resetImageSetting(query, fields[selected])
-			case "mouse-click":
-				if index, ok := imageSettingsFieldAt(event.X, event.Y, width, height, fields); ok {
-					if index == selected {
-						query = changeImageSetting(query, fields[selected], 1)
-					} else {
-						selected = index
-					}
-				}
-			}
-			return overlayDecision{Disposition: overlayContinue}
-		},
-	})
-	return result, decision.Disposition == overlayCommit
-}
-
-func drawImageSettingsDialog(width, height int, query string, selected int, fields []imageSettingField, title string) {
-	panelWidth := min(width, 74)
-	panelHeight := min(height, len(fields)+6)
-	left := max(0, (width-panelWidth)/2)
-	top := max(0, (height-panelHeight)/2)
-	panelBG := "48;2;18;18;18"
-	for row := 0; row < panelHeight; row++ {
-		termPrintf("\033[0;37;%sm\033[%d;%dH%s", panelBG, top+row+1, left+1, strings.Repeat(" ", panelWidth))
-	}
-	termPrintf("\033[0;37;%sm\033[%d;%dH%s", panelBG, top+1, left+3, title)
-	for i, field := range fields {
-		bg := panelBG
-		fg := "37"
-		if i == selected {
-			bg = "43"
-			fg = "30"
-		}
-		value := imageSettingDisplayValue(query, field)
-		line := fmt.Sprintf("%-16s %s", field.Label, value)
-		termPrintf("\033[0;%s;%sm\033[%d;%dH%s", fg, bg, top+3+i, left+3, padRight(crop(line, panelWidth-6), panelWidth-6))
-	}
-	help := " arrows adjust  r reset field  Enter save  Esc cancel "
-	termPrintf("\033[0;30;43m\033[%d;%dH%s", top+panelHeight-1, left+3, padRight(crop(help, panelWidth-6), panelWidth-6))
-}
-
-func imageSettingsFieldAt(x, y, width, height int, fields []imageSettingField) (int, bool) {
-	panelWidth := min(width, 74)
-	panelHeight := min(height, len(fields)+6)
-	left := max(0, (width-panelWidth)/2)
-	top := max(0, (height-panelHeight)/2)
-	index := y - (top + 2)
-	if x < left+2 || x >= left+panelWidth-2 || index < 0 || index >= len(fields) {
-		return 0, false
-	}
-	return index, true
-}
-
-func readImageSettingsKeyEvent() KeyEvent {
-	var buf [32]byte
-	n, _ := inputRead(buf[:])
-	if n == 0 {
-		return KeyEvent{}
-	}
-	b := buf[:n]
-	if event := parseMouseEvent(b); event.Action != "" {
-		return event
-	}
-	if event := editEscapeEvent(b); event.Action != "" {
-		return event
-	}
-	if bytes.Contains(b, []byte{'\r'}) || bytes.Contains(b, []byte{'\n'}) {
-		return KeyEvent{Action: "enter"}
-	}
-	if bytes.Contains(b, []byte{'q'}) {
-		return KeyEvent{Action: "quit"}
-	}
-	if bytes.Contains(b, []byte{'r'}) {
-		return KeyEvent{Action: "reset"}
-	}
-	if bytes.Contains(b, []byte{27, '[', 'A'}) {
-		return KeyEvent{Action: "up"}
-	}
-	if bytes.Contains(b, []byte{27, '[', 'B'}) {
-		return KeyEvent{Action: "down"}
-	}
-	if bytes.Contains(b, []byte{27, '[', 'C'}) {
-		return KeyEvent{Action: "right"}
-	}
-	if bytes.Contains(b, []byte{27, '[', 'D'}) {
-		return KeyEvent{Action: "left"}
-	}
-	return KeyEvent{}
-}
-
-func normalizeImageSettingsQuery(query string) string {
-	values, _ := url.ParseQuery(query)
-	if values.Get("glyph") == "" {
-		values.Set("glyph", "blocks")
-	}
-	if values.Get("shape") == "" {
-		values.Set("shape", "subject")
-	}
-	for _, key := range []string{"brightness", "contrast", "saturation", "sharpness"} {
-		if values.Get(key) == "" {
-			values.Set(key, "1.0")
-		}
-	}
-	if values.Get("alpha") == "" {
-		values.Set("alpha", "96")
-	}
-	return values.Encode()
-}
-
-func normalizeTextSettingsQuery(query string) string {
-	values, _ := url.ParseQuery(query)
-	if values.Get("glyph") == "" {
-		values.Set("glyph", "blocks")
-	}
-	for _, key := range []string{"shape", "brightness", "contrast", "saturation", "sharpness", "alpha"} {
-		values.Del(key)
-	}
-	return values.Encode()
-}
-
-func compactImageSettingsQuery(query string) string {
-	values, _ := url.ParseQuery(query)
-	defaults := map[string]string{
-		"glyph":      "blocks",
-		"shape":      "subject",
-		"brightness": "1.0",
-		"contrast":   "1.0",
-		"saturation": "1.0",
-		"sharpness":  "1.0",
-		"alpha":      "96",
-	}
-	for key, value := range defaults {
-		if values.Get(key) == value {
-			values.Del(key)
-		}
-	}
-	return values.Encode()
-}
-
-func compactTextSettingsQuery(query string) string {
-	values, _ := url.ParseQuery(query)
-	if values.Get("glyph") == "blocks" {
-		values.Del("glyph")
-	}
-	for _, key := range []string{"shape", "brightness", "contrast", "saturation", "sharpness", "alpha"} {
-		values.Del(key)
-	}
-	return values.Encode()
-}
-
-func imageSettingValue(query string, field imageSettingField) string {
-	values, _ := url.ParseQuery(query)
-	if len(field.Values) > 0 {
-		value := values.Get(field.Key)
-		if value == "" {
-			value = field.Values[0]
-		}
-		return value
-	}
-	if field.Key == "alpha" {
-		value := values.Get(field.Key)
-		if value == "" {
-			value = "96"
-		}
-		return value
-	}
-	value := values.Get(field.Key)
-	if value == "" {
-		value = "1.0"
-	}
-	return value
-}
-
-func imageSettingDisplayValue(query string, field imageSettingField) string {
-	value := imageSettingValue(query, field)
-	if len(field.Values) > 0 {
-		return value
-	}
-	current, _ := strconv.ParseFloat(value, 64)
-	steps := 18
-	position := 0
-	if field.Max > field.Min {
-		position = int(math.Round((current - field.Min) / (field.Max - field.Min) * float64(steps-1)))
-	}
-	position = max(0, min(steps-1, position))
-	var bar strings.Builder
-	bar.WriteByte('[')
-	for i := 0; i < steps; i++ {
-		if i == position {
-			bar.WriteRune('█')
-		} else if i < position {
-			bar.WriteRune('▓')
-		} else {
-			bar.WriteRune('░')
-		}
-	}
-	bar.WriteByte(']')
-	return fmt.Sprintf("%s %s", bar.String(), value)
-}
-
-func changeImageSetting(query string, field imageSettingField, direction int) string {
-	values, _ := url.ParseQuery(query)
-	if len(field.Values) > 0 {
-		current := imageSettingValue(query, field)
-		index := 0
-		for i, value := range field.Values {
-			if value == current {
-				index = i
-				break
-			}
-		}
-		index = (index + direction + len(field.Values)) % len(field.Values)
-		values.Set(field.Key, field.Values[index])
-		return values.Encode()
-	}
-	current, _ := strconv.ParseFloat(imageSettingValue(query, field), 64)
-	next := clampFloat(current+float64(direction)*field.Step, field.Min, field.Max)
-	if field.Key == "alpha" {
-		values.Set(field.Key, strconv.Itoa(int(math.Round(next))))
-	} else {
-		values.Set(field.Key, fmt.Sprintf("%.1f", next))
-	}
-	return values.Encode()
-}
-
-func resetImageSetting(query string, field imageSettingField) string {
-	values, _ := url.ParseQuery(query)
-	switch field.Key {
-	case "glyph":
-		values.Set(field.Key, "blocks")
-	case "shape":
-		values.Set(field.Key, "subject")
-	case "alpha":
-		values.Set(field.Key, "96")
-	default:
-		values.Set(field.Key, "1.0")
-	}
-	return values.Encode()
-}
-
-func normalizeImagePlacement(slide *Slide, imageIndex, width, height int) {
-	lines := layout(*slide, width, height)
-	top, left := 0, 0
-	right := 0
-	found := false
-	for _, line := range lines {
-		if line.Role != "image" || line.Element != imageIndex {
-			continue
-		}
-		if !found {
-			top, left = line.Row, line.Col
-			found = true
-		}
-		top = min(top, line.Row)
-		left = min(left, line.Col)
-		right = max(right, line.Col+displayWidth(stripANSI(line.Text))-1)
-	}
-	if imageIndex < 0 || imageIndex >= len(slide.Elements) {
-		return
-	}
-	if !found {
-		return
-	}
-	query := setImageQueryInt(slide.Elements[imageIndex].Query, "top", max(0, top))
-	query = setPlacementHorizontalPct(query, left, right, width)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
-	slide.Elements[imageIndex].Query = query
-}
-
-func normalizeTextPlacement(slide *Slide, elementIndex, width, height int) {
-	if elementIndex < 0 || elementIndex >= len(slide.Elements) {
-		return
-	}
-	lines := layout(*slide, width, height)
-	top, left := 0, 0
-	right := 0
-	found := false
-	for _, line := range lines {
-		if line.Element != elementIndex || line.Role == "image" || line.Role == "outline" {
-			continue
-		}
-		if !found {
-			top, left = line.Row, line.Col
-			found = true
-		}
-		top = min(top, line.Row)
-		left = min(left, line.Col)
-		right = max(right, line.Col+displayWidth(stripANSI(line.Text))-1)
-	}
-	if !found {
-		return
-	}
-	query := slide.Elements[elementIndex].Query
-	query = setPlacementHorizontalPct(query, left, right, width)
-	query = setImageQueryInt(query, "top", max(0, top))
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
-	slide.Elements[elementIndex].Query = query
-}
-
-func moveTextElement(slide *Slide, elementIndex int, direction string, width, height, step int) {
-	if elementIndex < 0 || elementIndex >= len(slide.Elements) {
-		return
-	}
-	normalizeTextPlacement(slide, elementIndex, width, height)
-	placement := parseImagePlacement(slide.Elements[elementIndex].Query)
-	top, left := 0, 0
-	if placement.top != nil {
-		top = *placement.top
-	}
-	if placement.leftPct != nil {
-		left = int(math.Round(*placement.leftPct * float64(max(0, width-1))))
-	} else if placement.left != nil {
-		left = *placement.left
-	}
-	switch direction {
-	case "up":
-		top -= step
-	case "down":
-		top += step
-	case "left":
-		left -= step
-	case "right":
-		left += step
-	}
-	top = max(0, min(max(0, height-1), top))
-	left = max(0, min(max(0, width-1), left))
-	query := setImageQueryInt(slide.Elements[elementIndex].Query, "top", top)
-	query = setPlacementHorizontalPct(query, left, left, width)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
-	slide.Elements[elementIndex].Query = query
-}
-
-func moveSelectedElement(slide *Slide, elementIndex int, direction string, width, height, step int) {
-	if elementIndex < 0 || elementIndex >= len(slide.Elements) {
-		return
-	}
-	if isPositionedElement(slide.Elements[elementIndex]) || isEditableElement(slide.Elements[elementIndex]) {
-		withFastImageRender(func() {
-			if slide.Elements[elementIndex].Kind == "image" {
-				normalizeImagePlacement(slide, elementIndex, width, height)
-			} else {
-				normalizeTextPlacement(slide, elementIndex, width, height)
-			}
-		})
-		moveElementByBounds(slide, elementIndex, direction, width, height, step)
-	}
-}
-
-func moveElementByBounds(slide *Slide, elementIndex int, direction string, width, height, step int) {
-	top, left, right, ok := elementBounds(*slide, elementIndex, width, height)
-	if !ok {
-		return
-	}
-	switch direction {
-	case "up":
-		top -= step
-	case "down":
-		top += step
-	case "left":
-		left -= step
-		right -= step
-	case "right":
-		left += step
-		right += step
-	}
-	top = max(0, min(max(0, height-1), top))
-	blockWidth := max(1, right-left+1)
-	left = clampBlockCol(left, width, blockWidth)
-	right = left + blockWidth - 1
-	query := slide.Elements[elementIndex].Query
-	query = setPlacementHorizontalPct(query, left, right, width)
-	query = setImageQueryInt(query, "top", top)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
-	slide.Elements[elementIndex].Query = query
-}
-
-func elementBounds(slide Slide, elementIndex, width, height int) (int, int, int, bool) {
-	lines := layout(slide, width, height)
-	top, left, right := 0, 0, 0
-	found := false
-	for _, line := range lines {
-		if line.Element != elementIndex || line.Role == "outline" || line.Row < 0 || line.Row >= height {
-			continue
-		}
-		lineRight := line.Col + displayWidth(stripANSI(line.Text)) - 1
-		if !found {
-			top, left, right = line.Row, line.Col, lineRight
-			found = true
-			continue
-		}
-		top = min(top, line.Row)
-		left = min(left, line.Col)
-		right = max(right, lineRight)
-	}
-	return top, left, right, found
-}
-
-func elementFullBounds(slide Slide, elementIndex, width, height int) (int, int, int, bool) {
-	top, bottom, left, _, ok := elementFullBox(slide, elementIndex, width, height)
-	return top, bottom, left, ok
-}
-
 func elementFullBox(slide Slide, elementIndex, width, height int) (int, int, int, int, bool) {
 	lines := layout(slide, width, height)
 	top, bottom, left, right := 0, 0, 0, 0
@@ -16455,61 +14127,6 @@ func elementFullBox(slide Slide, elementIndex, width, height int) (int, int, int
 	return top, bottom, left, right, found
 }
 
-func naturalElementTop(slide Slide, elementIndex, width, height int, query string) (int, bool) {
-	if elementIndex < 0 || elementIndex >= len(slide.Elements) {
-		return 0, false
-	}
-	clone := cloneSlide(slide)
-	clone.Elements[elementIndex].Query = removeImageQueryKeys(query, "top", "bottom", "row_delta", "valign")
-	top, _, _, ok := elementBounds(clone, elementIndex, width, height)
-	return top, ok
-}
-
-func setPlacementRowDeltaForTop(slide Slide, elementIndex int, query string, top, width, height int) string {
-	if elementIndex < 0 || elementIndex >= len(slide.Elements) || width <= 0 || height <= 0 {
-		return removeImageQueryKeys(query, "top", "bottom", "row_delta", "valign")
-	}
-	return setPlacementRowDelta(query, max(0, top))
-}
-
-func normalizeFlowRelativePlacements(slide *Slide, width, height int) {
-	if slide == nil {
-		return
-	}
-	original := cloneSlide(*slide)
-	for index, element := range slide.Elements {
-		placement := parseImagePlacement(element.Query)
-		if !placement.hasHorizontalOffset() || placement.rowDelta != nil || placement.verticalAlign != "" || !placement.hasVerticalOffset() {
-			continue
-		}
-		top, _, _, ok := elementBounds(original, index, width, height)
-		if !ok {
-			continue
-		}
-		query := setPlacementRowDeltaForTop(original, index, element.Query, top, width, height)
-		query = removeImageQueryKeys(query, "top", "bottom", "valign")
-		slide.Elements[index].Query = query
-	}
-}
-
-func alignElement(element *Element, align string) {
-	if element == nil {
-		return
-	}
-	switch align {
-	case "left", "center", "right":
-	default:
-		return
-	}
-	values, _ := url.ParseQuery(element.Query)
-	values.Set("align", align)
-	values.Del("left")
-	values.Del("right")
-	values.Del("left_pct")
-	values.Del("right_pct")
-	element.Query = values.Encode()
-}
-
 func initializeInsertedImagePlacement(slide *Slide, imageIndex int) {
 	if imageIndex < 0 || imageIndex >= len(slide.Elements) {
 		return
@@ -16526,408 +14143,10 @@ func initializeInsertedImagePlacement(slide *Slide, imageIndex int) {
 	slide.Elements[imageIndex].Query = query
 }
 
-func insertedTextPlacementAnchor(slide Slide, selected, width, height, page int) (int, int) {
-	top := max(0, page*max(1, height)+1)
-	left := 1
-	if selected < 0 || selected >= len(slide.Elements) {
-		return top, left
-	}
-	minRow, maxRow, minCol, ok := elementFullBounds(slide, selected, width, height)
-	if !ok {
-		return top, left
-	}
-	pageTop := page * max(1, height)
-	pageBottom := pageTop + max(1, height) - 1
-	if maxRow < pageTop || minRow > pageBottom {
-		return top, left
-	}
-	top = min(pageBottom, maxRow+1)
-	left = max(0, minCol)
-	return top, left
-}
-
-func initializeInsertedTextPlacement(slide *Slide, elementIndex, top, left, width int) {
-	if elementIndex < 0 || elementIndex >= len(slide.Elements) {
-		return
-	}
-	query := slide.Elements[elementIndex].Query
-	query = setImageQueryInt(query, "top", max(0, top))
-	query = setPlacementHorizontalPct(query, left, left+max(0, displayWidth(slide.Elements[elementIndex].Text)-1), width)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
-	slide.Elements[elementIndex].Query = query
-}
-
-func initializeInsertedShapePlacement(slide *Slide, elementIndex, top, left, width int) {
-	if elementIndex < 0 || elementIndex >= len(slide.Elements) {
-		return
-	}
-	shapeWidth, _ := shapeSize(slide.Elements[elementIndex])
-	query := slide.Elements[elementIndex].Query
-	query = setImageQueryInt(query, "top", max(0, top))
-	query = setPlacementHorizontalPct(query, left, left+shapeWidth-1, width)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
-	slide.Elements[elementIndex].Query = query
-}
-
-func clipboardElementFromSelection(slide Slide, elementIndex, width, height int) Element {
-	if elementIndex < 0 || elementIndex >= len(slide.Elements) {
-		return Element{}
-	}
-	element := slide.Elements[elementIndex]
-	top, _, left, right, ok := elementFullBox(slide, elementIndex, width, height)
-	if !ok {
-		return element
-	}
-	element.Query = setImageQueryInt(element.Query, "top", top)
-	element.Query = setPlacementHorizontalPct(element.Query, left, right, width)
-	element.Query = removeImageQueryKeys(element.Query, "align", "left", "right", "bottom", "row_delta", "valign")
-	return element
-}
-
-func elementForPastePage(element Element, page, width, height int) Element {
-	if height <= 0 {
-		return element
-	}
-	page = max(0, page)
-	placement := parseImagePlacement(element.Query)
-	localTop := 0
-	switch {
-	case placement.top != nil:
-		localTop = positiveMod(*placement.top, height)
-	case placement.bottom != nil:
-		localTop = max(0, height-elementLayoutHeight(element, width, height)-*placement.bottom)
-	case placement.rowDelta != nil:
-		localTop = max(0, *placement.rowDelta)
-	case placement.verticalAlign != "":
-		localTop = max(0, placementTopRow(placement, height, elementLayoutHeight(element, width, height), 0))
-	default:
-		if page == 0 {
-			return element
-		}
-	}
-	element.Query = setImageQueryInt(element.Query, "top", page*height+localTop)
-	element.Query = removeImageQueryKeys(element.Query, "bottom", "row_delta", "valign")
-	return element
-}
-
-func elementLayoutHeight(element Element, width, height int) int {
-	if element.Kind == "image" {
-		return max(1, len(renderImageElementRows(element, width, height)))
-	}
-	return max(1, len(layoutElementRows(element, width)))
-}
-
-func positiveMod(value, base int) int {
-	if base <= 0 {
-		return value
-	}
-	out := value % base
-	if out < 0 {
-		out += base
-	}
-	return out
-}
-
-func moveImageElement(element *Element, direction string, width, height, page, step int) {
-	placement := parseImagePlacement(element.Query)
-	top, left := 0, 0
-	pageTop := page * max(1, height)
-	if placement.top != nil {
-		top = *placement.top - pageTop
-	}
-	rows := renderImageElementRows(*element, width, height)
-	imageWidth := max(1, maxLineDisplayWidth(rows))
-	left = placementLeftCol(placement, width, imageWidth)
-	right := left + imageWidth - 1
-	switch direction {
-	case "up":
-		top -= step
-	case "down":
-		top += step
-	case "left":
-		left -= step
-		right -= step
-	case "right":
-		left += step
-		right += step
-	}
-	top = max(0, min(max(0, height-1), top))
-	left = clampBlockCol(left, width, imageWidth)
-	right = left + imageWidth - 1
-	query := setImageQueryInt(element.Query, "top", pageTop+top)
-	query = setPlacementHorizontalPct(query, left, right, width)
-	query = removeImageQueryKeys(query, "align", "left", "right", "bottom", "row_delta", "valign")
-	element.Query = query
-}
-
-func scaleImageElement(element *Element, delta float64) {
-	scale := clampFloat(imageScale(element.Query)+delta, 0.1, 1.0)
-	element.Query = setImageQueryFloat(element.Query, "scale", scale)
-}
-
-func resizeShapeElement(element *Element, delta int) {
-	if element == nil || element.Kind != "shape" {
-		return
-	}
-	w, h := shapeSize(*element)
-	w = max(1, w+delta*2)
-	h = max(1, h+delta)
-	element.Query = setShapeSize(element.Query, w, h)
-}
-
-func beginElementResize(slide *Slide, elementIndex, width, height int) {
-	if slide == nil || elementIndex < 0 || elementIndex >= len(slide.Elements) {
-		return
-	}
-	element := &slide.Elements[elementIndex]
-	switch {
-	case element.Kind == "image":
-		w, h := measuredElementSize(*slide, elementIndex, width, height, 16, 8)
-		element.Query = setImageResizeSize(element.Query, w, h)
-		top, _, left, _, ok := elementFullBox(*slide, elementIndex, width, height)
-		if ok {
-			element.Query = setElementTopLeft(element.Query, top, left)
-		}
-	case isEditableElement(*element):
-		w, _ := measuredElementSize(*slide, elementIndex, width, height, 20, 1)
-		element.Query = setImageQueryInt(element.Query, "width", max(4, w))
-		top, _, left, _, ok := elementFullBox(*slide, elementIndex, width, height)
-		if ok {
-			element.Query = setElementTopLeft(element.Query, top, left)
-		}
-	}
-}
-
-func resizeElementUniform(slide *Slide, elementIndex, width, height, delta int) {
-	if slide == nil || elementIndex < 0 || elementIndex >= len(slide.Elements) {
-		return
-	}
-	element := &slide.Elements[elementIndex]
-	switch {
-	case element.Kind == "shape":
-		resizeShapeElement(element, delta)
-	case element.Kind == "image":
-		w, h := measuredElementSize(*slide, elementIndex, width, height, 16, 8)
-		element.Query = setImageResizeSize(element.Query, max(1, w+delta*2), max(1, h+delta))
-	case isEditableElement(*element):
-		changeTextLevel(element, delta)
-	}
-}
-
-func resizeElementByDirection(slide *Slide, elementIndex int, direction string, width, height int, shrink bool) {
-	if slide == nil || elementIndex < 0 || elementIndex >= len(slide.Elements) {
-		return
-	}
-	element := &slide.Elements[elementIndex]
-	if element.Kind == "shape" {
-		stretchShapeElement(slide, elementIndex, direction, width, height, shrink)
-		return
-	}
-	top, bottom, left, right, ok := elementFullBox(*slide, elementIndex, width, height)
-	if !ok {
-		top, bottom, left, right = 0, 0, 0, 0
-	}
-	switch {
-	case element.Kind == "image":
-		w, h := max(1, right-left+1), max(1, bottom-top+1)
-		left, top, w, h = resizeBoxByDirection(left, top, w, h, width, height, direction, shrink, 2, 1, 1, 1)
-		element.Query = setImageResizeSize(element.Query, w, h)
-		element.Query = setElementTopLeft(element.Query, top, left)
-	case isEditableElement(*element):
-		w := max(4, right-left+1)
-		h := max(1, bottom-top+1)
-		switch direction {
-		case "left", "right":
-			left, _, w, _ = resizeBoxByDirection(left, top, w, h, width, height, direction, shrink, 4, 1, 4, 1)
-			element.Query = setImageQueryInt(element.Query, "width", w)
-			element.Query = setElementTopLeft(element.Query, top, left)
-		case "up", "down":
-			sizeDelta := 1
-			if shrink {
-				sizeDelta = -1
-			}
-			if direction == "up" || direction == "down" {
-				oldTop, oldBottom := top, bottom
-				changeTextLevel(element, sizeDelta)
-				newTop, newBottom, _, _, ok := elementFullBox(*slide, elementIndex, width, height)
-				if !ok {
-					return
-				}
-				newH := max(1, newBottom-newTop+1)
-				switch {
-				case !shrink && direction == "up":
-					if oldTop <= 0 && newH > h {
-						changeTextLevel(element, -sizeDelta)
-						return
-					}
-					top = oldBottom - newH + 1
-				case shrink && direction == "down":
-					top = oldTop + (h - newH)
-				default:
-					top = oldTop
-				}
-				if top < 0 || top+newH > height {
-					changeTextLevel(element, -sizeDelta)
-					return
-				}
-				element.Query = setElementTopLeft(element.Query, top, left)
-			}
-		}
-	}
-}
-
-func resizeElementByAxisMode(slide *Slide, elementIndex int, direction string, width, height int, mode string) {
-	switch mode {
-	case axisScaleStretchHorizontal:
-		if direction == "left" || direction == "right" {
-			resizeElementByDirection(slide, elementIndex, direction, width, height, false)
-		}
-	case axisScaleShrinkHorizontal:
-		if direction == "left" || direction == "right" {
-			resizeElementByDirection(slide, elementIndex, direction, width, height, true)
-		}
-	case axisScaleStretchVertical:
-		if direction == "up" || direction == "down" {
-			resizeElementByDirection(slide, elementIndex, direction, width, height, false)
-		}
-	case axisScaleShrinkVertical:
-		if direction == "up" || direction == "down" {
-			resizeElementByDirection(slide, elementIndex, direction, width, height, true)
-		}
-	}
-}
-
-func resizeBoxByDirection(left, top, w, h, viewportW, viewportH int, direction string, shrink bool, stepX, stepY, minW, minH int) (int, int, int, int) {
-	stepX = max(1, stepX)
-	stepY = max(1, stepY)
-	minW = max(1, minW)
-	minH = max(1, minH)
-	right := left + w - 1
-	bottom := top + h - 1
-	if shrink {
-		switch direction {
-		case "right":
-			if w > minW {
-				left += min(stepX, w-minW)
-				w -= min(stepX, w-minW)
-			}
-		case "left":
-			w = max(minW, w-stepX)
-		case "down":
-			if h > minH {
-				top += min(stepY, h-minH)
-				h -= min(stepY, h-minH)
-			}
-		case "up":
-			h = max(minH, h-stepY)
-		}
-		return max(0, left), max(0, top), max(minW, w), max(minH, h)
-	}
-	switch direction {
-	case "right":
-		if right+stepX < viewportW {
-			w += stepX
-		}
-	case "left":
-		if left-stepX >= 0 {
-			left -= stepX
-			w += stepX
-		}
-	case "down":
-		if bottom+stepY < viewportH {
-			h += stepY
-		}
-	case "up":
-		if top-stepY >= 0 {
-			top -= stepY
-			h += stepY
-		}
-	}
-	return max(0, left), max(0, top), max(minW, w), max(minH, h)
-}
-
-func measuredElementSize(slide Slide, elementIndex, width, height, fallbackW, fallbackH int) (int, int) {
-	top, bottom, left, right, ok := elementFullBox(slide, elementIndex, width, height)
-	if ok {
-		return max(1, right-left+1), max(1, bottom-top+1)
-	}
-	if elementIndex >= 0 && elementIndex < len(slide.Elements) {
-		return elementSizeQuery(slide.Elements[elementIndex], fallbackW, fallbackH)
-	}
-	return fallbackW, fallbackH
-}
-
-func elementSizeQuery(element Element, fallbackW, fallbackH int) (int, int) {
-	values, _ := url.ParseQuery(element.Query)
-	w := fallbackW
-	h := fallbackH
-	if parsed, err := strconv.Atoi(values.Get("width")); err == nil && parsed > 0 {
-		w = parsed
-	}
-	if parsed, err := strconv.Atoi(values.Get("height")); err == nil && parsed > 0 {
-		h = parsed
-	}
-	return max(1, w), max(1, h)
-}
-
-func setElementSize(query string, width, height int) string {
-	query = setImageQueryInt(query, "width", max(1, width))
-	query = setImageQueryInt(query, "height", max(1, height))
-	return query
-}
-
-func setElementTopLeft(query string, top, left int) string {
-	query = setImageQueryInt(query, "top", max(0, top))
-	query = setImageQueryInt(query, "left", max(0, left))
-	return removeImageQueryKeys(query, "align", "left_pct", "right", "right_pct", "bottom", "row_delta", "valign")
-}
-
-func setImageResizeSize(query string, width, height int) string {
-	query = setElementSize(query, width, height)
-	query = setQueryValue(query, "stretch", "1")
-	query = removeImageQueryKeys(query, "scale")
-	return query
-}
-
-func stretchShapeElement(slide *Slide, elementIndex int, direction string, width, height int, shrink bool) {
-	if slide == nil || elementIndex < 0 || elementIndex >= len(slide.Elements) || slide.Elements[elementIndex].Kind != "shape" {
-		return
-	}
-	normalizeTextPlacement(slide, elementIndex, width, height)
-	element := &slide.Elements[elementIndex]
-	top, _, left, _, ok := elementFullBox(*slide, elementIndex, width, height)
-	if !ok {
-		top = 0
-		left = 0
-	}
-	w, h := shapeSize(*element)
-	left, top, w, h = resizeBoxByDirection(left, top, w, h, width, height, direction, shrink, 1, 1, 1, 1)
-	element.Query = setShapeSize(element.Query, w, h)
-	element.Query = setElementTopLeft(element.Query, max(0, top), max(0, left))
-}
-
-func shapeSize(element Element) (int, int) {
-	values, _ := url.ParseQuery(element.Query)
-	w := max(1, intQueryDefault(values, "width", 12))
-	h := max(1, intQueryDefault(values, "height", 6))
-	return w, h
-}
-
 func setShapeSize(query string, width, height int) string {
 	query = setImageQueryInt(query, "width", max(1, width))
 	query = setImageQueryInt(query, "height", max(1, height))
 	return query
-}
-
-func imageScale(query string) float64 {
-	values, err := url.ParseQuery(query)
-	if err != nil {
-		return 1.0
-	}
-	if parsed, err := strconv.ParseFloat(values.Get("scale"), 64); err == nil && parsed > 0 {
-		return clampFloat(parsed, 0.1, 1.0)
-	}
-	return 1.0
 }
 
 func setImageQueryInt(query, key string, value int) string {
@@ -16956,18 +14175,6 @@ func setPlacementHorizontalPct(query string, left, right, width int) string {
 	return values.Encode()
 }
 
-func setPlacementRowDelta(query string, delta int) string {
-	values, _ := url.ParseQuery(query)
-	values.Del("top")
-	values.Del("bottom")
-	values.Del("row_delta")
-	values.Del("valign")
-	if delta != 0 {
-		values.Set("row_delta", strconv.Itoa(delta))
-	}
-	return values.Encode()
-}
-
 func setImageQueryFloat(query, key string, value float64) string {
 	values, _ := url.ParseQuery(query)
 	values.Set(key, fmt.Sprintf("%.1f", clampFloat(value, 0.1, 1.0)))
@@ -16980,38 +14187,9 @@ func setQueryValue(query, key, value string) string {
 	return values.Encode()
 }
 
-func toggleElementOutline(element *Element) {
-	if element == nil || !isSelectableElement(*element) {
-		return
-	}
-	values, _ := url.ParseQuery(element.Query)
-	switch values.Get("outline") {
-	case "":
-		values.Set("outline", "1")
-	case "1":
-		values.Set("outline", "dark")
-	default:
-		values.Del("outline")
-	}
-	element.Query = values.Encode()
-}
-
 func elementHasOutline(element Element) bool {
 	values, err := url.ParseQuery(element.Query)
 	return err == nil && values.Get("outline") != ""
-}
-
-func toggleElementTransparency(element *Element) {
-	if element == nil || !elementSupportsTransparency(*element) {
-		return
-	}
-	values, _ := url.ParseQuery(element.Query)
-	if values.Get("transparent") == "1" {
-		values.Del("transparent")
-	} else {
-		values.Set("transparent", "1")
-	}
-	element.Query = values.Encode()
 }
 
 func elementTransparent(element Element) bool {
@@ -17061,312 +14239,22 @@ func removeImageQueryKeys(query string, keys ...string) string {
 	return values.Encode()
 }
 
-func playSearchMode(slides []Slide, current, page, width, height int, lastQuery *string) (int, int) {
-	query := ""
-	if lastQuery != nil {
-		query = *lastQuery
-	}
-	originSlide, originPage := current, page
-	status := ""
-	if query != "" {
-		if matchSlide, matchPage, ok := findForwardMatch(slides, width, height, originSlide, originPage, query); ok {
-			current, page = matchSlide, matchPage
-		} else {
-			status = "not found"
-		}
-	}
-	renderer := &liveSlideRenderer{}
-	runOverlayLoop(overlayLoopSpec{
-		Draw: func(frame int) {
-			width, height = terminalSize()
-			renderer.draw(slides[current], width, height, page, frame, func(lines []Line) {
-				drawSearchHighlights(lines, slides[current], width, height, query)
-				drawSearchField(width, height, query, status)
-			})
-		},
-		Read: readSearchKeyEvent,
-		Handle: func(event KeyEvent) overlayDecision {
-			switch event.Action {
-			case "escape":
-				if lastQuery != nil {
-					*lastQuery = ""
-				}
-				return overlayDecision{Disposition: overlayCancel}
-			case "enter":
-				if query == "" {
-					return overlayDecision{Disposition: overlayCommit}
-				}
-				if lastQuery != nil {
-					*lastQuery = query
-				}
-				if matchSlide, matchPage, ok := findForwardMatch(slides, width, height, current, page, query); ok {
-					current, page = matchSlide, matchPage
-					status = ""
-				} else {
-					status = "not found"
-				}
-				return overlayDecision{Disposition: overlayContinue}
-			case "backspace":
-				if len(query) > 0 {
-					rs := []rune(query)
-					query = string(rs[:len(rs)-1])
-				}
-			case "text":
-				query += event.Text
-			}
-			status = ""
-			if query == "" {
-				return overlayDecision{Disposition: overlayContinue}
-			}
-			if lastQuery != nil {
-				*lastQuery = query
-			}
-			if matchSlide, matchPage, ok := findForwardMatch(slides, width, height, originSlide, originPage, query); ok {
-				current, page = matchSlide, matchPage
-			} else {
-				status = "not found"
-				current, page = originSlide, originPage
-			}
-			return overlayDecision{Disposition: overlayContinue}
-		},
-	})
-	return current, page
-}
-
-func playLinkInput(slide Slide, width, height, page int, current string, slideCount int) (string, bool) {
-	query := current
-	status := ""
-	result := ""
-	renderer := &liveSlideRenderer{}
-	decision := runOverlayLoop(overlayLoopSpec{
-		Draw: func(frame int) {
-			width, height = terminalSize()
-			renderer.draw(slide, width, height, page, frame, func(lines []Line) { drawLinkField(width, height, query, status) })
-		},
-		Read: readLinkInputKeyEvent,
-		Handle: func(event KeyEvent) overlayDecision {
-			switch event.Action {
-			case "escape":
-				return overlayDecision{Disposition: overlayCancel}
-			case "enter":
-				if strings.TrimSpace(query) == "" {
-					return overlayDecision{Disposition: overlayCommit}
-				}
-				if link, ok := normalizeLinkValue(query, slideCount); ok {
-					result = link
-					return overlayDecision{Disposition: overlayCommit}
-				}
-				status = "invalid URL or slide"
-			case "backspace":
-				rs := []rune(query)
-				if len(rs) > 0 {
-					query = string(rs[:len(rs)-1])
-					status = ""
-				}
-			case "text":
-				query += event.Text
-				status = ""
-			}
-			return overlayDecision{Disposition: overlayContinue}
-		},
-	})
-	return result, decision.Disposition == overlayCommit
-}
-
-func drawLinkField(width, height int, query, status string) {
-	if height <= 0 {
-		return
-	}
-	prompt := "link " + query
-	if status != "" {
-		prompt += "  " + status
-	}
-	prompt = crop(prompt, width)
-	termPrintf("\033[0;30;43m\033[%d;1H%s", height, padRight(prompt, width))
-}
-
-func playJumpMode(slides []Slide, current, page, width, height int) (int, int) {
-	query := ""
-	status := ""
-	targetSlide, targetPage := current, page
-	renderer := &liveSlideRenderer{}
-	runOverlayLoop(overlayLoopSpec{
-		Draw: func(frame int) {
-			width, height = terminalSize()
-			renderer.draw(slides[current], width, height, page, frame, func(lines []Line) { drawJumpField(width, height, query, status) })
-		},
-		Read: readJumpKeyEvent,
-		Handle: func(event KeyEvent) overlayDecision {
-			switch event.Action {
-			case "escape":
-				return overlayDecision{Disposition: overlayCancel}
-			case "enter":
-				if query != "" {
-					targetSlide, targetPage = resolveJumpTarget(slides, width, height, query)
-				}
-				return overlayDecision{Disposition: overlayCommit}
-			case "backspace":
-				if len(query) > 0 {
-					rs := []rune(query)
-					query = string(rs[:len(rs)-1])
-				}
-				status = ""
-			case "text":
-				query = appendJumpInput(query, event.Text)
-				status = ""
-			}
-			return overlayDecision{Disposition: overlayContinue}
-		},
-	})
-	return targetSlide, targetPage
-}
-
-func appendJumpInput(query, text string) string {
-	for _, r := range text {
-		if r >= '0' && r <= '9' {
-			query += string(r)
-			continue
-		}
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-			if query == "" || jumpHasSuffix(query) {
-				continue
-			}
-			query += strings.ToLower(string(r))
-		}
-	}
-	return query
-}
-
-func jumpHasSuffix(query string) bool {
-	for _, r := range query {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-			return true
-		}
-	}
-	return false
-}
-
-func resolveJumpTarget(slides []Slide, width, height int, query string) (int, int) {
-	numberPart := query
-	suffix := rune(0)
-	for index, r := range query {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-			numberPart = query[:index]
-			suffix = []rune(strings.ToLower(string(r)))[0]
-			break
-		}
-	}
-	target, err := strconv.Atoi(numberPart)
-	if err != nil {
-		target = 1
-	}
-	target = max(1, min(len(slides), target))
-	slideIndex := target - 1
-	pageCount := max(1, slidePageCount(slides[slideIndex], width, height))
-	page := 0
-	if suffix != 0 {
-		page = int(suffix - 'a')
-		page = max(0, min(pageCount-1, page))
-	}
-	return slideIndex, page
-}
-
-func drawSearchHighlights(lines []Line, slide Slide, width, height int, query string) {
-	if query == "" {
-		return
-	}
-	startRows := map[int]int{}
-	for _, line := range lines {
-		if line.Element < 0 || line.Row < 0 || line.Row >= height {
-			continue
-		}
-		if _, ok := startRows[line.Element]; !ok || line.Row < startRows[line.Element] {
-			startRows[line.Element] = line.Row
-		}
-	}
-	needle := strings.ToLower(query)
-	for elementIndex, startRow := range startRows {
-		if elementIndex < 0 || elementIndex >= len(slide.Elements) {
-			continue
-		}
-		element := slide.Elements[elementIndex]
-		haystack := strings.ToLower(element.Text)
-		searchFrom := 0
-		for {
-			matchAt := strings.Index(haystack[searchFrom:], needle)
-			if matchAt < 0 {
-				break
-			}
-			matchStart := searchFrom + matchAt
-			matchEnd := matchStart + len([]rune(query))
-			drawRenderedMatch(element, width, height, startRow, matchStart, matchEnd)
-			searchFrom = matchStart + max(1, len([]rune(query)))
-		}
-	}
-}
-
-func drawRenderedMatch(element Element, width, height, startRow, matchStart, matchEnd int) {
-	renderedRows := editableRowsForElementPrefix(element, width, len([]rune(element.Text)))
-	if len(renderedRows) == 0 {
-		return
-	}
-	if element.Kind == "heading" && !rendersAsTextImage(element) {
-		drawRenderedHeadingMatch(element, renderedRows, width, height, startRow, matchStart, matchEnd)
-		return
-	}
-	startOffset, startCol := renderedOffsetForCursor(element, width, matchStart)
-	endOffset, endCol := renderedOffsetForCursor(element, width, matchEnd)
-	if endOffset < startOffset {
-		return
-	}
-	startCol++
-	endCol++
-	for offset := startOffset; offset <= endOffset && offset < len(renderedRows); offset++ {
-		row := startRow + offset
-		if row < 0 || row >= height {
-			continue
-		}
-		from := 0
-		if offset == startOffset {
-			from = startCol
-		}
-		to := displayWidth(renderedRows[offset])
-		if offset == endOffset {
-			to = endCol
-		}
-		if to <= from {
-			continue
-		}
-		segment := runeSliceWithPadding(renderedRows[offset], from, to)
-		if segment == "" {
-			continue
-		}
-		termPrintf("\033[0;30;43m\033[%d;%dH%s", row+1, from+1, segment)
-	}
-}
-
-func drawRenderedHeadingMatch(element Element, renderedRows []string, width, height, startRow, matchStart, matchEnd int) {
-	from := matchStart*editGlyphWidth(element) + 1
-	to := matchEnd*editGlyphWidth(element) + 1
-	if to <= from {
-		return
-	}
-	from = min(max(0, from), max(0, width-1))
-	to = min(max(from, to), width)
-	for offset, rowText := range renderedRows {
-		row := startRow + offset
-		if row < 0 || row >= height {
-			continue
-		}
-		segment := runeSliceWithPadding(rowText, from, to)
-		if segment == "" {
-			continue
-		}
-		termPrintf("\033[0;30;43m\033[%d;%dH%s", row+1, from+1, segment)
-	}
-}
-
 func renderedOffsetForCursor(element Element, width, cursor int) (int, int) {
+	plain := element
+	q, _ := url.ParseQuery(plain.Query)
+	if q.Get("text-align") == "" && q.Get("text-valign") == "" {
+		return renderedUnalignedOffsetForCursor(element, width, cursor)
+	}
+	q.Del("text-align")
+	q.Del("text-valign")
+	plain.Query = q.Encode()
+	row, col := renderedUnalignedOffsetForCursor(plain, width, cursor)
+	rows := renderElementRowsBase(plain, constrainedElementWidth(plain, width))
+	dy, dx := textBoxOffsets(element, rows, constrainedElementWidth(element, width), row)
+	return row + dy, col + dx
+}
+
+func renderedUnalignedOffsetForCursor(element Element, width, cursor int) (int, int) {
 	cursor = max(0, min(cursor, len([]rune(element.Text))))
 	if element.Kind == "bullet" {
 		row, col, _ := bulletCaretMetrics(element, width, cursor)
@@ -17579,186 +14467,13 @@ func runeSliceWithPadding(text string, start, end int) string {
 	return string(rs[start:end])
 }
 
-func drawSearchField(width, height int, query, status string) {
-	if height <= 0 {
-		return
-	}
-	prompt := "/" + query
-	if status != "" {
-		prompt += "  " + status
-	}
-	prompt = crop(prompt, width)
-	termPrintf("\033[0;30;43m\033[%d;1H%s", height, padRight(prompt, width))
-}
-
-func drawJumpField(width, height int, query, status string) {
-	if height <= 0 {
-		return
-	}
-	prompt := "jump " + query
-	if status != "" {
-		prompt += "  " + status
-	}
-	prompt = crop(prompt, width)
-	termPrintf("\033[0;30;43m\033[%d;1H%s", height, padRight(prompt, width))
-}
-
-func drawViewChrome(width, height int, view ViewState) {
-	if height <= 0 || width <= 0 || view.SlideCount <= 0 {
-		return
-	}
-	right := []toolbarSegment{}
-	if presenter, short := presenterStatusLabels(); presenter != "" {
-		right = append(right, toolbarSegment{Long: presenter, Short: short, Required: true, Priority: 1})
-	}
-	if notice := currentUINotice(); notice != "" {
-		right = append(right, toolbarSegment{Long: notice, Short: "status", Priority: 4})
-	}
-	slideLabel := slideNumberLabel(view)
-	right = append(right, toolbarSegment{Long: slideLabel, Short: slideLabel, Required: true, Priority: 0})
-	if view.Chrome {
-		left := toolbarSegmentsFromActions(mainActionSpecs())
-		left = append(left, toolbarSegment{Long: "? shortcuts", Short: "?", Required: true, Priority: 0})
-		drawAdaptiveToolbarLine(width, height, "47", left, right)
-		return
-	}
-	label := slideLabel
-	col := max(1, width-displayWidth(label)+1)
-	termPrintf("\033[0;37;%sm\033[%d;%dH%s", slideBGCodeOnly(view), height, col, label)
-}
-
-func presenterStatusLabels() (string, string) {
-	if !presenterModeActive {
-		return "", ""
-	}
-	if activePresenter == nil {
-		return "PRES: Unavailable", "P:!"
-	}
-	available, target, live := activePresenter.Status()
-	if !available {
-		return "PRES: Unavailable", "P:!"
-	}
-	if target == "none" || target == "" {
-		return "PRES: None", "P:-"
-	}
-	targetLabel := "Main"
-	shortTarget := "M"
-	if target == "external" {
-		targetLabel = "External"
-		shortTarget = "E"
-	}
-	signal := "Signal off"
-	shortSignal := "O"
-	if live {
-		signal = "Live"
-		shortSignal = "L"
-	}
-	return "PRES: " + targetLabel + " / " + signal, "P:" + shortTarget + "/" + shortSignal
-}
-
-func drawViewOverlays(width, height int, view ViewState) {
-	if view.ShowSlides {
-		scroll := view.SlideNavScroll
-		drawSlideNavigatorOverlay(view.Slides, view.SlideNavIndex, &scroll, width, height)
-		drawSlideNavigatorToolbar(width, height, view.SlideNavIndex, view.SlideCount)
-	}
-	if view.ShowNotes && view.SlideIndex >= 0 && view.SlideIndex < len(view.Slides) {
-		activeSlide := view.Slides[view.SlideIndex]
-		notes := activeSlide.Notes
-		drawSpeakerNotesPanel(notes, len([]rune(notes)), false, width, height)
-		drawSpeakerNotesToolbar(width, height, false)
-	}
-	if view.TimerMode != "" {
-		drawTimerOverlay(width, height, view.TimerMode, view.TimerInput, view.TimerDeadline)
-	}
-	drawViewportFitWarning(width, height)
-}
-
-func viewportFitWarningActive() bool {
-	return viewportWarning.Text != "" && time.Now().Before(viewportWarning.ExpiresAt)
-}
-
-func drawViewportFitWarning(width, height int) {
-	if width <= 0 || height <= 1 || !viewportFitWarningActive() {
-		return
-	}
-	text := cropANSIVisible(viewportWarning.Text, max(1, width-4))
-	textWidth := displayWidth(text)
-	col := max(1, (width-textWidth)/2+1)
-	termPrintf("\033[0;30;103m\033[1;%dH %s \033[0m", col, text)
-}
-
-func slideNumberLabel(view ViewState) string {
-	slideNo := strconv.Itoa(view.SlideIndex + 1)
-	if view.PageCount > 1 {
-		slideNo += string(rune('a' + max(0, view.Page)))
-	}
-	return fmt.Sprintf("%s/%d", slideNo, view.SlideCount)
-}
-
-func slideBGCodeOnly(view ViewState) string {
-	return "40"
-}
-
-func findForwardMatch(slides []Slide, width, height, originSlide, originPage int, query string) (int, int, bool) {
-	height = max(1, height)
-	positions := slidePagePositions(slides, width, height)
-	if len(positions) == 0 {
-		return 0, 0, false
-	}
-	origin := 0
-	for i, pos := range positions {
-		if pos.slide == originSlide && pos.page == originPage {
-			origin = i
-			break
-		}
-	}
-	needle := strings.ToLower(query)
-	for step := 1; step < len(positions); step++ {
-		pos := positions[(origin+step)%len(positions)]
-		if strings.Contains(strings.ToLower(pageContentText(slides[pos.slide], width, height, pos.page)), needle) {
-			return pos.slide, pos.page, true
-		}
-	}
-	return 0, 0, false
-}
-
 type slidePagePosition struct {
 	slide int
 	page  int
 }
 
-func slidePagePositions(slides []Slide, width, height int) []slidePagePosition {
-	height = max(1, height)
-	var positions []slidePagePosition
-	for slideIndex, slide := range slides {
-		pages := max(1, slidePageCount(slide, width, height))
-		for page := 0; page < pages; page++ {
-			positions = append(positions, slidePagePosition{slide: slideIndex, page: page})
-		}
-	}
-	return positions
-}
-
 func slidePageCount(slide Slide, width, height int) int {
 	return max(1, len(displayPages(slide, width, max(1, height))))
-}
-
-func pageContentText(slide Slide, width, height, page int) string {
-	seen := map[int]bool{}
-	var parts []string
-	for _, line := range displayLines(slide, width, height, page) {
-		if line.Row < 0 || line.Row >= height || line.Element < 0 || line.Role == "image" || seen[line.Element] {
-			continue
-		}
-		seen[line.Element] = true
-		element := slide.Elements[line.Element]
-		switch element.Kind {
-		case "heading", "text", "bullet", "code":
-			parts = append(parts, element.Text)
-		}
-	}
-	return strings.Join(parts, "\n")
 }
 
 func padRight(text string, width int) string {
@@ -17877,27 +14592,6 @@ func editGlyphHeight(element Element) int {
 	return 4
 }
 
-func editCursorColumn(element Element, prefixRows []string, cursor int) int {
-	if rendersAsTextImage(element) {
-		return maxLineDisplayWidth(prefixRows)
-	}
-	if element.Kind == "heading" {
-		return cursor * editGlyphWidth(element)
-	}
-	if element.Kind == "code" {
-		line, col := codeCursorLineCol(element.Text, cursor)
-		if elementUsesDeckFont(element) {
-			logicalLines := strings.Split(element.Text, "\n")
-			if line >= 0 && line < len(logicalLines) {
-				prefix := string([]rune(logicalLines[line])[:min(col, len([]rune(logicalLines[line])))])
-				return codeBlockPadX + maxLineDisplayWidth(renderBitmapTextImageForElement(element, prefix, textImageScale(element)))
-			}
-		}
-		return codeBlockPadX + col*editGlyphWidth(element)
-	}
-	return displayWidth(strings.TrimRight(prefixRows[len(prefixRows)-1], " "))
-}
-
 func codeCursorLineCol(text string, cursor int) (int, int) {
 	runes := []rune(text)
 	cursor = max(0, min(cursor, len(runes)))
@@ -17912,29 +14606,6 @@ func codeCursorLineCol(text string, cursor int) (int, int) {
 		}
 	}
 	return line, col
-}
-
-func codeCursorIndexForLineCol(text string, targetLine, targetCol int) int {
-	targetLine = max(0, targetLine)
-	targetCol = max(0, targetCol)
-	runes := []rune(text)
-	line := 0
-	col := 0
-	for i, r := range runes {
-		if line == targetLine && col >= targetCol {
-			return i
-		}
-		if r == '\n' {
-			if line == targetLine {
-				return i
-			}
-			line++
-			col = 0
-			continue
-		}
-		col++
-	}
-	return len(runes)
 }
 
 func codeCursorVisualLineCol(text string, charsPerLine, cursor int) (int, int) {
@@ -17953,89 +14624,12 @@ func codeCursorVisualLineCol(text string, charsPerLine, cursor int) (int, int) {
 	return visualLine, 0
 }
 
-func codeCursorIndexForVisualLineCol(text string, charsPerLine, targetVisualLine, targetCol int) int {
-	charsPerLine = max(1, charsPerLine)
-	targetVisualLine = max(0, targetVisualLine)
-	targetCol = max(0, targetCol)
-	offset := 0
-	visualLine := 0
-	for _, rawLine := range strings.Split(text, "\n") {
-		runes := []rune(rawLine)
-		visualWidth := textVisualUnitWidth(rawLine)
-		chunkCount := max(1, (visualWidth+charsPerLine-1)/charsPerLine)
-		if targetVisualLine < visualLine+chunkCount {
-			chunk := targetVisualLine - visualLine
-			targetWidth := min(visualWidth, chunk*charsPerLine+targetCol)
-			runeCol, used := 0, 0
-			for _, unit := range textVisualUnits(rawLine) {
-				if used+unit.width > targetWidth {
-					break
-				}
-				used += unit.width
-				runeCol += len([]rune(unit.text))
-			}
-			return offset + min(len(runes), runeCol)
-		}
-		offset += len(runes)
-		if offset < len([]rune(text)) {
-			offset++
-		}
-		visualLine += chunkCount
-	}
-	return len([]rune(text))
-}
-
-func moveCodeCursorVertical(element Element, cursor, delta, width int) int {
-	charsPerLine := codeCharsPerVisualLineForElement(element, width)
-	visualLine, col := codeCursorVisualLineCol(element.Text, charsPerLine, cursor)
-	return codeCursorIndexForVisualLineCol(element.Text, charsPerLine, visualLine+delta, col)
-}
-
-func firstEditableElement(slide Slide) int {
-	for i, element := range slide.Elements {
-		if isEditableElement(element) {
-			return i
-		}
-	}
-	return -1
-}
-
-func previousEditableElement(slide Slide, selected int) int {
-	for i := selected - 1; i >= 0; i-- {
-		if isEditableElement(slide.Elements[i]) {
-			return i
-		}
-	}
-	return selected
-}
-
-func nextEditableElement(slide Slide, selected int) int {
-	start := selected + 1
-	if selected < 0 {
-		start = 0
-	}
-	for i := start; i < len(slide.Elements); i++ {
-		if isEditableElement(slide.Elements[i]) {
-			return i
-		}
-	}
-	return selected
-}
-
 func isEditableElement(element Element) bool {
 	return element.Kind == "heading" || element.Kind == "text" || element.Kind == "text-image" || element.Kind == "bullet" || element.Kind == "code"
 }
 
 func isRotatableTextElement(element Element) bool {
 	return element.Kind == "heading" || element.Kind == "text" || element.Kind == "text-image" || element.Kind == "bullet"
-}
-
-func isSelectableElement(element Element) bool {
-	return !element.Inherited && (isEditableElement(element) || isPositionedElement(element))
-}
-
-func isAxisScalableElement(element Element) bool {
-	return element.Kind == "image" || element.Kind == "shape"
 }
 
 type editorMode string
@@ -18081,215 +14675,6 @@ func action(keys, help, toolbar, short string, core bool, priority int, actions 
 	return actionSpec{Actions: actions, Key: keys, Help: help, Toolbar: toolbar, Short: short, Core: core, Priority: priority}
 }
 
-func interactionContextFor(mode string, slide Slide, selected int, selection map[int]bool, status string) interactionContext {
-	ctx := interactionContext{Mode: editorModeSelect, Selection: selectionNone}
-	switch mode {
-	case "text":
-		ctx.Mode = editorModeText
-	case "resize":
-		ctx.Mode = editorModeAxisScale
-	case "move":
-		ctx.Mode = editorModeMove
-	}
-	if selectionSetCount(selection) > 1 || strings.HasSuffix(status, " selected") && status != "text selected" && status != "code text selected" && status != "image selected" && status != "shape selected" && status != "page number selected" {
-		ctx.Selection = selectionMulti
-		return ctx
-	}
-	if selected < 0 || selected >= len(slide.Elements) {
-		return ctx
-	}
-	ctx.SupportsTransparency = elementSupportsTransparency(slide.Elements[selected])
-	if status == "code text selected" {
-		ctx.Selection = selectionCode
-		return ctx
-	}
-	switch slide.Elements[selected].Kind {
-	case "image":
-		ctx.Selection = selectionImage
-	case "shape":
-		ctx.Selection = selectionShape
-	case "page-number":
-		ctx.Selection = selectionPage
-	case "code":
-		ctx.Selection = selectionCode
-	default:
-		ctx.Selection = selectionText
-	}
-	return ctx
-}
-
-func mainActionSpecs() []actionSpec {
-	return []actionSpec{
-		action("Space / ->", "next page or slide", "Space/→ next", "→ next", true, 0, "next"),
-		action("<-", "previous page or slide", "← prev", "←", true, 0, "prev"),
-		action("p", "toggle presentation signal", "p present", "p", true, 1, "present", "controls"),
-		action("0", "countdown timer", "0 timer", "0", true, 2, "timer"),
-		action("1", "slide overview", "1 slides", "1", true, 3, "slide-list"),
-		action("2", "speaker notes", "2 notes", "2", true, 3, "speaker-notes"),
-		action("Tab", "select slide element", "", "", false, 4, "tab", "shift-tab"),
-		action("n / c / d", "new, clone, or delete slide", "", "", false, 4, "insert-slide", "clone-slide", "delete-slide"),
-		action("M / L", "master view or change slide layout", "", "", false, 4, "master-view", "layout-picker"),
-		action("#", "cycle page number inherit, show, or hide", "", "", false, 4, "page-number"),
-		action("v", "visual properties", "", "", false, 4, "visual-properties"),
-		action("t / i / s", "insert text, image, or shape", "", "", false, 4, "insert-text", "insert-image", "shape-picker"),
-		action("e / b", "effects or backgrounds", "", "", false, 5, "effect-picker", "background-picker"),
-		action("/ / j", "search or jump", "", "", false, 5, "search", "jump"),
-		action("x", "export HTML", "", "", false, 5, "export"),
-		action("Ctrl-Z / Ctrl-Y", "undo or redo", "", "", false, 5, "undo", "redo"),
-		action("q", "quit", "", "", false, 5, "quit"),
-	}
-}
-
-func editActionSpecs(ctx interactionContext) []actionSpec {
-	if ctx.Mode == editorModeText {
-		return []actionSpec{
-			action("Type", "insert text", "", "", false, 0, "text"),
-			action("Arrows", "move cursor", "arrows cursor", "arrows", true, 0, "up", "down", "left", "right"),
-			action("Shift-Enter", "insert newline in code", "Shift-Enter newline", "⇧Enter", true, 1, "insert-newline"),
-			action("Enter", "commit edit", "Enter commit", "Enter", true, 0, "enter"),
-			action("Esc", "cancel edit", "Esc cancel", "Esc", true, 0, "escape"),
-		}
-	}
-	if ctx.Mode == editorModeAxisScale {
-		return []actionSpec{
-			action("Arrows", "scale the selected axis", "arrows scale", "arrows", true, 0, "up", "down", "left", "right"),
-			action("Enter", "commit axis scaling", "Enter commit", "Enter", true, 0, "enter"),
-			action("Esc", "cancel axis scaling", "Esc cancel", "Esc", true, 0, "escape"),
-		}
-	}
-	if ctx.Mode == editorModeMove {
-		return []actionSpec{
-			action("Arrows", "move element", "arrows move", "arrows", true, 0, "up", "down", "left", "right"),
-			action("Shift-arrows", "jump 10 cells", "Shift-arrows ×10", "⇧arrows", true, 1, "shift-up", "shift-down", "shift-left", "shift-right"),
-			action("Enter", "commit move", "Enter commit", "Enter", true, 0, "enter"),
-			action("Esc", "cancel move", "Esc cancel", "Esc", true, 0, "escape"),
-		}
-	}
-	var specs []actionSpec
-	if ctx.Selection == selectionNone {
-		specs = append(specs,
-			action("Tab / Shift-Tab", "select next or previous element", "Tab select", "Tab", true, 0, "tab", "shift-tab"),
-			action("0", "countdown timer", "0 timer", "0", true, 2, "timer"),
-			action("1", "slide overview", "1 slides", "1", true, 3, "slide-list"),
-			action("2", "speaker notes", "2 notes", "2", true, 3, "speaker-notes"),
-			action("Ctrl-V", "paste element", "", "", false, 4, "paste"),
-			action("t / i / s", "insert text, image, or shape", "", "", false, 3, "insert-text", "insert-image", "shape-picker"),
-		)
-	}
-	if ctx.Master {
-		specs = append(specs,
-			action("#", "cycle page-number policy", "# page number", "#", true, 2, "page-number"),
-			action("v", "visual properties", "v properties", "v", true, 2, "visual-properties"),
-		)
-	}
-	if ctx.Selection == selectionText || ctx.Selection == selectionImage || ctx.Selection == selectionShape || ctx.Selection == selectionPage || ctx.Selection == selectionMulti {
-		specs = append(specs,
-			action("Arrows", "move selection", "arrows move", "arrows", true, 0, "up", "down", "left", "right"),
-			action("Shift-arrows", "jump 10 cells", "Shift-arrows ×10", "⇧arrows", false, 3, "shift-up", "shift-down", "shift-left", "shift-right"),
-		)
-	}
-	if ctx.Selection == selectionText || ctx.Selection == selectionImage || ctx.Selection == selectionShape || ctx.Selection == selectionPage {
-		specs = append(specs, action("Space", "add or remove from multi-selection", "", "", false, 4, "toggle-selection"))
-	}
-	if ctx.Selection == selectionText || ctx.Selection == selectionCode {
-		specs = append(specs, action("Enter", "edit text", "Enter edit", "Enter", true, 0, "enter", "edit-selected"))
-	}
-	if ctx.Selection == selectionText || ctx.Selection == selectionImage || ctx.Selection == selectionShape || ctx.Selection == selectionPage {
-		specs = append(specs, action("+ / -", "increase or decrease size", "+/- size", "+/-", true, 1, "promote", "demote"))
-	}
-	if ctx.Selection == selectionImage || ctx.Selection == selectionShape {
-		specs = append(specs, action("g", "axis scaling", "g axis scale", "g scale", true, 1, "shape-toggle"))
-	}
-	if ctx.Selection == selectionText {
-		specs = append(specs,
-			action("Shift-B", "toggle bold Markdown", "", "", false, 3, "toggle-bold"),
-			action("Shift-H", "toggle highlighted Markdown", "", "", false, 3, "toggle-highlight"),
-			action("r / R", "rotate clockwise or counter-clockwise", "", "", false, 3, "rotate", "rotate-ccw"),
-		)
-	}
-	if ctx.Selection == selectionText || ctx.Selection == selectionCode || ctx.Selection == selectionShape || ctx.Selection == selectionPage {
-		specs = append(specs, action("c", "change color", "c color", "c", true, 2, "color"))
-	}
-	if ctx.Selection == selectionText || ctx.Selection == selectionImage || ctx.Selection == selectionShape || ctx.Selection == selectionPage {
-		specs = append(specs, action("s", "change style", "s style", "s", true, 2, "style", "settings"))
-	}
-	if ctx.Selection == selectionText || ctx.Selection == selectionCode || ctx.Selection == selectionImage || ctx.Selection == selectionShape || ctx.Selection == selectionPage {
-		specs = append(specs, action("o", "cycle outline", "o outline", "o", true, 2, "outline"))
-	}
-	if ctx.Master && (ctx.Selection == selectionText || ctx.Selection == selectionCode || ctx.Selection == selectionImage || ctx.Selection == selectionShape) {
-		specs = append(specs, action("p", "set placeholder role", "p placeholder", "p", true, 2, "placeholder-role"))
-	}
-	if ctx.Selection == selectionImage || ctx.Selection == selectionShape {
-		specs = append(specs, action("[ / ]", "send back or bring front", "", "", false, 3, "layer-back", "layer-front"))
-	}
-	if ctx.Selection == selectionText || ctx.Selection == selectionImage || ctx.Selection == selectionShape {
-		specs = append(specs, action("l", "set link", "", "", false, 3, "link"))
-	}
-	if ctx.SupportsTransparency && (ctx.Selection == selectionText || ctx.Selection == selectionCode || ctx.Selection == selectionImage || ctx.Selection == selectionShape) {
-		specs = append(specs, action("/", "toggle see-through", "/ see-through", "/", true, 2, "transparency"))
-	}
-	if ctx.Selection == selectionText || ctx.Selection == selectionImage || ctx.Selection == selectionShape || ctx.Selection == selectionMulti {
-		specs = append(specs, action("< / = / >", "align left, center, or right", "align", "align", true, 2, "align-left", "align-center", "align-right"))
-	}
-	if ctx.Selection != selectionNone && ctx.Selection != selectionCode && ctx.Selection != selectionPage {
-		specs = append(specs,
-			action("Ctrl-C / X / V", "copy, cut, or paste", "", "", false, 4, "copy", "cut", "paste"),
-			action("Backspace", "delete selection", "", "", false, 4, "backspace"),
-		)
-	}
-	return specs
-}
-
-func actionSpecsAllow(specs []actionSpec, actionName string) bool {
-	for _, spec := range specs {
-		for _, candidate := range spec.Actions {
-			if candidate == actionName {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func globalEditAction(actionName string) bool {
-	switch actionName {
-	case "escape", "quit", "save", "undo", "redo", "mouse-click", "shift-mouse-click", "slide-list", "speaker-notes", "timer", "export", "jump", "search", "present", "controls", "next", "prev", "tab", "shift-tab":
-		return true
-	default:
-		return false
-	}
-}
-
-func actionAllowedInContext(ctx interactionContext, actionName string) bool {
-	if ctx.Mode == editorModeText {
-		return actionSpecsAllow(editActionSpecs(ctx), actionName) || actionName == "backspace" || actionName == "paste" || actionName == "quit"
-	}
-	return globalEditAction(actionName) || actionSpecsAllow(editActionSpecs(ctx), actionName)
-}
-
-func elementKindLabel(element Element) string {
-	switch element.Kind {
-	case "heading":
-		return "heading"
-	case "bullet":
-		return "bullet"
-	case "code":
-		return "code block"
-	case "image":
-		return "image"
-	case "shape":
-		return "shape"
-	case "page-number":
-		return "page number"
-	default:
-		return "text"
-	}
-}
-
-func isPositionedElement(element Element) bool {
-	return element.Kind == "image" || element.Kind == "shape" || element.Kind == "page-number"
-}
-
 const (
 	codeBlockPadX = 2
 	codeBlockPadY = 1
@@ -18300,16 +14685,6 @@ const (
 	textSizeTitle   = 20
 	textSizeMax     = 25
 )
-
-func changeTextLevel(element *Element, delta int) {
-	if element == nil {
-		return
-	}
-	size := textSize(*element)
-	size += delta
-	size = max(textSizeMin, min(textSizeMax, size))
-	applyTextSize(element, size)
-}
 
 func textSize(element Element) int {
 	values, _ := url.ParseQuery(element.Query)
@@ -18373,15 +14748,6 @@ func applyTextSize(element *Element, size int) {
 	element.Query = setTextRenderQuery(element.Query, "text-image", source, scale, size)
 }
 
-func ensureTextImageRender(element *Element) {
-	if element == nil || rendersAsTextImage(*element) {
-		return
-	}
-	size := textSize(*element)
-	source, scale := textImageSourceAndScale(size)
-	element.Query = setTextRenderQuery(element.Query, "text-image", source, scale, size)
-}
-
 func nativeTextSize(element Element) int {
 	if _, mode, _, ok := elementDeckFontRenderDetails(element, false); ok && mode == deckFontModeFiglet {
 		return textSizeNormal
@@ -18436,215 +14802,6 @@ func textOrientation(element Element) string {
 	}
 }
 
-func rotateTextOrientation(element *Element) {
-	if element == nil || !isRotatableTextElement(*element) {
-		return
-	}
-	values, _ := url.ParseQuery(element.Query)
-	switch textOrientation(*element) {
-	case "":
-		values.Set("orientation", "cw")
-	case "cw":
-		values.Set("orientation", "down")
-	case "down":
-		values.Set("orientation", "ccw")
-	default:
-		values.Del("orientation")
-	}
-	element.Query = values.Encode()
-}
-
-func rotateTextOrientationCounterClockwise(element *Element) {
-	if element == nil || !isRotatableTextElement(*element) {
-		return
-	}
-	values, _ := url.ParseQuery(element.Query)
-	switch textOrientation(*element) {
-	case "":
-		values.Set("orientation", "ccw")
-	case "ccw":
-		values.Set("orientation", "down")
-	case "down":
-		values.Set("orientation", "cw")
-	default:
-		values.Del("orientation")
-	}
-	element.Query = values.Encode()
-}
-
-func ensureCursor(slide *Slide, cursor map[int]int, selected int) {
-	if selected < 0 || selected >= len(slide.Elements) {
-		return
-	}
-	length := len([]rune(slide.Elements[selected].Text))
-	if _, ok := cursor[selected]; !ok {
-		cursor[selected] = length
-		return
-	}
-	cursor[selected] = max(0, min(cursor[selected], length))
-}
-
-func insertTextAtCursor(slide *Slide, selected int, cursor map[int]int, text string) {
-	if selected < 0 || selected >= len(slide.Elements) {
-		return
-	}
-	materializePlaceholder(slide, selected, cursor)
-	rs := []rune(slide.Elements[selected].Text)
-	pos := max(0, min(cursor[selected], len(rs)))
-	insert := []rune(text)
-	next := make([]rune, 0, len(rs)+len(insert))
-	next = append(next, rs[:pos]...)
-	next = append(next, insert...)
-	next = append(next, rs[pos:]...)
-	slide.Elements[selected].Text = string(next)
-	cursor[selected] = pos + len(insert)
-}
-
-func editBackspace(slide *Slide, selected int, cursor map[int]int) int {
-	if selected < 0 || selected >= len(slide.Elements) {
-		return selected
-	}
-	if slide.Elements[selected].Placeholder {
-		materializePlaceholder(slide, selected, cursor)
-		return selected
-	}
-	rs := []rune(slide.Elements[selected].Text)
-	pos := max(0, min(cursor[selected], len(rs)))
-	if pos > 0 {
-		next := make([]rune, 0, len(rs)-1)
-		next = append(next, rs[:pos-1]...)
-		next = append(next, rs[pos:]...)
-		slide.Elements[selected].Text = string(next)
-		cursor[selected] = pos - 1
-		return selected
-	}
-	if slide.Elements[selected].Kind == "bullet" {
-		slide.Elements[selected].Kind = "text"
-		cursor[selected] = 0
-	}
-	return selected
-}
-
-func materializePlaceholder(slide *Slide, selected int, cursor map[int]int) {
-	if selected < 0 || selected >= len(slide.Elements) || !slide.Elements[selected].Placeholder {
-		return
-	}
-	slide.Elements[selected].Placeholder = false
-	slide.Elements[selected].Text = ""
-	cursor[selected] = 0
-}
-
-func finalizeTextEdit(slide *Slide, selected int, cursor map[int]int) int {
-	if selected < 0 || selected >= len(slide.Elements) {
-		return selected
-	}
-	if slide.Elements[selected].Kind == "bullet" {
-		slide.Elements[selected].Text = normalizeBulletText(slide.Elements[selected].Text)
-	}
-	if slide.Elements[selected].Placeholder || strings.TrimSpace(slide.Elements[selected].Text) == "" {
-		return removeEditableElement(slide, selected, cursor)
-	}
-	return selected
-}
-
-func bulletItemAtCursorEmpty(text string, cursor int) bool {
-	runes := []rune(text)
-	cursor = max(0, min(cursor, len(runes)))
-	start := cursor
-	for start > 0 && runes[start-1] != '\n' {
-		start--
-	}
-	end := cursor
-	for end < len(runes) && runes[end] != '\n' {
-		end++
-	}
-	return strings.TrimSpace(string(runes[start:end])) == ""
-}
-
-func removeEmptyTextLineAtCursor(element *Element, cursor int) int {
-	if element == nil {
-		return cursor
-	}
-	runes := []rune(element.Text)
-	cursor = max(0, min(cursor, len(runes)))
-	start := cursor
-	for start > 0 && runes[start-1] != '\n' {
-		start--
-	}
-	end := cursor
-	for end < len(runes) && runes[end] != '\n' {
-		end++
-	}
-	if strings.TrimSpace(string(runes[start:end])) != "" {
-		return cursor
-	}
-	removeStart, removeEnd := start, end
-	if start > 0 {
-		removeStart--
-	} else if end < len(runes) {
-		removeEnd++
-	}
-	element.Text = string(append(append([]rune(nil), runes[:removeStart]...), runes[removeEnd:]...))
-	return removeStart
-}
-
-func removeEditableElement(slide *Slide, selected int, cursor map[int]int) int {
-	if selected < 0 || selected >= len(slide.Elements) {
-		return selected
-	}
-	slide.Elements = append(slide.Elements[:selected], slide.Elements[selected+1:]...)
-	delete(cursor, selected)
-	shiftCursorKeys(cursor, selected, -1)
-	if len(slide.Elements) == 0 {
-		return -1
-	}
-	if selected >= len(slide.Elements) {
-		selected = len(slide.Elements) - 1
-	}
-	if !isEditableElement(slide.Elements[selected]) {
-		selected = previousEditableElement(*slide, selected+1)
-	}
-	if selected >= 0 && selected < len(slide.Elements) && isEditableElement(slide.Elements[selected]) {
-		ensureCursor(slide, cursor, selected)
-		return selected
-	}
-	return -1
-}
-
-func editInsertLine(slide *Slide, selected int, cursor map[int]int) int {
-	newElement := Element{Kind: "text"}
-	insertAt := selected + 1
-	if selected < 0 || selected >= len(slide.Elements) {
-		slide.Elements = append(slide.Elements, newElement)
-		selected = len(slide.Elements) - 1
-		cursor[selected] = 0
-		return selected
-	}
-	slide.Elements = append(slide.Elements, Element{})
-	copy(slide.Elements[insertAt+1:], slide.Elements[insertAt:])
-	slide.Elements[insertAt] = newElement
-	shiftCursorKeys(cursor, insertAt, 1)
-	cursor[insertAt] = 0
-	return insertAt
-}
-
-func shiftCursorKeys(cursor map[int]int, start, delta int) {
-	next := map[int]int{}
-	for key, value := range cursor {
-		if key >= start {
-			next[key+delta] = value
-		} else {
-			next[key] = value
-		}
-	}
-	for key := range cursor {
-		delete(cursor, key)
-	}
-	for key, value := range next {
-		cursor[key] = value
-	}
-}
-
 func renderElementRows(element Element, width int) []string {
 	orientation := textOrientation(element)
 	var rows []string
@@ -18653,11 +14810,27 @@ func renderElementRows(element Element, width int) []string {
 	} else {
 		rows = renderRotatedTextImageElement(element, width, orientation)
 	}
-	return padTextRowsForShadow(element, rows)
+	rows = padTextRowsForShadow(element, rows)
+	rows = alignTextBoxRows(element, rows, constrainedElementWidth(element, width))
+	values, _ := url.ParseQuery(element.Query)
+	if values.Get("text-box") == "1" {
+		boxWidth := constrainedElementWidth(element, width)
+		boxHeight := max(1, min(4096, intQueryDefault(values, "height", len(rows))))
+		if len(rows) > boxHeight {
+			rows = rows[:boxHeight]
+		}
+		for i := range rows {
+			rows[i] = cropANSIVisible(rows[i], boxWidth)
+		}
+	}
+	return rows
 }
 
 func renderElementRowsBase(element Element, width int) []string {
 	width = constrainedElementWidth(element, width)
+	if textBoxAlignment(element) == "justify" && (element.Kind == "text" || element.Kind == "heading" || element.Kind == "text-image" || element.Kind == "bullet") {
+		return renderJustifiedTextRows(element, width)
+	}
 	if element.Kind == "code" {
 		return renderCodeBlockRows(element, width)
 	}
@@ -18678,70 +14851,6 @@ func renderElementRowsBase(element Element, width int) []string {
 	default:
 		return renderBodyWrapped(element.Text, width, "", "")
 	}
-}
-
-func rotateRowsClockwise(rows []string) []string {
-	matrix, width := plainRowMatrix(rows)
-	if width == 0 || len(matrix) == 0 {
-		return rows
-	}
-	out := make([]string, 0, width)
-	for col := 0; col < width; col++ {
-		var b strings.Builder
-		for row := len(matrix) - 1; row >= 0; row-- {
-			b.WriteRune(matrix[row][col])
-		}
-		out = append(out, b.String())
-	}
-	return trimBlank(out)
-}
-
-func rotateRowsDown(rows []string) []string {
-	matrix, width := plainRowMatrix(rows)
-	if width == 0 || len(matrix) == 0 {
-		return rows
-	}
-	out := make([]string, 0, len(matrix))
-	for row := len(matrix) - 1; row >= 0; row-- {
-		var b strings.Builder
-		for col := width - 1; col >= 0; col-- {
-			b.WriteRune(matrix[row][col])
-		}
-		out = append(out, b.String())
-	}
-	return trimBlank(out)
-}
-
-func rotateRowsCounterClockwise(rows []string) []string {
-	matrix, width := plainRowMatrix(rows)
-	if width == 0 || len(matrix) == 0 {
-		return rows
-	}
-	out := make([]string, 0, width)
-	for col := width - 1; col >= 0; col-- {
-		var b strings.Builder
-		for row := 0; row < len(matrix); row++ {
-			b.WriteRune(matrix[row][col])
-		}
-		out = append(out, b.String())
-	}
-	return trimBlank(out)
-}
-
-func plainRowMatrix(rows []string) ([][]rune, int) {
-	width := maxLineDisplayWidth(rows)
-	if width == 0 {
-		return nil, 0
-	}
-	matrix := make([][]rune, len(rows))
-	for rowIndex, row := range rows {
-		rs := []rune(stripANSI(row))
-		if len(rs) < width {
-			rs = append(rs, []rune(strings.Repeat(" ", width-len(rs)))...)
-		}
-		matrix[rowIndex] = rs
-	}
-	return matrix, width
 }
 
 func constrainedElementWidth(element Element, width int) int {
@@ -18774,25 +14883,44 @@ func constrainedElementHeight(element Element, height int) int {
 
 func renderShapeRows(element Element, maxWidth int) []string {
 	values, _ := url.ParseQuery(element.Query)
-	shape := shapeName(element)
-	w := max(1, intQueryDefault(values, "width", 12))
-	h := max(1, intQueryDefault(values, "height", 6))
-	if maxWidth > 0 {
-		w = min(w, maxWidth)
+	if values.Has("shape-label") {
+		maxWidth = max(maxWidth, shapeHalfCells(values, "width", 12)/2+1)
 	}
-	rows := make([]string, h)
-	for y := 0; y < h; y++ {
-		cells := make([]rune, w)
-		for x := 0; x < w; x++ {
-			if shapeCellFilled(shape, x, y, w, h) {
-				cells[x] = '█'
-			} else {
-				cells[x] = ' '
+	shape := shapeName(element)
+	// Work in half-cell pixels, then pack into quadrant glyphs. Offsets keep
+	// the opposite edge stationary when resizing a north/west corner.
+	w := shapeHalfCells(values, "width", 12)
+	h := shapeHalfCells(values, "height", 6)
+	ox := int(math.Round(shapeSubcellOffset(values, "shape-offset-x") * 2))
+	oy := int(math.Round(shapeSubcellOffset(values, "shape-offset-y") * 2))
+	if maxWidth > 0 {
+		w = min(w, max(1, maxWidth*2-ox))
+	}
+	mask := make([][]bool, h+oy)
+	for y := range mask {
+		mask[y] = make([]bool, w+ox)
+		for x := range mask[y] {
+			if x >= ox && y >= oy {
+				mask[y][x] = shapeCellFilled(shape, x-ox, y-oy, w, h)
 			}
 		}
-		rows[y] = string(cells)
 	}
-	return rows
+	return maskToQuadrantsPadded(mask)
+}
+
+func shapeHalfCells(values url.Values, key string, fallback float64) int {
+	value, err := strconv.ParseFloat(values.Get(key), 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+		value = fallback
+	}
+	return int(math.Round(clampFloat(value, .5, 1000) * 2))
+}
+
+func shapeSubcellOffset(values url.Values, key string) float64 {
+	if values.Get(key) == "0.5" {
+		return .5
+	}
+	return 0
 }
 
 func shapeCellFilled(shape string, x, y, w, h int) bool {
@@ -18852,24 +14980,37 @@ func renderCodeBlockRows(element Element, width int) []string {
 	if width <= 0 {
 		return nil
 	}
-	glyphRows := renderCodeGlyphRows(element, max(1, width-codeBlockPadX*2))
+	padX, padY := codeBlockPadX, codeBlockPadY
+	values, _ := url.ParseQuery(element.Query)
+	if values.Get("qr") == "1" {
+		padX, padY = 0, 0
+	}
+	glyphRows := renderCodeGlyphRows(element, max(1, width-padX*2))
 	contentWidth := max(1, maxLineDisplayWidth(glyphRows))
-	blockWidth := min(width, contentWidth+codeBlockPadX*2)
+	blockWidth := min(width, contentWidth+padX*2)
 	blank := strings.Repeat(" ", blockWidth)
-	rows := make([]string, 0, len(glyphRows)+codeBlockPadY*2)
-	for i := 0; i < codeBlockPadY; i++ {
+	rows := make([]string, 0, len(glyphRows)+padY*2)
+	for i := 0; i < padY; i++ {
 		rows = append(rows, blank)
 	}
 	for _, row := range glyphRows {
-		rows = append(rows, strings.Repeat(" ", codeBlockPadX)+padRight(crop(row, contentWidth), contentWidth)+strings.Repeat(" ", codeBlockPadX))
+		rows = append(rows, strings.Repeat(" ", padX)+padRight(crop(row, contentWidth), contentWidth)+strings.Repeat(" ", padX))
 	}
-	for i := 0; i < codeBlockPadY; i++ {
+	for i := 0; i < padY; i++ {
 		rows = append(rows, blank)
 	}
 	return rows
 }
 
 func renderCodeGlyphRows(element Element, width int) []string {
+	values, _ := url.ParseQuery(element.Query)
+	if values.Get("qr") == "1" {
+		rows := strings.Split(strings.TrimSuffix(element.Text, "\n"), "\n")
+		for index := range rows {
+			rows[index] = crop(rows[index], width)
+		}
+		return rows
+	}
 	glyphWidth := 4
 	if rendersAsTextImage(element) || elementUsesDeckFont(element) {
 		glyphWidth = editGlyphWidth(element)
@@ -18914,6 +15055,9 @@ func elementUsesDeckFont(element Element) bool {
 }
 
 func layout(slide Slide, width, height int) []Line {
+	slide = cloneSlide(slide)
+	fitSlideShapeLabels(&slide, width, height)
+	slide = withTrueTypeDefaults(slide)
 	type block struct {
 		lines   []Line
 		image   bool
@@ -18924,6 +15068,10 @@ func layout(slide Slide, width, height int) []Line {
 	var blocks [][]Line
 	var typedBlocks []block
 	for elementIndex, e := range slide.Elements {
+		if isTrueType(e) {
+			typedBlocks = append(typedBlocks, block{lines: roleLines(trueTypeLayoutRows(e, width, height), "truetype", elementIndex, e.Query)})
+			continue
+		}
 		switch e.Kind {
 		case "heading":
 			typedBlocks = append(typedBlocks, block{lines: roleLines(layoutElementRows(e, width), "heading", elementIndex, e.Query)})
@@ -19038,6 +15186,11 @@ func layout(slide Slide, width, height int) []Line {
 			for _, line := range block {
 				blockWidth = max(blockWidth, displayWidth(stripANSI(line.Text)))
 			}
+			boxQuery, _ := url.ParseQuery(block[0].Query)
+			if boxQuery.Get("text-box") == "1" {
+				blockWidth = max(1, intQueryDefault(boxQuery, "width", blockWidth))
+				blockHeight = max(1, intQueryDefault(boxQuery, "height", blockHeight))
+			}
 			row := placementTopRow(placement, height, blockHeight, currentRow)
 			col := 0
 			if placement.hasHorizontalOffset() {
@@ -19065,10 +15218,22 @@ func layout(slide Slide, width, height int) []Line {
 				col = clampBlockCol(col, width, blockWidth)
 			}
 			availableWidth := max(1, width-col)
-			if availableWidth < width {
+			if slide.Elements[block[0].Element].Kind == "shape" {
+				if placement.left != nil {
+					col = *placement.left
+				}
+				if placement.top != nil {
+					row = *placement.top
+				}
+				availableWidth = max(1, width-col)
+			}
+			if availableWidth < width && block[0].Role != "truetype" {
 				role := block[0].Role
 				block = roleLines(layoutElementRows(slide.Elements[block[0].Element], availableWidth), role, block[0].Element, block[0].Query)
 				blockHeight = len(block)
+				if boxQuery.Get("text-box") == "1" {
+					blockHeight = max(1, intQueryDefault(boxQuery, "height", blockHeight))
+				}
 				if placement.bottom != nil || placement.verticalAlign != "" {
 					row = placementTopRow(placement, height, blockHeight, currentRow)
 					row = max(0, min(max(0, height-1), row))
@@ -19093,11 +15258,14 @@ func layout(slide Slide, width, height int) []Line {
 				line.Col = col
 				*layerLines = append(*layerLines, line)
 			}
-			if elementHasOutline(slide.Elements[block[0].Element]) {
+			if block[0].Role != "truetype" && elementHasOutline(slide.Elements[block[0].Element]) {
 				*layerLines = append(*layerLines, outlineLinesForRows(blockRows, block[0].Role, block[0].Element, block[0].Query, row, col, width)...)
 			}
 			if elementLink(block[0].Query) != "" {
 				blockHeight++
+			}
+			if label, ok := shapeLabelLine(element, block[0].Element, row, col, width, height); ok {
+				*layerLines = append(*layerLines, label)
 			}
 			if !placement.hasVerticalOffset() {
 				currentRow += blockHeight
@@ -19108,6 +15276,7 @@ func layout(slide Slide, width, height int) []Line {
 	lines := append(masterBackLines, masterFrontLines...)
 	lines = append(lines, backLines...)
 	lines = append(lines, frontLines...)
+	lines = append(lines, shapeConnectorLines(slide, lines, width, height)...)
 	return applyTextElementEffects(lines, slide)
 }
 
@@ -19164,64 +15333,6 @@ func renderImageElementRows(element Element, maxWidth, maxHeight int) []string {
 		return renderImagePlaceholderRows(element, maxWidth, maxHeight)
 	}
 	return renderUnavailableImageRows(maxWidth, maxHeight)
-}
-
-func resolveTextCollisions(lines []Line) []Line {
-	type group struct {
-		element int
-		minRow  int
-		maxRow  int
-		minCol  int
-	}
-	groupsByElement := map[int]int{}
-	var groups []group
-	for _, line := range lines {
-		if line.Role == "image" || parseImagePlacement(line.Query).hasVerticalOffset() {
-			continue
-		}
-		lineRight := line.Col + displayWidth(stripANSI(line.Text)) - 1
-		index, ok := groupsByElement[line.Element]
-		if !ok {
-			groups = append(groups, group{element: line.Element, minRow: line.Row, maxRow: line.Row, minCol: line.Col})
-			groupsByElement[line.Element] = len(groups) - 1
-			continue
-		}
-		g := &groups[index]
-		g.minRow = min(g.minRow, line.Row)
-		g.maxRow = max(g.maxRow, line.Row)
-		g.minCol = min(g.minCol, min(line.Col, lineRight))
-	}
-	sort.SliceStable(groups, func(i, j int) bool {
-		if groups[i].minRow != groups[j].minRow {
-			return groups[i].minRow < groups[j].minRow
-		}
-		if groups[i].minCol != groups[j].minCol {
-			return groups[i].minCol < groups[j].minCol
-		}
-		return groups[i].element < groups[j].element
-	})
-	deltas := map[int]int{}
-	nextFreeRow := -1
-	for _, group := range groups {
-		delta := 0
-		if nextFreeRow >= 0 && group.minRow < nextFreeRow {
-			delta = nextFreeRow - group.minRow
-		}
-		if delta != 0 {
-			deltas[group.element] = delta
-		}
-		nextFreeRow = max(nextFreeRow, group.maxRow+delta+1)
-	}
-	if len(deltas) == 0 {
-		return lines
-	}
-	out := append([]Line(nil), lines...)
-	for i := range out {
-		if delta, ok := deltas[out[i].Element]; ok {
-			out[i].Row += delta
-		}
-	}
-	return out
 }
 
 func roleLines(rows []string, role string, elementIndex int, query string) []Line {
@@ -19335,42 +15446,7 @@ func rowFilledCells(row, role string, width int) []bool {
 	return out
 }
 
-func pageLines(lines []Line, page, height int) []Line {
-	if height <= 0 {
-		return nil
-	}
-	var out []Line
-	for _, line := range lines {
-		row := line.Row - page*height
-		if row < 0 || row >= height {
-			continue
-		}
-		line.Row = row
-		out = append(out, line)
-	}
-	return out
-}
-
-func pageForElement(slide Slide, width, height, element int) (int, bool) {
-	if height <= 0 || element < 0 || element >= len(slide.Elements) {
-		return 0, false
-	}
-	for page, lines := range displayPages(slide, width, height) {
-		for _, line := range lines {
-			if line.Element == element {
-				return page, true
-			}
-		}
-	}
-	return 0, false
-}
-
-func isAbsolutePlacementQuery(query string) bool {
-	placement := parseImagePlacement(query)
-	return placement.hasVerticalOffset()
-}
-
-func paginateLayout(lines []Line, height int) [][]Line {
+func paginateLayout(lines []Line, height int, elements []Element) [][]Line {
 	type group struct {
 		lines      []Line
 		minRow     int
@@ -19419,6 +15495,18 @@ func paginateLayout(lines []Line, height int) [][]Line {
 		}
 	}
 	for _, group := range groups {
+		// Master decorations belong to this slide, not to continuation pages.
+		// Keep their authored position and prune only the out-of-canvas rows;
+		// never relocate them or mutate the reusable master definition.
+		if group.element < len(elements) && elements[group.element].Inherited {
+			ensurePage(0)
+			for _, line := range group.lines {
+				if line.Row >= 0 && line.Row < height {
+					pages[0] = append(pages[0], line)
+				}
+			}
+			continue
+		}
 		groupHeight := group.maxRow - group.minRow + 1
 		if groupHeight > height {
 			basePage := max(0, group.minRow/height)
@@ -19452,24 +15540,6 @@ func paginateLayout(lines []Line, height int) [][]Line {
 	return pages
 }
 
-func hasNextPage(slide Slide, width, height, page int) bool {
-	return page+1 < slidePageCount(slide, width, height)
-}
-
-func clampPage(slide Slide, width, height, page int) int {
-	if page < 0 {
-		return 0
-	}
-	for page > 0 && !hasPage(slide, width, height, page) {
-		page--
-	}
-	return page
-}
-
-func hasPage(slide Slide, width, height, page int) bool {
-	return page >= 0 && page < slidePageCount(slide, width, height)
-}
-
 type imagePlacement struct {
 	align         string
 	verticalAlign string
@@ -19494,9 +15564,9 @@ func parseImagePlacement(query string) imagePlacement {
 	case "top", "middle", "bottom":
 		placement.verticalAlign = values.Get("valign")
 	}
-	placement.top = intQuery(values, "top")
+	placement.top = signedIntQuery(values, "top")
 	placement.bottom = intQuery(values, "bottom")
-	placement.left = intQuery(values, "left")
+	placement.left = signedIntQuery(values, "left")
 	placement.right = intQuery(values, "right")
 	placement.rowDelta = signedIntQuery(values, "row_delta")
 	placement.leftPct = floatQuery(values, "left_pct")
@@ -19974,20 +16044,6 @@ type styledTextSpan struct {
 	Color     string
 }
 
-func toggleMarkdownStyle(text, marker string) string {
-	if text == "" || marker == "" {
-		return text
-	}
-	if hasMarkdownStyleWrapper(text, marker) {
-		return text[len(marker) : len(text)-len(marker)]
-	}
-	return marker + text + marker
-}
-
-func hasMarkdownStyleWrapper(text, marker string) bool {
-	return marker != "" && len(text) >= len(marker)*2 && strings.HasPrefix(text, marker) && strings.HasSuffix(text, marker)
-}
-
 func parseMarkdownStyledSpans(text string) []styledTextSpan {
 	return parseMarkdownStyledSpansUntil(text, -1)
 }
@@ -20335,6 +16391,28 @@ func renderTextImageElement(element Element, width int) []string {
 	if element.Kind == "bullet" {
 		return renderTextImageBulletElement(element, width, scale)
 	}
+	values, _ := url.ParseQuery(element.Query)
+	if values.Get("text-box") == "1" {
+		normalWidth := max(1, int(math.Ceil(4*scale)))
+		boldWidth := max(normalWidth, int(math.Ceil(5*scale)))
+		if w, ok := scaledDeckFontGlyphWidth(element, false, scale); ok {
+			normalWidth = w
+		}
+		if w, ok := scaledDeckFontGlyphWidth(element, true, scale); ok {
+			boldWidth = max(normalWidth, w)
+		}
+		var rows []string
+		for _, line := range splitStyledSpanLines(parseMarkdownStyledSpans(element.Text)) {
+			chunks := wrapStyledSpans(line, width, normalWidth, boldWidth)
+			if len(chunks) == 0 {
+				rows = append(rows, make([]string, max(1, len(renderBitmapTextImageForElement(element, "M", scale))))...)
+			}
+			for _, chunk := range chunks {
+				rows = append(rows, renderTextImageStyledSpans(element, width, chunk)...)
+			}
+		}
+		return rows
+	}
 	if strings.Contains(strings.ReplaceAll(element.Text, "\r\n", "\n"), "\n") {
 		return renderTextImageStyledSpans(element, width, parseMarkdownStyledSpans(element.Text))
 	}
@@ -20533,7 +16611,7 @@ func hasTextImageStyle(query string) bool {
 	if err != nil {
 		return false
 	}
-	for _, key := range []string{"glyph", "shape", "brightness", "contrast", "saturation", "sharpness", "alpha"} {
+	for _, key := range []string{"glyph", "shape", "brightness", "contrast", "saturation", "tint", "sharpness", "alpha"} {
 		if values.Get(key) != "" {
 			return true
 		}
@@ -20597,17 +16675,6 @@ func doubleMaskRows(mask [][]bool) [][]bool {
 		out = append(out, first, second)
 	}
 	return out
-}
-
-func renderBitmapTextImage(text string, factor float64) []string {
-	height := bitmapTextRowHeight(factor)
-	return renderTextWithEmoji(text, height, func(chunk string) []string {
-		mask := scaledC64TextMask(chunk, factor)
-		if len(mask) == 0 {
-			return nil
-		}
-		return maskToQuadrants(mask)
-	})
 }
 
 func renderBitmapTextImageForElement(element Element, text string, factor float64) []string {
@@ -20711,10 +16778,6 @@ func rotateMaskCounterClockwise(mask [][]bool) [][]bool {
 		}
 	}
 	return out
-}
-
-func c64TextMask(text string) [][]bool {
-	return textMaskWithFont(text, c64FullFont, 8)
 }
 
 func textMaskWithFont(text string, font map[rune][]string, glyphW int) [][]bool {
@@ -20850,6 +16913,7 @@ type imageASCIIOptions struct {
 	colorBoost float64
 	alphaGate  uint8
 	binaryTone bool
+	tint       *rgba8
 }
 
 type imageRenderStats struct {
@@ -21251,35 +17315,6 @@ func cacheSourcePath(path string) string {
 	return filepath.Clean(abs)
 }
 
-func cleanUnusedImageCache(slides []Slide) {
-	used := map[string]bool{}
-	for _, slide := range slides {
-		for _, element := range slide.Elements {
-			if element.Kind == "image" {
-				used[cacheSourcePath(element.Path)] = true
-			}
-		}
-	}
-	entries, err := os.ReadDir(imageCacheDirectory())
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-		path := filepath.Join(imageCacheDirectory(), entry.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var disk diskImageAnimation
-		if json.Unmarshal(data, &disk) != nil || disk.Version != diskImageAnimationVersion || disk.Source == "" || !used[cacheSourcePath(disk.Source)] {
-			_ = os.Remove(path)
-		}
-	}
-}
-
 func loadDiskASCIIAnimation(path string) *asciiImageAnimation {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -21572,6 +17607,9 @@ func parseImageASCIIOptions(query string) imageASCIIOptions {
 	if err != nil {
 		return opts
 	}
+	if r, g, b, ok := parseHexColour(values.Get("tint")); ok {
+		opts.tint = &rgba8{r: uint8(r), g: uint8(g), b: uint8(b), a: 255}
+	}
 	switch strings.ToLower(values.Get("glyph")) {
 	case "braille", "ascii", "dense":
 		opts.glyph = strings.ToLower(values.Get("glyph"))
@@ -21658,6 +17696,11 @@ func renderUnicodeImageRows(pixels []rgba8, pixelW, pixelH, cellW, cellH int, op
 				continue
 			}
 			colour := averageImageBlockColour(block, decisions)
+			// Tint only the colour, after coverage/glyph selection: transparent
+			// regions and the silhouette must not change with the chosen hue.
+			if opts.tint != nil {
+				colour = monochromeImageColour(colour, *opts.tint)
+			}
 			rr, gg, bb := boostRGB(colour.r, colour.g, colour.b, opts.colorBoost)
 			writeRGBSequence(&sb, "38", rr, gg, bb, char)
 		}
@@ -21870,6 +17913,14 @@ func averageImageBlockColour(block [8]rgba8, decisions [8]bool) rgba8 {
 	return rgba8{r: uint8(r / weight), g: uint8(g / weight), b: uint8(b / weight), a: 255}
 }
 
+func monochromeImageColour(pixel, tint rgba8) rgba8 {
+	luma := (299*int(pixel.r) + 587*int(pixel.g) + 114*int(pixel.b))
+	shade := func(channel uint8) uint8 {
+		return uint8((int(channel)*luma + 127500) / 255000)
+	}
+	return rgba8{r: shade(tint.r), g: shade(tint.g), b: shade(tint.b), a: pixel.a}
+}
+
 func adjustImagePixels(pixels []rgba8, opts imageASCIIOptions) {
 	for i, p := range pixels {
 		r, g, b := adjustRGB(p.r, p.g, p.b, opts.brightness, opts.contrast, opts.saturation)
@@ -21906,32 +17957,6 @@ func imageColourDistance(a, b rgba8) int {
 	dg := int(a.g) - int(b.g)
 	db := int(a.b) - int(b.b)
 	return int(math.Sqrt(float64(dr*dr + dg*dg + db*db)))
-}
-
-func imageLuma(pixels []rgba8, brightness float64, useAlphaVisibility bool) []float64 {
-	out := make([]float64, len(pixels))
-	for index, pixel := range pixels {
-		lumaByte := (299*int(pixel.r) + 587*int(pixel.g) + 114*int(pixel.b)) / 1000
-		luma := float64(lumaByte) * brightness
-		if useAlphaVisibility {
-			alpha := int(pixel.a)
-			if alpha <= 0 {
-				out[index] = 0
-				continue
-			}
-			luma = float64((255-lumaByte)*alpha/255) * brightness
-		}
-		out[index] = clampFloat(luma, 0, 255)
-	}
-	return out
-}
-
-func applyBrightness(pixels []rgba8, brightness float64) {
-	for i := range pixels {
-		pixels[i].r = uint8(clampFloat(float64(pixels[i].r)*brightness, 0, 255))
-		pixels[i].g = uint8(clampFloat(float64(pixels[i].g)*brightness, 0, 255))
-		pixels[i].b = uint8(clampFloat(float64(pixels[i].b)*brightness, 0, 255))
-	}
 }
 
 func enhanceSharpnessRGBA(pixels []rgba8, width, height int, factor float64) []rgba8 {
@@ -22139,41 +18164,6 @@ func imageContentBounds(img image.Image, useAlpha bool) image.Rectangle {
 	return image.Rect(minX, minY, maxX, maxY)
 }
 
-func sampleLanczosRGBA(img image.Image, offX, offY, width, height int, x, y float64) (float64, float64, float64, float64) {
-	const radius = 3.0
-	minX := int(math.Floor(x - radius + 1))
-	maxX := int(math.Floor(x + radius))
-	minY := int(math.Floor(y - radius + 1))
-	maxY := int(math.Floor(y + radius))
-	var r, g, b, a, total float64
-	for yy := minY; yy <= maxY; yy++ {
-		wy := lanczosWeight(y - float64(yy))
-		if wy == 0 {
-			continue
-		}
-		py := max(0, min(height-1, yy))
-		for xx := minX; xx <= maxX; xx++ {
-			wx := lanczosWeight(x - float64(xx))
-			if wx == 0 {
-				continue
-			}
-			weight := wx * wy
-			px := max(0, min(width-1, xx))
-			rr, gg, bb, aa := pixelRGBA(img, offX+px, offY+py)
-			r += float64(rr) * weight
-			g += float64(gg) * weight
-			b += float64(bb) * weight
-			a += float64(aa) * weight
-			total += weight
-		}
-	}
-	if total == 0 {
-		rr, gg, bb, aa := pixelRGBA(img, offX+max(0, min(width-1, int(math.Round(x)))), offY+max(0, min(height-1, int(math.Round(y)))))
-		return float64(rr), float64(gg), float64(bb), float64(aa)
-	}
-	return clampFloat(r/total, 0, 255), clampFloat(g/total, 0, 255), clampFloat(b/total, 0, 255), clampFloat(a/total, 0, 255)
-}
-
 func lanczosWeight(x float64) float64 {
 	if x < 0 {
 		x = -x
@@ -22230,41 +18220,6 @@ func hasTransparency(img image.Image) bool {
 	return false
 }
 
-func cubicWeight(x float64) float64 {
-	if x < 0 {
-		x = -x
-	}
-	if x <= 1 {
-		return 1.5*x*x*x - 2.5*x*x + 1
-	}
-	if x < 2 {
-		return -0.5*x*x*x + 2.5*x*x - 4*x + 2
-	}
-	return 0
-}
-
-func enhanceSharpness(luma []float64, width, height int, factor float64) []float64 {
-	out := make([]float64, len(luma))
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			var sum float64
-			var count float64
-			for yy := -1; yy <= 1; yy++ {
-				py := max(0, min(height-1, y+yy))
-				for xx := -1; xx <= 1; xx++ {
-					px := max(0, min(width-1, x+xx))
-					sum += luma[py*width+px]
-					count++
-				}
-			}
-			blurred := sum / count
-			original := luma[y*width+x]
-			out[y*width+x] = clampFloat(blurred*(1-factor)+original*factor, 0, 255)
-		}
-	}
-	return out
-}
-
 func clampFloat(value, low, high float64) float64 {
 	if value < low {
 		return low
@@ -22273,15 +18228,6 @@ func clampFloat(value, low, high float64) float64 {
 		return high
 	}
 	return value
-}
-
-func firstVisibleRune(charset []rune) rune {
-	for _, char := range charset {
-		if char != ' ' {
-			return char
-		}
-	}
-	return '.'
 }
 
 func boostRGB(r, g, b uint8, factor float64) (uint8, uint8, uint8) {
@@ -22304,39 +18250,6 @@ func writeRGBSequence(sb *strings.Builder, mode string, r, g, b uint8, char rune
 	sb.WriteString(strconv.Itoa(int(b)))
 	sb.WriteByte('m')
 	sb.WriteRune(char)
-}
-
-func playEffect(slide Slide, width, height, page int, view ViewState) string {
-	name := slide.Effect
-	frame := 0
-	overlay := displayLines(slide, width, height, page)
-	hasAnimatedOverlay := slideHasAnimatedImage(slide)
-	geometry := fittedTerminalContentGeometry(width, height)
-	matrix := newMatrix(geometry.Width, geometry.Height)
-	stars := newStars(geometry.Width, geometry.Height)
-	fireworks := newBursts(name, geometry.Width, geometry.Height)
-	for {
-		if action := pollKey(); action != "" {
-			return action
-		}
-		flushTerminalFrame(func() {
-			clearPhysicalTerminalViewport()
-			canvasFrame, _ := drawTerminalSlideCanvas(slide, width, height, func(canvas terminalContentGeometry) {
-				drawEffectFrame(name, canvas.Width, canvas.Height, frame, matrix, stars, fireworks, slideBG(slide))
-			})
-			if hasAnimatedOverlay {
-				overlay = displayLines(slide, width, height, page)
-			}
-			backdropLines := ansiFrameToExportLines(canvasFrame, width, height, ansiCSSColour(slideFG(slide)))
-			drawTransparentShapeBackdrop(overlay, backdropLines, width, height, slide)
-			drawOverlayLines(overlay, width, height, slide)
-			drawLinkUnderlines(overlay, width, height, slide)
-			drawViewChrome(width, height, view)
-			drawViewOverlays(width, height, view)
-		})
-		time.Sleep(70 * time.Millisecond)
-		frame++
-	}
 }
 
 type matrixTrail struct {
@@ -23174,922 +19087,18 @@ func (b *burstEffect) printParticle(x, y int, color, char string) {
 	}
 }
 
-func waitKey() string {
-	for {
-		if action := pollKey(); action != "" {
-			return action
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
-func pollKey() string {
-	event := readKeyEvent()
-	if event.Action == "text" {
-		queuedTimerText = event.Text
-	}
-	switch event.Action {
-	case "quit", "prev", "next", "up", "down", "enter", "backspace", "text", "edit", "insert-image", "insert-text", "shape-picker", "insert-slide", "clone-slide", "delete-slide", "effect-picker", "background-picker", "search", "jump", "export", "present", "controls", "tab", "shift-tab", "undo", "redo", "copy", "cut", "paste", "mouse-click", "slide-list", "speaker-notes", "timer", "shortcuts", "master-view", "layout-picker", "page-number", "visual-properties":
-		return event.Action
-	default:
-		return ""
-	}
-}
-
-func readKeyEvent() KeyEvent {
-	if event, ok := pollRemoteKeyEvent(); ok {
-		return event
-	}
-	var buf [64]byte
-	n, _ := inputRead(buf[:])
-	if n == 0 {
-		return KeyEvent{}
-	}
-	b := buf[:n]
-	if event := parseMouseEvent(b); event.Action != "" {
-		queuedMainMouseEvent = &event
-		return event
-	}
-	if consumeBracketedPaste(b) {
-		return KeyEvent{Action: "paste"}
-	}
-	if bytes.Contains(b, []byte{3}) {
-		return KeyEvent{Action: "copy"}
-	}
-	if bytes.Contains(b, []byte{26}) {
-		return KeyEvent{Action: "undo"}
-	}
-	if bytes.Contains(b, []byte{25}) {
-		return KeyEvent{Action: "redo"}
-	}
-	if bytes.Contains(b, []byte{24}) {
-		return KeyEvent{Action: "cut"}
-	}
-	if bytes.Contains(b, []byte{22}) {
-		return KeyEvent{Action: "paste"}
-	}
-	if bytes.Equal(b, []byte{27}) {
-		return KeyEvent{Action: "controls"}
-	}
-	if bytes.Contains(b, []byte{27, '[', 'A'}) {
-		return KeyEvent{Action: "up"}
-	}
-	if bytes.Contains(b, []byte{27, '[', 'B'}) {
-		return KeyEvent{Action: "down"}
-	}
-	if bytes.Contains(b, []byte{27, '[', 'Z'}) {
-		return KeyEvent{Action: "shift-tab"}
-	}
-	if bytes.Contains(b, []byte{9}) {
-		return KeyEvent{Action: "tab"}
-	}
-	if bytes.Contains(b, []byte{27, '[', 'D'}) {
-		return KeyEvent{Action: "prev"}
-	}
-	if bytes.Contains(b, []byte{' '}) || bytes.Contains(b, []byte{27, '[', 'C'}) {
-		return KeyEvent{Action: "next"}
-	}
-	if bytes.Contains(b, []byte{'n'}) {
-		return KeyEvent{Action: "insert-slide"}
-	}
-	if bytes.Contains(b, []byte{'1'}) {
-		return KeyEvent{Action: "slide-list"}
-	}
-	if bytes.Contains(b, []byte{'2'}) {
-		return KeyEvent{Action: "speaker-notes"}
-	}
-	if bytes.Contains(b, []byte{'0'}) {
-		return KeyEvent{Action: "timer"}
-	}
-	if bytes.Contains(b, []byte{'#'}) {
-		return KeyEvent{Action: "page-number"}
-	}
-	if bytes.Contains(b, []byte{'v'}) {
-		return KeyEvent{Action: "visual-properties"}
-	}
-	if bytes.Contains(b, []byte{'?'}) {
-		return KeyEvent{Action: "shortcuts"}
-	}
-	if bytes.Contains(b, []byte{'M'}) {
-		return KeyEvent{Action: "master-view"}
-	}
-	if bytes.Contains(b, []byte{'L'}) {
-		return KeyEvent{Action: "layout-picker"}
-	}
-	if bytes.Contains(b, []byte{'c'}) {
-		return KeyEvent{Action: "clone-slide"}
-	}
-	if bytes.Contains(b, []byte{'d'}) {
-		return KeyEvent{Action: "delete-slide"}
-	}
-	if bytes.Contains(b, []byte{'e'}) {
-		return KeyEvent{Action: "effect-picker"}
-	}
-	if bytes.Contains(b, []byte{'b'}) {
-		return KeyEvent{Action: "background-picker"}
-	}
-	if bytes.Contains(b, []byte{'q'}) {
-		return KeyEvent{Action: "quit"}
-	}
-	if bytes.Contains(b, []byte{'i'}) {
-		return KeyEvent{Action: "insert-image"}
-	}
-	if bytes.Contains(b, []byte{'t'}) {
-		return KeyEvent{Action: "insert-text"}
-	}
-	if bytes.Contains(b, []byte{'s'}) {
-		return KeyEvent{Action: "shape-picker"}
-	}
-	if bytes.Contains(b, []byte{'p'}) {
-		return KeyEvent{Action: "present"}
-	}
-	if bytes.Contains(b, []byte{'/'}) {
-		return KeyEvent{Action: "search"}
-	}
-	if bytes.Contains(b, []byte{'j'}) {
-		return KeyEvent{Action: "jump"}
-	}
-	if bytes.Contains(b, []byte{'x'}) {
-		return KeyEvent{Action: "export"}
-	}
-	if bytes.Contains(b, []byte{127}) || bytes.Contains(b, []byte{8}) {
-		return KeyEvent{Action: "backspace"}
-	}
-	if bytes.Contains(b, []byte{'\r'}) || bytes.Contains(b, []byte{'\n'}) {
-		return KeyEvent{Action: "enter"}
-	}
-	text := string(b)
-	if utf8.ValidString(text) {
-		var out []rune
-		for _, r := range text {
-			if r >= 32 && r != 127 {
-				out = append(out, r)
-			}
-		}
-		if len(out) > 0 {
-			return KeyEvent{Action: "text", Text: string(out)}
-		}
-	}
-	return KeyEvent{}
-}
-
-func pollRemoteKeyEvent() (KeyEvent, bool) {
-	select {
-	case event := <-remoteKeyEvents:
-		return event, true
-	default:
-		return KeyEvent{}, false
-	}
-}
-
-func readEditKeyEvent() KeyEvent {
-	return readEditKeyEventMode(false)
-}
-
-func readEditKeyEventForMode(mode string) KeyEvent {
-	return readEditKeyEventMode(mode == "text")
-}
-
-func readEditKeyEventMode(textMode bool) KeyEvent {
-	if event, ok := pollRemoteKeyEvent(); ok {
-		return event
-	}
-	var buf [32]byte
-	n, _ := inputRead(buf[:])
-	if n == 0 {
-		return KeyEvent{}
-	}
-	b := buf[:n]
-	if event := parseMouseEvent(b); event.Action != "" {
-		return event
-	}
-	if consumeBracketedPaste(b) {
-		return KeyEvent{Action: "paste"}
-	}
-	if event := shiftArrowEvent(b); event.Action != "" {
-		return event
-	}
-	if bytes.Contains(b, []byte{3}) {
-		return KeyEvent{Action: "copy"}
-	}
-	if bytes.Contains(b, []byte{26}) {
-		return KeyEvent{Action: "undo"}
-	}
-	if bytes.Contains(b, []byte{25}) {
-		return KeyEvent{Action: "redo"}
-	}
-	if bytes.Contains(b, []byte{24}) {
-		return KeyEvent{Action: "cut"}
-	}
-	if bytes.Contains(b, []byte{22}) {
-		return KeyEvent{Action: "paste"}
-	}
-	if bytes.Contains(b, []byte{27, '[', 'Z'}) {
-		return KeyEvent{Action: "shift-tab"}
-	}
-	if shiftEnterEvent(b) {
-		return KeyEvent{Action: "insert-newline"}
-	}
-	if event := editEscapeEvent(b); event.Action != "" {
-		return event
-	}
-	if bytes.Contains(b, []byte{9}) {
-		return KeyEvent{Action: "tab"}
-	}
-	if bytes.Contains(b, []byte{127}) || bytes.Contains(b, []byte{8}) {
-		return KeyEvent{Action: "backspace"}
-	}
-	if bytes.Contains(b, []byte{'\r'}) || bytes.Contains(b, []byte{'\n'}) {
-		return KeyEvent{Action: "enter"}
-	}
-	if textMode {
-		return printableKeyEvent(b)
-	}
-	if bytes.Contains(b, []byte{'#'}) {
-		return KeyEvent{Action: "page-number"}
-	}
-	if bytes.Contains(b, []byte{'v'}) {
-		return KeyEvent{Action: "visual-properties"}
-	}
-	if bytes.Contains(b, []byte{'0'}) {
-		return KeyEvent{Action: "timer"}
-	}
-	if bytes.Contains(b, []byte{'='}) {
-		return KeyEvent{Action: "align-center"}
-	}
-	if bytes.Contains(b, []byte{'>'}) {
-		return KeyEvent{Action: "align-right"}
-	}
-	if bytes.Contains(b, []byte{'<'}) {
-		return KeyEvent{Action: "align-left"}
-	}
-	if bytes.Contains(b, []byte{'['}) {
-		return KeyEvent{Action: "layer-back"}
-	}
-	if bytes.Contains(b, []byte{']'}) {
-		return KeyEvent{Action: "layer-front"}
-	}
-	if bytes.Contains(b, []byte{'+'}) {
-		return KeyEvent{Action: "promote"}
-	}
-	if bytes.Contains(b, []byte{'-'}) || bytes.Contains(b, []byte{'_'}) {
-		return KeyEvent{Action: "demote"}
-	}
-	if bytes.Contains(b, []byte{'c'}) {
-		return KeyEvent{Action: "color"}
-	}
-	if bytes.Contains(b, []byte{'g'}) {
-		return KeyEvent{Action: "shape-toggle"}
-	}
-	if bytes.Contains(b, []byte{'o'}) {
-		return KeyEvent{Action: "outline"}
-	}
-	if bytes.Contains(b, []byte{'p'}) {
-		return KeyEvent{Action: "placeholder-role"}
-	}
-	if bytes.Contains(b, []byte{'B'}) {
-		return KeyEvent{Action: "toggle-bold"}
-	}
-	if bytes.Contains(b, []byte{'H'}) {
-		return KeyEvent{Action: "toggle-highlight"}
-	}
-	if bytes.Contains(b, []byte{'R'}) {
-		return KeyEvent{Action: "rotate-ccw"}
-	}
-	if bytes.Contains(b, []byte{'r'}) {
-		return KeyEvent{Action: "rotate"}
-	}
-	if bytes.Contains(b, []byte{'/'}) {
-		return KeyEvent{Action: "transparency"}
-	}
-	if bytes.Contains(b, []byte{'s'}) {
-		return KeyEvent{Action: "style"}
-	}
-	if bytes.Contains(b, []byte{'1'}) {
-		return KeyEvent{Action: "slide-list"}
-	}
-	if bytes.Contains(b, []byte{'2'}) {
-		return KeyEvent{Action: "speaker-notes"}
-	}
-	if bytes.Contains(b, []byte{'l'}) {
-		return KeyEvent{Action: "link"}
-	}
-	if bytes.Contains(b, []byte{'e'}) {
-		return KeyEvent{Action: "edit-selected"}
-	}
-	if bytes.Contains(b, []byte{'t'}) {
-		return KeyEvent{Action: "insert-text"}
-	}
-	if bytes.Contains(b, []byte{'m'}) {
-		return KeyEvent{Action: "move"}
-	}
-	if bytes.Contains(b, []byte{' '}) {
-		return KeyEvent{Action: "toggle-selection"}
-	}
-	text := string(b)
-	if !utf8.ValidString(text) {
-		return KeyEvent{}
-	}
-	var out []rune
-	for _, r := range text {
-		if r == 'q' {
-			return KeyEvent{Action: "quit"}
-		}
-		if r == 'i' {
-			return KeyEvent{Action: "insert-image"}
-		}
-		if r == 't' {
-			return KeyEvent{Action: "insert-text"}
-		}
-		if r == 's' {
-			return KeyEvent{Action: "style"}
-		}
-		if r == 'g' {
-			return KeyEvent{Action: "shape-toggle"}
-		}
-		if r == 'o' {
-			return KeyEvent{Action: "outline"}
-		}
-		if r == 'p' {
-			return KeyEvent{Action: "placeholder-role"}
-		}
-		if r == 'R' {
-			return KeyEvent{Action: "rotate-ccw"}
-		}
-		if r == 'r' {
-			return KeyEvent{Action: "rotate"}
-		}
-		if r == '/' {
-			return KeyEvent{Action: "transparency"}
-		}
-		if r >= 32 && r != 127 && r != 27 {
-			out = append(out, r)
-		}
-	}
-	if len(out) == 0 {
-		return KeyEvent{}
-	}
-	return KeyEvent{Action: "text", Text: string(out)}
-}
-
-func printableKeyEvent(b []byte) KeyEvent {
-	text := string(b)
-	if !utf8.ValidString(text) {
-		return KeyEvent{}
-	}
-	var out []rune
-	for _, r := range text {
-		if r >= 32 && r != 127 && r != 27 {
-			out = append(out, r)
-		}
-	}
-	if len(out) == 0 {
-		return KeyEvent{}
-	}
-	return KeyEvent{Action: "text", Text: string(out)}
-}
-
-func readSlideNavigatorKeyEvent() KeyEvent {
-	var buf [64]byte
-	n, _ := inputRead(buf[:])
-	if n == 0 {
-		return KeyEvent{}
-	}
-	b := buf[:n]
-	if event := parseMouseEvent(b); event.Action != "" {
-		return event
-	}
-	if bytes.Equal(b, []byte{27}) {
-		return KeyEvent{Action: "escape"}
-	}
-	if bytes.Contains(b, []byte{27, '[', 'A'}) {
-		return KeyEvent{Action: "up"}
-	}
-	if bytes.Contains(b, []byte{27, '[', 'B'}) {
-		return KeyEvent{Action: "down"}
-	}
-	if bytes.Contains(b, []byte{'\r'}) || bytes.Contains(b, []byte{'\n'}) {
-		return KeyEvent{Action: "enter"}
-	}
-	if bytes.Contains(b, []byte{'1'}) {
-		return KeyEvent{Action: "slide-list"}
-	}
-	return KeyEvent{}
-}
-
-func readSpeakerNotesViewKeyEvent() KeyEvent {
-	var buf [64]byte
-	n, _ := inputRead(buf[:])
-	if n == 0 {
-		return KeyEvent{}
-	}
-	b := buf[:n]
-	if event := parseMouseEvent(b); event.Action != "" {
-		return event
-	}
-	if bytes.Equal(b, []byte{27}) {
-		return KeyEvent{Action: "escape"}
-	}
-	if bytes.Contains(b, []byte{9}) {
-		return KeyEvent{Action: "tab"}
-	}
-	if bytes.Contains(b, []byte{'\r'}) || bytes.Contains(b, []byte{'\n'}) {
-		return KeyEvent{Action: "enter"}
-	}
-	if bytes.Contains(b, []byte{27, '[', 'D'}) {
-		return KeyEvent{Action: "prev"}
-	}
-	if bytes.Contains(b, []byte{' '}) || bytes.Contains(b, []byte{27, '[', 'C'}) {
-		return KeyEvent{Action: "next"}
-	}
-	if bytes.Contains(b, []byte{'1'}) {
-		return KeyEvent{Action: "slide-list"}
-	}
-	if bytes.Contains(b, []byte{'2'}) {
-		return KeyEvent{Action: "speaker-notes"}
-	}
-	if bytes.Contains(b, []byte{'0'}) {
-		return KeyEvent{Action: "timer"}
-	}
-	if bytes.Contains(b, []byte{'n'}) {
-		return KeyEvent{Action: "insert-slide"}
-	}
-	if bytes.Contains(b, []byte{'c'}) {
-		return KeyEvent{Action: "clone-slide"}
-	}
-	if bytes.Contains(b, []byte{'d'}) {
-		return KeyEvent{Action: "delete-slide"}
-	}
-	if bytes.Contains(b, []byte{'e'}) {
-		return KeyEvent{Action: "effect-picker"}
-	}
-	if bytes.Contains(b, []byte{'b'}) {
-		return KeyEvent{Action: "background-picker"}
-	}
-	if bytes.Contains(b, []byte{'q'}) {
-		return KeyEvent{Action: "quit"}
-	}
-	if bytes.Contains(b, []byte{'i'}) {
-		return KeyEvent{Action: "insert-image"}
-	}
-	if bytes.Contains(b, []byte{'t'}) {
-		return KeyEvent{Action: "insert-text"}
-	}
-	if bytes.Contains(b, []byte{'s'}) {
-		return KeyEvent{Action: "shape-picker"}
-	}
-	if bytes.Contains(b, []byte{'p'}) {
-		return KeyEvent{Action: "present"}
-	}
-	if bytes.Contains(b, []byte{'/'}) {
-		return KeyEvent{Action: "search"}
-	}
-	if bytes.Contains(b, []byte{'j'}) {
-		return KeyEvent{Action: "jump"}
-	}
-	if bytes.Contains(b, []byte{'x'}) {
-		return KeyEvent{Action: "export"}
-	}
-	return KeyEvent{}
-}
-
-func readSpeakerNotesKeyEvent() KeyEvent {
-	var buf [64]byte
-	n, _ := inputRead(buf[:])
-	if n == 0 {
-		return KeyEvent{}
-	}
-	b := buf[:n]
-	if event := parseMouseEvent(b); event.Action != "" {
-		return event
-	}
-	if bytes.Equal(b, []byte{27}) {
-		return KeyEvent{Action: "escape"}
-	}
-	if shiftEnterEvent(b) {
-		return KeyEvent{Action: "insert-newline"}
-	}
-	if bytes.Contains(b, []byte{27, '[', 'A'}) {
-		return KeyEvent{Action: "up"}
-	}
-	if bytes.Contains(b, []byte{27, '[', 'B'}) {
-		return KeyEvent{Action: "down"}
-	}
-	if bytes.Contains(b, []byte{27, '[', 'D'}) {
-		return KeyEvent{Action: "left"}
-	}
-	if bytes.Contains(b, []byte{27, '[', 'C'}) {
-		return KeyEvent{Action: "right"}
-	}
-	if bytes.Contains(b, []byte{127}) || bytes.Contains(b, []byte{8}) {
-		return KeyEvent{Action: "backspace"}
-	}
-	if bytes.Contains(b, []byte{'\r'}) || bytes.Contains(b, []byte{'\n'}) {
-		return KeyEvent{Action: "enter"}
-	}
-	text := string(b)
-	if utf8.ValidString(text) {
-		var out []rune
-		for _, r := range text {
-			if r >= 32 && r != 127 {
-				out = append(out, r)
-			}
-		}
-		if len(out) > 0 {
-			return KeyEvent{Action: "text", Text: string(out)}
-		}
-	}
-	return KeyEvent{}
-}
-
-func readColorPickerKeyEvent() KeyEvent {
-	var buf [32]byte
-	n, _ := inputRead(buf[:])
-	if n == 0 {
-		return KeyEvent{}
-	}
-	b := buf[:n]
-	if event := parseMouseEvent(b); event.Action != "" {
-		return event
-	}
-	if event := editEscapeEvent(b); event.Action != "" {
-		return event
-	}
-	if bytes.Contains(b, []byte{'\r'}) || bytes.Contains(b, []byte{'\n'}) {
-		return KeyEvent{Action: "enter"}
-	}
-	if bytes.Contains(b, []byte{127}) || bytes.Contains(b, []byte{8}) {
-		return KeyEvent{Action: "backspace"}
-	}
-	text := string(b)
-	if !utf8.ValidString(text) {
-		return KeyEvent{}
-	}
-	var out []rune
-	for _, r := range text {
-		if r == 'q' {
-			return KeyEvent{Action: "quit"}
-		}
-		if r >= 32 && r != 127 && r != 27 {
-			out = append(out, r)
-		}
-	}
-	if len(out) == 0 {
-		return KeyEvent{}
-	}
-	return KeyEvent{Action: "text", Text: string(out)}
-}
-
-func readLinkInputKeyEvent() KeyEvent {
-	var buf [256]byte
-	n, _ := inputRead(buf[:])
-	if n == 0 {
-		return KeyEvent{}
-	}
-	b := buf[:n]
-	if event := editEscapeEvent(b); event.Action != "" {
-		return event
-	}
-	if bytes.Contains(b, []byte{'\r'}) || bytes.Contains(b, []byte{'\n'}) {
-		return KeyEvent{Action: "enter"}
-	}
-	if bytes.Contains(b, []byte{127}) || bytes.Contains(b, []byte{8}) {
-		return KeyEvent{Action: "backspace"}
-	}
-	text := string(b)
-	if !utf8.ValidString(text) {
-		return KeyEvent{}
-	}
-	var out []rune
-	for _, r := range text {
-		if r >= 32 && r != 127 && r != 27 {
-			out = append(out, r)
-		}
-	}
-	if len(out) == 0 {
-		return KeyEvent{}
-	}
-	return KeyEvent{Action: "text", Text: string(out)}
-}
-
-func readSearchKeyEvent() KeyEvent {
-	var buf [32]byte
-	n, _ := inputRead(buf[:])
-	if n == 0 {
-		return KeyEvent{}
-	}
-	b := buf[:n]
-	if event := parseMouseEvent(b); event.Action != "" {
-		return event
-	}
-	if consumeBracketedPaste(b) {
-		return KeyEvent{Action: "control"}
-	}
-	if bytes.Equal(b, []byte{27}) {
-		return KeyEvent{Action: "escape"}
-	}
-	if bytes.Contains(b, []byte{127}) || bytes.Contains(b, []byte{8}) {
-		return KeyEvent{Action: "backspace"}
-	}
-	if bytes.Contains(b, []byte{'\r'}) || bytes.Contains(b, []byte{'\n'}) {
-		return KeyEvent{Action: "enter"}
-	}
-	if len(b) > 0 && b[0] == 27 {
-		return KeyEvent{Action: "control"}
-	}
-	text := string(b)
-	if !utf8.ValidString(text) {
-		return KeyEvent{}
-	}
-	var out []rune
-	for _, r := range text {
-		if r >= 32 && r != 127 && r != 27 {
-			out = append(out, r)
-		}
-	}
-	if len(out) == 0 {
-		return KeyEvent{}
-	}
-	return KeyEvent{Action: "text", Text: string(out)}
-}
-
-func readJumpKeyEvent() KeyEvent {
-	var buf [32]byte
-	n, _ := inputRead(buf[:])
-	if n == 0 {
-		return KeyEvent{}
-	}
-	b := buf[:n]
-	if event := parseMouseEvent(b); event.Action != "" {
-		return event
-	}
-	if consumeBracketedPaste(b) {
-		return KeyEvent{Action: "control"}
-	}
-	if bytes.Equal(b, []byte{27}) {
-		return KeyEvent{Action: "escape"}
-	}
-	if bytes.Contains(b, []byte{127}) || bytes.Contains(b, []byte{8}) {
-		return KeyEvent{Action: "backspace"}
-	}
-	if bytes.Contains(b, []byte{'\r'}) || bytes.Contains(b, []byte{'\n'}) {
-		return KeyEvent{Action: "enter"}
-	}
-	if len(b) > 0 && b[0] == 27 {
-		return KeyEvent{Action: "control"}
-	}
-	text := string(b)
-	if !utf8.ValidString(text) {
-		return KeyEvent{}
-	}
-	var out []rune
-	for _, r := range text {
-		if r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
-			out = append(out, r)
-		}
-	}
-	if len(out) == 0 {
-		return KeyEvent{}
-	}
-	return KeyEvent{Action: "text", Text: string(out)}
-}
-
-func readImagePlacementKeyEvent() KeyEvent {
-	var buf [32]byte
-	n, _ := inputRead(buf[:])
-	if n == 0 {
-		return KeyEvent{}
-	}
-	b := buf[:n]
-	if event := parseMouseEvent(b); event.Action != "" {
-		return event
-	}
-	if consumeBracketedPaste(b) {
-		return KeyEvent{Action: "paste"}
-	}
-	if event := shiftArrowEvent(b); event.Action != "" {
-		return event
-	}
-	if event := editEscapeEvent(b); event.Action != "" {
-		return event
-	}
-	if bytes.Contains(b, []byte{3}) {
-		return KeyEvent{Action: "copy"}
-	}
-	if bytes.Contains(b, []byte{26}) {
-		return KeyEvent{Action: "undo"}
-	}
-	if bytes.Contains(b, []byte{25}) {
-		return KeyEvent{Action: "redo"}
-	}
-	if bytes.Contains(b, []byte{24}) {
-		return KeyEvent{Action: "cut"}
-	}
-	if bytes.Contains(b, []byte{22}) {
-		return KeyEvent{Action: "paste"}
-	}
-	if bytes.Contains(b, []byte{'\r'}) || bytes.Contains(b, []byte{'\n'}) {
-		return KeyEvent{Action: "save"}
-	}
-	if bytes.Contains(b, []byte{127}) || bytes.Contains(b, []byte{8}) {
-		return KeyEvent{Action: "backspace"}
-	}
-	if bytes.Contains(b, []byte{'q'}) {
-		return KeyEvent{Action: "quit"}
-	}
-	if bytes.Contains(b, []byte{'s'}) {
-		return KeyEvent{Action: "settings"}
-	}
-	if bytes.Contains(b, []byte{'='}) {
-		return KeyEvent{Action: "align-center"}
-	}
-	if bytes.Contains(b, []byte{'>'}) {
-		return KeyEvent{Action: "align-right"}
-	}
-	if bytes.Contains(b, []byte{'<'}) {
-		return KeyEvent{Action: "align-left"}
-	}
-	if bytes.Contains(b, []byte{'+'}) {
-		return KeyEvent{Action: "scale-up"}
-	}
-	if bytes.Contains(b, []byte{'-'}) || bytes.Contains(b, []byte{'_'}) {
-		return KeyEvent{Action: "scale-down"}
-	}
-	return KeyEvent{}
-}
-
 var (
 	bracketedPasteStart = []byte{27, '[', '2', '0', '0', '~'}
 	bracketedPasteEnd   = []byte{27, '[', '2', '0', '1', '~'}
 )
 
-func consumeBracketedPaste(initial []byte) bool {
-	if !bytes.Contains(initial, bracketedPasteStart) {
-		return false
-	}
-	data := append([]byte(nil), initial...)
-	var buf [512]byte
-	deadline := time.Now().Add(750 * time.Millisecond)
-	for !bytes.Contains(data, bracketedPasteEnd) && time.Now().Before(deadline) {
-		n, _ := inputRead(buf[:])
-		if n == 0 {
-			time.Sleep(5 * time.Millisecond)
-			continue
-		}
-		data = append(data, buf[:n]...)
-	}
-	return true
-}
-
-func parseMouseEvent(b []byte) KeyEvent {
-	text := string(b)
-	start := strings.Index(text, "\x1b[<")
-	if start < 0 {
-		return KeyEvent{}
-	}
-	end := start + 3
-	for end < len(text) && text[end] != 'M' && text[end] != 'm' {
-		end++
-	}
-	if end >= len(text) {
-		return KeyEvent{Action: "mouse"}
-	}
-	payload := text[start+3 : end]
-	parts := strings.Split(payload, ";")
-	if len(parts) != 3 {
-		return KeyEvent{Action: "mouse"}
-	}
-	button, err1 := strconv.Atoi(parts[0])
-	x, err2 := strconv.Atoi(parts[1])
-	y, err3 := strconv.Atoi(parts[2])
-	if err1 != nil || err2 != nil || err3 != nil {
-		return KeyEvent{Action: "mouse"}
-	}
-	if button >= 64 && button <= 67 {
-		return KeyEvent{Action: "mouse-scroll", X: x - 1, Y: y - 1, Button: button}
-	}
-	if text[end] == 'm' {
-		return KeyEvent{Action: "mouse-release", X: x - 1, Y: y - 1, Button: button}
-	}
-	if button&4 != 0 {
-		return KeyEvent{Action: "shift-mouse-click", X: x - 1, Y: y - 1, Button: button}
-	}
-	return KeyEvent{Action: "mouse-click", X: x - 1, Y: y - 1, Button: button}
-}
-
-func editEscapeEvent(b []byte) KeyEvent {
-	if len(b) == 0 || b[0] != 27 {
-		return KeyEvent{}
-	}
-	if len(b) == 1 {
-		return KeyEvent{Action: "escape"}
-	}
-	switch {
-	case bytes.Contains(b, []byte{27, '[', 'A'}) || bytes.Contains(b, []byte{27, 'O', 'A'}):
-		return KeyEvent{Action: "up"}
-	case bytes.Contains(b, []byte{27, '[', 'B'}) || bytes.Contains(b, []byte{27, 'O', 'B'}):
-		return KeyEvent{Action: "down"}
-	case bytes.Contains(b, []byte{27, '[', 'C'}) || bytes.Contains(b, []byte{27, 'O', 'C'}):
-		return KeyEvent{Action: "right"}
-	case bytes.Contains(b, []byte{27, '[', 'D'}) || bytes.Contains(b, []byte{27, 'O', 'D'}):
-		return KeyEvent{Action: "left"}
-	default:
-		return KeyEvent{Action: "control"}
-	}
-}
-
-func shiftEnterEvent(b []byte) bool {
-	sequences := [][]byte{
-		{27, '[', '1', '3', ';', '2', 'u'},
-		{27, '[', '1', '3', ';', '2', '~'},
-		{27, '[', '2', '7', ';', '2', ';', '1', '3', '~'},
-		{27, '[', '1', ';', '2', '\r'},
-		{27, '[', '1', ';', '2', '\n'},
-	}
-	for _, sequence := range sequences {
-		if bytes.Contains(b, sequence) {
-			return true
-		}
-	}
-	return false
-}
-
-func shiftArrowEvent(b []byte) KeyEvent {
-	switch {
-	case bytes.Contains(b, []byte{27, '[', '1', ';', '2', 'A'}) || bytes.Contains(b, []byte{27, '[', '2', 'A'}):
-		return KeyEvent{Action: "shift-up"}
-	case bytes.Contains(b, []byte{27, '[', '1', ';', '2', 'B'}) || bytes.Contains(b, []byte{27, '[', '2', 'B'}):
-		return KeyEvent{Action: "shift-down"}
-	case bytes.Contains(b, []byte{27, '[', '1', ';', '2', 'C'}) || bytes.Contains(b, []byte{27, '[', '2', 'C'}):
-		return KeyEvent{Action: "shift-right"}
-	case bytes.Contains(b, []byte{27, '[', '1', ';', '2', 'D'}) || bytes.Contains(b, []byte{27, '[', '2', 'D'}):
-		return KeyEvent{Action: "shift-left"}
-	default:
-		return KeyEvent{}
-	}
-}
-
-func rawTerminal() (func(), error) {
-	oldCmd := exec.Command("stty", "-g")
-	oldCmd.Stdin = os.Stdin
-	old, _ := oldCmd.Output()
-
-	rawCmd := exec.Command("stty", "raw", "-echo", "min", "0", "time", "0")
-	rawCmd.Stdin = os.Stdin
-	if err := rawCmd.Run(); err != nil {
-		return nil, err
-	}
-	return func() {
-		restoreCmd := exec.Command("stty", string(bytes.TrimSpace(old)))
-		restoreCmd.Stdin = os.Stdin
-		_ = restoreCmd.Run()
-	}, nil
-}
-
 func terminalSize() (int, int) {
-	if width, height, ok := terminalSizeOK(); ok {
-		return width, height
-	}
-	return 80, 25
+	return authoredRenderSize(defaultAuthoredTerminalWidth, defaultAuthoredTerminalHeight)
 }
 
 func terminalAuthoredSize() (int, int) {
 	width, height := terminalSize()
 	return authoredRenderSize(width, height)
-}
-
-func terminalSizeOK() (int, int, bool) {
-	if columns, errW := strconv.Atoi(os.Getenv("COLUMNS")); errW == nil && columns > 0 {
-		if lines, errH := strconv.Atoi(os.Getenv("LINES")); errH == nil && lines > 0 {
-			return columns, lines, true
-		}
-	}
-	cmd := exec.Command("stty", "size")
-	cmd.Stdin = os.Stdin
-	out, err := cmd.Output()
-	if err == nil {
-		parts := strings.Fields(string(out))
-		if len(parts) == 2 {
-			h, _ := strconv.Atoi(parts[0])
-			w, _ := strconv.Atoi(parts[1])
-			if w > 0 && h > 0 {
-				return w, h, true
-			}
-		}
-	}
-	return 0, 0, false
-}
-
-func c64Prefix(text string) string {
-	var sb strings.Builder
-	for _, r := range text {
-		if r == '█' {
-			sb.WriteString("█   ")
-		} else {
-			sb.WriteString("    ")
-		}
-	}
-	return sb.String()
 }
 
 func wrapWords(text string, width int) []string {

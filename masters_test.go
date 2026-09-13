@@ -62,7 +62,7 @@ func TestMasterDeckRoundTripDoesNotCreateSlides(t *testing.T) {
 	if len(parsed.Slides) != 1 {
 		t.Fatalf("master layouts leaked into slide count: %d", len(parsed.Slides))
 	}
-	if len(parsed.Masters.Layouts) != 4 {
+	if len(parsed.Masters.Layouts) != 5 {
 		t.Fatalf("layout count = %d", len(parsed.Masters.Layouts))
 	}
 	resolved := parsed.ResolveSlide(0, false)
@@ -356,7 +356,7 @@ func TestEmptyPlaceholderPositionOverrideRoundTripsWithoutPresentingSample(t *te
 		}
 	}
 	resolvedEditing := parsed.ResolveSlide(0, true)
-	if len(resolvedEditing.Elements) != 2 || resolvedEditing.Elements[0].Text != "Title" || resolvedEditing.Elements[0].Query != "left=12" || resolvedEditing.Elements[1].Kind != "page-number" {
+	if len(resolvedEditing.Elements) != 2 || resolvedEditing.Elements[0].Text != "Title" || !strings.Contains(resolvedEditing.Elements[0].Query, "left=12") || !isTrueType(resolvedEditing.Elements[0]) || resolvedEditing.Elements[1].Kind != "page-number" {
 		t.Fatalf("editing placeholder = %#v", resolvedEditing.Elements)
 	}
 }
@@ -512,6 +512,7 @@ func TestMasterPageNumberPolicyReplacesOnlyMasteredExportChrome(t *testing.T) {
 }
 
 func TestDynamicPageNumberRepeatsOnOverflowSubpages(t *testing.T) {
+	useTestAuthoredSize(t, 80, 25)
 	deck := Deck{Masters: defaultMasterDeck(), Slides: []Slide{{
 		LayoutID: "blank",
 		Elements: []Element{{Kind: "text", Text: "Second page", Query: "top=30"}},
@@ -531,6 +532,54 @@ func TestDynamicPageNumberRepeatsOnOverflowSubpages(t *testing.T) {
 		}
 		if !hasPageNumber {
 			t.Fatalf("overflow page %d has no page number: %#v", pageIndex, lines)
+		}
+	}
+}
+
+func TestMasterOverflowIsClippedWithoutCreatingContinuation(t *testing.T) {
+	useTestAuthoredSize(t, 245, 56)
+	masters := defaultMasterDeck()
+	masters.Base.Slide.PageNumber = pageNumberHide
+	masters.Base.Slide.Elements = []Element{{Kind: "shape", Query: "top=54&width=10&height=8&shape=square"}}
+	masters.Layouts[0].Slide.Elements = []Element{
+		{Kind: "text", Text: "Master footer", Query: "render=truetype&top=52&width=100&height=12"},
+		{Kind: "text", Text: "Entirely outside", Query: "render=truetype&top=70"},
+	}
+	deck := Deck{Masters: masters, Slides: []Slide{{LayoutID: "blank", Elements: []Element{
+		{Kind: "text", Text: "Slide content", Query: "render=truetype&top=15"},
+	}}}}
+	resolved := deck.ResolveSlide(0, false)
+	pages := displayPages(resolved, 245, 56)
+	if len(pages) != 1 {
+		t.Fatalf("master overflow created %d pages", len(pages))
+	}
+	seen := map[string]int{}
+	for _, line := range pages[0] {
+		if line.Row < 0 || line.Row >= 56 {
+			t.Fatalf("unclipped master row: %#v", line)
+		}
+		seen[resolved.Elements[line.Element].Text]++
+	}
+	if seen["Master footer"] != 4 || seen["Entirely outside"] != 0 || seen["Slide content"] == 0 {
+		t.Fatalf("wrong clipped content: %v", seen)
+	}
+	if len(exportSlidePages(resolved, 0, 1, 245, 56)) != 1 {
+		t.Fatal("HTML export retained master continuation")
+	}
+	if deck.Masters.Layouts[0].Slide.Elements[1].Text != "Entirely outside" {
+		t.Fatal("clipping modified the master definition")
+	}
+	// Slide-owned content still overflows, but master decorations must not
+	// leak onto the continuation or get shifted to its top.
+	deck.Slides[0].Elements = append(deck.Slides[0].Elements, Element{Kind: "text", Text: "Local overflow", Query: "render=truetype&top=70"})
+	resolved = deck.ResolveSlide(0, false)
+	pages = displayPages(resolved, 245, 56)
+	if len(pages) != 2 {
+		t.Fatalf("local overflow lost its continuation: %d pages", len(pages))
+	}
+	for _, line := range pages[1] {
+		if resolved.Elements[line.Element].Inherited {
+			t.Fatalf("master decoration leaked onto continuation: %#v", line)
 		}
 	}
 }
@@ -568,34 +617,6 @@ func TestPageNumberSlideOverrideRoundTripsMarkdown(t *testing.T) {
 	}
 	if len(parsed.Slides) != 1 || parsed.Slides[0].PageNumber != pageNumberHide {
 		t.Fatalf("parsed page-number override = %#v", parsed.Slides)
-	}
-}
-
-func TestMasterPageNumberToggleCyclesPoliciesAndElements(t *testing.T) {
-	deck := Deck{Masters: defaultMasterDeck()}
-	if got := toggleMasterPageNumber(&deck, 0); got != "hide" {
-		t.Fatalf("Base toggle = %q", got)
-	}
-	if _, ok := pageNumberElement(deck.Masters.Base.Slide); ok {
-		t.Fatal("hidden Base Master retained page-number element")
-	}
-	if got := toggleMasterPageNumber(&deck, 0); got != "show" {
-		t.Fatalf("Base second toggle = %q", got)
-	}
-	if _, ok := pageNumberElement(deck.Masters.Base.Slide); !ok {
-		t.Fatal("shown Base Master has no page-number element")
-	}
-	if got := toggleMasterPageNumber(&deck, 1); got != "show" {
-		t.Fatalf("layout first toggle = %q", got)
-	}
-	if _, ok := pageNumberElement(deck.Masters.Layouts[0].Slide); !ok {
-		t.Fatal("shown layout has no page-number element")
-	}
-	if got := toggleMasterPageNumber(&deck, 1); got != "hide" {
-		t.Fatalf("layout second toggle = %q", got)
-	}
-	if got := toggleMasterPageNumber(&deck, 1); got != "inherit" || deck.Masters.Layouts[0].Slide.PageNumber != "" {
-		t.Fatalf("layout third toggle = %q slide=%#v", got, deck.Masters.Layouts[0].Slide)
 	}
 }
 

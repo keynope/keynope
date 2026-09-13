@@ -21,6 +21,31 @@ import (
 	"time"
 )
 
+func TestNativeEditorHistoryAvailability(t *testing.T) {
+	session := newNativeEditorSession(filepath.Join(t.TempDir(), "deck.md"), Deck{Slides: []Slide{{}}})
+	for _, step := range []struct {
+		action     string
+		undo, redo bool
+	}{
+		{"", false, false},
+		{"add-slide", true, false},
+		{"undo", false, true},
+		{"redo", true, false},
+		{"undo", false, true},
+		{"add-slide", true, false},
+	} {
+		if step.action != "" {
+			if err := session.apply(nativeEditorAction{Action: step.action}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		state := session.state()
+		if state.CanUndo != step.undo || state.CanRedo != step.redo {
+			t.Fatalf("after %s: undo=%v redo=%v; want %v/%v", step.action, state.CanUndo, state.CanRedo, step.undo, step.redo)
+		}
+	}
+}
+
 func TestNativeEditorMutationsPersistAndUndo(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "deck.md")
 	deck := Deck{Slides: []Slide{{Elements: []Element{{Kind: "heading", Level: 1, Text: "Original"}}}}}
@@ -431,6 +456,7 @@ func TestNativeEditorPreviewRendersWithoutMutatingDeck(t *testing.T) {
 }
 
 func TestNativeEditorInlinePreviewReturnsExactBulletCaret(t *testing.T) {
+	useTestAuthoredSize(t, 80, 40)
 	element := Element{Kind: "bullet", Text: "First\nSecond  "}
 	session := newNativeEditorSession(filepath.Join(t.TempDir(), "deck.md"), Deck{Slides: []Slide{{Elements: []Element{element}}}})
 	action := nativeEditorAction{Name: "inline-edit", Element: 0, ElementData: &element, Cursor: len([]rune(element.Text)), Cols: 80, Rows: 40}
@@ -454,6 +480,7 @@ func TestNativeEditorInlinePreviewReturnsExactBulletCaret(t *testing.T) {
 }
 
 func TestNativeEditorInlinePreviewReturnsSelectionBackgroundRows(t *testing.T) {
+	useTestAuthoredSize(t, 80, 40)
 	element := Element{Kind: "text", Text: "Select me"}
 	session := newNativeEditorSession(filepath.Join(t.TempDir(), "deck.md"), Deck{Slides: []Slide{{Elements: []Element{element}}}})
 	action := nativeEditorAction{Name: "inline-edit", Element: 0, ElementData: &element, Cursor: 6, SelectionStart: 0, SelectionEnd: 6, Cols: 80, Rows: 40}
@@ -479,6 +506,7 @@ func TestNativeEditorInlinePreviewReturnsSelectionBackgroundRows(t *testing.T) {
 }
 
 func TestNativeEditorSelectionBackgroundUsesBoldGlyphWidth(t *testing.T) {
+	useTestAuthoredSize(t, 80, 40)
 	element := Element{Kind: "text", Text: "A**BB**C"}
 	selectionStart := len([]rune("A**"))
 	selectionEnd := len([]rune("A**BB"))
@@ -587,6 +615,7 @@ func TestDefaultTextCaretIncludesEveryEmojiAndSpacer(t *testing.T) {
 }
 
 func TestBulletEmojiCaretAndSelectionUseRenderedWidth(t *testing.T) {
+	useTestAuthoredSize(t, 80, 40)
 	element := Element{Kind: "bullet", Text: "A[color=#55aaff]😀[/color]B"}
 	slide := Slide{Elements: []Element{element}}
 	startCursor := len([]rune("A[color=#55aaff]"))
@@ -647,7 +676,7 @@ func TestNativeEditorFitsLargestTextSizeInsideDragBox(t *testing.T) {
 	if smallSize, largeSize := textSize(small.Element), textSize(large.Element); largeSize <= smallSize {
 		t.Fatalf("fitted sizes small=%d large=%d", smallSize, largeSize)
 	}
-	if got := session.state().Slides[0].Elements[0].Query; got != "" {
+	if got := session.state().Slides[0].Elements[0].Query; got != "render=truetype" {
 		t.Fatalf("fit preview mutated deck query to %q", got)
 	}
 }
@@ -722,7 +751,7 @@ func TestNativeEditorClonesMasterImmediatelyBelowSource(t *testing.T) {
 	if state.Current != 3 {
 		t.Fatalf("selected master after clone = %d, want 3", state.Current)
 	}
-	if len(state.Masters.Layouts) != 5 || state.Masters.Layouts[1].ID != sourceID {
+	if len(state.Masters.Layouts) != 6 || state.Masters.Layouts[1].ID != sourceID {
 		t.Fatalf("master order after clone = %#v", state.Masters.Layouts)
 	}
 	clone := state.Masters.Layouts[2]
@@ -731,6 +760,49 @@ func TestNativeEditorClonesMasterImmediatelyBelowSource(t *testing.T) {
 	}
 	if state.Masters.Layouts[3].Name != "Title + Subtitle" {
 		t.Fatalf("following master was displaced incorrectly: %#v", state.Masters.Layouts)
+	}
+}
+
+func TestNativeEditorReordersSlides(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deck.md")
+	deck := Deck{Slides: []Slide{
+		{Elements: []Element{{Kind: "text", Text: "A"}}},
+		{Elements: []Element{{Kind: "text", Text: "B"}}},
+		{Elements: []Element{{Kind: "text", Text: "C"}}},
+	}}
+	if err := saveDeck(path, deck); err != nil {
+		t.Fatal(err)
+	}
+	session := newNativeEditorSession(path, deck)
+	for _, move := range []struct {
+		from, to int
+		want     string
+	}{{0, 2, "BCA"}, {2, 0, "ABC"}, {2, 1, "ACB"}} {
+		if err := session.apply(nativeEditorAction{Action: "reorder-slide", Slide: move.from, Value: move.to}); err != nil {
+			t.Fatal(err)
+		}
+		got := ""
+		for _, slide := range session.deck.Slides {
+			got += slide.Elements[0].Text
+		}
+		if got != move.want || session.current != move.to {
+			t.Fatalf("order=%s current=%d", got, session.current)
+		}
+	}
+	if err := session.apply(nativeEditorAction{Action: "undo"}); err != nil {
+		t.Fatal(err)
+	}
+	if session.deck.Slides[1].Elements[0].Text != "B" {
+		t.Fatal("undo did not restore order")
+	}
+	if err := session.apply(nativeEditorAction{Action: "redo"}); err != nil {
+		t.Fatal(err)
+	}
+	if session.deck.Slides[1].Elements[0].Text != "C" {
+		t.Fatal("redo did not restore order")
+	}
+	if err := session.apply(nativeEditorAction{Action: "reorder-slide", Slide: 0, Value: 3}); err == nil {
+		t.Fatal("accepted invalid destination")
 	}
 }
 

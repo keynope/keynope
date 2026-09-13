@@ -18,6 +18,30 @@
 *.dmg
 *.pkg
 *.zip
+!assets/emoji/keynope-emoji-fonts.zip
 xcuserdata/
 DerivedData/
 terraform/
+
+# Local design utilities and manual test fixtures (not release inputs).
+/editor.html
+/eyes-editor.html
+/mouths-editor.html
+/multi.html
+/test.html
+/test.md
+/tools/activity_contact_sheets.cjs
+/tools/audit_activities.cjs
+/tools/extract_character_assets.go
+/tools/serve_multi.py
+/characters_svg/*/
+/characters_svg/*_kn.png
+
+# Local reference checkouts, screenshots, and unrelated working documents.
+/app-store-review-skill/
+/oh-my-logo/
+/app-store/screenshots/
+/output/
+/examples/Screenshot 2026-07-15 at 06.17.54.png
+/examples/robot-operator-3d-icon-png-download-8877553-2.webp
+/install

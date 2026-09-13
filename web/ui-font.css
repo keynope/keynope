@@ -1,0 +1,4 @@
+@font-face{font-family:KeynopeC64;src:url('/fonts/keynope-c64.ttf') format('truetype');font-weight:400;font-display:swap}
+html body,html body :is(button,input,select,textarea,label,h1,h2,h3,p,small,strong,summary){font-family:KeynopeC64,ui-monospace,monospace}
+/* Keep block-art geometry on the existing grid font, not the interface font. */
+html body :is(.avatar-layer,.avatar-option-preview,.draw-grid,.draw-grid button,.portrait-art){font-family:Menlo,Monaco,monospace}

@@ -31,6 +31,7 @@ const (
 var masterDeckMetaRE = regexp.MustCompile(`(?m)^<!--\s*keynope-masters\s+version=([0-9]+)\s+base64:([A-Za-z0-9+/=]+)\s*-->\s*`)
 
 type Deck struct {
+	Tabs    []DeckTab
 	Slides  []Slide
 	Masters MasterDeck
 	Assets  map[string]DeckAsset
@@ -108,6 +109,7 @@ func defaultMasterDeck() MasterDeck {
 			masterPlaceholder("title-body-title", placeholderTitle, "Title", "heading", 1),
 			masterPlaceholder("title-body-body", placeholderBody, "Body text", "text", 0),
 		}}},
+		defaultActivityMaster(),
 	}
 	return masters
 }
@@ -136,10 +138,16 @@ func masterPlaceholder(id, role, text, kind string, level int) Element {
 }
 
 func (deck *Deck) EnsureDefaultMasters() {
-	if deck == nil || len(deck.Masters.Layouts) > 0 {
+	if deck == nil {
 		return
 	}
-	deck.Masters = defaultMasterDeck()
+	if len(deck.Masters.Layouts) == 0 {
+		deck.Masters = defaultMasterDeck()
+		return
+	}
+	if _, exists := deck.Masters.Layout(activityLayoutID); !exists {
+		deck.Masters.Layouts = append(deck.Masters.Layouts, defaultActivityMaster())
+	}
 }
 
 func deckHasMasterData(masters MasterDeck) bool {
@@ -181,6 +189,35 @@ func (masters *MasterDeck) Normalize() {
 			removePageNumberElements(&layout.Slide)
 		}
 		normalizeMasterSlide(&layout.Slide, layout.ID)
+		if layout.ID == activityLayoutID {
+			normalizeActivityMaster(layout)
+		}
+	}
+}
+
+func normalizeActivityMaster(layout *MasterLayout) {
+	if layout == nil {
+		return
+	}
+	for index := range layout.Slide.Elements {
+		element := &layout.Slide.Elements[index]
+		switch element.PlaceholderRole {
+		case activityTitleRole:
+			element.Kind = "heading"
+			element.Level = 2
+		case activityQRCodeRole:
+			element.Kind = "code"
+			values, _ := url.ParseQuery(element.Query)
+			if values.Get("valign") == "middle" && values.Get("top") == "" {
+				values.Del("valign")
+				values.Set("top", "12")
+			} else if values.Get("top") == "9" {
+				values.Set("top", "12")
+			}
+			element.Query = encodeQueryStable(values)
+		case activityURLRole:
+			element.Kind = "text"
+		}
 	}
 }
 
@@ -248,6 +285,12 @@ func normalizePlaceholderRole(role string) string {
 		return placeholderCode
 	case placeholderImage:
 		return placeholderImage
+	case activityTitleRole:
+		return activityTitleRole
+	case activityQRCodeRole:
+		return activityQRCodeRole
+	case activityURLRole:
+		return activityURLRole
 	default:
 		return placeholderBody
 	}
@@ -358,6 +401,7 @@ func (masters MasterDeck) Clone() MasterDeck {
 
 func cloneDeck(deck Deck) Deck {
 	out := Deck{Slides: cloneSlides(deck.Slides), Masters: deck.Masters.Clone()}
+	out.Tabs = append([]DeckTab(nil), deck.Tabs...)
 	if len(deck.Assets) > 0 {
 		out.Assets = make(map[string]DeckAsset, len(deck.Assets))
 		for id, asset := range deck.Assets {
@@ -414,7 +458,9 @@ func (deck Deck) ResolveSlide(index int, includePlaceholders bool) Slide {
 	resolved := inheritedSlideStyle(deck.Masters, source.LayoutID)
 	applySourceStyle(&resolved, source)
 	resolved.LayoutID = source.LayoutID
+	resolved.TabID = source.TabID
 	resolved.Notes = source.Notes
+	resolved.Engagement = cloneEngagement(source.Engagement)
 	bound := map[string]Element{}
 	for _, element := range source.Elements {
 		if element.MasterSlotID != "" {
@@ -424,6 +470,13 @@ func (deck Deck) ResolveSlide(index int, includePlaceholders bool) Slide {
 	appendMasterElements := func(elements []Element) {
 		for _, masterElement := range elements {
 			if masterElement.Kind == "page-number" {
+				continue
+			}
+			if source.Engagement != nil && (masterElement.PlaceholderRole == activityTitleRole || masterElement.PlaceholderRole == activityQRCodeRole || masterElement.PlaceholderRole == activityURLRole) {
+				effective := resolveActivityElement(masterElement, source.Engagement)
+				effective.Inherited = true
+				effective.Placeholder = false
+				resolved.Elements = append(resolved.Elements, effective)
 				continue
 			}
 			if masterElement.PlaceholderRole == "" {
@@ -466,6 +519,25 @@ func (deck Deck) ResolveSlide(index int, includePlaceholders bool) Slide {
 	}
 	appendMasterElements(deck.Masters.Base.Slide.Elements)
 	appendMasterElements(layout.Slide.Elements)
+	if source.Engagement != nil && source.LayoutID == activityLayoutID {
+		for _, role := range []string{activityTitleRole, activityQRCodeRole, activityURLRole} {
+			found := false
+			for _, element := range resolved.Elements {
+				if element.PlaceholderRole == role {
+					found = true
+					break
+				}
+			}
+			if !found {
+				if element, ok := activityRoleElement(role); ok {
+					element = resolveActivityElement(element, source.Engagement)
+					element.Inherited = true
+					element.Placeholder = false
+					resolved.Elements = append(resolved.Elements, element)
+				}
+			}
+		}
+	}
 	resolved.PageNumber = deck.effectivePageNumberMode(source)
 	if resolved.PageNumber == pageNumberShow {
 		resolved.Elements = append(resolved.Elements, resolvedPageNumberElement(deck.Masters, source.LayoutID, index))
@@ -544,6 +616,12 @@ func ensurePageNumberElement(slide *Slide, idPrefix string) {
 func inheritedSlideStyle(masters MasterDeck, layoutID string) Slide {
 	resolved := Slide{}
 	applyMasterStyle := func(layer Slide) {
+		if layer.TTFSize > 0 {
+			resolved.TTFSize = layer.TTFSize
+		}
+		if layer.TTFWidth > 0 {
+			resolved.TTFWidth = layer.TTFWidth
+		}
 		if layer.EffectSet || layer.Effect != "" {
 			resolved.Effect = layer.Effect
 			resolved.EffectSet = true
@@ -575,6 +653,12 @@ func inheritedSlideStyle(masters MasterDeck, layoutID string) Slide {
 func applySourceStyle(resolved *Slide, source Slide) {
 	if resolved == nil {
 		return
+	}
+	if source.TTFSize > 0 {
+		resolved.TTFSize = source.TTFSize
+	}
+	if source.TTFWidth > 0 {
+		resolved.TTFWidth = source.TTFWidth
 	}
 	if source.EffectSet {
 		resolved.Effect = source.Effect
@@ -670,6 +754,13 @@ func stripRuntimeElementState(elements []Element) []Element {
 }
 
 func setStyleOverrides(target *Slide, inherited, effective Slide) {
+	target.TTFSize, target.TTFWidth = 0, 0
+	if effective.TTFSize != inherited.TTFSize {
+		target.TTFSize = effective.TTFSize
+	}
+	if effective.TTFWidth != inherited.TTFWidth {
+		target.TTFWidth = effective.TTFWidth
+	}
 	target.EffectSet = effective.Effect != inherited.Effect
 	target.BackgroundSet = effective.Background != inherited.Background
 	target.FGSet = effective.FG != inherited.FG
@@ -920,7 +1011,9 @@ func encodeQueryStable(values url.Values) string {
 
 func isMasterOverrideQueryKey(key string) bool {
 	switch key {
-	case "top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "font", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "link", "slide":
+	case "text-align", "text-valign", "ttf-size", "ttf-weight":
+		return true
+	case "top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "ttf-width", "font", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "tint", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "link", "slide":
 		return true
 	default:
 		return false

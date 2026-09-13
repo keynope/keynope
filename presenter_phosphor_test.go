@@ -24,7 +24,7 @@ func TestPresenterPhosphorAppliesToSlidesAndFallback(t *testing.T) {
 
 func TestExternalPresenterNavigationConsumesHandledKeys(t *testing.T) {
 	javascript := exportHTMLSuffix()
-	expected := "else if (e.key === 'End') pageIndex = deck.pages.length - 1;\n  else return;\n  e.preventDefault();\n  e.stopPropagation();\n  frame = 0;"
+	expected := "else if (e.key === 'End') { const last = nextPresentationPage(deck.pages.length, -1); if (last < deck.pages.length) pageIndex = last; }\n  else return;\n  e.preventDefault();\n  e.stopPropagation();\n  frame = 0;"
 	if !strings.Contains(javascript, expected) {
 		t.Fatal("external presenter navigation does not suppress WebKit's native key action")
 	}

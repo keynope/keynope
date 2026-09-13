@@ -72,12 +72,16 @@ func wasmEditorHandler(path string) http.HandlerFunc {
 		return activeNativeEditor.handleAction
 	case "/api/editor/preview":
 		return activeNativeEditor.handlePreview
+	case "/api/editor/connector-preview":
+		return activeNativeEditor.handleConnectorPreview
 	case "/api/editor/fit-text":
 		return activeNativeEditor.handleFitText
 	case "/api/editor/normalize-text-kind":
 		return activeNativeEditor.handleNormalizeTextKind
 	case "/api/editor/emojis":
 		return activeNativeEditor.handleEmojiCatalog
+	case "/api/editor/activity-qr":
+		return activeNativeEditor.handleActivityQR
 	case "/api/editor/fonts/default":
 		return activeNativeEditor.handleDefaultFont
 	case "/api/editor/fonts/library":
@@ -88,6 +92,8 @@ func wasmEditorHandler(path string) http.HandlerFunc {
 		return activeNativeEditor.handleUpload
 	case "/api/editor/document":
 		return activeNativeEditor.handleDocument
+	case "/api/editor/participant-page":
+		return activeNativeEditor.handleParticipantPage
 	case "/api/editor/export-document":
 		return activeNativeEditor.handleExportDocument
 	default:
@@ -192,10 +198,38 @@ func registerWASMFunction(name string, fn func(js.Value, []js.Value) any) {
 }
 
 func main() {
+	registerWASMFunction("keynopeWasmRenderParticipantPage", wasmRenderParticipantPage)
 	registerWASMFunction("keynopeWasmInit", wasmEditorInit)
 	registerWASMFunction("keynopeWasmRequest", wasmEditorRequest)
 	registerWASMFunction("keynopeWasmUpload", wasmEditorUpload)
 	registerWASMFunction("keynopeWasmWorkspace", wasmEditorWorkspace)
 	js.Global().Set("keynopeWasmReady", true)
 	select {}
+}
+
+func wasmRenderParticipantPage(_ js.Value, args []js.Value) any {
+	if len(args) < 4 || len(args[0].String()) > 16<<20 {
+		return wasmJSON(wasmResponse{Status: 400, Body: "invalid page document"})
+	}
+	deck, err := parseDeckData("Presentation.md", []byte(args[0].String()))
+	if err != nil || len(deck.Slides) != 1 {
+		return wasmJSON(wasmResponse{Status: 400, Body: "invalid page Markdown"})
+	}
+	ensureDefaultAuthoredSize()
+	cols, rows := authoredRenderSize(245, 56)
+	if cols > 1024 || rows > 512 {
+		return wasmJSON(wasmResponse{Status: 400, Body: "Page dimensions too large"})
+	}
+	pageIndex, slideIndex, slideCount := args[1].Int(), args[2].Int(), args[3].Int()
+	restoreParticipantLayers(&deck.Slides[0])
+	pages := exportSlidePages(deck.Slides[0], slideIndex, slideCount, cols, rows)
+	if pageIndex < 0 || pageIndex >= len(pages) {
+		return wasmJSON(wasmResponse{Status: 400, Body: "Page out of range"})
+	}
+	payload, err := json.Marshal(exportDeck{Cols: cols, Rows: rows, Pages: []exportPage{pages[pageIndex]}})
+	if err != nil {
+		return wasmJSON(wasmResponse{Status: 500, Body: err.Error()})
+	}
+	html := exportHTMLPrefix(preservedExportHead{}, false) + "<script id=\"keynope-data\" type=\"application/json\">" + string(payload) + "</script>" + exportHTMLSuffix()
+	return wasmJSON(wasmResponse{Status: 200, Body: html})
 }
