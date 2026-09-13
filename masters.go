@@ -458,6 +458,7 @@ func (deck Deck) ResolveSlide(index int, includePlaceholders bool) Slide {
 	resolved := inheritedSlideStyle(deck.Masters, source.LayoutID)
 	applySourceStyle(&resolved, source)
 	resolved.LayoutID = source.LayoutID
+	resolved.TabID = source.TabID
 	resolved.Notes = source.Notes
 	resolved.Engagement = cloneEngagement(source.Engagement)
 	bound := map[string]Element{}
@@ -615,6 +616,12 @@ func ensurePageNumberElement(slide *Slide, idPrefix string) {
 func inheritedSlideStyle(masters MasterDeck, layoutID string) Slide {
 	resolved := Slide{}
 	applyMasterStyle := func(layer Slide) {
+		if layer.TTFSize > 0 {
+			resolved.TTFSize = layer.TTFSize
+		}
+		if layer.TTFWidth > 0 {
+			resolved.TTFWidth = layer.TTFWidth
+		}
 		if layer.EffectSet || layer.Effect != "" {
 			resolved.Effect = layer.Effect
 			resolved.EffectSet = true
@@ -646,6 +653,12 @@ func inheritedSlideStyle(masters MasterDeck, layoutID string) Slide {
 func applySourceStyle(resolved *Slide, source Slide) {
 	if resolved == nil {
 		return
+	}
+	if source.TTFSize > 0 {
+		resolved.TTFSize = source.TTFSize
+	}
+	if source.TTFWidth > 0 {
+		resolved.TTFWidth = source.TTFWidth
 	}
 	if source.EffectSet {
 		resolved.Effect = source.Effect
@@ -741,6 +754,13 @@ func stripRuntimeElementState(elements []Element) []Element {
 }
 
 func setStyleOverrides(target *Slide, inherited, effective Slide) {
+	target.TTFSize, target.TTFWidth = 0, 0
+	if effective.TTFSize != inherited.TTFSize {
+		target.TTFSize = effective.TTFSize
+	}
+	if effective.TTFWidth != inherited.TTFWidth {
+		target.TTFWidth = effective.TTFWidth
+	}
 	target.EffectSet = effective.Effect != inherited.Effect
 	target.BackgroundSet = effective.Background != inherited.Background
 	target.FGSet = effective.FG != inherited.FG
@@ -991,7 +1011,9 @@ func encodeQueryStable(values url.Values) string {
 
 func isMasterOverrideQueryKey(key string) bool {
 	switch key {
-	case "top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "font", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "link", "slide":
+	case "text-align", "text-valign", "ttf-size", "ttf-weight":
+		return true
+	case "top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "ttf-width", "font", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "tint", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "link", "slide":
 		return true
 	default:
 		return false

@@ -56,9 +56,9 @@ func TestTrueTypeRoundTripAndExport(t *testing.T) {
 
 func TestTrueTypeBlockConversion(t *testing.T) {
 	for _, kind := range []string{"bullet", "code"} {
-		source := Element{Kind: "text", Text: "One two\nThree four", Query: "render=truetype&ttf-size=96&width=100&height=20&align=justify&orientation=cw"}
+		source := Element{Kind: "text", Text: "One two\nThree four", Query: "render=truetype&ttf-size=96&ttf-width=50&width=100&height=20&align=justify&orientation=cw"}
 		converted := convertedTextKindElement(source, kind, 0)
-		if !isTrueType(converted) || trueTypeSize(converted) != 96 || converted.Kind != kind || converted.Text != source.Text {
+		if !isTrueType(converted) || trueTypeSize(converted) != 96 || trueTypeWidthPercent(converted) != 50 || converted.Kind != kind || converted.Text != source.Text {
 			t.Fatalf("lost renderer on conversion: %#v", converted)
 		}
 		data, err := serializeDeck("test.md", Deck{Slides: []Slide{{Elements: []Element{converted}}}})
@@ -70,9 +70,101 @@ func TestTrueTypeBlockConversion(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := parsed.Slides[0].Elements[0]
-		if got.Kind != kind || got.Text != source.Text || !isTrueType(got) || textOrientation(got) != "cw" {
+		if got.Kind != kind || got.Text != source.Text || !isTrueType(got) || textOrientation(got) != "cw" || trueTypeWidthPercent(got) != 50 {
 			t.Fatalf("block round trip: %#v", got)
 		}
+	}
+}
+
+func TestTrueTypePresetSizes(t *testing.T) {
+	for _, tc := range []struct {
+		kind        string
+		level, want int
+	}{{"text", 0, 97}, {"heading", 1, 386}, {"heading", 2, 193}, {"bullet", 0, 97}, {"code", 0, 97}} {
+		e := Element{Kind: tc.kind, Level: tc.level, Text: "Test", Query: "render=truetype"}
+		if got := trueTypeSize(e); got != tc.want {
+			t.Fatalf("%s H%d: got %d want %d", tc.kind, tc.level, got, tc.want)
+		}
+		e.Query += "&ttf-size=120"
+		if trueTypeSize(e) != 120 {
+			t.Fatal("explicit size must override preset")
+		}
+	}
+}
+
+func TestTrueTypeHeadingColour(t *testing.T) {
+	e := Element{Kind: "heading", Level: 1, Text: "Title", Query: "render=truetype&header=%23ff5500&width=200&height=30"}
+	pages := exportSlidePages(Slide{Elements: []Element{e}}, 0, 1, 245, 56)
+	for _, page := range pages {
+		for _, line := range page.Lines {
+			if line.TrueType != nil {
+				if line.TrueType.Size != 386 || line.Parts[0].Color != "rgb(255,85,0)" {
+					t.Fatalf("wrong heading export: %#v", line)
+				}
+				return
+			}
+		}
+	}
+	t.Fatal("missing TrueType heading")
+}
+
+func TestTrueTypeWidth(t *testing.T) {
+	for _, tc := range []struct {
+		query string
+		want  float64
+	}{
+		{"", 100}, {"ttf-width=41.67", 41.67}, {"ttf-width=100", 100}, {"ttf-width=50", 50}, {"ttf-width=0", 1}, {"ttf-width=999", 200}, {"ttf-width=bad", 100},
+	} {
+		if got := trueTypeWidthPercent(Element{Query: tc.query}); got != tc.want {
+			t.Fatalf("%s: got %g want %g", tc.query, got, tc.want)
+		}
+	}
+	e := Element{Kind: "text", Text: "ABCD", Query: "render=truetype&ttf-size=100"}
+	w, h := trueTypeBounds(e, 1920, 1080)
+	if w != 134 {
+		t.Fatalf("default width: got %d want 134", w)
+	}
+	e.Query += "&ttf-width=100"
+	w, h = trueTypeBounds(e, 1920, 1080)
+	e.Query = "render=truetype&ttf-size=100"
+	e.Query += "&ttf-width=50"
+	narrowW, narrowH := trueTypeBounds(e, 1920, 1080)
+	if narrowW != w/2 || narrowH != h {
+		t.Fatalf("width scale changed height or wrong width: %dx%d -> %dx%d", w, h, narrowW, narrowH)
+	}
+	e.Query += "&width=500&height=200"
+	w, h = trueTypeBounds(e, 1920, 1080)
+	if w != 500 || h != 200 {
+		t.Fatal("explicit bounds changed")
+	}
+	data, err := serializeDeck("test.md", Deck{Slides: []Slide{{Elements: []Element{e}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := parseDeckData("test.md", data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := parsed.Slides[0].Elements[0]
+	if trueTypeWidthPercent(got) != 50 {
+		t.Fatal("lost saved width")
+	}
+	pages := exportSlidePages(parsed.Slides[0], 0, 1, 1920, 1080)
+	if !strings.Contains(pages[0].Lines[0].TrueType.Query, "ttf-width=50") {
+		t.Fatal("export lost width")
+	}
+	e.Query = "render=truetype&ttf-width=41.67"
+	data, err = serializeDeck("test.md", Deck{Slides: []Slide{{Elements: []Element{e}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err = parseDeckData("test.md", data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, _ := url.ParseQuery(parsed.Slides[0].Elements[0].Query)
+	if q.Get("ttf-width") != "41.67" {
+		t.Fatal("lost fractional saved width")
 	}
 }
 
@@ -100,6 +192,7 @@ func TestTrueTypeBrowser(t *testing.T) {
 	mux.HandleFunc("/api/editor/document", s.handleDocument)
 	mux.HandleFunc("/api/editor/fonts/default", s.handleDefaultFont)
 	mux.HandleFunc("/api/editor/fonts/library", s.handleFontLibrary)
+	mux.HandleFunc("/api/editor/emojis", s.handleEmojiCatalog)
 	mux.HandleFunc("/test/workspace", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
@@ -121,6 +214,12 @@ func TestTrueTypeBrowser(t *testing.T) {
 	defer server.Close()
 	cmd := exec.Command("node", "tools/test_truetype_ui.cjs", server.URL)
 	out, err := cmd.CombinedOutput()
+	t.Log(string(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("node", "tools/test_emoji_editor.cjs", server.URL)
+	out, err = cmd.CombinedOutput()
 	t.Log(string(out))
 	if err != nil {
 		t.Fatal(err)

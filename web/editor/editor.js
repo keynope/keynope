@@ -198,6 +198,9 @@
 
   const stateOnlyEditorActions = new Set([
     'select-element',
+    'select-elements',
+    'enter-group',
+    'exit-group',
     'update-slide-notes',
     'confirm-save',
     'start-timer',
@@ -414,15 +417,8 @@
     openButton.title = 'Open a Markdown presentation';
     openButton.setAttribute('aria-label', openButton.title);
     openButton.onclick = openPresentation;
-    const mainMode = topbar.querySelector('.keynope-topbar-mode');
-    const addSlide = mainMode && mainMode.querySelector('button');
-    const save = topbar.querySelector('.keynope-save-button');
-    const importImage = topbar.querySelector('button[aria-label="Import image"]');
-    if (addSlide) controls.appendChild(addSlide);
     controls.append(newButton, openButton);
-    if (save) controls.appendChild(save);
-    if (importImage) controls.appendChild(importImage);
-    topbar.insertBefore(controls, topbar.firstChild);
+    topbar.querySelector('[data-ribbon="insert"]').prepend(controls);
     return true;
   }
 

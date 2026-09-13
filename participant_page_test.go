@@ -58,10 +58,11 @@ func TestParticipantJustifiedTextBox(t *testing.T) {
 	authoredTerminalWidth, authoredTerminalHeight = 245, 56
 	for _, kind := range []string{"text", "heading", "bullet"} {
 		t.Run(kind, func(t *testing.T) {
-			e := Element{Kind: kind, Level: 2, Text: "AAA AAA AA\nAA A AA\nA A AA", Query: "align=justify&text-box=1&width=60&height=12&top=3&left_pct=0.1"}
+			e := Element{Kind: kind, Level: 2, Text: "AAA AAA AA\nAA A AA\nA A AA", Query: "align=justify&text-box=1&width=60&height=12&top=3&left_pct=0.100000"}
 			if kind == "heading" {
 				e.Text = "AAA AAA AA AA A AA A A AA"
 			}
+			e = standardTextElement(e)
 			deck := Deck{Slides: []Slide{{Elements: []Element{e}}}}
 			data, err := participantSlideMarkdown(deck, 0)
 			if err != nil {
@@ -85,7 +86,7 @@ func TestParticipantJustifiedTextBox(t *testing.T) {
 			wantLines, _ := json.Marshal(want[0].Lines)
 			gotLines, _ := json.Marshal(got.Pages[0].Lines)
 			if string(wantLines) != string(gotLines) {
-				t.Fatal("participant glyphs/positions differ from presenter's justified box")
+				t.Fatalf("participant glyphs/positions differ from presenter's justified box\nwant %s\ngot %s",wantLines,gotLines)
 			}
 		})
 	}

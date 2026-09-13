@@ -20,6 +20,7 @@ func participantSlideMarkdown(deck Deck, index int) ([]byte, error) {
 	}
 	slide := cloneSlide(deck.ResolvedSlides()[index])
 	slide.Notes, slide.LayoutID, slide.Engagement = "", "", nil
+	slide.TabID = "" // Explicit tab requests render normally, outside the slide show.
 	for i := range slide.Elements {
 		e := &slide.Elements[i]
 		query, _ := url.ParseQuery(e.Query)

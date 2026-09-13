@@ -21,6 +21,31 @@ import (
 	"time"
 )
 
+func TestNativeEditorHistoryAvailability(t *testing.T) {
+	session := newNativeEditorSession(filepath.Join(t.TempDir(), "deck.md"), Deck{Slides: []Slide{{}}})
+	for _, step := range []struct {
+		action     string
+		undo, redo bool
+	}{
+		{"", false, false},
+		{"add-slide", true, false},
+		{"undo", false, true},
+		{"redo", true, false},
+		{"undo", false, true},
+		{"add-slide", true, false},
+	} {
+		if step.action != "" {
+			if err := session.apply(nativeEditorAction{Action: step.action}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		state := session.state()
+		if state.CanUndo != step.undo || state.CanRedo != step.redo {
+			t.Fatalf("after %s: undo=%v redo=%v; want %v/%v", step.action, state.CanUndo, state.CanRedo, step.undo, step.redo)
+		}
+	}
+}
+
 func TestNativeEditorMutationsPersistAndUndo(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "deck.md")
 	deck := Deck{Slides: []Slide{{Elements: []Element{{Kind: "heading", Level: 1, Text: "Original"}}}}}
@@ -431,6 +456,7 @@ func TestNativeEditorPreviewRendersWithoutMutatingDeck(t *testing.T) {
 }
 
 func TestNativeEditorInlinePreviewReturnsExactBulletCaret(t *testing.T) {
+	useTestAuthoredSize(t, 80, 40)
 	element := Element{Kind: "bullet", Text: "First\nSecond  "}
 	session := newNativeEditorSession(filepath.Join(t.TempDir(), "deck.md"), Deck{Slides: []Slide{{Elements: []Element{element}}}})
 	action := nativeEditorAction{Name: "inline-edit", Element: 0, ElementData: &element, Cursor: len([]rune(element.Text)), Cols: 80, Rows: 40}
@@ -454,6 +480,7 @@ func TestNativeEditorInlinePreviewReturnsExactBulletCaret(t *testing.T) {
 }
 
 func TestNativeEditorInlinePreviewReturnsSelectionBackgroundRows(t *testing.T) {
+	useTestAuthoredSize(t, 80, 40)
 	element := Element{Kind: "text", Text: "Select me"}
 	session := newNativeEditorSession(filepath.Join(t.TempDir(), "deck.md"), Deck{Slides: []Slide{{Elements: []Element{element}}}})
 	action := nativeEditorAction{Name: "inline-edit", Element: 0, ElementData: &element, Cursor: 6, SelectionStart: 0, SelectionEnd: 6, Cols: 80, Rows: 40}
@@ -479,6 +506,7 @@ func TestNativeEditorInlinePreviewReturnsSelectionBackgroundRows(t *testing.T) {
 }
 
 func TestNativeEditorSelectionBackgroundUsesBoldGlyphWidth(t *testing.T) {
+	useTestAuthoredSize(t, 80, 40)
 	element := Element{Kind: "text", Text: "A**BB**C"}
 	selectionStart := len([]rune("A**"))
 	selectionEnd := len([]rune("A**BB"))
@@ -587,6 +615,7 @@ func TestDefaultTextCaretIncludesEveryEmojiAndSpacer(t *testing.T) {
 }
 
 func TestBulletEmojiCaretAndSelectionUseRenderedWidth(t *testing.T) {
+	useTestAuthoredSize(t, 80, 40)
 	element := Element{Kind: "bullet", Text: "A[color=#55aaff]😀[/color]B"}
 	slide := Slide{Elements: []Element{element}}
 	startCursor := len([]rune("A[color=#55aaff]"))
@@ -647,7 +676,7 @@ func TestNativeEditorFitsLargestTextSizeInsideDragBox(t *testing.T) {
 	if smallSize, largeSize := textSize(small.Element), textSize(large.Element); largeSize <= smallSize {
 		t.Fatalf("fitted sizes small=%d large=%d", smallSize, largeSize)
 	}
-	if got := session.state().Slides[0].Elements[0].Query; got != "" {
+	if got := session.state().Slides[0].Elements[0].Query; got != "render=truetype" {
 		t.Fatalf("fit preview mutated deck query to %q", got)
 	}
 }

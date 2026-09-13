@@ -1,6 +1,6 @@
 # Keynope
 
-Keynope is a terminal-native presentation tool. This repository is the source distribution: it builds the Go CLI and the native macOS presenter helper from source.
+Keynope is a retro presentation editor for macOS and the web. This repository builds the windowed Mac app and the self-contained browser editor. The terminal CLI has been retired.
 
 ![Keynope main presentation screen](https://raw.githubusercontent.com/keynope/keynope/main/screenshots/kn1-keynope-main-screen.jpg)
 
@@ -9,20 +9,11 @@ Keynope is a terminal-native presentation tool. This repository is the source di
 You can download and install Keynope from the Apple [App Store](https://apps.apple.com/us/app/keynope/id6793679625)
 Don't forget to give it a kick ass review.
 
-## Quick install
-
-```sh
-curl -fsSL https://keynope.sh/install | sh &&
-export PATH="$HOME/.keynope/bin:$PATH"
-```
-
-The installer supports Intel and Apple silicon Macs running macOS 14 or later. It downloads the signed and notarized release, verifies its SHA-256 checksum, and installs both Keynope and the presenter helper under `~/.keynope/bin`. It adds that directory to `PATH` in `~/.zshrc` or `~/.bash_profile`, based on your shell. No `sudo` is needed.
-
 ## Install with Homebrew
 
 ```sh
 brew tap keynope/keynope
-brew install keynope
+brew install --cask keynope
 ```
 
 ## Community
@@ -42,58 +33,23 @@ Want to contribute code or report a bug? Read the [contribution guide](CONTRIBUT
 make build
 ```
 
-This creates:
-
-```text
-bin/keynope
-bin/KeynopePresenter.app
-```
-
-The Go CLI launches `KeynopePresenter.app` automatically when the app bundle is next to the CLI. If the helper is absent or unavailable, Keynope still runs in presentation mode locally and simply skips second-screen broadcast.
-
-The helper is an `LSUIElement` app: it has a stable `sh.keynope.presenter` identity and a menu bar icon, but no Dock icon or ordinary application window. Screen Recording permission therefore belongs to Keynope Presenter instead of the terminal that launched it. Local `make build` builds are ad-hoc signed and may require permission again after a rebuild. Official release artifacts are Developer ID signed and notarized so their identity remains stable across upgrades.
+This creates `bin/Keynope.app`, including its private Go engine. There is no standalone terminal executable or presenter helper to install.
 
 ## Run
 
 ```sh
-bin/keynope deck.md
+open bin/Keynope.app
 ```
 
-By default Keynope starts presentation mode: the terminal UI renders at the deck's authored size. When the native presenter helper is available, it also opens a second-screen surface. That surface shows TV snow while you are editing, and switches to the live slide only while `p` presentation mode is active. If no external display is connected, the helper stays in the menu bar and does not cover the terminal. It will automatically open on an external display if one is connected later.
+Use File → Open to select a Markdown deck, or File → New for an unsaved starter deck. Save and Export to HTML use native file dialogs. Present locally or on an external screen using the presentation controls.
 
-The presenter menu bar's **Share** submenu can place another application, individual window, or entire screen over the live deck. Shared content is aspect-fitted with a margin on every edge so the current slide remains visible around it. **Share → Nothing** stops capture. Screen sharing is video-only and macOS asks for Screen Recording permission the first time it is used; if permission is denied, the same menu links to the relevant System Settings page. Full-screen sharing excludes Keynope Presenter itself to avoid recursive capture.
+## Text
 
-Press `2` to open speaker notes while presenting. Animated GIFs and WebP images play directly inside the terminal-rendered slide.
+Text uses the bundled Keynope C64 TrueType face by default. The T button inserts “Text”; H1, H2 and T select heading, subtitle and body sizes. Size and horizontal width are independently adjustable. Dragging the text-box corners changes its available space and wrapping, not the font size.
 
-![Speaker notes and an animated GIF in a Keynope slide](https://raw.githubusercontent.com/keynope/keynope/main/screenshots/kn6-speaker-notes-and-animated-gifs.jpg)
+Choose Default, Blocks, Braille, ASCII or Dense in the text rendering-style selector. These treatments sample the same TrueType face and retain its size, margins, alignment, colours and effects. Choose Default to return to the font. Gradients, outlines, shadows, rotation and transparency work with each treatment.
 
-Press `0` to start the test-card countdown timer before a presentation.
-
-![Keynope test-card countdown timer](https://raw.githubusercontent.com/keynope/keynope/main/screenshots/kn8-testcard-countdown-timer.jpg)
-
-Create a new starter deck in the current directory:
-
-```sh
-bin/keynope
-```
-
-This opens an ASCII startup menu. Choose **Open** to select an existing Markdown deck with the system file picker, or **New** to name a new `.md` deck. If the new deck path already exists, Keynope asks before overwriting it.
-
-Classic terminal-only mode:
-
-```sh
-bin/keynope --classic deck.md
-```
-
-Export HTML:
-
-```sh
-bin/keynope --export deck.md
-```
-
-Press `?` at any time to open the shortcut reference.
-
-![Keynope main keyboard shortcuts](https://raw.githubusercontent.com/keynope/keynope/main/screenshots/kn5-shortcuts.jpg)
+Text metadata, including existing `render=truetype` objects, represents ordinary editable text. Older bitmap text is upgraded on load; old decks may lay out differently. Explicit custom glyph/FIGlet fonts remain supported.
 
 ## Visuals and Effects
 
@@ -121,7 +77,71 @@ Every activity follows the same `OPEN → LOCKED → REVEAL → DISCUSS` flow; `
 
 The Mac and web editors include a glyph editor for creating variable-width Keynope fonts. Each font covers the 95 printable ASCII characters. Select text to choose a font, or use the `Aa` font-editor button to paint glyphs, resize their advance width, clone the default face, import/export JSON or FIGlet `.flf`/`.tlf` files, and keep reusable fonts in your personal library. FIGlet mode supports literal ASCII and non-emoji Unicode cell art.
 
-Fonts referenced by a deck are stored as gzip-compressed `keynope-fonts` metadata in the Markdown file. Text elements refer to them with `font=<id>`, so the same deck renders with its chosen fonts in the terminal, Mac app, web editor, presenter, and HTML export without external font files. The desktop library stores compressed font files under `~/.keynope/fonts` for the CLI and in the Keynope application-support directory for the sandboxed Mac app; the web editor uses browser-local storage.
+Fonts referenced by a deck are stored as gzip-compressed `keynope-fonts` metadata in the Markdown file. Text elements refer to them with `font=<id>`, so the same deck renders with its chosen fonts in the Mac app, web editor, presenter, and HTML export without external font files. The desktop library stores compressed font files in the Keynope application-support directory for the sandboxed Mac app; the web editor uses browser-local storage.
+
+### Colour emoji fonts
+
+All 3,993 bundled emoji artworks are also available as Keynope Emoji colour
+TrueType faces (COLRv0, WOFF2-compressed). Mac, web, the emoji picker and HTML
+exports use the same artwork and metrics, including complete flag, skin-tone
+and joined emoji sequences. Emoji retain their colours and square proportions
+alongside the C64 text face. Text size, explicit width, glyph treatments,
+gradients, outlines, shadows and see-through apply through the shared renderer.
+Select an emoji and use **Style → Emoji tint** for a single-colour scale that
+preserves shading. White gives grayscale; disabling it restores the original
+colours. For mixed text and emojis, only the emojis are tinted.
+Only faces used in exported text are included in the export; Markdown keeps the
+Unicode text and styling, not a second copy of this built-in font collection.
+
+Normal builds consume the generated `assets/emoji/keynope-emoji-fonts.zip`;
+normal builds do not require Python or FontTools. To regenerate from the
+canonical block artwork, install `fonttools[woff]` in a Python environment and
+run `python tools/build_emoji_fonts.py`. Individual uncompressed `.ttf` files
+are additionally written to `output/emoji-fonts/`. These are per-artwork faces
+used by Keynope's sequence mapping, not a single installable system emoji font.
+The derivatives retain the bundled OFL and attribution notices.
+
+## Grouping elements
+
+Hold Shift and drag on the canvas to select several elements with a rectangle. Yellow highlights preview the items that will be added to your selection on release; Escape cancels. Shift-click still toggles individual items. Then right-click → Group (also available under Arrange). A group has one outer bounding box; dragging, arrow-key movement and Arrange alignment preserve the spacing between its members. Groups are saved in the deck's Markdown metadata and support undo/redo.
+
+Double-click a group to expose its individual elements. Select a member to edit, resize or adjust it, then press Escape or choose Done editing group to return. Right-click → Ungroup separates the members without changing their appearance or positions. Selecting a group together with other items and choosing Group combines them into one flat group.
+
+For mixed selections, text tools affect only text, and Colour affects text and shapes. Image adjustments, links and other single-item tools are available when editing an individual member.
+
+## Text inside shapes
+
+Double-click a shape to add or edit its text. Only the overflowing axis grows: width extends to the right, height extends downward, keeping the top-left corner fixed. Text is re-centred horizontally and vertically inside the expanded silhouette. Shape text belongs to the shape, so moving, grouping, copying and deleting it keep them together.
+
+Select the shape to adjust its text size, width and bold weight in the Shape tab. The Style tab has separate text colour, gradient, shadow, outline, rendering and transparency controls, independent of the shape's fill. Clearing the text keeps the shape.
+
+## Connecting shapes
+
+Choose **Connect shapes** in Insert (or the selected shape's Shape tab).
+Drag between the yellow connection dots, or click a dot on each shape.
+Each shape has top, bottom, left and right centre ports on its visible silhouette.
+Press Escape or click empty canvas to cancel. New connectors use elbow paths,
+preferring routes around visible shape pixels; unavoidable crossings receive a
+heavy routing penalty. Lines stay attached when shapes move or resize.
+Connect shapes shows path, arrowhead, width and colour controls before drawing;
+selecting a line shows the same controls plus Delete. There is no line right-click menu.
+Line width defaults to 1 (the minimum), arrow width to 6, with arrowheads off.
+Unset colour inherits the slide/master colour; Inherit color clears an override.
+Horizontal strokes use half the canvas-height units for equal visual thickness.
+Lines and arrowheads are rendered above shapes from continuous semi-blocks, including
+the styled drag preview—there is no yellow line overlay. Double-click an elbow line
+to expose segment handles: drag horizontal segments up/down or vertical segments
+left/right. Manual bends are saved; **Auto-route** restores automatic routing.
+Connections are saved in the deck and render in presentations and HTML exports.
+
+## Tab-only slides
+
+Use **Tab** in the bottom toolbar to turn the current slide into a participant tab.
+It moves into the separate **Tabs** section beneath Slides; drag those entries to
+change their tab order. Tab-only slides stay editable but are skipped during
+presentation navigation, including HTML exports. Participants see them alongside
+the existing tabs in the activity lobby. Toggle **Tab** off to restore the slide
+to its previous position. Tab status and order are saved in the deck's Markdown.
 
 ## Master Decks
 
@@ -130,7 +150,7 @@ Press `M` while the editor chrome is visible to open **Master View**. Every deck
 - The Base Master supplies deck-wide graphics, backgrounds, effects, and styles.
 - Layouts add fixed graphics and editable Title, Subtitle, Body, Code, or Image placeholders.
 - New decks include a dynamic page number in the Base Master's bottom-right corner. Press `#` either in Master View or while editing a master to show or hide it on the Base, or cycle inherit/show/hide on a layout. The number itself can be selected, moved, resized, colored, styled, and outlined while editing the master.
-- Press `v` in Master View or while editing a master to open Visual Properties. It controls foreground, terminal background, header color, background pattern, and effect. Layout properties can inherit from Base, explicitly choose a value, or explicitly choose None.
+- Press `v` in Master View or while editing a master to open Visual Properties. It controls foreground, slide background, header color, background pattern, and effect. Layout properties can inherit from Base, explicitly choose a value, or explicitly choose None.
 - Select an element in Master View and press `p` to assign or remove its placeholder role.
 - Create, clone, rename, reorder, and delete layouts from the Master View navigator.
 - Master elements render behind slide-owned content and cannot be selected from an ordinary slide.
@@ -139,7 +159,7 @@ Press `n` to create a slide. Keynope opens a visual layout chooser and preselect
 
 ![Choosing a master-deck layout for a new Keynope slide](https://raw.githubusercontent.com/keynope/keynope/main/screenshots/kn2-build-master-decks.jpg)
 
-Press `#` in the normal slide view to cycle that slide's page-number policy through inherit, show, and hide. Page numbers resolve from the actual slide index in the terminal, presenter, thumbnails, and HTML export; no literal number is stored in slide content.
+Press `#` in the normal slide view to cycle that slide's page-number policy through inherit, show, and hide. Page numbers resolve from the actual slide index in the presenter, thumbnails, and HTML export; no literal number is stored in slide content.
 
 Press `v` in the normal slide view to edit the same five visual properties for that slide. Mastered slides can inherit each property independently, choose an explicit value, or choose None. Changes remain local to that slide. Selecting **Close menu** commits immediately; pressing `Esc` after making changes asks `Save visual changes? [Y/n]`, with Yes as the default.
 
@@ -153,23 +173,23 @@ Master definitions are embedded as versioned metadata in the deck's `.md` file. 
 make install
 ```
 
-By default this installs the private CLI and app bundle under `/usr/local/libexec/keynope`, with `/usr/local/bin/keynope` pointing to the private CLI. This is also the intended Homebrew formula layout. Override the target with:
+By default this installs `Keynope.app` in `/Applications`. To install for your user only:
 
 ```sh
-make install PREFIX="$HOME/.local"
+make install APPDIR="$HOME/Applications"
 ```
 
 ## Project Layout
 
 ```text
-main.go                         Go CLI and terminal renderer
+main.go                         shared presentation engine and windowed editor
 fonts.go                        Glyph/font data
 masters.go                      master-deck model, persistence, and resolution
-master_ui.go                    master view, layout and placeholder pickers
-presenter/KeynopePresenter.swift macOS presenter helper
+master_ui.go                    master preview and placeholder helpers
+presenter/KeynopePresenter.swift native macOS application
 presenter/ScreenShare.swift       native app, window, and screen capture
 presenter/EmbeddedIcon.swift      embedded menu bar icon data
-presenter/Info.plist              helper bundle identity and privacy metadata
+app/Info.plist                  application bundle identity and privacy metadata
 assets/KeynopeMenuTemplate.png    source icon asset
 Makefile                          build, sign, test, install, clean
 ```

@@ -13,11 +13,10 @@ cp "$welcome_source" "$temporary_dir/Welcome.md"
 
 (
   cd "$repo_dir"
-  GOCACHE=${GOCACHE:-/tmp/keynope-go-cache} go build -o "$temporary_dir/keynope"
+  GOCACHE=${GOCACHE:-/tmp/keynope-go-cache} go run -tags keynope_sitegen . "$temporary_dir/Welcome.md" "$temporary_dir"
   GOOS=js GOARCH=wasm GOCACHE=${GOCACHE:-/tmp/keynope-go-cache} go build -o "$output_dir/keynope-editor.wasm" .
 )
 
-"$temporary_dir/keynope" --export "$temporary_dir/Welcome.md"
 version=$(awk '/^## [0-9]/{print $2; exit}' "$repo_dir/CHANGELOG.md")
 
 awk '
@@ -46,7 +45,7 @@ cp "$repo_dir/web/participant-transfer.js" "$output_dir/../participant-transfer.
 node "$repo_dir/tools/build_participant_renderer.cjs" "$temporary_dir/Welcome.html" "$output_dir/../join/slide-renderer.js"
 cp "$repo_dir/web/editor/service-worker.js" "$output_dir/service-worker.js"
 cp "$repo_dir/web/editor/manifest.webmanifest" "$output_dir/manifest.webmanifest"
-"$temporary_dir/keynope" --licenses > "$output_dir/licenses.txt"
+cp "$temporary_dir/licenses.txt" "$output_dir/licenses.txt"
 
 goroot=$(go env GOROOT)
 cp "$goroot/lib/wasm/wasm_exec.js" "$output_dir/wasm_exec.js"

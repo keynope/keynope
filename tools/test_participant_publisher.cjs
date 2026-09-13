@@ -11,9 +11,12 @@ const context = vm.createContext({
   window:{KEYNOPE_PRESENTER:true}, console, Date, AbortSignal,
   keynopeAppSurface:true,keynopeEditorMasterMode:false,presenterPresenting:true,
   presenterDeckVersion:1,pageIndex:0,
+  presenterTimerBroadcast:false,
+  presenterTimerCanBroadcast:()=>context.presenterPresenting && context.hasActivities,
+  hasActivities:true,
   presenterPageAt:()=>({slide:currentSlide,page:1}),
   onboardingSessionDefinition:()=>({id:'lobby',code:'Abcd1234'}),
-  keynopeActivityConnector:async()=>async()=>{connections++;return {send:async p=>sent.push(p),close(){}}},
+  keynopeActivityConnector:async()=>async()=>{connections++;return {send:async p=>{if(p.type!=='lobby-tabs')sent.push(p);},close(){}}},
   KeynopePresentationTransfer:{pack:async markdown=>({id:markdown,parts:['data']})},
   fetch:async url=>({ok:true,json:async()=>({rendered:{label:url+(edited&&url.endsWith('slide=0')?' edited':'')},slideCount:4})}),
   syncPresenterState:async()=>{},setInterval:()=>{}
@@ -67,5 +70,50 @@ vm.runInContext(source.slice(start,end),context);
   vm.runInContext('keynopeLobbyPresentation.forceSentAt=0',context);
   await vm.runInContext('publishLobbyPresentation()',context);
   assert.equal(sent.filter(p=>p.type==='presentation-md').at(-1).presenting,true,'publisher failed to recover');
+  // Broadcast requires presentation mode and activities; local timers never leak.
+  context.presenterTimerMode='running';
+  context.presenterTimerEndMS=Date.now()+90000;
+  context.presenterPresenting=false;
+  vm.runInContext('keynopeLobbyPresentation.forceSentAt=0',context);
+  sent.length=0;
+  await vm.runInContext('publishLobbyPresentation()',context);
+  assert.equal(context.window.keynopePresentationTimerEnd(),0,'local timer leaked to web');
+  assert.equal(sent.find(p=>p.type==='presentation-md').presenting,false,'local timer started a web presentation');
+  const localDeadline=context.presenterTimerEndMS;
+  context.presenterTimerBroadcast=true;
+  assert.equal(context.window.keynopePresentationTimerEnd(),0,'non-presenting timer leaked');
+  context.presenterPresenting=true;context.hasActivities=false;
+  assert.equal(context.window.keynopePresentationTimerEnd(),0,'activity-free timer leaked');
+  context.hasActivities=true;
+  sent.length=0;
+  await vm.runInContext('publishLobbyPresentation()',context);
+  assert.equal(context.presenterTimerEndMS,localDeadline,'broadcast restarted the countdown');
+  const timer=sent.find(p=>p.type==='presentation-md');
+  assert.equal(timer.presenting,true);
+  assert.equal(timer.timerEndMs,context.presenterTimerEndMS);
+  assert.equal(timer.slideCount,1);
+  assert.equal(JSON.parse(timer.transfer).pages[0].lines.length,0,'timer leaked slide content');
+  const timerCount=sent.length;
+  await vm.runInContext('publishLobbyPresentation()',context);
+  assert.equal(sent.length,timerCount,'timer retransmitted on unchanged tick');
+  context.presenterTimerEndMS+=1000;
+  await vm.runInContext('publishLobbyPresentation()',context);
+  assert.equal(sent.length,timerCount+1,'timer restart re-uploaded the test card');
+  assert.equal(sent.at(-1).timerEndMs,context.presenterTimerEndMS);
+  await vm.runInContext('publishLobbyPresentation(true)',context);
+  assert.equal(sent.filter(p=>p.type==='presentation-md').at(-1).timerEndMs,context.presenterTimerEndMS,'late join lost deadline');
+  context.presenterTimerMode='';context.presenterTimerEndMS=0;context.presenterPresenting=false;
+  await vm.runInContext('publishLobbyPresentation()',context);
+  assert.equal(sent.at(-1).presenting,false,'stopping timer did not restore standby');
+  context.presenterPresenting=true;
+  await vm.runInContext('publishLobbyPresentation()',context);
+  assert.equal(sent.filter(p=>p.type==='presentation-md').at(-1).timerEndMs,0,'normal slide retained timer');
+  // A browser presentation can start its own timer via its keyboard controls.
+  context.window.KEYNOPE_WEB_EDITOR=true;
+  const popupEnd=Date.now()+60000;
+  context.window.keynopeLivePresentationWindow={closed:false,keynopePresentationPosition:()=>({slide:0,page:0,key:'popup'}),keynopePresentationTimerEnd:()=>popupEnd};
+  await vm.runInContext('publishLobbyPresentation()',context);
+  assert(sent.filter(p=>p.type==='presentation-md').at(-1).timerEndMs>0,'popup timer not shared');
+  console.log('Timer publisher: eligibility, cached restart, late join, standby/slide restoration and web popup passed.');
   console.log('Participant publisher: activity-independent start, native state, overflow, deduplication, late join and stop passed.');
 })().catch(e=>{console.error(e);process.exitCode=1});

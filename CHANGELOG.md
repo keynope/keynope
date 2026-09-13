@@ -4,6 +4,41 @@ All notable changes to `keynope` are documented in this file.
 
 This project follows semantic versioning.
 
+## 0.1.6
+
+Added:
+
+- Interactive workshop activities with on-slide launch markers, QR-code joining, browser participation, live responses, presenter-controlled reveals, and configurable timers and anonymity where appropriate.
+- Polling, brainstorming and voting activities including Pulse, Storm, Sort, Dot Voting, Questions with a voting round, Quiz, and Fact or Fiction with up to five sequential questions and answer reveals.
+- Group exercises including Pair Share, Playing Cards, The Race, and Prerequisites. Prerequisites combines per-item instructions and checklists with completion timing; completion-based pairing balances faster and slower participants. Assigned groups receive their own private pairing chat.
+- Creative and discussion activities including Quick Draw, a layered pixel-art Introduction avatar builder, Gallery Walk, Feedback Wall, Expertise, Ball Toss, and private Impostor role assignments.
+- An Onboarding lobby with a reusable deck-persisted session code, participant list, group chat, private messages, and a live Presentation view. Participants can follow slides and activities from desktop or mobile browsers, with animation scheduling matched to the native/export renderer.
+- Participant tabs for URLs and reference slides, configured through Settings. Slides can also be toggled into a separately ordered Tabs section, excluded from presentation navigation, and restored to their previous position.
+- TrueType text using the bundled Keynope C64 font, with independent font-size and horizontal-width controls, heading presets, slide/master typography defaults, and editable wrapping boxes. Text supports gradients, shadows, outlines, rotation, transparency, and Blocks, Braille, ASCII and Dense rendering treatments.
+- Text justification within a bounding box, leaving lines shorter than 70% of the longest unadjusted line untouched.
+- Colour TrueType versions of all 3,993 bundled emoji artworks, shared across the Mac app, web editor, picker and HTML exports. Emoji tint and image colour-scale controls preserve shading while applying a selected colour.
+- Shift-drag rectangle selection with live selection previews, persistent element groups, group movement and alignment, and individual member editing within a group.
+- Editable text inside shapes, independently styled and centred within the silhouette. Text overflow expands the right or bottom edge as needed.
+- Shape connectors with straight or elbow paths, editable bends, obstacle-aware automatic routing, optional single or double arrowheads, configurable widths and colours, and slide/master colour inheritance. Connections remain attached when shapes move or resize and are preserved in decks and HTML exports.
+- Optional timer broadcasting to participant browsers. During presentation with activities defined, the timer button cycles through local, broadcast and off; otherwise it remains on/off. Broadcast mode has a green button and a BROADCAST tag.
+
+Changed:
+
+- Reorganised editor actions into contextual ribbon tabs. Text alignment controls position text within its box; Arrange alignment controls position the element itself.
+- Text-box corner dragging adjusts margins and wrapping instead of font size.
+- Standard text now uses TrueType rendering. Legacy bitmap text is upgraded on load and may lay out differently; explicit custom glyph and FIGlet fonts remain supported. Literal asterisks no longer automatically apply bold formatting; use the Bold control.
+- Shape resizing supports finer, partial-block dimensions.
+- The Mac app reopens the most recently opened deck when it can be restored, falling back to the starter presentation.
+
+Fixed:
+
+- Local presentation views refresh edited slide content without requiring an app restart.
+- Overflowing master content no longer creates additional presentation pages.
+
+Removed:
+
+- The terminal CLI and standalone presenter-helper distribution. Builds, release archives, installation instructions and Homebrew packaging now target the windowed Mac app, which retains its private Go engine. The browser editor remains available.
+
 ## 0.1.5
 
 Added:

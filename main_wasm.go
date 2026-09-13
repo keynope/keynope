@@ -72,6 +72,8 @@ func wasmEditorHandler(path string) http.HandlerFunc {
 		return activeNativeEditor.handleAction
 	case "/api/editor/preview":
 		return activeNativeEditor.handlePreview
+	case "/api/editor/connector-preview":
+		return activeNativeEditor.handleConnectorPreview
 	case "/api/editor/fit-text":
 		return activeNativeEditor.handleFitText
 	case "/api/editor/normalize-text-kind":

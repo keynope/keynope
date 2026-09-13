@@ -28,8 +28,19 @@ let active=false,destroyed=false,lastTick=performance.now();
 function paint(){const rect=host.getBoundingClientRect();if(!active||rect.width<1||rect.height<1)return;innerWidth=rect.width;innerHeight=rect.height;resize();render();}
 KeynopeTrueType.ready.then(()=>{if(!destroyed)paint();});
 const observer=new ResizeObserver(paint);observer.observe(host);
-const timer=globalThis.setInterval(()=>{const now=performance.now();if(active&&host.getBoundingClientRect().width>0&&!realDocument.hidden){contentAnimationElapsedMS+=Math.min(1000,now-lastTick);frame++;drawFrame();}lastTick=now;},30);
-return {setPage(data,index){if(!data||!Array.isArray(data.pages)||!data.pages[index])throw Error('Invalid rendered presentation page');deck.cols=data.cols;deck.rows=data.rows;deck.pages=data.pages;pageIndex=index;frame=0;contentAnimationElapsedMS=0;contentAnimationPageIndex=-1;contentAnimationCache.clear();effectState.clear();active=true;paint();},setVisible(value){active=value;if(value)paint();},destroy(){active=false;destroyed=true;observer.disconnect();globalThis.clearInterval(timer);}};
+// Use the native/export cadence, including GIF frame deadlines. A fixed 30 ms
+// interval makes frame-driven distortion and effects run over twice as fast.
+let timer;
+function participantTick(){
+  if(destroyed)return;
+  const now=performance.now();
+  const visible=active&&host.getBoundingClientRect().width>0&&!realDocument.hidden;
+  if(visible){contentAnimationElapsedMS+=Math.max(0,Math.min(1000,now-lastTick));frame++;try{drawFrame();}catch(_err){presenterTransitionUntil=0;presenterContext.globalAlpha=1;drawPresenterPageFallback();}}
+  lastTick=now;
+  timer=globalThis.setTimeout(participantTick,visible?contentAnimationWakeDelayMS():70);
+}
+timer=globalThis.setTimeout(participantTick,contentAnimationWakeDelayMS());
+return {setPage(data,index,{timerEndMs=0}={}){if(!data||!Array.isArray(data.pages)||!data.pages[index])throw Error('Invalid rendered presentation page');presenterTimerEndMS=Number.isSafeInteger(timerEndMs)&&timerEndMs>0?timerEndMs:0;presenterTimerMode=presenterTimerEndMS?'running':'';presenterTimerInput='';deck.cols=data.cols;deck.rows=data.rows;deck.pages=data.pages;pageIndex=index;frame=0;contentAnimationElapsedMS=0;contentAnimationPageIndex=-1;contentAnimationCache.clear();effectState.clear();active=true;lastTick=performance.now();paint();},setVisible(value){active=value;lastTick=performance.now();if(value)paint();},destroy(){active=false;destroyed=true;observer.disconnect();globalThis.clearTimeout(timer);}};
 }
 `;
 fs.writeFileSync(process.argv[3],trueType+prefix+script+suffix);

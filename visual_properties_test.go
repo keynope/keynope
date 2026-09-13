@@ -99,61 +99,6 @@ func TestEmptySlideWithOnlyVisualOverridesSurvivesParsing(t *testing.T) {
 	}
 }
 
-func TestMasterEditorPageNumberToggleWorksForBaseAndLayouts(t *testing.T) {
-	deck := Deck{Masters: defaultMasterDeck()}
-	base := masterEditorSlide(&deck, 0)
-	if got := toggleMasterEditorPageNumber(&deck, 0, &base); got != "hide" {
-		t.Fatalf("Base editor toggle = %q", got)
-	}
-	if _, ok := pageNumberElement(base); ok {
-		t.Fatal("Base editor retained hidden page number")
-	}
-	if got := toggleMasterEditorPageNumber(&deck, 0, &base); got != "show" {
-		t.Fatalf("Base editor second toggle = %q", got)
-	}
-	number, ok := pageNumberElement(base)
-	if !ok || number.Inherited {
-		t.Fatalf("Base editor page number = %#v ok=%v", number, ok)
-	}
-
-	layout := masterEditorSlide(&deck, 1)
-	if inherited, ok := pageNumberElement(layout); !ok || !inherited.Inherited {
-		t.Fatalf("inherited layout page number = %#v ok=%v", inherited, ok)
-	}
-	if got := toggleMasterEditorPageNumber(&deck, 1, &layout); got != "show" {
-		t.Fatalf("layout editor show toggle = %q", got)
-	}
-	if own, ok := pageNumberElement(layout); !ok || own.Inherited {
-		t.Fatalf("layout-owned page number = %#v ok=%v", own, ok)
-	}
-	if got := toggleMasterEditorPageNumber(&deck, 1, &layout); got != "hide" {
-		t.Fatalf("layout editor hide toggle = %q", got)
-	}
-	if _, ok := pageNumberElement(layout); ok {
-		t.Fatal("hidden layout retained page number")
-	}
-	if got := toggleMasterEditorPageNumber(&deck, 1, &layout); got != "inherit" {
-		t.Fatalf("layout editor inherit toggle = %q", got)
-	}
-	if inherited, ok := pageNumberElement(layout); !ok || !inherited.Inherited {
-		t.Fatalf("restored inherited page number = %#v ok=%v", inherited, ok)
-	}
-}
-
-func TestMasterEditorContextAllowsPageNumberAndVisualProperties(t *testing.T) {
-	master := interactionContext{Mode: editorModeSelect, Selection: selectionNone, Master: true}
-	if !actionAllowedInContext(master, "page-number") || !actionAllowedInContext(master, "visual-properties") {
-		t.Fatalf("master actions unavailable: %#v", editActionSpecs(master))
-	}
-	normal := interactionContext{Mode: editorModeSelect, Selection: selectionNone}
-	if actionAllowedInContext(normal, "page-number") || actionAllowedInContext(normal, "visual-properties") {
-		t.Fatalf("master-only actions leaked into ordinary element editing: %#v", editActionSpecs(normal))
-	}
-	if !actionSpecsAllow(mainActionSpecs(), "visual-properties") {
-		t.Fatal("visual properties missing from normal slide shortcuts")
-	}
-}
-
 func TestMasterEditorExtractionPreservesRawLayoutVisualOverrides(t *testing.T) {
 	deck := Deck{Masters: defaultMasterDeck()}
 	target := &deck.Masters.Layouts[0].Slide

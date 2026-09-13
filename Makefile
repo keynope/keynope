@@ -1,6 +1,4 @@
-PREFIX ?= /usr/local
-BINDIR ?= $(PREFIX)/bin
-LIBEXECDIR ?= $(PREFIX)/libexec/keynope
+APPDIR ?= /Applications
 
 GO ?= go
 SWIFTC ?= swiftc
@@ -14,9 +12,6 @@ SWIFT_TARGET ?= $(SWIFT_ARCH)-apple-macosx$(MACOSX_DEPLOYMENT_TARGET)
 CODESIGN_IDENTITY ?= -
 
 BIN_DIR := bin
-KEYNOPE := $(BIN_DIR)/keynope
-PRESENTER_APP := $(BIN_DIR)/KeynopePresenter.app
-PRESENTER := $(PRESENTER_APP)/Contents/MacOS/KeynopePresenter
 KEYNOPE_APP := $(BIN_DIR)/Keynope.app
 KEYNOPE_APP_EXECUTABLE := $(KEYNOPE_APP)/Contents/MacOS/Keynope
 KEYNOPE_APP_ENGINE := $(KEYNOPE_APP)/Contents/Helpers/keynope-engine
@@ -29,11 +24,9 @@ KEYNOPE_APP_ICON := assets/KeynopeAssets.xcassets
 KEYNOPE_APP_ICON_FILES := $(shell find $(KEYNOPE_APP_ICON) -type f)
 KEYNOPE_APP_ICON_FALLBACK := assets/KeynopeApp.icns
 KEYNOPE_APP_ICON_INFO := $(BIN_DIR)/KeynopeAppIconInfo.plist
-KEYNOPE_EMOJI_ASSETS := assets/emoji/keynope-emoji-glyphs.bin.gz assets/emoji/emoji-test.txt assets/emoji/OFL.txt assets/emoji/NOTICE.txt assets/emoji/NOTO-REGION-FLAGS-LICENSE.txt assets/emoji/UNICODE-LICENSE.txt
+KEYNOPE_EMOJI_ASSETS := assets/emoji/keynope-emoji-glyphs.bin.gz assets/emoji/keynope-emoji-fonts.zip assets/emoji/emoji-test.txt assets/emoji/OFL.txt assets/emoji/NOTICE.txt assets/emoji/NOTO-REGION-FLAGS-LICENSE.txt assets/emoji/UNICODE-LICENSE.txt
 KEYNOPE_VERSION := $(shell awk '/^\#\# [0-9]/{print $$2; exit}' CHANGELOG.md)
-PRESENTER_INFO := presenter/Info.plist
 PRESENTER_ICON := assets/KeynopeMenuTemplate.png
-PRESENTER_SIGNATURE := $(PRESENTER_APP)/Contents/_CodeSignature/CodeResources
 PRESENTER_SRC := presenter/KeynopePresenter.swift presenter/ScreenShare.swift presenter/EmbeddedIcon.swift
 PRESENTER_FRAMEWORKS := -framework Cocoa -framework WebKit -framework AVFoundation -framework ScreenCaptureKit
 GO_SRC := $(filter-out %_test.go,$(wildcard *.go))
@@ -47,15 +40,11 @@ GO_SRC += web/participant-transfer.js
 character_assets_data.go: characters_svg/items.json eyes.json tools/generate_character_assets.go
 	$(GO) run ./tools/generate_character_assets.go
 
-.PHONY: all build app keynope presenter web-editor test install clean
+.PHONY: all build app web-editor test install clean
 
 all: build
 
-build: keynope presenter
-
-keynope: $(KEYNOPE)
-
-presenter: $(PRESENTER_SIGNATURE)
+build: app
 
 web-editor:
 	./tools/build_web_editor.sh
@@ -80,30 +69,12 @@ $(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE
 	$(CODESIGN) --force --options runtime --identifier sh.keynope.app.engine --entitlements $(KEYNOPE_APP_ENGINE_ENTITLEMENTS) --sign "$(CODESIGN_IDENTITY)" $(KEYNOPE_APP_ENGINE)
 	$(CODESIGN) --force --options runtime --entitlements $(KEYNOPE_APP_ENTITLEMENTS) --sign "$(CODESIGN_IDENTITY)" $(KEYNOPE_APP)
 
-$(KEYNOPE): $(GO_SRC) $(KEYNOPE_EMOJI_ASSETS) go.mod go.sum LICENSE.txt
-	@mkdir -p $(BIN_DIR)
-	$(GO) build -o $(KEYNOPE) .
-
-$(PRESENTER_SIGNATURE): $(PRESENTER_SRC) $(PRESENTER_INFO) $(PRESENTER_ICON)
-	rm -f $(BIN_DIR)/KeynopePresenter
-	rm -rf $(PRESENTER_APP)
-	@mkdir -p $(PRESENTER_APP)/Contents/MacOS $(PRESENTER_APP)/Contents/Resources
-	cp $(PRESENTER_INFO) $(PRESENTER_APP)/Contents/Info.plist
-	cp $(PRESENTER_ICON) $(PRESENTER_APP)/Contents/Resources/KeynopeMenuTemplate.png
-	$(SWIFTC) $(SWIFTFLAGS) -target $(SWIFT_TARGET) -O $(PRESENTER_FRAMEWORKS) $(PRESENTER_SRC) -o $(PRESENTER)
-	$(CODESIGN) --force --sign "$(CODESIGN_IDENTITY)" $(PRESENTER_APP)
-
 test:
 	$(GO) test ./...
 
 install: build
-	@mkdir -p $(BINDIR) $(LIBEXECDIR)
-	cp $(KEYNOPE) $(LIBEXECDIR)/keynope
-	@mkdir -p $(LIBEXECDIR)/licenses
-	cp assets/emoji/*-LICENSE.txt $(LIBEXECDIR)/licenses/
-	rm -rf $(LIBEXECDIR)/KeynopePresenter.app
-	cp -R $(PRESENTER_APP) $(LIBEXECDIR)/KeynopePresenter.app
-	ln -sfn $(LIBEXECDIR)/keynope $(BINDIR)/keynope
+	@mkdir -p $(APPDIR)
+	ditto $(KEYNOPE_APP) $(APPDIR)/Keynope.app
 
 clean:
 	rm -rf $(BIN_DIR) build
