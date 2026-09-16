@@ -57,6 +57,29 @@ func activityRoleElement(role string) (Element, bool) {
 	return Element{}, false
 }
 
+// Apply the deck preference to legacy Activity-master elements as well as
+// expose it to the presentation HTML. Never mutate the authored master.
+func (deck Deck) applyActivityQRSetting(slide Slide) Slide {
+	slide.HideActivityQR = deck.HideActivityQR
+	if !deck.HideActivityQR || slide.Engagement == nil {
+		return slide
+	}
+	slide.Elements = append([]Element(nil), slide.Elements...)
+	for index, element := range slide.Elements {
+		if element.PlaceholderRole != activityQRCodeRole {
+			continue
+		}
+		element.Kind = "text"
+		element.Text = "https://keynope.sh/join/"
+		if slide.Engagement.Code != "" {
+			element.Text += "\nCode: " + slide.Engagement.Code
+		}
+		element.Query = "align=center&valign=middle&render=truetype&fg=%2355aaff"
+		slide.Elements[index] = element
+	}
+	return slide
+}
+
 func protectedActivityElement(element Element) bool {
 	switch element.PlaceholderRole {
 	case activityTitleRole, activityQRCodeRole, activityURLRole:
@@ -93,8 +116,14 @@ func activityElementText(role string, definition *EngagementDefinition) string {
 	switch role {
 	case activityTitleRole:
 		names := map[string]string{
-			"onboarding": "Onboarding",
-			"pulse":      "Pulse", "storm": "Storm", "sort": "Sort", "dual": "Dual Response",
+			"shuffle":     "Shuffle",
+			"pressure":    "Pressure Cooker",
+			"deducer":     "Deducer",
+			"finalanswer": "Final Answer",
+			"nominate":    "Nominate",
+			"chosen":      "The Chosen",
+			"onboarding":  "Onboarding",
+			"pulse":       "Pulse", "storm": "Storm", "sort": "Sort", "dual": "Dual Response",
 			"quiz": "Quiz", "truefalse": "Fact or Fiction", "match": "Mix & Match",
 			"questions": "Questions", "wall": "Feedback Wall", "draw": "Draw Yourself",
 			"introduction": "Introduction",

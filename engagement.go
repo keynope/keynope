@@ -23,29 +23,34 @@ var legacyPulseOptions = []string{"0", "1", "2", "3", "4", "5"}
 
 var activityCodeRE = regexp.MustCompile(`^[A-Za-z0-9]{8}$`)
 
-// EngagementDefinition is authored deck data. Live answers deliberately do not
-// belong here: saving a deck must never persist names, votes, or workshop input.
+// EngagementDefinition is authored activity configuration. Completed results are
+// stored separately on the slide, not in definitions sent to participants.
 type EngagementDefinition struct {
-	ID                string               `json:"id,omitempty"`
-	Code              string               `json:"code,omitempty"`
-	Kind              string               `json:"kind"`
-	Prompt            string               `json:"prompt,omitempty"`
-	Options           []string             `json:"options,omitempty"`
-	Zones             []string             `json:"zones,omitempty"`
-	Cards             []string             `json:"cards,omitempty"`
-	Questions         []EngagementQuestion `json:"questions,omitempty"`
-	Prerequisites     []PrerequisiteItem   `json:"prerequisites,omitempty"`
-	Correct           int                  `json:"correct,omitempty"`
-	GroupSize         int                  `json:"groupSize,omitempty"`
-	GroupCount        int                  `json:"groupCount,omitempty"`
-	ImpostorCount     int                  `json:"impostorCount,omitempty"`
-	TimerSeconds      int                  `json:"timerSeconds,omitempty"`
-	JoinSeconds       int                  `json:"joinSeconds,omitempty"`
-	DiscussionSeconds int                  `json:"discussionSeconds,omitempty"`
+	ID            string               `json:"id,omitempty"`
+	Code          string               `json:"code,omitempty"`
+	Kind          string               `json:"kind"`
+	Prompt        string               `json:"prompt,omitempty"`
+	Options       []string             `json:"options,omitempty"`
+	Zones         []string             `json:"zones,omitempty"`
+	Cards         []string             `json:"cards,omitempty"`
+	Questions     []EngagementQuestion `json:"questions,omitempty"`
+	Prerequisites []PrerequisiteItem   `json:"prerequisites,omitempty"`
+	// Omitted in older decks: preserve their completion-based grouping.
+	DisableGrouping   bool `json:"disableGrouping,omitempty"`
+	Correct           int  `json:"correct,omitempty"`
+	GroupSize         int  `json:"groupSize,omitempty"`
+	GroupCount        int  `json:"groupCount,omitempty"`
+	ImpostorCount     int  `json:"impostorCount,omitempty"`
+	ChosenCount       int  `json:"chosenCount,omitempty"`
+	MaxEntries        int  `json:"maxEntries,omitempty"`
+	TimerSeconds      int  `json:"timerSeconds,omitempty"`
+	JoinSeconds       int  `json:"joinSeconds,omitempty"`
+	DiscussionSeconds int  `json:"discussionSeconds,omitempty"`
 	// Named is opt-in. Its zero value keeps activities anonymous by default.
-	Named     bool `json:"named,omitempty"`
-	DotBudget int  `json:"dotBudget,omitempty"`
-	StackDots bool `json:"stackDots,omitempty"`
+	Named          bool `json:"named,omitempty"`
+	DotBudget      int  `json:"dotBudget,omitempty"`
+	StackDots      bool `json:"stackDots,omitempty"`
+	ImportPrevious bool `json:"importPrevious,omitempty"`
 }
 
 type EngagementQuestion struct {
@@ -148,22 +153,26 @@ func activityJoinURL(definition *EngagementDefinition) string {
 // EngagementRuntimeState is transient presenter state shared between Keynope's
 // controller and presentation surfaces. It is never serialized into Markdown.
 type EngagementRuntimeState struct {
-	Definition   EngagementDefinition    `json:"definition"`
-	Slide        int                     `json:"slide"`
-	Phase        int                     `json:"phase"`
-	Counts       []int                   `json:"counts,omitempty"`
-	Ideas        []string                `json:"ideas,omitempty"`
-	Assignments  []int                   `json:"assignments,omitempty"`
-	Respondents  []string                `json:"respondents,omitempty"`
-	Attributions []EngagementAttribution `json:"attributions,omitempty"`
-	Groups       []EngagementGroup       `json:"groups,omitempty"`
-	SessionCode  string                  `json:"sessionCode,omitempty"`
-	JoinURL      string                  `json:"joinUrl,omitempty"`
-	QRCode       string                  `json:"qrCode,omitempty"`
-	RoomReady    bool                    `json:"roomReady,omitempty"`
-	Game         json.RawMessage         `json:"game,omitempty"`
-	DeadlineMS   int64                   `json:"deadlineMs,omitempty"`
-	Participants int                     `json:"participants,omitempty"`
+	Definition        EngagementDefinition    `json:"definition"`
+	Slide             int                     `json:"slide"`
+	Phase             int                     `json:"phase"`
+	Counts            []int                   `json:"counts,omitempty"`
+	Ideas             []string                `json:"ideas,omitempty"`
+	Assignments       []int                   `json:"assignments,omitempty"`
+	Respondents       []string                `json:"respondents,omitempty"`
+	Attributions      []EngagementAttribution `json:"attributions,omitempty"`
+	Groups            []EngagementGroup       `json:"groups,omitempty"`
+	SessionCode       string                  `json:"sessionCode,omitempty"`
+	JoinURL           string                  `json:"joinUrl,omitempty"`
+	QRCode            string                  `json:"qrCode,omitempty"`
+	HideActivityQR    bool                    `json:"hideActivityQR,omitempty"`
+	RoomReady         bool                    `json:"roomReady,omitempty"`
+	Game              json.RawMessage         `json:"game,omitempty"`
+	DeadlineMS        int64                   `json:"deadlineMs,omitempty"`
+	PausedRemainingMS int64                   `json:"pausedRemainingMs,omitempty"`
+	Participants      int                     `json:"participants,omitempty"`
+	QuestionIndex     int                     `json:"questionIndex,omitempty"`
+	QuestionRevealed  bool                    `json:"questionRevealed,omitempty"`
 }
 
 func cloneEngagementRuntime(runtime *EngagementRuntimeState) *EngagementRuntimeState {
@@ -224,6 +233,47 @@ func cloneEngagement(definition *EngagementDefinition) *EngagementDefinition {
 	return &copyDefinition
 }
 
+// Older slide clones kept the source activity ID. Every activity needs its own
+// identity for both live sessions and result storage, even when kinds match.
+func ensureUniqueEngagementIDs(deck *Deck) bool {
+	reserved := make(map[string]bool)
+	for _, slide := range deck.Slides {
+		if slide.Engagement != nil {
+			reserved[slide.Engagement.ID] = true
+		}
+	}
+	seen := make(map[string]bool)
+	changed := false
+	for i := range deck.Slides {
+		slide := &deck.Slides[i]
+		if slide.Engagement == nil {
+			continue
+		}
+		oldID := slide.Engagement.ID
+		if oldID == "" || seen[oldID] {
+			slide.Engagement = cloneEngagement(slide.Engagement)
+			for {
+				slide.Engagement.ID = newStableID("activity")
+				if !reserved[slide.Engagement.ID] {
+					break
+				}
+			}
+			reserved[slide.Engagement.ID] = true
+			// Keep results already attached to this specific slide.
+			if result := slide.EngagementResult; result != nil && result.ActivityID == oldID && result.Kind == slide.Engagement.Kind {
+				slide.EngagementResult = cloneEngagementResult(result)
+				slide.EngagementResult.ActivityID = slide.Engagement.ID
+				if slide.EngagementResult.Definition != nil {
+					slide.EngagementResult.Definition.ID = slide.Engagement.ID
+				}
+			}
+			changed = true
+		}
+		seen[slide.Engagement.ID] = true
+	}
+	return changed
+}
+
 func normalizeEngagement(definition EngagementDefinition) (EngagementDefinition, error) {
 	if err := ensureActivityID(&definition); err != nil {
 		return EngagementDefinition{}, err
@@ -239,7 +289,23 @@ func normalizeEngagement(definition EngagementDefinition) (EngagementDefinition,
 		definition.Code = ""
 	}
 	definition.Prompt = strings.TrimSpace(definition.Prompt)
-	definition.Options = cleanEngagementItems(definition.Options)
+	if definition.Kind == "dots" && definition.ImportPrevious {
+		// Imported workshop contributions must survive result/save round trips
+		// without the 160-byte truncation used by manually authored options.
+		items := make([]string, 0, len(definition.Options))
+		for _, item := range definition.Options {
+			item = strings.TrimSpace(item)
+			if len(item) > 4000 {
+				return EngagementDefinition{}, fmt.Errorf("imported voting item is too long")
+			}
+			if item != "" {
+				items = append(items, item)
+			}
+		}
+		definition.Options = items
+	} else {
+		definition.Options = cleanEngagementItems(definition.Options)
+	}
 	definition.Zones = cleanEngagementItems(definition.Zones)
 	definition.Cards = cleanEngagementItems(definition.Cards)
 	definition.Questions = cleanEngagementQuestions(definition.Questions)
@@ -250,6 +316,57 @@ func normalizeEngagement(definition EngagementDefinition) (EngagementDefinition,
 		return EngagementDefinition{}, fmt.Errorf("engagement prompt is too long")
 	}
 	switch definition.Kind {
+	case "nominate":
+		definition.Options, definition.Zones, definition.Cards, definition.Questions = nil, nil, nil, nil
+	case "shuffle":
+		definition.Named = true
+		definition.TimerSeconds = 0
+		definition.Options, definition.Zones, definition.Cards, definition.Questions = nil, nil, nil, nil
+	case "finalanswer":
+		definition.MaxEntries = 1
+		definition.Named = true
+		if definition.TimerSeconds == 0 {
+			definition.TimerSeconds = 5 * 60
+		}
+		if definition.TimerSeconds < 60 || definition.TimerSeconds > 600 {
+			return EngagementDefinition{}, fmt.Errorf("Final Answer timer must be between 1 and 10 minutes")
+		}
+		definition.Options, definition.Zones, definition.Cards, definition.Questions = nil, nil, nil, nil
+	case "deducer":
+		if definition.GroupCount == 0 {
+			definition.GroupCount = 4
+		}
+		if definition.MaxEntries == 0 {
+			definition.MaxEntries = 5
+		}
+		if definition.TimerSeconds == 0 {
+			definition.TimerSeconds = 5 * 60
+		}
+		if definition.GroupCount < 1 || definition.GroupCount > 10 {
+			return EngagementDefinition{}, fmt.Errorf("Deducer needs 1 to 10 groups")
+		}
+		if definition.MaxEntries < 1 || definition.MaxEntries > 100 {
+			return EngagementDefinition{}, fmt.Errorf("Deducer needs 1 to 100 entries per group")
+		}
+		if definition.TimerSeconds < 60 || definition.TimerSeconds > 600 {
+			return EngagementDefinition{}, fmt.Errorf("Deducer timer must be between 1 and 10 minutes")
+		}
+		definition.Named = true
+		definition.Options, definition.Zones, definition.Cards, definition.Questions = nil, nil, nil, nil
+	case "pressure":
+		if definition.TimerSeconds == 0 {
+			definition.TimerSeconds = 5 * 60
+		}
+		definition.Options, definition.Zones, definition.Cards, definition.Questions = nil, nil, nil, nil
+	case "chosen":
+		if definition.ChosenCount == 0 {
+			definition.ChosenCount = 1
+		}
+		if definition.ChosenCount < 1 || definition.ChosenCount > 1000 {
+			return EngagementDefinition{}, fmt.Errorf("The Chosen needs between 1 and 1000 people")
+		}
+		definition.Named = true
+		definition.Options, definition.Zones, definition.Cards, definition.Questions = nil, nil, nil, nil
 	case "ball", "gallery", "hunt", "teach", "fame", "agreements", "three":
 		if len(definition.Options) > 40 {
 			return EngagementDefinition{}, fmt.Errorf("activity supports at most 40 items")
@@ -282,7 +399,11 @@ func normalizeEngagement(definition EngagementDefinition) (EngagementDefinition,
 		}
 		definition.Zones, definition.Cards, definition.Questions = nil, nil, nil
 	case "dots":
-		if len(definition.Options) < 2 || len(definition.Options) > 40 {
+		if definition.ImportPrevious {
+			if len(definition.Options) > 500 {
+				return EngagementDefinition{}, fmt.Errorf("automatic dot voting supports up to 500 submitted items")
+			}
+		} else if len(definition.Options) < 2 || len(definition.Options) > 40 {
 			return EngagementDefinition{}, fmt.Errorf("dot voting needs 2 to 40 options")
 		}
 		if definition.DotBudget == 0 {
@@ -462,11 +583,17 @@ func normalizeEngagement(definition EngagementDefinition) (EngagementDefinition,
 	if definition.Kind != "pair" {
 		definition.GroupSize = 0
 	}
-	if definition.Kind != "cards" {
+	if definition.Kind != "cards" && definition.Kind != "deducer" {
 		definition.GroupCount = 0
 	}
 	if definition.Kind != "impostor" {
 		definition.ImpostorCount = 0
+	}
+	if definition.Kind != "chosen" {
+		definition.ChosenCount = 0
+	}
+	if definition.Kind != "deducer" && definition.Kind != "finalanswer" {
+		definition.MaxEntries = 0
 	}
 	if definition.Kind != "pair" && definition.Kind != "cards" && definition.Kind != "impostor" && definition.Kind != "teach" {
 		definition.JoinSeconds = 0

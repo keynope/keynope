@@ -37,6 +37,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var recentDecksMenu: NSMenu?
     private var saveMenuItem: NSMenuItem?
     private var participantTabsMenuItem: NSMenuItem?
+    private var activityQRMenuItem: NSMenuItem?
     private var shareableContent: SCShareableContent?
     private var loadingShareSources = false
     private let screenShareController = ScreenShareController()
@@ -221,6 +222,11 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         tabsItem.target = self
         tabsItem.isEnabled = false
         participantTabsMenuItem = tabsItem
+        let qrItem = settingsMenu.addItem(withTitle: "Activity QR Codes", action: #selector(toggleActivityQR), keyEquivalent: "")
+        qrItem.target = self
+        qrItem.isEnabled = false
+        qrItem.state = .on
+        activityQRMenuItem = qrItem
         settingsItem.submenu = settingsMenu
         mainMenu.addItem(settingsItem)
 
@@ -242,6 +248,11 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         guard participantTabsMenuItem?.isEnabled == true else { return }
         showEditor()
         editorWebView?.evaluateJavaScript("window.keynopeOpenParticipantTabs?.()")
+    }
+
+    @objc private func toggleActivityQR() {
+        guard activityQRMenuItem?.isEnabled == true else { return }
+        editorWebView?.evaluateJavaScript("window.keynopeToggleActivityQR?.()")
     }
 
     private var versionedAppName: String {
@@ -686,6 +697,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         presenterURL = newURL
         editorWebView?.load(URLRequest(url: editorURL()))
         participantTabsMenuItem?.isEnabled = false
+        activityQRMenuItem?.isEnabled = false
         documentDirty = true
         saveMenuItem?.isEnabled = true
         updateEditorWindowTitle()
@@ -785,6 +797,15 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         saveMenuItem?.isEnabled = false
         Task {
             do {
+                let activityResultsPending: Bool
+                if let webView = self.editorWebView {
+                    // A failed auxiliary result write must never veto saving the
+                    // deck itself, including when an older page is still open.
+                    let flushed = try await webView.callAsyncJavaScript("try { return (await window.keynopeFlushActivityResults?.()) !== false; } catch (error) { console.warn('Activity results pending:', error); return false; }", arguments: [:], in: nil, contentWorld: .page)
+                    activityResultsPending = (flushed as? Bool) == false
+                } else {
+                    activityResultsPending = false
+                }
                 var request = URLRequest(url: documentURL)
                 request.httpMethod = "POST"
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -805,11 +826,22 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 }
                 await MainActor.run {
                     self.savingDocument = false
-                    self.documentDirty = false
-                    self.saveMenuItem?.isEnabled = false
+                    self.documentDirty = activityResultsPending
+                    self.saveMenuItem?.isEnabled = activityResultsPending
                     self.didSaveDeckHandler?(destination.path)
                     self.updateEditorWindowTitle(deckPath: destination.path)
                     self.editorWebView?.evaluateJavaScript("window.keynopeDidSave && window.keynopeDidSave()")
+                    // The deck was saved, but do not discard recoverable results
+                    // by automatically closing or opening another document.
+                    if activityResultsPending {
+                        self.closeAfterSave = false
+                        self.actionAfterSave = nil
+                        if self.terminateAfterSave {
+                            self.terminateAfterSave = false
+                            NSApp.reply(toApplicationShouldTerminate: false)
+                        }
+                        return
+                    }
                     if let action = self.actionAfterSave {
                         self.actionAfterSave = nil
                         action()
@@ -853,6 +885,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         saveMenuItem?.isEnabled = false
         editorWebView?.load(URLRequest(url: editorURL()))
         participantTabsMenuItem?.isEnabled = false
+        activityQRMenuItem?.isEnabled = false
         updateEditorWindowTitle(deckPath: path)
         showEditorWindow()
     }
@@ -1348,6 +1381,8 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 updateEditorWindowTitle()
             } else if action == "editor-tabs-availability", let available = body["available"] as? Bool {
                 participantTabsMenuItem?.isEnabled = available
+                activityQRMenuItem?.isEnabled = available
+                activityQRMenuItem?.state = (body["activityQRVisible"] as? Bool ?? true) ? .on : .off
             }
         }
     }

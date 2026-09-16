@@ -50,4 +50,17 @@ cp "$temporary_dir/licenses.txt" "$output_dir/licenses.txt"
 goroot=$(go env GOROOT)
 cp "$goroot/lib/wasm/wasm_exec.js" "$output_dir/wasm_exec.js"
 
+# Fingerprint the complete editor, not its release number. Development deploys
+# often share a version, but must never keep an obsolete parser or renderer.
+build=$(cd "$output_dir" && shasum -a 256 index.html editor.js editor.css Welcome.md licenses.txt wasm_exec.js keynope-editor.wasm service-worker.js | shasum -a 256 | cut -c1-20)
+node - "$output_dir" "$build" <<'NODE'
+const fs = require('node:fs');
+const [dir, build] = process.argv.slice(2);
+const html = fs.readFileSync(dir + '/index.html', 'utf8')
+  .replace(/\/editor\/(editor\.(?:js|css))/g, '/editor/$1?build=' + build);
+fs.writeFileSync(dir + '/index.html', html);
+const worker = fs.readFileSync(dir + '/service-worker.js', 'utf8').replaceAll('__KEYNOPE_BUILD__', build);
+fs.writeFileSync(dir + '/service-worker.js', worker);
+NODE
+
 printf '%s\n' "Built Keynope web editor in $output_dir"

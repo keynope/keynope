@@ -19,6 +19,7 @@ type DeckTab struct {
 }
 
 var deckTabsRE = regexp.MustCompile(`(?m)^<!--\s*keynope-tabs version=1 base64:([A-Za-z0-9+/=]+)\s*-->\s*`)
+var activityQRSettingRE = regexp.MustCompile(`(?m)^<!--\s*keynope-activity-qr=(on|off)\s*-->\s*`)
 var slideTabRE = regexp.MustCompile(`<!--\s*keynope-tab=([a-zA-Z0-9_-]{1,80})\s*-->`)
 
 // Tab slides retain their slot in Slides. Their separate display order lives

@@ -46,6 +46,30 @@ games.receive(r,event('d',{volunteer:true}));assert.equal(r.game.volunteers.leng
 r=runtime('hunt');games.receive(r,event('a',{choices:[0]}));assert.equal(games.publicState(r).entries.length,0);assert.deepEqual(plain(games.definition(r).options),['A','B']);r.phase=3;assert.deepEqual(plain(games.publicState(r).expected),[0]);assert.equal(games.publicState(r).entries[0].name,'');
 r=runtime('fame');games.receive(r,event('a',{target:'Bob',text:'Thanks'}));assert.equal(games.publicState(r).entries.length,0);r.phase=3;assert.equal(games.publicState(r).entries.length,1);
 console.log('Workshop state, privacy and authorization checks passed.');
+for(const count of [1,3,4,8]){
+  r=runtime('chosen');r.definition.chosenCount=count;r.deadlineMs=Date.now()+1000;r.pausedRemainingMs=100;
+  games.next(r);
+  assert.equal(r.phase,3);assert.equal(r.game.chosen.length,Math.min(count,4));
+  assert.equal(new Set(r.game.chosen.map(p=>p.identity)).size,r.game.chosen.length);
+  assert(r.game.chosen.every(p=>r.memberNames[p.identity]===p.displayName));
+  assert.equal(r.deadlineMs,0);assert.equal(r.pausedRemainingMs,0);
+  const saved=JSON.stringify(r.game.chosen);
+  r.memberNames.e='Late joiner';games.next(r);games.receive(r,event('e',{chosen:['e']}));
+  assert.equal(JSON.stringify(r.game.chosen),saved);
+  assert.equal(JSON.stringify(games.publicState(r).chosen),saved);
+  assert.equal(r.groups,undefined,'Random selection must not create pairing channels');
+  r.phase=1;delete r.game;games.next(r);assert.equal(r.game.poolSize,5);
+}
+r=runtime('chosen');r.memberNames={};r.deadlineMs=1;games.next(r);
+assert.equal(r.phase,1);assert.equal(r.deadlineMs,0);assert.equal(r.game.chosen,undefined);
+r.memberNames.a='Alice';games.next(r);assert.equal(r.game.chosen[0].displayName,'Alice');
+console.log('The Chosen: distinct picks, count limits, empty pool, late joins, stable reveal and reset passed.');
+r=runtime('pressure');r.definition.timerSeconds=120;r.deadlineMs=Date.now()+120000;
+games.receive(r,event('a',{text:'ignored'}));assert.equal(r.phase,1);assert.equal(r.game.entries.length,0);
+games.next(r);assert.equal(r.phase,3);assert.equal(r.deadlineMs,0);assert.equal(r.pausedRemainingMs,0);
+games.next(r);assert.equal(r.phase,3);
+assert.equal(games.timerGlyphs['1'][0].length,games.timerGlyphs['0'][0].length);
+console.log('Pressure Cooker: stop/expiry is terminal, no responses, consistent timer digit widths.');
 assert.equal(games.has('metaphor'),false);
 r=runtime('gallery');r.definition.named=true;
 games.receive(r,event('a',{item:0,symbol:'?',text:'Why this design?'}));

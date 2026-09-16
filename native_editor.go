@@ -67,53 +67,55 @@ func (s *nativeEditorSession) handleUpload(w http.ResponseWriter, r *http.Reques
 }
 
 type nativeEditorState struct {
-	Tabs          []DeckTab           `json:"tabs"`
-	HasActivities bool                `json:"hasActivities"`
-	CanUndo       bool                `json:"canUndo"`
-	CanRedo       bool                `json:"canRedo"`
-	Version       int64               `json:"version"`
-	Path          string              `json:"path"`
-	Current       int                 `json:"current"`
-	Selected      int                 `json:"selected"`
-	EditingGroup  string              `json:"editingGroup,omitempty"`
-	Selection     []int               `json:"selection"`
-	Slides        []Slide             `json:"slides"`
-	Resolved      []Slide             `json:"resolved"`
-	Masters       MasterDeck          `json:"masters"`
-	Fonts         map[string]DeckFont `json:"fonts,omitempty"`
-	MasterMode    bool                `json:"masterMode,omitempty"`
-	Dirty         bool                `json:"dirty"`
-	Untitled      bool                `json:"untitled"`
-	TimerMode     string              `json:"timerMode,omitempty"`
-	TimerEndMS    int64               `json:"timerEndMs,omitempty"`
+	Tabs           []DeckTab           `json:"tabs"`
+	HasActivities  bool                `json:"hasActivities"`
+	HideActivityQR bool                `json:"hideActivityQR"`
+	CanUndo        bool                `json:"canUndo"`
+	CanRedo        bool                `json:"canRedo"`
+	Version        int64               `json:"version"`
+	Path           string              `json:"path"`
+	Current        int                 `json:"current"`
+	Selected       int                 `json:"selected"`
+	EditingGroup   string              `json:"editingGroup,omitempty"`
+	Selection      []int               `json:"selection"`
+	Slides         []Slide             `json:"slides"`
+	Resolved       []Slide             `json:"resolved"`
+	Masters        MasterDeck          `json:"masters"`
+	Fonts          map[string]DeckFont `json:"fonts,omitempty"`
+	MasterMode     bool                `json:"masterMode,omitempty"`
+	Dirty          bool                `json:"dirty"`
+	Untitled       bool                `json:"untitled"`
+	TimerMode      string              `json:"timerMode,omitempty"`
+	TimerEndMS     int64               `json:"timerEndMs,omitempty"`
 }
 
 type nativeEditorAction struct {
-	Tabs           []DeckTab             `json:"tabs,omitempty"`
-	Action         string                `json:"action"`
-	Slide          int                   `json:"slide,omitempty"`
-	Page           int                   `json:"page,omitempty"`
-	Value          int                   `json:"value,omitempty"`
-	Cols           int                   `json:"cols,omitempty"`
-	Rows           int                   `json:"rows,omitempty"`
-	BoxWidth       int                   `json:"boxWidth,omitempty"`
-	BoxHeight      int                   `json:"boxHeight,omitempty"`
-	Element        int                   `json:"element,omitempty"`
-	Cursor         int                   `json:"cursor,omitempty"`
-	SelectionStart int                   `json:"selectionStart,omitempty"`
-	SelectionEnd   int                   `json:"selectionEnd,omitempty"`
-	Kind           string                `json:"kind,omitempty"`
-	Level          int                   `json:"level,omitempty"`
-	Name           string                `json:"name,omitempty"`
-	Path           string                `json:"path,omitempty"`
-	Notes          string                `json:"notes,omitempty"`
-	ElementData    *Element              `json:"elementData,omitempty"`
-	ElementIndices []int                 `json:"elementIndices,omitempty"`
-	ElementsData   []Element             `json:"elementsData,omitempty"`
-	SlideData      *Slide                `json:"slideData,omitempty"`
-	AssetData      *DeckAsset            `json:"assetData,omitempty"`
-	FontData       *DeckFont             `json:"fontData,omitempty"`
-	EngagementData *EngagementDefinition `json:"engagementData,omitempty"`
+	Tabs             []DeckTab             `json:"tabs,omitempty"`
+	Action           string                `json:"action"`
+	Slide            int                   `json:"slide,omitempty"`
+	Page             int                   `json:"page,omitempty"`
+	Value            int                   `json:"value,omitempty"`
+	Cols             int                   `json:"cols,omitempty"`
+	Rows             int                   `json:"rows,omitempty"`
+	BoxWidth         int                   `json:"boxWidth,omitempty"`
+	BoxHeight        int                   `json:"boxHeight,omitempty"`
+	Element          int                   `json:"element,omitempty"`
+	Cursor           int                   `json:"cursor,omitempty"`
+	SelectionStart   int                   `json:"selectionStart,omitempty"`
+	SelectionEnd     int                   `json:"selectionEnd,omitempty"`
+	Kind             string                `json:"kind,omitempty"`
+	Level            int                   `json:"level,omitempty"`
+	Name             string                `json:"name,omitempty"`
+	Path             string                `json:"path,omitempty"`
+	Notes            string                `json:"notes,omitempty"`
+	ElementData      *Element              `json:"elementData,omitempty"`
+	ElementIndices   []int                 `json:"elementIndices,omitempty"`
+	ElementsData     []Element             `json:"elementsData,omitempty"`
+	SlideData        *Slide                `json:"slideData,omitempty"`
+	AssetData        *DeckAsset            `json:"assetData,omitempty"`
+	FontData         *DeckFont             `json:"fontData,omitempty"`
+	EngagementData   *EngagementDefinition `json:"engagementData,omitempty"`
+	EngagementResult *EngagementResult     `json:"engagementResult,omitempty"`
 }
 
 type nativeEditorCaret struct {
@@ -868,6 +870,7 @@ func newNativeEditorSession(deckPath string, deck Deck, options ...bool) *native
 	isUntitled := len(options) > 0 && options[0]
 	dirtyOverride := len(options) > 1 && options[1]
 	deck = cloneDeck(deck)
+	dirtyOverride = ensureUniqueEngagementIDs(&deck) || dirtyOverride
 	syncSlideTabs(&deck)
 	deck.EnsureDefaultMasters()
 	standardizeDeckText(&deck)
@@ -944,7 +947,7 @@ func (s *nativeEditorSession) state() nativeEditorState {
 		timerMode, timerEndMS = "running", s.timerDeadline.UnixMilli()
 	}
 	return nativeEditorState{
-		Tabs: append([]DeckTab(nil), s.deck.Tabs...), HasActivities: deckHasActivities(s.deck),
+		Tabs: append([]DeckTab(nil), s.deck.Tabs...), HasActivities: deckHasActivities(s.deck), HideActivityQR: s.deck.HideActivityQR,
 		CanUndo: len(s.undo) > 0, CanRedo: len(s.redo) > 0,
 		Version: s.version, Path: s.deckPath, Current: current, Selected: s.selected, MasterMode: s.masterMode,
 		Selection: selection, EditingGroup: s.editingGroup, Slides: slides, Resolved: resolved, Masters: s.deck.Masters, Fonts: cloneDeck(s.deck).Fonts,
@@ -1054,6 +1057,9 @@ func (s *nativeEditorSession) handleAction(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *nativeEditorSession) apply(action nativeEditorAction) error {
+	if action.Action == "set-engagement-result" {
+		return s.applyEngagementResult(action)
+	}
 	if action.Action == "confirm-save" {
 		if strings.TrimSpace(action.Path) == "" || !s.confirmSaved(action.Path, int64(action.Value)) {
 			return errInvalidEditorAction
@@ -1139,6 +1145,14 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		}
 		s.deck.Tabs[slots[action.Value]] = moved
 		s.current, s.selected, s.selection, changed = action.Slide, -1, map[int]bool{}, from != action.Value
+	case "set-activity-qr":
+		if s.masterMode || !deckHasActivities(s.deck) || (action.Value != 0 && action.Value != 1) {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		hide := action.Value == 0
+		changed = s.deck.HideActivityQR != hide
+		s.deck.HideActivityQR = hide
 	case "set-tabs":
 		if !deckHasActivities(s.deck) {
 			s.mu.Unlock()
@@ -1204,7 +1218,7 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			return err
 		}
 	case "navigate-presentation":
-		if action.Slide < 0 || action.Slide >= slideCount || action.Page < 0 || s.deck.Slides[action.Slide].TabID != "" {
+		if action.Slide < 0 || action.Slide >= slideCount || action.Page < 0 {
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
@@ -1257,6 +1271,15 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.deck.Slides = append(s.deck.Slides, Slide{})
 		copy(s.deck.Slides[insert+1:], s.deck.Slides[insert:])
 		s.deck.Slides[insert] = cloneSlide(s.deck.Slides[s.current])
+		if activity := s.deck.Slides[insert].Engagement; activity != nil {
+			activity.ID, activity.Code = "", ""
+			if err := ensureActivityID(activity); err != nil {
+				s.deck = before
+				s.mu.Unlock()
+				return err
+			}
+			s.deck.Slides[insert].EngagementResult = nil
+		}
 		s.current, s.selected, changed = insert, -1, true
 		s.selection = map[int]bool{}
 	case "reorder-slide":
@@ -1316,7 +1339,21 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			s.mu.Unlock()
 			return err
 		}
+		for i, slide := range s.deck.Slides {
+			if i != s.current && slide.Engagement != nil && slide.Engagement.ID == definition.ID {
+				definition.ID = newStableID("activity")
+				break
+			}
+		}
 		s.deck.Slides[s.current].Engagement = &definition
+		if previous := before.Slides[s.current].Engagement; previous == nil || previous.ID != definition.ID || previous.Kind != definition.Kind {
+			s.deck.Slides[s.current].EngagementResult = nil
+		}
+		if definition.Kind == "onboarding" && before.Slides[s.current].Engagement != nil && before.Slides[s.current].Engagement.Code != definition.Code {
+			for i := range s.deck.Slides {
+				s.deck.Slides[i].EngagementResult = nil
+			}
+		}
 		changed = true
 	case "remove-engagement":
 		if s.current < 0 || s.current >= slideCount {
@@ -1325,6 +1362,7 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		}
 		if s.deck.Slides[s.current].Engagement != nil {
 			s.deck.Slides[s.current].Engagement = nil
+			s.deck.Slides[s.current].EngagementResult = nil
 			changed = true
 		}
 	case "add-element":
@@ -1551,6 +1589,8 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		updated.HeaderFG = nativeEditorColorCode(updated.HeaderFG, false)
 		updated.Elements = s.deck.Slides[s.current].Elements
 		updated.TabID = s.deck.Slides[s.current].TabID
+		updated.Engagement = s.deck.Slides[s.current].Engagement
+		updated.EngagementResult = s.deck.Slides[s.current].EngagementResult
 		s.deck.Slides[s.current] = updated
 		changed = true
 	case "update-slide-notes":
@@ -1695,9 +1735,6 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			}
 		}
 		presenting := companion.presentationEnabled()
-		if current >= 0 && current < len(deck.Slides) && deck.Slides[current].TabID != "" {
-			presenting = false
-		}
 		companion.Update(current, presenterPage, presenting, nil)
 		if action.Action == "start-timer" {
 			companion.StartTimer(time.Duration(action.Value) * time.Second)

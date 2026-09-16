@@ -56,24 +56,26 @@ type Element struct {
 }
 
 type Slide struct {
-	TabID         string                `json:"tabId,omitempty"`
-	Elements      []Element             `json:"elements,omitempty"`
-	Effect        string                `json:"effect,omitempty"`
-	Background    string                `json:"background,omitempty"`
-	FG            string                `json:"fg,omitempty"`
-	BG            string                `json:"bg,omitempty"`
-	HeaderFG      string                `json:"headerFg,omitempty"`
-	TTFSize       int                   `json:"ttfSize,omitempty"`
-	TTFWidth      float64               `json:"ttfWidth,omitempty"`
-	Notes         string                `json:"notes,omitempty"`
-	LayoutID      string                `json:"layoutId,omitempty"`
-	EffectSet     bool                  `json:"effectSet,omitempty"`
-	BackgroundSet bool                  `json:"backgroundSet,omitempty"`
-	FGSet         bool                  `json:"fgSet,omitempty"`
-	BGSet         bool                  `json:"bgSet,omitempty"`
-	HeaderFGSet   bool                  `json:"headerFgSet,omitempty"`
-	PageNumber    string                `json:"pageNumber,omitempty"`
-	Engagement    *EngagementDefinition `json:"engagement,omitempty"`
+	HideActivityQR   bool                  `json:"-"` // Derived from the deck when resolving slides.
+	TabID            string                `json:"tabId,omitempty"`
+	Elements         []Element             `json:"elements,omitempty"`
+	Effect           string                `json:"effect,omitempty"`
+	Background       string                `json:"background,omitempty"`
+	FG               string                `json:"fg,omitempty"`
+	BG               string                `json:"bg,omitempty"`
+	HeaderFG         string                `json:"headerFg,omitempty"`
+	TTFSize          int                   `json:"ttfSize,omitempty"`
+	TTFWidth         float64               `json:"ttfWidth,omitempty"`
+	Notes            string                `json:"notes,omitempty"`
+	LayoutID         string                `json:"layoutId,omitempty"`
+	EffectSet        bool                  `json:"effectSet,omitempty"`
+	BackgroundSet    bool                  `json:"backgroundSet,omitempty"`
+	FGSet            bool                  `json:"fgSet,omitempty"`
+	BGSet            bool                  `json:"bgSet,omitempty"`
+	HeaderFGSet      bool                  `json:"headerFgSet,omitempty"`
+	PageNumber       string                `json:"pageNumber,omitempty"`
+	Engagement       *EngagementDefinition `json:"engagement,omitempty"`
+	EngagementResult *EngagementResult     `json:"engagementResult,omitempty"`
 }
 
 type Line struct {
@@ -152,6 +154,7 @@ type exportDeck struct {
 }
 
 type exportPage struct {
+	HideActivityQR       bool                  `json:"hideActivityQR"`
 	ShapePorts           []shapePort           `json:"shapePorts,omitempty"`
 	Connectors           []shapeConnector      `json:"connectors,omitempty"`
 	TabOnly              bool                  `json:"tabOnly,omitempty"`
@@ -856,6 +859,11 @@ func parseDeck(path string) (Deck, error) {
 func parseDeckData(path string, data []byte) (Deck, error) {
 	parsedDeckElementOrderChanged = false
 	text := string(data)
+	hideActivityQR := false
+	if match := activityQRSettingRE.FindStringSubmatch(text); match != nil {
+		hideActivityQR = match[1] == "off"
+		text = activityQRSettingRE.ReplaceAllString(text, "")
+	}
 	tabs, text, err := decodeDeckTabs(text)
 	if err != nil {
 		return Deck{}, err
@@ -896,7 +904,8 @@ func parseDeckData(path string, data []byte) (Deck, error) {
 			slides = append(slides, slide)
 		}
 	}
-	deck := Deck{Slides: slides, Masters: masters, Assets: assets, Fonts: fonts, Tabs: tabs}
+	deck := Deck{Slides: slides, Masters: masters, Assets: assets, Fonts: fonts, Tabs: tabs, HideActivityQR: hideActivityQR}
+	parsedDeckElementOrderChanged = ensureUniqueEngagementIDs(&deck) || parsedDeckElementOrderChanged
 	syncSlideTabs(&deck)
 	standardizeDeckText(&deck)
 	registerDeckFonts(deck.Fonts)
@@ -933,6 +942,9 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 		canonicalizeSlideElementOrder(&deck.Masters.Layouts[index].Slide, authoredTerminalWidth, authoredTerminalHeight)
 	}
 	var out strings.Builder
+	if deck.HideActivityQR {
+		out.WriteString("<!-- keynope-activity-qr=off -->\n\n")
+	}
 	if len(deck.Tabs) > 0 {
 		if err := validateDeckTabs(deck.Tabs); err != nil {
 			return nil, err
@@ -980,6 +992,12 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 			fmt.Fprintf(&out, "<!-- page-number=%s -->\n", slide.PageNumber)
 		}
 		if metadata, err := encodeEngagementMetadata(slide.Engagement); err != nil {
+			return nil, err
+		} else if metadata != "" {
+			out.WriteString(metadata)
+			out.WriteByte('\n')
+		}
+		if metadata, err := encodeEngagementResult(slide.EngagementResult); err != nil {
 			return nil, err
 		} else if metadata != "" {
 			out.WriteString(metadata)
@@ -1284,6 +1302,7 @@ func exportSlidePagesMode(slide Slide, slideIndex, slideCount, cols, rows int, f
 			contentFrames = exportContentFrames(slide, page, cols, rows, slideCount)
 		}
 		pages = append(pages, exportPage{
+			HideActivityQR:       slide.HideActivityQR,
 			ShapePorts:           slideShapePorts(slide, lines, cols, rows),
 			Connectors:           slideShapeConnectors(slide, lines, cols, rows),
 			TabOnly:              slide.TabID != "",
@@ -1537,9 +1556,6 @@ func (p *presenterCompanion) handlePresenterStatus(w http.ResponseWriter, r *htt
 	p.helper = true
 	if nativeAppModeActive {
 		presenting := status.Mode != "none" && !status.Paused
-		if pages := p.pages[p.state.Slide]; len(pages) > 0 && pages[0].TabOnly {
-			presenting = false
-		}
 		changed := false
 		if p.state.Presenting != presenting {
 			p.state.Presenting = presenting
@@ -1747,9 +1763,6 @@ func (p *presenterCompanion) Update(slide, page int, presenting bool, deckState 
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if pages := p.pages[slide]; len(pages) > 0 && pages[0].TabOnly {
-		presenting = false
-	}
 	timerMode, timerInput, timerEndMS := p.state.TimerMode, p.state.TimerInput, p.state.TimerEndMS
 	if deckState != nil {
 		timerMode = deckState.TimerMode
@@ -2900,11 +2913,19 @@ body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Libe
 .keynope-activity-marker.visible { display: inline-flex; }
 .keynope-activity-marker:hover,.keynope-activity-marker:focus-visible { color: #fff; border-color: #fff; outline: none; }
 .keynope-activity-marker.active { color: #78dc9a; border-color: #78dc9a; }
+.keynope-activity-marker.completed { color: #9b9b9b; border-color: #9b9b9b; }
 .keynope-app-toolbar { position: fixed; left: 210px; right: 0; bottom: 0; height: 52px; z-index: 20; display: none; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 12px; box-sizing: border-box; color: #e8e8e8; background: rgba(18, 18, 18, 0.96); border-top: 1px solid #444; font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
 .keynope-app-toolbar button { color: inherit; background: #292929; border: 1px solid #555; border-radius: 6px; padding: 6px 12px; font: inherit; cursor: default; }
 .keynope-app-toolbar button:active { background: #444; }
 .keynope-app-toolbar button.active { border-color: #70b7ff; background: #244766; }
+.keynope-app-toolbar button[data-activity-state="clean"] { color: #ffd166; border-color: #ffd166; }
+.keynope-app-toolbar button[data-activity-state="running"] { color: #78dc9a; border-color: #78dc9a; background: #203c2a; }
+.keynope-app-toolbar button[data-activity-state="completed"] { color: #9b9b9b; border-color: #9b9b9b; background: #292929; }
 .keynope-app-toolbar button:disabled { opacity: .38; filter: grayscale(1); }
+.keynope-app-toolbar button.keynope-active-activity { display: flex; gap: 6px; align-items: center; min-width: 0; max-width: 38vw; margin-right: auto; overflow: hidden; white-space: nowrap; color: #ffcf55; cursor: pointer; border-color: #8b763b; }
+.keynope-active-activity .activity-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.keynope-active-activity .activity-progress { flex: none; }
+.keynope-app-toolbar button.keynope-active-activity.all-submitted { color: #8fe3a1; border-color: #8fe3a1; background: #203c2a; }
 .keynope-app-toolbar button.keynope-app-icon-button { display: inline-grid; width: 42px; min-width: 42px; height: 36px; place-items: center; padding: 3px; }
 .keynope-app-toolbar button.keynope-timer-button { width: 56px; min-width: 56px; }
 .keynope-app-icon-button svg { display: block; width: 34px; height: 26px; }
@@ -2999,6 +3020,21 @@ html[data-keynope-app="true"] button:active:not(:disabled) > span { translate: 0
 .keynope-engagement-kind { display: grid; grid-template-columns: repeat(3,1fr); gap: 6px; margin-bottom: 12px; }
 .keynope-engagement-kind button,.keynope-engagement-actions button { min-height: 32px; color: #eee; background: #292d31; border: 1px solid #59616a; border-radius: 5px; padding: 6px 10px; font: inherit; }
 .keynope-engagement-kind button.active { color: #fff; background: #244766; border-color: #70b7ff; }
+.keynope-engagement-dialog.activity-chooser { width:min(760px,calc(100vw - 32px)); }
+.keynope-group-editor p { line-height:1.6; }
+.keynope-group-editor button,.keynope-group-editor select { box-sizing:border-box; min-height:36px; padding:8px 10px; border:1px solid #607181; border-radius:5px; background:#25323e; color:#edf1f3; font:inherit; cursor:pointer; }
+.keynope-group-editor button:hover,.keynope-group-editor select:hover { border-color:#a8c6e3; }
+.keynope-group-editor button:focus-visible,.keynope-group-editor select:focus-visible { outline:2px solid #ffd166; outline-offset:2px; }
+.keynope-group-editor button.primary { background:#244766; border-color:#70b7ff; }
+.keynope-group-editor button:disabled { opacity:.45; cursor:default; }
+.keynope-activity-categories { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid #414951; }
+.keynope-activity-categories button { min-height:34px; padding:7px 11px; border:1px solid #59616a; border-radius:5px; color:#c5cdd5; background:#252a30; font:inherit; cursor:pointer; }
+.keynope-activity-categories button[aria-selected="true"] { color:#fff; background:#244766; border-color:#70b7ff; }
+.keynope-activity-categories button:focus-visible,.keynope-engagement-kind button:focus-visible { outline:2px solid #ffd166; outline-offset:2px; }
+.activity-chooser .keynope-engagement-kind { max-height:240px; overflow:auto; padding:3px; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); }
+.activity-chooser .keynope-engagement-kind button { min-width:0; cursor:pointer; }
+.activity-chooser .keynope-engagement-kind button:hover { border-color:#a8c6e3; }
+.keynope-activity-configure { margin:16px 0 12px; padding-top:12px; border-top:1px solid #414951; color:#8dc8ff; font:700 14px -apple-system,BlinkMacSystemFont,sans-serif; }
 .keynope-engagement-dialog label { display: block; margin: 0 0 9px; color: #b9c1c8; }
 .keynope-engagement-dialog input,.keynope-engagement-dialog textarea { display: block; width: 100%; min-height: 34px; margin-top: 4px; box-sizing: border-box; padding: 7px; color: #fff; background: #0e1012; border: 1px solid #59616a; border-radius: 5px; font: 13px ui-monospace,SFMono-Regular,Menlo,monospace; }
 .keynope-engagement-dialog textarea { min-height: 88px; resize: vertical; }
@@ -3012,6 +3048,9 @@ html[data-keynope-app="true"] button:active:not(:disabled) > span { translate: 0
 .keynope-engagement-actions .danger { margin-right: auto; color: #ffb0aa; border-color: #8d4741; }
 .keynope-engagement-overlay { position: fixed; inset: 0; z-index: 500; display: grid; place-items: center; padding: 5vh 5vw; box-sizing: border-box; background: rgba(2,4,7,.88); color: #f3efe0; font: 15px ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; }
 .keynope-engagement-overlay[hidden] { display: none; }
+.keynope-engagement-overlay.pressure-cooker { background:transparent; padding:0; }
+.pressure-cooker .pressure-clock { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); width:min(65vw,850px); pointer-events:none; }
+.pressure-cooker .keynope-engagement-controls { position:absolute; bottom:18px; left:50%; transform:translateX(-50%); background:rgba(12,15,19,.85); padding:10px; max-width:95vw; box-sizing:border-box; }
 .keynope-engagement-board { display: grid; width: min(980px,100%); max-height: 90vh; overflow: auto; gap: 16px; padding: 22px; box-sizing: border-box; border: 2px solid #ffd166; background: rgba(12,15,19,.96); box-shadow: 0 22px 80px rgba(0,0,0,.8); }
 .keynope-engagement-head { display: flex; align-items: flex-start; gap: 14px; }
 .keynope-engagement-head h1 { flex: 1; margin: 0; color: #fff; font-size: clamp(18px,3vw,34px); }
@@ -3024,6 +3063,8 @@ html[data-keynope-app="true"] button:active:not(:disabled) > span { translate: 0
 @keyframes keynope-engagement-toast { 0% { opacity:0; transform:translate(-50%,-44%) scale(.96); } 12%,72% { opacity:1; transform:translate(-50%,-50%) scale(1); } 100% { opacity:0; transform:translate(-50%,-56%) scale(1.02); } }
 .keynope-engagement-join .participants { margin-left: auto; color: #78dc9a; }
 .keynope-engagement-qr { margin: 0 auto; padding: 2px; color: #000; background: #fff; font: 8px/8px ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing: 0; white-space: pre; }
+.keynope-engagement-join-text { text-align:center; margin:24px auto; font:clamp(18px,3vw,36px)/1.6 KeynopeC64,monospace; overflow-wrap:anywhere; }
+.keynope-engagement-join-text a { color:#55aaff; }
 .keynope-engagement-countdown { color: #ffd166; text-align: center; font: 800 22px/1 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing: .08em; }
 .keynope-engagement-content { min-height: 180px; }
 .keynope-engagement-pulse { display: grid; grid-template-columns: repeat(auto-fit,minmax(90px,1fr)); gap: 10px; }
@@ -3088,6 +3129,8 @@ html[data-keynope-app="true"] button:active:not(:disabled) > span { translate: 0
 .keynope-engagement-controls button { min-height: 34px; padding: 7px 11px; color: #fff; background: #292f35; border: 1px solid #59616a; font: inherit; }
 .keynope-engagement-controls .primary { border-color: #70b7ff; background: #244766; }
 .keynope-engagement-controls .reset { margin-right: auto; }
+.keynope-engagement-controls .reset.with-reopen { margin-right: 0; }
+.keynope-engagement-controls .reopen { margin-right: auto; }
 .keynope-input-blocker { position: fixed; inset: 0 0 52px 0; z-index: 55; background: transparent; }
 html[data-keynope-timer-active="true"] .keynope-editor-topbar,
 html[data-keynope-timer-active="true"] .keynope-editor-slides,
@@ -3433,10 +3476,209 @@ function keynopeIntroductionAvatarElement(value,extraClass='') {
   return canvas;
 }
 let keynopeEngagementRuntime = null;
+// The viewed activity is independent of the exercise accepting responses.
+let keynopeRunningActivity = null;
+let keynopeActivityStatusButton = null;
+function engagementRuntimeAlive(runtime) {
+  return !!runtime && (runtime === keynopeEngagementRuntime || runtime === keynopeRunningActivity);
+}
+function engagementIsRunning(runtime) {
+  return !!runtime && runtime.phase > 0 && !engagementHasCompleted(runtime);
+}
+function engagementSubmissionProgress(runtime) {
+  const members = Object.keys(runtime.memberNames || {}).filter(id => runtime.memberNames[id] && runtime.memberNames[id] !== 'Presenter');
+  const kind = runtime.definition.kind;
+  // Joining a room is not itself a submitted answer.
+  if (kind === 'finalanswer') {
+    const groups = (runtime.game?.groups || []).map((group,index)=>({group,index})).filter(({group})=>group.ids?.length);
+    const count = groups.filter(({index})=>(runtime.game?.entries || []).some(entry=>entry.item===index)).length;
+    return {total:groups.length,submitted:count,all:groups.length > 0 && count === groups.length};
+  }
+  if (['onboarding','pair','cards','impostor','chosen','shuffle','pressure','ball'].includes(kind)) return {total:members.length,submitted:0,all:false};
+  const submitted = new Set();
+  if (kind === 'finishpair' || kind === 'prerequisites') {
+    for (const id of Object.keys(runtime.finishedAt || {})) submitted.add(id);
+  } else if (kind === 'questions' && runtime.phase === 2) {
+    for (const [id,votes] of Object.entries(runtime.questionVotes || {})) if (votes.length) submitted.add(id);
+  } else {
+    for (const [id,item] of Object.entries(runtime.responseByIdentity || {})) {
+      if (kind !== 'truefalse' || Number.isInteger(item.response?.choices?.[runtime.questionIndex || 0])) submitted.add(id);
+    }
+    for (const item of runtime.entryResponses || []) submitted.add(item.identity);
+    for (const item of runtime.game?.entries || []) submitted.add(item.id);
+    for (const [id,votes] of Object.entries(runtime.game?.votes || {})) if (Object.keys(votes).length) submitted.add(id);
+  }
+  const count = members.filter(id => submitted.has(id)).length;
+  return {total:members.length,submitted:count,all:members.length > 0 && count === members.length};
+}
+function renderActiveActivityStatus() {
+  renderActivityMarker();
+  const button = keynopeActivityStatusButton, runtime = keynopeRunningActivity;
+  if (!button) return;
+  button.hidden = !engagementIsRunning(runtime) || keynopeEditorMasterMode;
+  if (button.hidden) {
+    button.classList.remove('all-submitted');
+    button.replaceChildren();
+    button.removeAttribute('title');
+    button.removeAttribute('aria-label');
+    return;
+  }
+  const progress = engagementSubmissionProgress(runtime);
+  const name = runtime.definition.prompt || KeynopeGames.names[runtime.definition.kind] || runtime.definition.kind;
+  let timer = '';
+  if (runtime.deadlineMs || runtime.pausedRemainingMs) timer = ' · ' + (runtime.pausedRemainingMs ? 'Paused ' : '') + engagementRemainingText(runtime.deadlineMs || Date.now() + runtime.pausedRemainingMs);
+  const complete = progress.all ? (runtime.definition.kind==='finalanswer'?' · All groups submitted':' · Everyone submitted') : '';
+  if (!button.firstChild) {
+    const nameLabel = document.createElement('span'); nameLabel.className = 'activity-name';
+    const progressLabel = document.createElement('span'); progressLabel.className = 'activity-progress';
+    button.append(nameLabel,progressLabel);
+  }
+  button.firstChild.textContent = name;
+  button.lastChild.textContent = timer + complete;
+  button.classList.toggle('all-submitted',progress.all);
+  button.title = 'Open activity: ' + name + timer + complete;
+  button.setAttribute('aria-label',button.title);
+}
+function appendReadyActivityControls(controls,runtime) {
+  const start = engagementButton('Start','primary',startEngagementRuntime);
+  controls.append(start);
+  const seconds = ['pair','cards','impostor'].includes(runtime.definition.kind) ? Number(runtime.definition.joinSeconds)||120 : Number(runtime.definition.timerSeconds)||0;
+  if (seconds > 0) {
+    const add = engagementButton('+1 min','',() => {}), pause = engagementButton('Pause timer','',() => {});
+    add.disabled = pause.disabled = true; controls.append(add,pause);
+    const duration = document.createElement('span'); duration.className = 'keynope-engagement-duration';
+    duration.textContent = engagementRemainingText(Date.now()+seconds*1000); controls.append(duration);
+  }
+  if (runtime.definition.kind !== 'onboarding') {
+    const next = engagementButton('Next','',() => {}); next.disabled = true; controls.append(next);
+  }
+}
 let keynopeEngagementOverlay = null;
 let keynopeEngagementPublishChain = Promise.resolve();
 let keynopeEngagementSessionEpoch = 0;
 const keynopeEngagementSessions = new Map();
+let keynopeActivityResultWrites = Promise.resolve();
+const keynopePendingActivityResults = new Map();
+const keynopeActivityResultFields = ['phase','counts','ideas','assignments','respondents','attributions','groups','participants',
+  'questionIndex','questionRevealed','memberNames','cardAssignments','pairAssignments','roleAssignments','finishedAt',
+  'startedAt','stoppedAt','game','responseByIdentity','entryResponses','questionVotes','stormResponses','responseSequence','resumeState'];
+function engagementHasCompleted(runtime) {
+  if (!runtime || runtime.readOnly) return false;
+  if (runtime.completedReview) return true;
+  if (runtime.definition.kind === 'onboarding') return false;
+  if (runtime.definition.kind === 'truefalse') return runtime.phase >= 3 || !!runtime.questionRevealed &&
+    (Number(runtime.questionIndex)||0) >= Math.max(0,(runtime.definition.questions||[]).length-1);
+  if (runtime.definition.kind === 'pair') return runtime.phase === 4;
+  return runtime.phase >= 3;
+}
+function archiveEngagementResult(runtime, clear = false) {
+  if (!runtime || runtime.readOnly || runtime.definition.kind === 'onboarding' || (!clear && !engagementHasCompleted(runtime))) return;
+  const session = engagementSessionFor(runtime.definition);
+  let result = null;
+  if (!clear) {
+    const state = {};
+    for (const key of keynopeActivityResultFields) if (runtime[key] !== undefined) state[key] = runtime[key];
+    state.phase = Math.max(3,Number(runtime.phase)||3);
+    result = JSON.parse(JSON.stringify({version:1,activityId:runtime.definition.id,kind:runtime.definition.kind,
+      definition:{...runtime.definition,code:undefined},state}));
+  }
+  const signature = JSON.stringify(result);
+  session.result = result;
+  if (signature === session.resultSignature) return;
+  session.resultSignature = signature;
+  if (!window.keynopeStoreActivityResult) return;
+  const write = {id:runtime.definition.id,result,signature,store:window.keynopeStoreActivityResult};
+  keynopePendingActivityResults.set(session,write);
+  window.keynopeActivityResultsChanged?.();
+  queueActivityResultWrite(session,write);
+}
+function queueActivityResultWrite(session,write) {
+  keynopeActivityResultWrites = keynopeActivityResultWrites.catch(()=>{}).then(async()=>{
+    // Reset, document replacement, or a newer snapshot supersedes this write.
+    if(keynopePendingActivityResults.get(session)!==write)return;
+    try {
+      await write.store(write.id,write.result);
+      if(keynopePendingActivityResults.get(session)===write)keynopePendingActivityResults.delete(session);
+      window.keynopeActivityResultsChanged?.();
+    } catch(error) {
+      write.error=String(error?.message||error);
+      console.warn('Activity results could not be stored:',write.id,write.error);
+      showEngagementToast('ACTIVITY RESULTS NOT STORED: '+write.error+'. RESULTS KEPT IN MEMORY; SAVE WILL RETRY.');
+    }
+  });
+}
+async function flushActivityResults() {
+  await keynopeActivityResultWrites.catch(()=>{});
+  for(const [session,write] of keynopePendingActivityResults)queueActivityResultWrite(session,write);
+  await keynopeActivityResultWrites.catch(()=>{});
+  if(keynopePendingActivityResults.size)showEngagementToast('PRESENTATION CAN BE SAVED, BUT PENDING ACTIVITY RESULTS ARE NOT INCLUDED. KEEP THIS WINDOW OPEN AND RETRY SAVE.');
+  return keynopePendingActivityResults.size===0;
+}
+window.keynopeFlushActivityResults = flushActivityResults;
+window.keynopeHasPendingActivityResults = () => keynopePendingActivityResults.size>0;
+const keynopeTrainingDepartures = new Map();
+const keynopeTrainingDepartureHistory = new Map();
+const keynopeTrainingPresenceTimes = new Map();
+function removeTrainingParticipants(code, members) {
+  let removed=keynopeTrainingDepartures.get(code);
+  if(!removed){removed=new Map();keynopeTrainingDepartures.set(code,removed);}
+  let history=keynopeTrainingDepartureHistory.get(code);
+  if(!history){history=new Map();keynopeTrainingDepartureHistory.set(code,history);}
+  let changed=false;
+  for(const member of members){
+    if((history.get(member.identity)||0)>=(member.at||1))continue;
+    history.set(member.identity,member.at||Date.now());
+    if((keynopeTrainingPresenceTimes.get(code)?.get(member.identity)||0)>member.at)continue;
+    removed.set(member.identity,member.at||Date.now());changed=true;
+    const runtimes=new Set([keynopeRunningActivity,keynopeEngagementRuntime,...[...keynopeEngagementSessions.values()].map(session=>session.runtime)]);
+    for(const runtime of runtimes){
+    if(!runtime||runtime.sessionCode!==code)continue;
+      pruneTrainingParticipant(runtime,member.identity);
+    }
+    if(keynopePairingRoom?.sessionCode===code){
+      const previous=keynopePairingRoom,names={...previous.names};delete names[member.identity];
+      keynopePairingRoom=KeynopeGroups.room(code,KeynopeGroups.fromRoom(previous).map(group=>({...group,members:group.members.filter(id=>id!==member.identity)})),names,randomActivityCode());
+      keynopePairingRoom.updatedAt=Math.max(Date.now(),Number(previous.updatedAt||0)+1);
+    }
+  }
+  if(changed){
+    for (const runtime of new Set([keynopeRunningActivity,keynopeEngagementRuntime])) if(runtime?.sessionCode===code){
+      renderEngagementRuntime(runtime);publishEngagementRuntime(runtime);publishHostedEngagementState(false,false,runtime);
+    }
+  }
+  if(changed&&keynopeLobbyPresentation?.code===code)publishPairingRoom(keynopeLobbyPresentation.channel,code).catch(error=>console.warn('Group update:',error));
+}
+function pruneTrainingParticipant(runtime, identity) {
+  if(!runtime.memberNames?.[identity])return;
+  for(const key of ['memberNames','rolePublicKeys','responseByIdentity','questionVotes','finishedAt','cardAssignments','roleAssignments','pairAssignments'])if(runtime[key])delete runtime[key][identity];
+  for(const key of ['entryResponses','stormResponses','pairMessages'])if(Array.isArray(runtime[key]))runtime[key]=runtime[key].filter(item=>item.identity!==identity);
+  const entryIDs=new Set((runtime.entryResponses||[]).map(item=>item.id));
+  for(const [id,votes] of Object.entries(runtime.questionVotes||{}))runtime.questionVotes[id]=votes.filter(vote=>entryIDs.has(vote));
+  for(const assignment of Object.values(runtime.pairAssignments||{}))assignment.members=assignment.members.filter(id=>id!==identity);
+  if(runtime.definition.kind==='cards')rebuildPlayingCardGroups(runtime);
+  else if(runtime.groups?.length){
+    runtime.groups=runtime.groups.map((group,index)=>({...group,members:Object.entries(runtime.pairAssignments||{}).filter(([,value])=>value.group===index).map(([id])=>runtime.memberNames[id]).filter(Boolean)}));
+  }
+  if(runtime.game){
+    const g=runtime.game;
+    if(runtime.definition.kind==='agreements'){
+      const base=(runtime.definition.options||[]).length,old=g.entries||[],mapping=new Map();let next=base;
+      old.forEach((item,index)=>{if(item.id!==identity)mapping.set(base+index,next++);});
+      for(const [id,votes] of Object.entries(g.votes||{}))g.votes[id]=Object.fromEntries(Object.entries(votes).flatMap(([index,vote])=>Number(index)<base?[[index,vote]]:mapping.has(Number(index))?[[mapping.get(Number(index)),vote]]:[]));
+    }
+    g.entries=(g.entries||[]).filter(item=>item.id!==identity&&(runtime.definition.kind!=='nominate'||item.target!==identity));
+    if(g.votes)delete g.votes[identity];
+    for(const key of ['volunteers','spoken'])if(g[key])g[key]=g[key].filter(id=>id!==identity);
+    if(g.chosen)g.chosen=g.chosen.filter(item=>item.identity!==identity);
+    if(g.poolSize!=null)g.poolSize=Object.keys(runtime.memberNames||{}).length;
+    for(const group of g.groups||[]){group.ids=(group.ids||[]).filter(id=>id!==identity);group.names=group.ids.map(id=>runtime.memberNames[id]);}
+    if(g.speaker===identity){g.speaker=g.volunteers.shift()||'';if(!g.speaker){g.stage='done';runtime.phase=3;runtime.deadlineMs=0;}}
+  }
+  foldHostedEngagementResponses(runtime);
+  if(KeynopeGames.has(runtime.definition.kind))runtime.participants=runtime.definition.kind==='ball'||runtime.definition.kind==='chosen'?Object.keys(runtime.memberNames||{}).length:new Set((runtime.game?.entries||[]).map(item=>item.id)).size;
+  if(['onboarding','pair','cards','impostor','finishpair','prerequisites'].includes(runtime.definition.kind))runtime.participants=Object.keys(runtime.memberNames||{}).length;
+  if(['finishpair','prerequisites'].includes(runtime.definition.kind)&&runtime.phase===1&&runtime.participants>0&&Object.keys(runtime.memberNames).every(id=>runtime.finishedAt?.[id]!=null))finishBalancedPairs(runtime);
+}
 let keynopeEngagementCountdownTick = 0;
 let keynopeOnboardingResetBlocker = null;
 let keynopeEditorPresentationActive = false;
@@ -3507,7 +3749,8 @@ async function publishLobbyPresentation(force = false) {
     try {
       const connect = await keynopeActivityConnector();
       const channel = await connect({code:owner.code,sessionId:owner.id,activityId:owner.id,displayName:'Presenter',presenter:true,
-        onEvent:event => { if (!keynopeLobbyPresentation?.channel?.usesState && ['hello','presentation-request'].includes(event.payload?.type)) publishLobbyPresentation(true); },
+        onDepartures:members=>removeTrainingParticipants(owner.code,members),
+        onEvent:event => { receivePairingRoom(event,owner.code); if (!keynopeLobbyPresentation?.channel?.usesState && ['hello','presentation-request'].includes(event.payload?.type)) publishLobbyPresentation(true); },
         onError:error => console.warn('Participant presentation connection:',error)});
       if (onboardingSessionDefinition()?.code !== owner.code) { channel.close(); return; }
       host = keynopeLobbyPresentation = {channel,code:owner.code,key:'',sentAt:0,sending:false,documents:new Map(),preloaded:new Set(),sentTransfers:new Set()};
@@ -3519,7 +3762,6 @@ async function publishLobbyPresentation(force = false) {
   }
   let position;
   try { position = timerEndMs ? {slide:0,page:0,key:'timer'} : presenting ? (popup ? popup.keynopePresentationPosition?.() : window.keynopePresentationPosition()) : null; } catch (_) { return; }
-  if (position?.tabOnly) { presenting = false; position = null; }
   if (presenting && !position) return;
   const key = [presenting,position?.key,timerEndMs,presenterDeckVersion,window.keynopePresentationDocumentVersion||0].join(':');
   if(force && key===host.key && host.forceSentAt && Date.now()-host.forceSentAt<2000){host.forcePending=true;return;}
@@ -3597,6 +3839,17 @@ async function publishLobbyPresentation(force = false) {
 setInterval(() => publishLobbyPresentation(),1000);
 const keynopeEngagementControllerSurface = keynopeAppSurface || presenterMainSurface;
 const keynopeHostedEngagementControllerSurface = keynopeEngagementControllerSurface || !window.KEYNOPE_PRESENTER;
+function engagementPresentationActive() {
+  if (keynopeEditorMasterMode) return false;
+  if (window.KEYNOPE_WEB_EDITOR) {
+    const popup = window.keynopeLivePresentationWindow;
+    return !!popup && !popup.closed;
+  }
+  if (keynopeAppSurface) {
+    return ['main','external'].includes(document.documentElement.getAttribute('data-keynope-presentation-mode'));
+  }
+  return window.KEYNOPE_PRESENTER ? presenterPresenting : true;
+}
 function randomActivityCode() {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
   const bytes = new Uint8Array(16);
@@ -3632,36 +3885,40 @@ async function loadEngagementQRCode(runtime) {
     const response = await fetch('/api/editor/activity-qr?value=' + encodeURIComponent(runtime.joinUrl),{cache:'no-store'});
     if (!response.ok) return;
     const payload = await response.json();
-    if (keynopeEngagementRuntime !== runtime || !payload.text) return;
+    if (!engagementRuntimeAlive(runtime) || !payload.text) return;
     runtime.qrCode = payload.text;
     const session = engagementSessionFor(runtime.definition);
     session.qrCode = runtime.qrCode;
-    renderEngagementRuntime();
-    publishEngagementRuntime();
+    renderEngagementRuntime(runtime);
+    publishEngagementRuntime(runtime);
   } catch (_err) {}
 }
-function publishEngagementRuntime() {
+function publishEngagementRuntime(runtime = keynopeEngagementRuntime) {
+  archiveEngagementResult(runtime);
+  if (runtime?.localPreview) return;
   if (!window.KEYNOPE_PRESENTER || !keynopeEngagementControllerSurface) return;
-  if (keynopeEngagementRuntime && !keynopeEngagementOverlay) return;
-  const payload = keynopeEngagementRuntime ? {
-    definition:keynopeEngagementRuntime.definition,
-    game:keynopeEngagementRuntime.definition.kind==='prerequisites'?prerequisitePublicState(keynopeEngagementRuntime):KeynopeGames.has(keynopeEngagementRuntime.definition.kind)?KeynopeGames.publicState(keynopeEngagementRuntime):undefined,
-    slide:keynopeEngagementRuntime.slide,
-    phase:keynopeEngagementRuntime.phase,
-    counts:keynopeEngagementRuntime.counts,
-    ideas:keynopeEngagementRuntime.ideas,
-    assignments:keynopeEngagementRuntime.assignments,
-    respondents:keynopeEngagementRuntime.respondents,
-    attributions:keynopeEngagementRuntime.attributions || [],
-    groups:keynopeEngagementRuntime.groups || [],
-    sessionCode:keynopeEngagementRuntime.sessionCode || '',
-    joinUrl:keynopeEngagementRuntime.joinUrl || '',
-    qrCode:keynopeEngagementRuntime.qrCode || '',
-    roomReady:!!keynopeEngagementRuntime.roomReady,
-    deadlineMs:Number(keynopeEngagementRuntime.deadlineMs) || 0,
-    participants:Number(keynopeEngagementRuntime.participants) || 0,
-    questionIndex:Number(keynopeEngagementRuntime.questionIndex) || 0,
-    questionRevealed:!!keynopeEngagementRuntime.questionRevealed
+  runtime = runtime === keynopeEngagementRuntime && keynopeEngagementOverlay && runtime?.phase > 0 ? runtime : null;
+  const payload = runtime ? {
+    definition:runtime.definition,
+    game:runtime.definition.kind==='prerequisites'?prerequisitePublicState(runtime):KeynopeGames.has(runtime.definition.kind)?KeynopeGames.publicState(runtime):undefined,
+    slide:runtime.slide,
+    phase:runtime.phase,
+    counts:runtime.counts,
+    ideas:runtime.ideas,
+    assignments:runtime.assignments,
+    respondents:runtime.respondents,
+    attributions:runtime.attributions || [],
+    groups:runtime.groups || [],
+    sessionCode:runtime.sessionCode || '',
+    joinUrl:runtime.joinUrl || '',
+    qrCode:runtime.qrCode || '',
+    hideActivityQR:activityQRHidden(runtime),
+    roomReady:!!runtime.roomReady,
+    deadlineMs:Number(runtime.deadlineMs) || 0,
+    pausedRemainingMs:Number(runtime.pausedRemainingMs) || 0,
+    participants:Number(runtime.participants) || 0,
+    questionIndex:Number(runtime.questionIndex) || 0,
+    questionRevealed:!!runtime.questionRevealed
   } : null;
   keynopeEngagementPublishChain = keynopeEngagementPublishChain.catch(() => {}).then(() => fetch('/engagement',{
     method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)
@@ -3737,7 +3994,7 @@ function hostedEngagementResults(runtime) {
   const pairAssignments = runtime.phase >= 3 ? Object.entries(runtime.pairAssignments || {}).map(([identity,assignment]) => ({identity,group:assignment.group,members:(assignment.members || []).map(memberIdentity => ({identity:memberIdentity,displayName:runtime.memberNames[memberIdentity] || 'Participant'}))})) : [];
   const pairMessages = runtime.phase >= 3 ? (runtime.pairMessages || []).slice(-100) : [];
   const members = Object.entries(runtime.memberNames || {}).map(([identity,displayName]) => ({identity,displayName})).filter(item => item.displayName && item.displayName !== 'Presenter').sort((a,b) => a.displayName.localeCompare(b.displayName));
-  return {pairing:keynopePairingRoom?.sessionCode===runtime.sessionCode?keynopePairingRoom:undefined,game:runtime.definition.kind==='prerequisites'?prerequisitePublicState(runtime):KeynopeGames.has(runtime.definition.kind)?KeynopeGames.publicState(runtime):undefined,counts:runtime.counts || [],ideas:runtime.ideas || [],assignments:runtime.assignments || [],respondents:named ? (runtime.respondents || []) : [],attributions:publicAttributions,groups:runtime.phase >= 3 ? (runtime.groups || []) : [],cardAssignments,pairAssignments,pairMessages,members};
+  return {pairing:keynopePairingRoom?.sessionCode===runtime.sessionCode?KeynopeGroups.publicRoom(keynopePairingRoom):undefined,game:runtime.definition.kind==='prerequisites'?prerequisitePublicState(runtime):KeynopeGames.has(runtime.definition.kind)?KeynopeGames.publicState(runtime):undefined,counts:runtime.counts || [],ideas:runtime.ideas || [],assignments:runtime.assignments || [],respondents:named ? (runtime.respondents || []) : [],attributions:publicAttributions,groups:runtime.phase >= 3 ? (runtime.groups || []) : [],cardAssignments,pairAssignments,pairMessages,members};
 }
 function engagementBase64URL(bytes) {
   let binary = '';
@@ -3755,6 +4012,17 @@ async function sendImpostorRole(runtime,identity,publicKey) {
   } catch (_error) {}
 }
 function receiveHostedEngagement(event,runtime,epoch) {
+  if(event.payload?.type==='pairing'){receivePairingRoom(event,runtime.sessionCode);return;}
+  if(['hello','presence'].includes(event.payload?.type)){
+    let times=keynopeTrainingPresenceTimes.get(runtime.sessionCode);
+    if(!times){times=new Map();keynopeTrainingPresenceTimes.set(runtime.sessionCode,times);}
+    times.set(event.identity,Math.max(times.get(event.identity)||0,new Date(event.createdAt).getTime()||0));
+  }
+  const departed=keynopeTrainingDepartures.get(runtime.sessionCode)?.get(event.identity);
+  if(departed){
+    if(!['hello','presence'].includes(event.payload?.type)||new Date(event.createdAt).getTime()<=departed)return;
+    keynopeTrainingDepartures.get(runtime.sessionCode).delete(event.identity);
+  }
   if (keynopeLobbyPresentation?.channel === runtime.activityChannel && event.payload?.type === 'presentation-request') {
     if (!runtime.lastPageRequest || Date.now()-runtime.lastPageRequest>2000) {
       runtime.lastPageRequest=Date.now(); publishLobbyPresentation(true);
@@ -3768,30 +4036,41 @@ function receiveHostedEngagement(event,runtime,epoch) {
       if (lobby) runtime.activityChannel.send({type:'definition',activityId:lobby.id,definition:lobby,phase:1,participants:0}).catch(()=>{});
     }
   }
-  if (!keynopeEngagementRuntime || keynopeEngagementRuntime !== runtime || epoch !== keynopeEngagementSessionEpoch) return;
+  if (!engagementRuntimeAlive(runtime) || epoch !== runtime.connectionEpoch) return;
   const payload = event && event.payload || {};
+  if (runtime.completedReview) {
+    if (payload.type === 'hello') {
+      if (runtime.definition.kind === 'impostor') sendImpostorRole(runtime,event.identity,payload.rolePublicKey);
+      if (runtime.activityChannel && !runtime.activityChannel.usesState) publishHostedEngagementState(true,false,runtime);
+    }
+    return;
+  }
   if (payload.type === 'hello' || payload.type === 'presence') {
     const name = String(payload.displayName || event.displayName || 'Participant').trim().slice(0,80) || 'Participant';
     const changed = runtime.memberNames[event.identity] !== name;
     runtime.memberNames[event.identity] = name;
+    if(runtime.definition.kind==='shuffle')runtime.participants=Object.keys(runtime.memberNames).length;
     if (payload.rolePublicKey && typeof payload.rolePublicKey === 'object') runtime.rolePublicKeys[event.identity] = payload.rolePublicKey;
-    if ((runtime.definition.kind === 'finishpair' || runtime.definition.kind === 'prerequisites') || runtime.definition.kind === 'onboarding' || runtime.definition.kind === 'pair' || runtime.definition.kind === 'cards' || runtime.definition.kind === 'impostor') runtime.participants = Object.keys(runtime.memberNames).length;
+    if ((runtime.definition.kind === 'chosen' || runtime.definition.kind === 'finishpair' || runtime.definition.kind === 'prerequisites') || runtime.definition.kind === 'onboarding' || runtime.definition.kind === 'pair' || runtime.definition.kind === 'cards' || runtime.definition.kind === 'impostor') runtime.participants = Object.keys(runtime.memberNames).length;
     if (runtime.definition.kind === 'impostor' && runtime.phase >= 3) sendImpostorRole(runtime,event.identity,payload.rolePublicKey);
     if (!changed && payload.type !== 'hello') return;
-    runtime.presenceNeedsDefinition = runtime.presenceNeedsDefinition || (payload.type === 'hello' && !runtime.activityChannel.usesState);
+    runtime.presenceNeedsDefinition = runtime.presenceNeedsDefinition || (payload.type === 'hello' && !runtime.activityChannel?.usesState);
     if (!runtime.presencePublishTimer) runtime.presencePublishTimer = setTimeout(async () => {
       runtime.presencePublishTimer = null;
-      if (keynopeEngagementRuntime !== runtime || epoch !== keynopeEngagementSessionEpoch) return;
+      if (!engagementRuntimeAlive(runtime) || epoch !== runtime.connectionEpoch) return;
       const definition = runtime.presenceNeedsDefinition;
       runtime.presenceNeedsDefinition = false;
-      renderEngagementRuntime();
-      if (definition) await publishHostedEngagementState(true);
-      await publishHostedEngagementState(false);
+      renderEngagementRuntime(runtime);
+      if (definition) await publishHostedEngagementState(true,false,runtime);
+      await publishHostedEngagementState(false,false,runtime);
     }, 100);
     return;
   }
   if (payload.type !== 'response' || payload.activityId !== runtime.definition.id) return;
-  if (KeynopeGames.receive(runtime,event)) { renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(false);return; }
+  // Once collection ends, results are immutable. Questions have an explicit
+  // voting phase; Pair Share chat remains available during discussion only.
+  if (!engagementAcceptsResponse(runtime,payload.response)) return;
+  if (KeynopeGames.receive(runtime,event)) { renderEngagementRuntime(runtime);publishEngagementRuntime(runtime);publishHostedEngagementState(false,false,runtime);return; }
   if (runtime.definition.kind === 'dots' || (runtime.definition.kind === 'finishpair' || runtime.definition.kind === 'prerequisites')) {
     if (runtime.phase !== 1 || (runtime.deadlineMs && Date.now() >= runtime.deadlineMs)) return;
     if (runtime.definition.kind === 'dots' && !validEngagementDots(runtime.definition,payload.response && payload.response.dots)) return;
@@ -3806,15 +4085,16 @@ function receiveHostedEngagement(event,runtime,epoch) {
   }
   const displayName = String(event.displayName || 'Participant').trim().slice(0,80) || 'Participant';
   if (runtime.definition.kind === 'pair' && payload.response && payload.response.chat) {
+    if(keynopePairingRoom?.sessionCode===runtime.sessionCode && payload.response.groupEpoch!==keynopePairingRoom.epoch)return;
     const assignment = runtime.pairAssignments && runtime.pairAssignments[event.identity];
     const text = String(payload.response.chat || '').trim().slice(0,240);
     if (runtime.phase === 3 && assignment && text && !runtime.seenResponseEvents[event.id]) {
       runtime.seenResponseEvents[event.id] = true;
       runtime.pairMessages.push({id:event.id,group:assignment.group,identity:event.identity,displayName:runtime.memberNames[event.identity] || displayName,text,createdAt:Date.now()});
       if (runtime.pairMessages.length > 100) runtime.pairMessages.splice(0,runtime.pairMessages.length - 100);
-      renderEngagementRuntime();
-      publishEngagementRuntime();
-      publishHostedEngagementState(false);
+      renderEngagementRuntime(runtime);
+      publishEngagementRuntime(runtime);
+      publishHostedEngagementState(false,false,runtime);
     }
     return;
   } else if (runtime.definition.kind === 'storm') {
@@ -3832,14 +4112,15 @@ function receiveHostedEngagement(event,runtime,epoch) {
     runtime.responseByIdentity[event.identity] = {displayName,response:payload.response || {},sequence:++runtime.responseSequence};
   }
   foldHostedEngagementResponses(runtime);
-  renderEngagementRuntime();
-  publishEngagementRuntime();
+  renderEngagementRuntime(runtime);
+  publishEngagementRuntime(runtime);
+  publishHostedEngagementState(false,false,runtime);
 }
-function startHostedEngagement() {
-  const runtime = keynopeEngagementRuntime;
-  if (!runtime || runtime.readOnly || !keynopeHostedEngagementControllerSurface || runtime.hostingConnection || runtime.activityChannel) return;
+function startHostedEngagement(runtime = keynopeEngagementRuntime) {
+  if (keynopeRunningActivity && keynopeRunningActivity !== runtime) return;
+  if (!runtime || runtime.phase === 0 || runtime.localPreview || !engagementPresentationActive() || runtime.readOnly || !keynopeHostedEngagementControllerSurface || runtime.hostingConnection || runtime.activityChannel) return;
   runtime.hostingConnection = true;
-  const epoch = ++keynopeEngagementSessionEpoch;
+  const epoch = runtime.connectionEpoch = ++keynopeEngagementSessionEpoch;
   // Non-onboarding activities deliberately have no authored code of their
   // own. Keep the durable onboarding code that openEngagementRuntime attached
   // to this runtime so every activity in the deck uses the same room.
@@ -3861,47 +4142,92 @@ function startHostedEngagement() {
   runtime.pairMessages ??= [];
   runtime.responseSequence ??= 0;
   runtime.respondents ??= [];
-  renderEngagementRuntime();
+  renderEngagementRuntime(runtime);
   keynopeActivityConnector().then(connect => connect({
     code:runtime.sessionCode,sessionId:runtime.sessionId || runtime.definition.id,activityId:runtime.definition.id,displayName:'Presenter',presenter:true,
     onEvent:event => receiveHostedEngagement(event,runtime,epoch),
-    onError:error => { if (keynopeEngagementRuntime === runtime) { runtime.participationUnavailable = true; runtime.participationError = String(error && error.message || error || 'Connection failed'); renderEngagementRuntime(); } }
+    // Membership is durable; a missed hello must not leave a Deducer joiner
+    // waiting forever. Feed verified roster entries through the usual batching.
+    onRoster:members=>{
+      for(const member of members)receiveHostedEngagement({identity:member.identity,displayName:member.displayName,createdAt:member.joinedAt,payload:{type:'presence',displayName:member.displayName}},runtime,epoch);
+    },
+    onDepartures:members=>removeTrainingParticipants(runtime.sessionCode,members),
+    onError:error => { if (engagementRuntimeAlive(runtime)) { runtime.participationUnavailable = true; runtime.participationError = String(error && error.message || error || 'Connection failed'); renderEngagementRuntime(runtime); } }
   })).then(channel => {
-    if (!keynopeEngagementRuntime || epoch !== keynopeEngagementSessionEpoch) { channel.close(); return; }
+    if (!engagementRuntimeAlive(runtime) || epoch !== runtime.connectionEpoch || runtime.localPreview || !engagementPresentationActive()) { channel.close(); return; }
     runtime.activityChannel = channel;
     publishLobbyPresentation(true);
     runtime.roomReady = true;
     runtime.participationUnavailable = false;
     runtime.participationError = '';
-    return loadEngagementQRCode(runtime).then(() => publishHostedEngagementState(true)).then(() => {
-      if (keynopeEngagementRuntime === runtime && epoch === keynopeEngagementSessionEpoch) return publishHostedEngagementState(false);
+    return loadEngagementQRCode(runtime).then(() => publishHostedEngagementState(true,false,runtime)).then(() => {
+      if (engagementRuntimeAlive(runtime) && epoch === runtime.connectionEpoch) return publishHostedEngagementState(false,false,runtime);
     });
   }).then(() => {
-    if (!keynopeEngagementRuntime || epoch !== keynopeEngagementSessionEpoch) return;
-    renderEngagementRuntime();
-    publishEngagementRuntime();
+    if (epoch !== runtime.connectionEpoch) return;
+    renderEngagementRuntime(runtime);
+    publishEngagementRuntime(runtime);
   }).catch(error => {
-    if (!keynopeEngagementRuntime || epoch !== keynopeEngagementSessionEpoch) return;
+    if (epoch !== runtime.connectionEpoch) return;
     runtime.participationUnavailable = true;
     runtime.participationError = String(error && error.message || error || 'Connection failed');
     runtime.roomReady = false;
-    renderEngagementRuntime();
+    renderEngagementRuntime(runtime);
     setTimeout(() => {
-      if (keynopeEngagementRuntime === runtime && !runtime.activityChannel) startHostedEngagement();
+      if (engagementRuntimeAlive(runtime) && !runtime.activityChannel) startHostedEngagement(runtime);
     }, 3000);
   }).finally(() => {
     runtime.hostingConnection = false;
   });
 }
-function publishHostedEngagementState(includeDefinition = false,reset = false) {
-  const runtime = keynopeEngagementRuntime;
-  if (!runtime || !runtime.activityChannel) return Promise.resolve();
+async function preparePressureSlide(runtime) {
+  if(runtime.definition.kind!=='pressure'||!runtime.activityChannel)return;
+  if(runtime.pressurePreparing)return runtime.pressurePreparing;
+  runtime.pressurePreparing=(async()=>{
+    if(!runtime.pressureDocument){
+      const response=await fetch('/api/editor/participant-page?format=rendered&slide='+runtime.slide,{cache:'no-store',signal:AbortSignal.timeout(12000)});
+      if(!response.ok)throw Error('Could not prepare the Pressure Cooker slide');
+      const data=await response.json();
+      const rendered={...data.rendered,pages:[data.rendered.pages[runtime.pressurePage||0]||data.rendered.pages[0]]};
+      runtime.pressureDocument=await KeynopePresentationTransfer.pack(JSON.stringify(rendered));
+    }
+    const document=runtime.pressureDocument;
+    runtime.pressureSlide={id:runtime.definition.id,name:'Pressure Cooker',transfer:document.id,parts:document.parts.length};
+    if(runtime.pressureUploadedChannel===runtime.activityChannel&&Date.now()-runtime.pressureUploadedAt<1200000)return;
+    // Announce before chunks on event-only channels; Firestore announces only
+    // once the referenced chunks have been uploaded successfully.
+    if(!runtime.activityChannel.usesState)await runtime.activityChannel.send({type:'definition',definition:runtime.definition,activityId:runtime.definition.id,activation:runtime.activation,phase:runtime.phase,deadlineMs:runtime.deadlineMs||0,pausedRemainingMs:runtime.pausedRemainingMs||0,pressureSlide:runtime.pressureSlide});
+    await runtime.activityChannel.send({type:'presentation-preload',format:'rendered-v1',transfer:document.id,parts:document.parts.length,sentAt:Date.now()});
+    for(let index=0;index<document.parts.length;index++)await runtime.activityChannel.send({type:'presentation-part',transfer:document.id,index,data:document.parts[index]});
+    runtime.pressureUploadedChannel=runtime.activityChannel;runtime.pressureUploadedAt=Date.now();runtime.pressureError='';
+  })();
+  try{await runtime.pressurePreparing;}finally{runtime.pressurePreparing=null;}
+}
+setInterval(()=>{const runtime=keynopeRunningActivity;if(engagementIsRunning(runtime)&&runtime.definition.kind==='pressure'&&runtime.activityChannel&&(!runtime.pressureUploadedAt||Date.now()-runtime.pressureUploadedAt>1200000))publishHostedEngagementState(false,false,runtime);},5000);
+async function publishHostedEngagementState(includeDefinition = false,reset = false,runtime = keynopeEngagementRuntime) {
+  if (!runtime || runtime.localPreview || !runtime.activityChannel) return Promise.resolve();
+  if (keynopeRunningActivity && keynopeRunningActivity !== runtime) return;
+  const channel = runtime.activityChannel, epoch = runtime.connectionEpoch;
+  if(runtime.definition.kind==='teach'&&runtime.game?.groups?.length){
+    const signature=JSON.stringify(runtime.game.groups.map(g=>g.ids));
+    if(runtime.teachPairingSignature!==signature){
+      runtime.pairAssignments={};runtime.game.groups.forEach((g,i)=>g.ids.forEach(id=>runtime.pairAssignments[id]={group:'teach-'+i,members:g.ids}));
+      runtime.teachPairingSignature=signature;replacePairingRoom(runtime);
+    }
+  }
+  await publishPairingRoom(runtime.activityChannel,runtime.sessionCode);
+  runtime.activation = runtime.activation || randomActivityCode();
+  if(runtime.definition.kind==='pressure'){
+    try{await preparePressureSlide(runtime);}catch(error){runtime.pressureError=String(error.message||error);}
+    if(!engagementRuntimeAlive(runtime))return;
+  }
   publishParticipantTabs(runtime.activityChannel).catch(error=>console.warn('Participant tabs:',error));
   const live = hostedEngagementResults(runtime);
-  runtime.activation = runtime.activation || randomActivityCode();
+  if (runtime.activityChannel !== channel || runtime.connectionEpoch !== epoch) return;
   const payload = includeDefinition
     ? {type:'definition',activation:runtime.activation,activityId:runtime.definition.id,definition:runtime.definition.kind === 'introduction' ? {...runtime.definition,introductionAssets:keynopeIntroductionAssets} : KeynopeGames.definition(runtime),phase:runtime.phase,deadlineMs:runtime.deadlineMs || 0,participants:runtime.participants,members:live.members,questionIndex:Number(runtime.questionIndex)||0,questionRevealed:!!runtime.questionRevealed,reset:!!reset}
     : {type:'state',activityId:runtime.definition.id,phase:runtime.phase,deadlineMs:runtime.deadlineMs || 0,participants:runtime.participants,members:live.members,questionIndex:Number(runtime.questionIndex)||0,questionRevealed:!!runtime.questionRevealed,results:runtime.definition.kind === 'prerequisites' || KeynopeGames.has(runtime.definition.kind) || runtime.phase >= 3 || runtime.definition.kind === 'questions' || runtime.definition.kind === 'cards' || runtime.definition.kind === 'impostor' || runtime.definition.kind === 'onboarding' || (runtime.definition.kind === 'truefalse' && runtime.questionRevealed) ? live : undefined};
+  if(runtime.definition.kind==='pressure')Object.assign(payload,{pressureSlide:runtime.pressureError?null:runtime.pressureSlide,pressureError:runtime.pressureError||'',pausedRemainingMs:runtime.pausedRemainingMs||0});
   return runtime.activityChannel.send(payload).catch(() => {});
 }
 function publishHostedEngagementPhase() {
@@ -3911,13 +4237,34 @@ function currentEngagementDefinition() {
   const page = deck.pages && deck.pages[pageIndex];
   return page && page.engagement || null;
 }
+function engagementDisplayState(definition) {
+  if (!definition) return '';
+  const owner = onboardingSessionDefinition();
+  const key = owner ? 'session-' + owner.id + '-activity-' + definition.id : definition.id;
+  const session = keynopeEngagementSessions.get(key);
+  const runtime = [keynopeRunningActivity,keynopeEngagementRuntime,session?.runtime].find(item => item?.definition.id === definition.id);
+  // A reset runtime takes precedence over any older persisted result.
+  if (runtime) {
+    const state = runtime.readOnly ? {...runtime,readOnly:false} : runtime;
+    return engagementHasCompleted(state) ? 'completed' : engagementIsRunning(state) ? 'running' : 'clean';
+  }
+  const result = session?.result === undefined ? window.keynopeActivityResult?.(definition.id) : session.result;
+  return result?.state ? 'completed' : 'clean';
+}
 function renderActivityMarker() {
-  if (!activityMarker) return;
   const definition = currentEngagementDefinition();
+  const state = engagementDisplayState(definition);
+  for (const button of document.querySelectorAll('[aria-label="Activities"]')) {
+    button.dataset.activityState = state;
+    button.classList.toggle('active',state === 'running');
+  }
+  if (!activityMarker) return;
   const visible = !!definition && !keynopeEditorMasterMode;
   activityMarker.classList.toggle('visible',visible);
-  activityMarker.classList.toggle('active',visible && !!keynopeEngagementRuntime);
-  activityMarker.title = definition ? 'Open ' + (definition.prompt || definition.kind || 'activity') : '';
+  activityMarker.dataset.activityState = state;
+  activityMarker.classList.toggle('active',state === 'running');
+  activityMarker.classList.toggle('completed',state === 'completed');
+  activityMarker.title = definition ? 'Open ' + (definition.prompt || definition.kind || 'activity') + ' · ' + ({clean:'Ready',running:'Running',completed:'Completed'}[state]) : '';
   if (visible) {
     const canvasRect = presenterCanvas.getBoundingClientRect();
     const stageRect = stage.getBoundingClientRect();
@@ -3926,40 +4273,175 @@ function renderActivityMarker() {
   }
 }
 let keynopeRecentActivityItems = [];
-function closeEngagementRuntime(publish = true, returnToLobby = true) {
+function activitySubmittedItems(runtime) {
+  if (!runtime) return [];
+  const items = [
+    ...(runtime.entryResponses || []).map(item => item.idea || item.question),
+    ...(runtime.ideas || []),
+    ...(runtime.attributions || []).flatMap(item => [item.idea,item.question,...(item.answers || []),...(item.tags || [])]),
+    ...(runtime.game?.entries || []).map(item => item.text)
+  ];
+  return [...new Set(items.filter(item => typeof item === 'string').map(item => item.trim()).filter(Boolean))];
+}
+function activityProducesVotingItems(definition) {
+  // Only exercises where participants author text can supply voting cards.
+  // Timers, grouping, polls, sorting existing cards and drawings are not sources.
+  return ['storm','deducer','finalanswer','dual','questions','wall','expertise','gallery','teach','fame','agreements','three'].includes(definition?.kind);
+}
+function previousActivityForVoting(runtime) {
+  const pages = deck.pages || [];
+  const index = pages.findIndex(page => page.engagement?.id === runtime.definition.id);
+  const definition = pages.slice(0,Math.max(0,index)).reverse().find(page => activityProducesVotingItems(page.engagement) && page.engagement.id !== runtime.definition.id)?.engagement;
+  if (!definition) return null;
+  const session = engagementSessionFor(definition);
+  // A reset live source deliberately wins over any older saved result.
+  if (session.runtime) return session.runtime;
+  const result = session.result === undefined ? window.keynopeActivityResult?.(definition.id) : session.result;
+  return result?.state ? {...result.state,definition:result.definition || definition} : null;
+}
+function closeEngagementRuntime(publish = true) {
   const runtime = keynopeEngagementRuntime;
-  if (runtime && !runtime.readOnly) {
-    // Keep exercise state, not its connection. Reopening reconnects without
-    // clearing answers, assignments, reveal progress, or manually paused timers.
-    engagementSessionFor(runtime.definition).runtime = {...runtime,activityChannel:null,hostingConnection:false,
-      resumeTimerMs:runtime.deadlineMs ? Math.max(1,runtime.deadlineMs-Date.now()) : 0,deadlineMs:0};
+  archiveEngagementResult(runtime);
+  if (runtime?.readOnly) {
+    clearInterval(keynopeEngagementCountdownTick);
+    keynopeEngagementCountdownTick = 0;
   }
+  if (engagementHasCompleted(runtime)) {
+    runtime.completedReview = true;
+    runtime.phase = Math.max(3,runtime.phase);
+    runtime.deadlineMs = 0; runtime.pausedRemainingMs = 0;
+    if (runtime === keynopeRunningActivity) {
+      clearInterval(keynopeEngagementCountdownTick);
+      keynopeEngagementCountdownTick = 0;
+    }
+  }
+  if (runtime && !runtime.readOnly) engagementSessionFor(runtime.definition).runtime = runtime;
   if (runtime && !runtime.readOnly) {
-    const items=[...(runtime.ideas||[]),...(runtime.attributions||[]).map(item=>item.idea||item.question||(item.answers||[]).filter(Boolean).join(' — ')),...((runtime.game||{}).entries||[]).map(item=>item.text)].filter(Boolean);
+    const items=activitySubmittedItems(runtime);
     if(items.length)keynopeRecentActivityItems=[...new Set(items)].slice(0,40);
   }
-  if (runtime && !runtime.readOnly && runtime.sessionCode) {
-    const lobby = onboardingSessionDefinition();
-    if (returnToLobby && lobby && runtime.definition.kind !== 'onboarding' && runtime.activityChannel) {
-      const members = hostedEngagementResults(runtime).members;
-      runtime.activityChannel.send({type:'definition',activityId:lobby.id,definition:lobby,phase:1,deadlineMs:0,participants:members.length,members}).catch(()=>{});
-    } else {
-      if (runtime.definition.kind !== 'onboarding') runtime.phase = 4;
-      publishHostedEngagementState(false).finally(() => { if (runtime.activityChannel && runtime.activityChannel !== keynopeLobbyPresentation?.channel) runtime.activityChannel.close(); });
-    }
-  } else if (runtime && runtime.activityChannel) {
-    runtime.activityChannel.close();
-  }
-  keynopeEngagementSessionEpoch++;
-  clearInterval(keynopeEngagementCountdownTick);
-  keynopeEngagementCountdownTick = 0;
   if (keynopeEngagementOverlay) keynopeEngagementOverlay.remove();
   keynopeEngagementOverlay = null;
-  keynopeEngagementRuntime = null;
-	for (const button of document.querySelectorAll('[aria-label="Activities"]')) button.classList.remove('active');
+  keynopeEngagementRuntime = keynopeRunningActivity;
 	renderActivityMarker();
-	if (publish) publishEngagementRuntime();
+	if (publish && runtime && !runtime.localPreview) publishEngagementRuntime();
   if (typeof refreshEditorPresenterControls === 'function') refreshEditorPresenterControls();
+  renderActiveActivityStatus();
+}
+function detachEngagementRuntime(runtime) {
+  if (!runtime) return;
+  archiveEngagementResult(runtime);
+  runtime.connectionEpoch = ++keynopeEngagementSessionEpoch;
+  clearTimeout(runtime.presencePublishTimer);
+  if (runtime.activityChannel && runtime.activityChannel !== keynopeLobbyPresentation?.channel) runtime.activityChannel.close();
+  runtime.activityChannel = null;
+  runtime.hostingConnection = false;
+  runtime.roomReady = false;
+  if (runtime === keynopeRunningActivity) keynopeRunningActivity = null;
+}
+function disposeEngagementRuntimes() {
+  // Only document replacement / session reset tears down the live exercise.
+  for (const runtime of new Set([keynopeEngagementRuntime,keynopeRunningActivity])) detachEngagementRuntime(runtime);
+  keynopeEngagementRuntime = null;
+  closeEngagementRuntime(false);
+  clearInterval(keynopeEngagementCountdownTick);
+  keynopeEngagementCountdownTick = 0;
+  publishEngagementRuntime(null);
+}
+async function goToActiveActivity() {
+  const runtime = keynopeRunningActivity;
+  if (!runtime) return;
+  const target = (deck.pages || []).find(page => page.engagement?.id === runtime.definition.id);
+  if (!target) { showEngagementToast('ACTIVITY SLIDE NOT FOUND'); return; }
+  if (window.keynopeGoToActivitySlide) await window.keynopeGoToActivitySlide(target.slide);
+  else { pageIndex = deck.pages.indexOf(target); render(); }
+  openEngagementRuntime(true);
+}
+function confirmRunningActivity() {
+  if (keynopeOnboardingResetBlocker) return;
+  const blocker = document.createElement('div'); blocker.className = 'keynope-modal-blocker keynope-onboarding-reset-blocker';
+  keynopeOnboardingResetBlocker = blocker;
+  const dialog = document.createElement('section'); dialog.className = 'keynope-engagement-dialog keynope-discard-dialog';
+  dialog.setAttribute('role','alertdialog'); dialog.setAttribute('aria-modal','true');
+  const title = document.createElement('h2'); title.textContent = 'Another activity is still running';
+  const message = document.createElement('p'); message.textContent = 'Stop the running activity before starting another one.';
+  const dismiss = () => { blocker.remove(); keynopeOnboardingResetBlocker = null; };
+  const actions = document.createElement('div'); actions.className = 'keynope-engagement-actions';
+  const cancel = engagementButton('Cancel','',dismiss);
+  actions.append(cancel,engagementButton('Go to activity','primary',() => { dismiss(); goToActiveActivity().catch(() => showEngagementToast('COULD NOT OPEN ACTIVITY')); }));
+  dialog.append(title,message,actions); blocker.append(dialog); document.body.append(blocker); cancel.focus();
+}
+async function stopEngagementRuntime() {
+  const runtime = keynopeEngagementRuntime;
+  if (!runtime || runtime.readOnly || runtime.phase === 0) return;
+  rememberEngagementResume(runtime);
+  if (runtime.definition.kind === 'onboarding') {
+    runtime.phase = 3; runtime.completedReview = true;
+    runtime.deadlineMs = 0; runtime.pausedRemainingMs = 0;
+    renderEngagementRuntime(); publishEngagementRuntime();
+    await publishHostedEngagementState(false,false,runtime);
+    if (runtime.completedReview) detachEngagementRuntime(runtime);
+    renderEngagementRuntime(); publishEngagementRuntime();
+  } else {
+    // Use the same finalization as expiry: keep submissions and reveal results.
+    runtime.deadlineMs = Date.now();
+    await expireEngagementRuntime(runtime);
+    if (!engagementHasCompleted(runtime)) return; // Reset may have happened while finalizing roles.
+    // Stop freezes the final result; it is not merely a hidden running dialog.
+    runtime.completedReview = true;
+    renderEngagementRuntime(runtime); publishEngagementRuntime(runtime);
+  }
+}
+function rememberEngagementResume(runtime) {
+  if (!runtime || runtime.readOnly || runtime.phase === 0) return;
+  if (!engagementHasCompleted(runtime)) {
+    const previous = runtime.resumeState;
+    runtime.resumeState = {phase:runtime.phase,gameStage:runtime.game?.stage,
+      deadlineMs:runtime.deadlineMs || 0,remainingMs:runtime.pausedRemainingMs ||
+        (previous?.deadlineMs ? Math.max(0,previous.deadlineMs-Date.now()) : previous?.remainingMs || 0),
+      timed:!!(runtime.deadlineMs || runtime.pausedRemainingMs || previous?.timed)};
+  } else if (runtime.resumeState?.deadlineMs) {
+    // Freeze the remaining time once completed; time spent reviewing doesn't count.
+    runtime.resumeState.remainingMs = Math.max(0,runtime.resumeState.deadlineMs-Date.now());
+    runtime.resumeState.deadlineMs = 0;
+  }
+}
+function reopenEngagementRuntime() {
+  const runtime = keynopeEngagementRuntime;
+  if (!runtime || runtime.readOnly || !engagementHasCompleted(runtime)) return;
+  const previous = keynopeRunningActivity;
+  if (previous && previous !== runtime && previous.definition.kind !== 'onboarding' && engagementIsRunning(previous)) {
+    confirmRunningActivity(); return;
+  }
+  if (runtime.definition.kind === 'finalanswer') {
+    const room = keynopePairingRoom;
+    if (room?.sessionCode !== runtime.sessionCode || !room.groups?.some(group => group.members?.length)) {
+      showEngagementToast('CREATE GROUPS FIRST USING THE GROUPS BUTTON OR A GROUPING ACTIVITY'); return;
+    }
+  }
+  if (previous && previous !== runtime) detachEngagementRuntime(previous);
+  const resume = runtime.resumeState || {};
+  const kind = runtime.definition.kind;
+  runtime.completedReview = false;
+  runtime.phase = kind === 'pair' && (resume.phase === 3 || (!resume.phase && runtime.groups?.length)) ? 3
+    : kind === 'questions' && resume.phase === 2 ? 2 : 1;
+  if (runtime.game) runtime.game.stage = resume.gameStage && !['done','reverted'].includes(resume.gameStage)
+    ? resume.gameStage : kind === 'ball' && runtime.game.speaker ? 'play'
+    : kind === 'teach' && runtime.game.groups?.length ? 'prepare' : 'join';
+  runtime.questionRevealed = false;
+  runtime.stoppedAt = 0;
+  const timed = resume.timed || runtime.definition.timerSeconds > 0 || ['pair','cards','impostor'].includes(kind);
+  runtime.deadlineMs = timed ? Date.now() + Math.max(0,Number(resume.remainingMs)||0) + 60000 : 0;
+  runtime.pausedRemainingMs = 0;
+  runtime.localPreview = !engagementPresentationActive();
+  keynopeRunningActivity = runtime;
+  const session = engagementSessionFor(runtime.definition);
+  session.runtime = runtime; session.deadlineMs = runtime.deadlineMs;
+  renderEngagementRuntime(runtime); publishEngagementRuntime(runtime); runEngagementCountdown(runtime);
+  if (runtime.activityChannel) publishHostedEngagementState(true,false,runtime).then(() => {
+    if (engagementRuntimeAlive(runtime)) return publishHostedEngagementState(false,false,runtime);
+  });
+  else startHostedEngagement(runtime);
 }
 function confirmOnboardingSessionReset() {
   if (!keynopeEngagementRuntime || keynopeEngagementRuntime.definition.kind !== 'onboarding') return;
@@ -3977,8 +4459,9 @@ function confirmOnboardingSessionReset() {
     yes.disabled = true;
     const definition = {...originalDefinition,code:randomActivityCode()};
     dismiss();
-    closeEngagementRuntime(false,false);
+    disposeEngagementRuntimes();
     keynopeEngagementSessions.clear();
+    keynopePendingActivityResults.clear();
     try {
       await editorAction({action:'set-engagement',engagementData:definition});
       const handler = window.webkit?.messageHandlers?.keynopePresenter;
@@ -3992,9 +4475,17 @@ function confirmOnboardingSessionReset() {
 }
 function resetEngagementRuntime() {
   if (!keynopeEngagementRuntime) return;
+  if(keynopeEngagementRuntime.completedReview){
+    const authored=(deck.pages||[]).find(page=>page.engagement?.id===keynopeEngagementRuntime.definition.id)?.engagement;
+    if(authored)keynopeEngagementRuntime.definition={...authored,code:keynopeEngagementRuntime.sessionCode};
+  }
   const definition = keynopeEngagementRuntime.definition;
   if (definition.kind === 'onboarding') { confirmOnboardingSessionReset(); return; }
-  keynopeEngagementRuntime.phase = 1;
+  archiveEngagementResult(keynopeEngagementRuntime,true);
+  keynopeEngagementRuntime.completedReview = false;
+  delete keynopeEngagementRuntime.resumeState;
+  keynopeEngagementRuntime.resumeTimerMs = 0;
+  keynopeEngagementRuntime.phase = 0;
   keynopeEngagementRuntime.counts = (definition.options || []).map(() => 0);
   keynopeEngagementRuntime.ideas = [];
   keynopeEngagementRuntime.assignments = (definition.cards || []).map(() => -1);
@@ -4014,31 +4505,84 @@ function resetEngagementRuntime() {
 	keynopeEngagementRuntime.pausedRemainingMs = 0;
 	keynopeEngagementRuntime.roleAssignments = {};
 	keynopeEngagementRuntime.finishedAt = {};
-	keynopeEngagementRuntime.startedAt = Date.now();
+	keynopeEngagementRuntime.startedAt = 0;
 	keynopeEngagementRuntime.stoppedAt = 0;
 	delete keynopeEngagementRuntime.game;
+	delete keynopeEngagementRuntime.deducerPairingSignature;
 	keynopeEngagementRuntime.questionIndex = 0;
 	keynopeEngagementRuntime.questionRevealed = false;
-	if (definition.kind === 'pair' || definition.kind === 'cards' || definition.kind === 'impostor') keynopeEngagementRuntime.participants = Object.keys(keynopeEngagementRuntime.memberNames || {}).length;
-	const resetSeconds = definition.kind === 'pair' || definition.kind === 'cards' || definition.kind === 'impostor' ? (Number(definition.joinSeconds) || 120) : Number(definition.timerSeconds);
-	if (resetSeconds > 0) {
-		keynopeEngagementRuntime.deadlineMs = Date.now() + resetSeconds * 1000;
-		engagementSessionFor(definition).deadlineMs = keynopeEngagementRuntime.deadlineMs;
-	}
+	if (definition.kind === 'chosen' || definition.kind === 'pair' || definition.kind === 'cards' || definition.kind === 'impostor') keynopeEngagementRuntime.participants = Object.keys(keynopeEngagementRuntime.memberNames || {}).length;
+	engagementSessionFor(definition).deadlineMs = 0;
 	renderEngagementRuntime();
 	publishEngagementRuntime();
-	publishHostedEngagementState(true,true);
+	// A definition reset clears the room's prior state. Publish the replacement
+	// snapshot afterwards even if all participants are already known to us.
+	const resetRuntime = keynopeEngagementRuntime;
+	publishHostedEngagementState(true,true).then(() => {
+		if (keynopeEngagementRuntime === resetRuntime) return publishHostedEngagementState(false);
+	});
 	runEngagementCountdown(keynopeEngagementRuntime);
+}
+function startEngagementRuntime() {
+  const runtime = keynopeEngagementRuntime;
+  if (!runtime || runtime.readOnly || runtime.phase !== 0) return;
+  const previous = keynopeRunningActivity;
+  if (previous && previous !== runtime && previous.definition.kind !== 'onboarding' && engagementIsRunning(previous)) {
+    confirmRunningActivity(); return;
+  }
+  if (runtime.definition.kind === 'finalanswer') {
+    const room = keynopePairingRoom;
+    if (room?.sessionCode !== runtime.sessionCode || !room.groups?.some(group => group.members?.length)) {
+      showEngagementToast('CREATE GROUPS FIRST USING THE GROUPS BUTTON OR A GROUPING ACTIVITY'); return;
+    }
+  }
+  if (runtime.definition.kind === 'dots' && runtime.definition.importPrevious) {
+    const source = previousActivityForVoting(runtime);
+    const items = activitySubmittedItems(source);
+    if (items.length < 2) { showEngagementToast('THE PREVIOUS TEXT-PRODUCING ACTIVITY NEEDS AT LEAST TWO TEXT SUBMISSIONS'); return; }
+    if (items.length > 500 || items.some(item => new TextEncoder().encode(item).length > 4000)) {
+      showEngagementToast('TOO MANY OR TOO LONG SUBMISSIONS TO IMPORT — REVIEW THE PREVIOUS ACTIVITY'); return;
+    }
+    runtime.definition = {...runtime.definition,options:items};
+    runtime.counts = items.map(() => 0);
+    runtime.importedFrom = source.definition.prompt || source.definition.kind;
+  }
+  if (previous && previous !== runtime) detachEngagementRuntime(previous);
+  keynopeRunningActivity = runtime;
+  engagementSessionFor(runtime.definition).runtime = runtime;
+  runtime.phase = 1;
+  runtime.startedAt = Date.now();
+  runtime.localPreview = !engagementPresentationActive();
+  const seconds = ['pair','cards','impostor'].includes(runtime.definition.kind)
+    ? Number(runtime.definition.joinSeconds) || 120 : Number(runtime.definition.timerSeconds) || 0;
+  runtime.deadlineMs = seconds > 0 ? runtime.startedAt + seconds * 1000 : 0;
+  runtime.pausedRemainingMs = 0;
+  engagementSessionFor(runtime.definition).deadlineMs = runtime.deadlineMs;
+  renderEngagementRuntime();
+  publishEngagementRuntime();
+  runEngagementCountdown(runtime);
+  if (runtime.activityChannel) {
+    const started = runtime;
+    publishHostedEngagementState(true).then(() => {
+      if (engagementRuntimeAlive(started)) return publishHostedEngagementState(false,false,started);
+    });
+  } else startHostedEngagement();
 }
 function advanceEngagementRuntime() {
   if (!keynopeEngagementRuntime) return;
+  if (keynopeEngagementRuntime.phase === 0) { startEngagementRuntime(); return; }
+  if(keynopeEngagementRuntime.definition.kind==='shuffle'){
+    if(keynopeEngagementRuntime.phase>=3)closeEngagementRuntime();
+    else shuffleEngagementGroups().catch(error=>showEngagementToast(error.message));
+    return;
+  }
   if (KeynopeGames.next(keynopeEngagementRuntime)) {renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(false);runEngagementCountdown(keynopeEngagementRuntime);return;}
   if ((keynopeEngagementRuntime.definition.kind === 'finishpair' || keynopeEngagementRuntime.definition.kind === 'prerequisites') && keynopeEngagementRuntime.phase === 1) { finishBalancedPairs(keynopeEngagementRuntime); return; }
   if (keynopeEngagementRuntime.definition.kind === 'truefalse') {
     const runtime = keynopeEngagementRuntime;
     const lastQuestion = Math.max(0,(runtime.definition.questions || []).length - 1);
     if (!runtime.questionRevealed) runtime.questionRevealed = true;
-    else if ((Number(runtime.questionIndex) || 0) < lastQuestion) { runtime.questionIndex = (Number(runtime.questionIndex) || 0) + 1; runtime.questionRevealed = false; }
+    else if ((Number(runtime.questionIndex) || 0) < lastQuestion) { runtime.questionIndex = (Number(runtime.questionIndex) || 0) + 1; runtime.questionRevealed = runtime.phase >= 3; }
     else { closeEngagementRuntime(); return; }
     renderEngagementRuntime();
     publishEngagementRuntime();
@@ -4111,19 +4655,128 @@ function validEngagementDots(definition,dots) {
   return dots.reduce((sum,value) => sum + value,0) <= (definition.dotBudget || 3) ? dots.slice() : null;
 }
 let keynopePairingRoom=null;
+const keynopePairingPublished=new WeakMap();
+function receivePairingRoom(event,code){
+  const value=event.payload?.type==='pairing'&&event.payload.pairing;
+  if(!value||value.sessionCode!==code)return;
+  if(keynopePairingRoom?.sessionCode===code&&keynopePairingRoom.epoch===value.epoch)return;
+  if(keynopePairingRoom?.sessionCode===code && Number(value.updatedAt||0)<Number(keynopePairingRoom.updatedAt||0))return;
+  keynopePairingRoom=value;
+}
+async function publishPairingRoom(channel,code){
+  const value=keynopePairingRoom;
+  if(!channel||!value||value.sessionCode!==code||keynopePairingPublished.get(channel)===value.epoch)return;
+  await channel.send({type:'pairing',pairing:KeynopeGroups.publicRoom(value)});
+  keynopePairingPublished.set(channel,value.epoch);
+}
+function setPairingGroups(code,groups,names,channel){
+  const previous=keynopePairingRoom;
+  const value=KeynopeGroups.room(code,groups,names,randomActivityCode());
+  value.updatedAt=Math.max(Date.now(),Number(previous?.updatedAt||0)+1);
+  keynopePairingRoom=value;
+  const runtime=keynopeRunningActivity || keynopeEngagementRuntime;
+  if(runtime?.sessionCode===code&&!runtime.localPreview){
+    runtime.pairMessages=[];
+    if(['finalanswer','deducer','pair','cards','finishpair','prerequisites','teach'].includes(runtime.definition.kind)){
+      runtime.memberNames={...runtime.memberNames,...names};
+      runtime.pairAssignments=Object.fromEntries(value.assignments.map(({identity,...item})=>[identity,item]));
+      const oldGroups=runtime.groups||[];
+      runtime.groups=value.groups.map(g=>({name:g.label,label:oldGroups.find(old=>old.name===g.label)?.label||g.label,members:g.members.map(id=>names[id]||'Participant')}));
+      if(runtime.definition.kind==='cards'){
+        const old=runtime.cardAssignments||{};runtime.cardAssignments={};
+        value.groups.forEach((g,index)=>g.members.forEach((id,i)=>runtime.cardAssignments[id]={rank:g.label,label:runtime.groups[index].label,suit:old[id]?.suit||['♠','♥','♦','♣'][i%4]}));
+      }
+      if(runtime.definition.kind==='teach'){
+        const game=KeynopeGames.init(runtime),old=game.groups;
+        game.groups=value.groups.map((g,i)=>({ids:g.members.slice(),names:g.members.map(id=>names[id]||'Participant'),topic:old[i]?.topic||runtime.definition.prompt}));
+        runtime.teachPairingSignature=JSON.stringify(game.groups.map(g=>g.ids));
+      }
+      if(['deducer','finalanswer'].includes(runtime.definition.kind)){
+        const game=KeynopeGames.init(runtime),old=game.groups;
+        // Keep each group's shared entries with that group, not a shifted index.
+        game.pairingEpoch=value.epoch;
+        game.entries=game.entries.flatMap(entry=>{const id=old[entry.item]?.id||'deducer-'+entry.item;const item=value.groups.findIndex(g=>g.id===id);return item<0?[]:[{...entry,item}];});
+        game.groups=value.groups.map(g=>({id:g.id,label:g.label,ids:g.members.slice(),names:g.members.map(id=>names[id]||'Participant')}));
+        game.unassigned=Object.keys(runtime.memberNames||{}).filter(id=>!runtime.pairAssignments[id]);
+        runtime.deducerPairingSignature=JSON.stringify(runtime.pairAssignments);runtime.deducerPairingRoom=value;
+      }
+    }
+  }
+  return publishPairingRoom(channel,code);
+}
 function replacePairingRoom(runtime){
-  // Roles must never create groups: this allowlist deliberately excludes Impostor.
-  if(!['prerequisites','finishpair','cards','pair'].includes(runtime.definition.kind))return;
-  keynopePairingRoom={sessionCode:runtime.sessionCode,epoch:randomActivityCode(),assignments:Object.entries(runtime.pairAssignments||{}).map(([identity,value])=>({identity,group:value.group,members:value.members}))};
+  if(runtime.localPreview)return;
+  // Roles must never create chat groups: deliberately exclude Impostor.
+  if(!['prerequisites','finishpair','cards','pair','deducer','teach'].includes(runtime.definition.kind))return;
+  if(runtime.definition.kind==='prerequisites'&&runtime.definition.disableGrouping)return;
+  const groups=KeynopeGroups.fromRoom({assignments:Object.entries(runtime.pairAssignments||{}).map(([identity,value])=>({identity,...value}))});
+  groups.forEach((group,index)=>group.label=runtime.groups?.[index]?.name||group.label);
+  setPairingGroups(runtime.sessionCode,groups,runtime.memberNames||{},runtime.activityChannel).catch(error=>console.warn('Group update:',error));
+}
+function syncDeducerRuntimeGroups(runtime){
+  if(runtime.definition.kind==='finalanswer'){
+    syncFinalAnswerGroups(runtime);return;
+  }
+  if(runtime.definition.kind!=='deducer'||runtime.phase!==1||runtime.readOnly||runtime.completedReview)return;
+  KeynopeGames.syncDeducerGroups(runtime);
+  const signature=JSON.stringify(runtime.pairAssignments);
+  if(signature!==runtime.deducerPairingSignature||keynopePairingRoom!==runtime.deducerPairingRoom){
+    replacePairingRoom(runtime);
+    runtime.deducerPairingSignature=signature;
+    runtime.deducerPairingRoom=keynopePairingRoom;
+  }
+}
+function syncFinalAnswerGroups(runtime){
+  if(runtime.phase!==1||runtime.readOnly||runtime.completedReview)return;
+  const room=keynopePairingRoom;
+  if(room?.sessionCode!==runtime.sessionCode)return;
+  const game=KeynopeGames.init(runtime),old=game.groups;
+  // Consume the existing room. Never generate assignments or replace chat channels.
+  game.entries=game.entries.flatMap(entry=>{
+    const item=room.groups.findIndex(group=>group.id===old[entry.item]?.id);
+    return item<0?[]:[{...entry,item}];
+  });
+  game.groups=room.groups.map(group=>({id:group.id,label:group.label,ids:group.members.slice(),names:group.members.map(id=>runtime.memberNames?.[id]||room.names?.[id]||'Participant')}));
+  game.pairingEpoch=room.epoch;
+  runtime.participants=Object.keys(runtime.memberNames||{}).length;
+  runtime.pairAssignments=Object.fromEntries(room.assignments.map(({identity,...assignment})=>[identity,assignment]));
+  runtime.groups=game.groups.map(group=>({name:group.label,members:group.names.slice()}));
+}
+async function shuffleEngagementGroups(revert=false){
+  const runtime=keynopeEngagementRuntime;
+  if(!runtime||runtime.definition.kind!=='shuffle'||runtime.readOnly)return;
+  if(!runtime.localPreview&&!runtime.roomReady)throw Error('Wait for the participant room to connect, then try again.');
+  const game=KeynopeGames.init(runtime),code=runtime.sessionCode;
+  const current=keynopePairingRoom?.sessionCode===code?KeynopeGroups.fromRoom(keynopePairingRoom):[];
+  const names={...(keynopePairingRoom?.sessionCode===code?keynopePairingRoom.names:{}),...runtime.memberNames};
+  const eligible=new Set(Object.keys(names).filter(id=>!keynopeTrainingDepartures.get(code)?.has(id)));
+  if(revert){
+    if(!game.originalGroups)return;
+    if(!runtime.localPreview&&game.groupEpoch!==keynopePairingRoom?.epoch&&JSON.stringify(KeynopeGroups.normalize(game.groups,eligible))!==JSON.stringify(KeynopeGroups.normalize(current,eligible)))throw Error('Groups changed since this shuffle. Use Groups to review them before reverting.');
+    game.groups=KeynopeGroups.normalize(game.originalGroups,eligible);game.stage='reverted';
+  }else{
+    const original=KeynopeGroups.normalize(current,eligible);
+    if(original.filter(g=>g.members.length).length<2)throw Error('Create at least two groups with participants in Activities → Groups first.');
+    if(!game.originalGroups||(game.groupEpoch&&game.groupEpoch!==keynopePairingRoom?.epoch))game.originalGroups=original;
+    game.groups=KeynopeGroups.shuffled(original);game.stage='done';
+  }
+  game.groups=game.groups.map(g=>({...g,ids:g.members,names:g.members.map(id=>names[id]||'Participant')}));
+  runtime.memberNames=names;runtime.participants=game.groups.reduce((n,g)=>n+g.members.length,0);
+  runtime.completedReview=false;runtime.phase=3;runtime.deadlineMs=0;runtime.pausedRemainingMs=0;
+  if(!runtime.localPreview){const publication=setPairingGroups(code,game.groups,names,runtime.activityChannel);game.groupEpoch=keynopePairingRoom.epoch;await publication;}
+  renderEngagementRuntime();publishEngagementRuntime();await publishHostedEngagementState(false);
 }
 function validPrerequisiteCompletion(definition,checked){
   return Array.isArray(checked)&&checked.length===(definition.prerequisites||[]).length&&checked.length>0&&checked.every(value=>value===true);
 }
 function prerequisitePublicState(runtime){
   const finished=Object.entries(runtime.finishedAt||{}).sort((a,b)=>a[1]-b[1]);
+  const unfinished=Object.keys(runtime.memberNames||{}).filter(id=>runtime.finishedAt?.[id]==null);
   return {startedAt:runtime.startedAt||0,stoppedAt:runtime.stoppedAt||0,finishedCount:finished.length,
+    unfinishedCount:unfinished.length,
+    unfinishedNames:runtime.definition.named?unfinished.map(id=>runtime.memberNames[id]):[],
     finishedNames:runtime.definition.named?finished.map(([id])=>runtime.memberNames[id]||'Participant'):[],
-    ranking:runtime.definition.named&&runtime.phase>=3?finished.map(([id,time],index)=>({rank:index+1,name:runtime.memberNames[id]||'Participant',elapsedMs:Math.max(0,time-(runtime.startedAt||time))})):[]};
+    ranking:!runtime.definition.disableGrouping&&runtime.definition.named&&runtime.phase>=3?finished.map(([id,time],index)=>({rank:index+1,name:runtime.memberNames[id]||'Participant',elapsedMs:Math.max(0,time-(runtime.startedAt||time))})):[]};
 }
 function balancedCompletionGroups(members,finishedAt,randomIndex) {
   const finished = members.filter(id => finishedAt[id] != null).sort((a,b) => finishedAt[a] - finishedAt[b]);
@@ -4136,7 +4789,7 @@ function balancedCompletionGroups(members,finishedAt,randomIndex) {
 }
 function finishBalancedPairs(runtime) {
   if (runtime.phase !== 1) return;
-  const groups = balancedCompletionGroups(Object.keys(runtime.memberNames || {}),runtime.finishedAt || {},engagementRandomIndex);
+  const groups = runtime.definition.kind==='prerequisites'&&runtime.definition.disableGrouping ? [] : balancedCompletionGroups(Object.keys(runtime.memberNames || {}),runtime.finishedAt || {},engagementRandomIndex);
   runtime.groups=groups.map((members,index)=>({name:'Group '+(index+1),members:members.map(id=>runtime.memberNames[id])}));
   runtime.participants=Object.keys(runtime.memberNames||{}).length;
   runtime.pairAssignments={};
@@ -4144,7 +4797,7 @@ function finishBalancedPairs(runtime) {
   runtime.stoppedAt=Date.now();
   replacePairingRoom(runtime);
   runtime.phase=3;runtime.deadlineMs=0;runtime.pausedRemainingMs=0;
-  renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(false);
+  renderEngagementRuntime(runtime);publishEngagementRuntime(runtime);publishHostedEngagementState(false,false,runtime);
 }
 
 function beginPairShareDiscussion(runtime) {
@@ -4156,9 +4809,9 @@ function beginPairShareDiscussion(runtime) {
   runtime.pausedRemainingMs = 0;
   runtime.deadlineMs = Date.now() + (Number(runtime.definition.discussionSeconds) || 300) * 1000;
   engagementSessionFor(runtime.definition).deadlineMs = runtime.deadlineMs;
-  renderEngagementRuntime();
-  publishEngagementRuntime();
-  publishHostedEngagementState(false);
+  renderEngagementRuntime(runtime);
+  publishEngagementRuntime(runtime);
+  publishHostedEngagementState(false,false,runtime);
   runEngagementCountdown(runtime);
 }
 function finishPairShareDiscussion(runtime) {
@@ -4169,9 +4822,9 @@ function finishPairShareDiscussion(runtime) {
   runtime.deadlineMs = 0;
   runtime.pausedRemainingMs = 0;
   engagementSessionFor(runtime.definition).deadlineMs = 0;
-  renderEngagementRuntime();
-  publishEngagementRuntime();
-  publishHostedEngagementState(false);
+  renderEngagementRuntime(runtime);
+  publishEngagementRuntime(runtime);
+  publishHostedEngagementState(false,false,runtime);
 }
 function reopenPairShareJoin(runtime) {
   if (!runtime || runtime.definition.kind !== 'pair') return;
@@ -4182,9 +4835,9 @@ function reopenPairShareJoin(runtime) {
   runtime.pausedRemainingMs = 0;
   runtime.deadlineMs = Date.now() + (Number(runtime.definition.joinSeconds) || 120) * 1000;
   engagementSessionFor(runtime.definition).deadlineMs = runtime.deadlineMs;
-  renderEngagementRuntime();
-  publishEngagementRuntime();
-  publishHostedEngagementState(true,true);
+  renderEngagementRuntime(runtime);
+  publishEngagementRuntime(runtime);
+  publishHostedEngagementState(true,true,runtime);
   runEngagementCountdown(runtime);
 }
 function addEngagementMinute(runtime) {
@@ -4192,9 +4845,9 @@ function addEngagementMinute(runtime) {
   if (runtime.pausedRemainingMs) runtime.pausedRemainingMs += 60000;
   else runtime.deadlineMs = Math.max(Date.now(),Number(runtime.deadlineMs)) + 60000;
   engagementSessionFor(runtime.definition).deadlineMs = runtime.deadlineMs || 0;
-  renderEngagementRuntime();
-  publishEngagementRuntime();
-  publishHostedEngagementState(false);
+  renderEngagementRuntime(runtime);
+  publishEngagementRuntime(runtime);
+  publishHostedEngagementState(false,false,runtime);
   runEngagementCountdown(runtime);
 }
 function toggleEngagementTimer(runtime) {
@@ -4207,9 +4860,9 @@ function toggleEngagementTimer(runtime) {
     runtime.deadlineMs = 0;
   } else return;
   engagementSessionFor(runtime.definition).deadlineMs = runtime.deadlineMs || 0;
-  renderEngagementRuntime();
-  publishEngagementRuntime();
-  publishHostedEngagementState(false);
+  renderEngagementRuntime(runtime);
+  publishEngagementRuntime(runtime);
+  publishHostedEngagementState(false,false,runtime);
   runEngagementCountdown(runtime);
 }
 function engagementRandomIndex(maximum) {
@@ -4270,9 +4923,9 @@ function dealPlayingCards(runtime) {
   engagementSessionFor(runtime.definition).deadlineMs = 0;
   clearInterval(keynopeEngagementCountdownTick);
   keynopeEngagementCountdownTick = 0;
-  renderEngagementRuntime();
-  publishEngagementRuntime();
-  publishHostedEngagementState(false);
+  renderEngagementRuntime(runtime);
+  publishEngagementRuntime(runtime);
+  publishHostedEngagementState(false,false,runtime);
 }
 async function revealImpostorRoles(runtime) {
   if (!runtime || runtime.definition.kind !== 'impostor') return;
@@ -4282,9 +4935,9 @@ async function revealImpostorRoles(runtime) {
   runtime.deadlineMs = 0;
   runtime.pausedRemainingMs = 0;
   engagementSessionFor(runtime.definition).deadlineMs = 0;
-  renderEngagementRuntime();
-  publishEngagementRuntime();
-  await publishHostedEngagementState(false);
+  renderEngagementRuntime(runtime);
+  publishEngagementRuntime(runtime);
+  await publishHostedEngagementState(false,false,runtime);
   const identities = Object.keys(runtime.memberNames || {}).filter(identity => runtime.memberNames[identity]);
   for (let index = identities.length - 1; index > 0; index--) {
     const swap = engagementRandomIndex(index + 1);
@@ -4295,11 +4948,11 @@ async function revealImpostorRoles(runtime) {
   identities.forEach((identity,index) => { runtime.roleAssignments[identity] = index < impostors ? 'impostor' : 'crew'; });
   runtime.counts = [Math.max(0,identities.length-impostors),impostors];
   await Promise.all(identities.map(identity => sendImpostorRole(runtime,identity,runtime.rolePublicKeys && runtime.rolePublicKeys[identity])));
-  if (keynopeEngagementRuntime !== runtime) return;
+  if (!engagementRuntimeAlive(runtime)) return;
   runtime.phase = 3;
-  renderEngagementRuntime();
-  publishEngagementRuntime();
-  publishHostedEngagementState(false);
+  renderEngagementRuntime(runtime);
+  publishEngagementRuntime(runtime);
+  publishHostedEngagementState(false,false,runtime);
 }
 function engagementButton(label,className,clicked) {
   const button = document.createElement('button');
@@ -4325,41 +4978,57 @@ function engagementRemainingText(deadlineMs) {
   const remaining = Math.max(0,Math.ceil((Number(deadlineMs) - Date.now()) / 1000));
   return String(Math.floor(remaining / 60)).padStart(2,'0') + ':' + String(remaining % 60).padStart(2,'0');
 }
-function runEngagementCountdown(runtime) {
+function engagementAcceptsResponse(runtime,response) {
+  if (runtime.readOnly || runtime.completedReview) return false;
+  if (runtime.deadlineMs && Date.now() >= runtime.deadlineMs) return false;
+  if (runtime.definition.kind === 'pair' && response?.chat) return runtime.phase === 3;
+  if (runtime.definition.kind === 'questions' && runtime.phase === 2) return true;
+  return runtime.phase === 1 && !(runtime.definition.kind === 'truefalse' && runtime.questionRevealed);
+}
+function expireEngagementRuntime(runtime) {
+  if (!engagementRuntimeAlive(runtime) || runtime.readOnly || !runtime.deadlineMs || Date.now() < runtime.deadlineMs) return;
   clearInterval(keynopeEngagementCountdownTick);
   keynopeEngagementCountdownTick = 0;
+  runtime.deadlineMs = 0;
+  runtime.pausedRemainingMs = 0;
+  engagementSessionFor(runtime.definition).deadlineMs = 0;
+  const kind = runtime.definition.kind;
+  if (kind === 'finishpair' || kind === 'prerequisites') { finishBalancedPairs(runtime); return; }
+  if (kind === 'cards') { dealPlayingCards(runtime); return; }
+  if (kind === 'impostor') return revealImpostorRoles(runtime);
+  if (kind === 'pair') {
+    if (runtime.phase === 1) { assignEngagementGroups(runtime); replacePairingRoom(runtime); }
+    finishPairShareDiscussion(runtime);
+    return;
+  }
+  // Finalize derived outcomes, but never start another timed stage on expiry.
+  if (['chosen','deducer','finalanswer'].includes(kind) || (['teach','ball'].includes(kind) && KeynopeGames.init(runtime).stage === 'join')) KeynopeGames.next(runtime);
+  if (KeynopeGames.has(kind)) KeynopeGames.init(runtime).stage = 'done';
+  if (kind === 'truefalse') runtime.questionRevealed = true;
+  runtime.phase = 3;
+  runtime.deadlineMs = 0;
+  runtime.pausedRemainingMs = 0;
+  runtime.stoppedAt = Date.now();
+  renderEngagementRuntime(runtime);
+  // This also archives every submitted response into the deck's result metadata.
+  publishEngagementRuntime(runtime);
+  publishHostedEngagementState(false,false,runtime);
+}
+function runEngagementCountdown(runtime) {
+  if (keynopeRunningActivity && runtime !== keynopeRunningActivity) return;
+  clearInterval(keynopeEngagementCountdownTick);
+  keynopeEngagementCountdownTick = 0;
+  renderActiveActivityStatus();
   if (!runtime || !runtime.deadlineMs) return;
   keynopeEngagementCountdownTick = setInterval(() => {
-    if (keynopeEngagementRuntime !== runtime) return;
-    if (!runtime.readOnly && runtime.definition.kind === 'pair' && runtime.phase === 3 && Date.now() >= runtime.deadlineMs) {
-      finishPairShareDiscussion(runtime);
+    if (!engagementRuntimeAlive(runtime)) return;
+    renderActiveActivityStatus();
+    if (!runtime.readOnly && runtime.deadlineMs && Date.now() >= runtime.deadlineMs) {
+      expireEngagementRuntime(runtime);
       return;
     }
-    if (!runtime.readOnly && runtime.phase === 1 && Date.now() >= runtime.deadlineMs) {
-      if (KeynopeGames.next(runtime)) {renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(false);runEngagementCountdown(runtime);return;}
-      if ((runtime.definition.kind === 'finishpair' || runtime.definition.kind === 'prerequisites')) { finishBalancedPairs(runtime); return; }
-      if (runtime.definition.kind === 'pair') {
-        beginPairShareDiscussion(runtime);
-        return;
-      }
-      if (runtime.definition.kind === 'cards') {
-        dealPlayingCards(runtime);
-        return;
-      }
-		if (runtime.definition.kind === 'impostor') {
-			revealImpostorRoles(runtime);
-			return;
-		}
-      const grouping = runtime.definition.kind === 'pair' || runtime.definition.kind === 'cards';
-      runtime.phase = grouping ? 3 : 2;
-      if (grouping) assignEngagementGroups(runtime);
-      renderEngagementRuntime();
-      publishHostedEngagementPhase();
-      publishEngagementRuntime();
-      return;
-    }
-    const countdown = keynopeEngagementOverlay && keynopeEngagementOverlay.querySelector('.keynope-engagement-countdown');
-    if (countdown) countdown.textContent = engagementRemainingText(runtime.deadlineMs);
+    const countdown = runtime === keynopeEngagementRuntime && keynopeEngagementOverlay && keynopeEngagementOverlay.querySelector('.keynope-engagement-countdown');
+    if (countdown && runtime.deadlineMs) countdown.textContent = engagementRemainingText(runtime.deadlineMs);
   },250);
 }
 function engagementVoteSummary(definition,items) {
@@ -4389,6 +5058,7 @@ function renderFactOrFictionQuestion(content,runtime,reveal) {
   content.appendChild(shell);
 }
 function renderEngagementRevealResults(content,runtime) {
+  if(runtime.definition.kind==='truefalse') { renderFactOrFictionQuestion(content,runtime,true); return; }
   if(runtime.definition.kind==='prerequisites'){
     KeynopeGames.renderPrerequisites(content,{...runtime,game:runtime.readOnly?runtime.game:prerequisitePublicState(runtime)},{presenter:true});
     if(!runtime.definition.named)return;
@@ -4527,12 +5197,41 @@ function renderEngagementRevealResults(content,runtime) {
   content.appendChild(results);
   KeynopeActivityDesign.results(results,runtime);
 }
-function renderEngagementRuntime() {
-  const runtime = keynopeEngagementRuntime;
+function activityJoinText(runtime) {
+  const area=document.createElement('div');area.className='keynope-engagement-join-text';
+  const link=document.createElement('a');link.href='https://keynope.sh/join/';link.target='_blank';link.rel='noopener';link.textContent='https://keynope.sh/join/';
+  const code=document.createElement('div');code.textContent='Code: '+runtime.sessionCode;
+  area.append(link,code);return area;
+}
+function activityQRHidden(runtime) {
+  if (runtime?.readOnly) return !!runtime.hideActivityQR;
+  if (typeof window.keynopeHideActivityQR === 'boolean') return window.keynopeHideActivityQR;
+  // Presentation/export windows do not have the editor's settings state.
+  return !!deck.pages?.[pageIndex]?.hideActivityQR;
+}
+function renderEngagementRuntime(runtime = keynopeEngagementRuntime) {
+  rememberEngagementResume(runtime);
+  if(runtime)syncDeducerRuntimeGroups(runtime);
+  renderActiveActivityStatus();
+  if (runtime !== keynopeEngagementRuntime) return;
   if (!runtime || !keynopeEngagementOverlay) return;
   const definition = runtime.definition;
+  keynopeEngagementOverlay.classList.toggle('pressure-cooker',definition.kind==='pressure');
+  if(definition.kind==='pressure'){
+    const clock=document.createElement('div');clock.className='pressure-clock';
+    keynopeEngagementOverlay.replaceChildren(clock);KeynopeGames.renderPressureClock(clock,runtime);
+    if(!runtime.readOnly){
+      const controls=document.createElement('footer');controls.className='keynope-engagement-controls';
+      controls.append(engagementButton('Reset','',resetEngagementRuntime),engagementButton('Close','',closeEngagementRuntime));
+      if(engagementHasCompleted(runtime))controls.insertBefore(engagementButton('Reopen','reopen',reopenEngagementRuntime),controls.lastChild);
+      if(runtime.phase===0)appendReadyActivityControls(controls,runtime);
+      if(runtime.phase===1)controls.append(engagementButton('+1 min','',()=>addEngagementMinute(runtime)),engagementButton(runtime.pausedRemainingMs?'Resume timer':'Pause timer','',()=>toggleEngagementTimer(runtime)),engagementButton('Stop','primary',stopEngagementRuntime));
+      keynopeEngagementOverlay.append(controls);
+    }
+    return;
+  }
   const phase = keynopeEngagementPhases[runtime.phase];
-  const phaseLabel = definition.kind === 'onboarding' ? 'LOBBY' : definition.kind === 'truefalse' ? (runtime.questionRevealed ? 'REVEAL' : 'QUESTION') : definition.kind === 'pair' ? ({1:'JOIN',3:'DISCUSS',4:'DONE'}[runtime.phase] || phase) : definition.kind === 'cards' || definition.kind === 'impostor' ? ({1:'JOIN',3:'REVEAL'}[runtime.phase] || phase) : phase;
+  const phaseLabel = runtime.phase === 0 ? 'READY' : definition.kind === 'onboarding' ? 'LOBBY' : definition.kind === 'truefalse' ? (runtime.questionRevealed ? 'REVEAL' : 'QUESTION') : definition.kind === 'pair' ? ({1:'JOIN',3:'DISCUSS',4:'DONE'}[runtime.phase] || phase) : definition.kind === 'cards' || definition.kind === 'impostor' ? ({1:'JOIN',3:'REVEAL'}[runtime.phase] || phase) : phase;
   const board = document.createElement('section'); board.className = 'keynope-engagement-board';
   const head = document.createElement('header'); head.className = 'keynope-engagement-head';
   const activityNames = {...KeynopeGames.names,onboarding:'Onboarding',dots:'Dot Voting',finishpair:'The Race',prerequisites:'Prerequisites',pulse:'Pulse',storm:'Storm',sort:'Sort',dual:'Dual response',quiz:'Quiz',truefalse:'Fact or Fiction',match:'Mix & Match',questions:'Questions',wall:'Feedback Wall',draw:'Draw yourself',introduction:'Introduction',pair:'Pair Share',expertise:'Expertise Map',cards:'Playing Cards',impostor:'Impostor'};
@@ -4546,6 +5245,7 @@ function renderEngagementRuntime() {
     head.appendChild(countdown);
   }
   const revealed = phase === 'REVEAL' || phase === 'DISCUSS';
+  const hideQR = activityQRHidden(runtime);
   let join = null;
   if (!revealed && (runtime.roomReady || runtime.participationUnavailable || (!runtime.readOnly && keynopeHostedEngagementControllerSurface))) {
     join = document.createElement('div'); join.className = 'keynope-engagement-join';
@@ -4555,16 +5255,22 @@ function renderEngagementRuntime() {
       const link = document.createElement('a'); link.href = runtime.joinUrl; link.target = '_blank'; link.rel = 'noopener'; link.textContent = runtime.joinUrl;
       const copy = engagementButton('Copy','keynope-engagement-copy',() => copyEngagementJoinURL(runtime.joinUrl));
       const participants = document.createElement('span'); participants.className = 'participants';
-      const grouping = runtime.definition.kind === 'onboarding' || runtime.definition.kind === 'pair' || runtime.definition.kind === 'cards' || runtime.definition.kind === 'impostor';
+      const grouping = runtime.definition.kind === 'chosen' || runtime.definition.kind === 'onboarding' || runtime.definition.kind === 'pair' || runtime.definition.kind === 'cards' || runtime.definition.kind === 'impostor';
       participants.textContent = (Number(runtime.participants) || 0) + (grouping ? ' joined' : ' submitted');
-      join.append(instruction,code,link,copy,participants);
+      if(hideQR)join.append(copy,participants);else join.append(instruction,code,link,copy,participants);
     } else {
-      join.textContent = runtime.participationUnavailable ? 'Could not open participant room — retrying…' + (runtime.participationError ? ' (' + runtime.participationError + ')' : '') : 'Opening participant room…';
+      join.textContent = runtime.phase === 0 ? 'Ready — press Start to begin.' : runtime.localPreview ? 'Local preview — start presenting and reopen this activity to share it.' : runtime.participationUnavailable ? 'Could not open participant room — retrying…' + (runtime.participationError ? ' (' + runtime.participationError + ')' : '') : 'Opening participant room…';
     }
   }
   const content = document.createElement('div'); content.className = 'keynope-engagement-content';
   KeynopeActivityDesign.mount(content,runtime,{presenter:true});
-  if (!revealed && runtime.roomReady && runtime.qrCode) {
+  if (definition.kind === 'dots' && definition.importPrevious) {
+    const imported=document.createElement('p');
+    imported.textContent=runtime.phase===0?'Voting cards will be imported from the previous text-producing activity when you press Start.':(definition.options||[]).length+' voting cards imported'+(runtime.importedFrom?' from '+runtime.importedFrom:'')+'.';content.appendChild(imported);
+  }
+  if (!revealed && runtime.roomReady && hideQR) {
+    content.appendChild(activityJoinText(runtime));
+  } else if (!revealed && runtime.roomReady && runtime.qrCode) {
     const qr = document.createElement('pre');
     qr.className = 'keynope-engagement-qr';
     qr.setAttribute('aria-label','Activity QR code');
@@ -4582,11 +5288,11 @@ function renderEngagementRuntime() {
     else { const empty=document.createElement('p'); empty.textContent='Waiting for people to join…'; roster.appendChild(empty); }
     content.appendChild(roster);
   } else if (KeynopeGames.has(definition.kind)) {
-    KeynopeGames.render(content,runtime,{presenter:!runtime.readOnly,changed:()=>{renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(true);publishHostedEngagementState(false);runEngagementCountdown(runtime);}});
+    KeynopeGames.render(content,runtime,{presenter:!runtime.readOnly && runtime.phase > 0,changed:()=>{renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(true);publishHostedEngagementState(false);runEngagementCountdown(runtime);}});
   } else if (definition.kind === 'prerequisites') {
     KeynopeGames.renderPrerequisites(content,{...runtime,game:runtime.readOnly?runtime.game:prerequisitePublicState(runtime)},{presenter:true});
   } else if (definition.kind === 'questions') {
-    const instruction=document.createElement('p');instruction.textContent=runtime.phase===1?'Submit your questions. Lock closes submissions and opens a three-dot voting round.':'Voting is open: distribute three dots across the submitted questions. Reveal closes voting and shows the ranked questions.';content.appendChild(instruction);
+    const instruction=document.createElement('p');instruction.textContent=runtime.phase<=1?'Submit your questions. Lock closes submissions and opens a three-dot voting round.':'Voting is open: distribute three dots across the submitted questions. Reveal closes voting and shows the ranked questions.';content.appendChild(instruction);
     const tally=document.createElement('p');tally.textContent=(runtime.attributions||[]).length+' questions collected';content.appendChild(tally);
   } else if (definition.kind === 'dots' || definition.kind === 'finishpair') {
     const instruction=document.createElement('p');instruction.textContent=definition.kind==='dots'?'Participants distribute '+(definition.dotBudget||3)+' dots. Totals stay hidden until reveal.':'Participants press “I am finished!” when their task is complete. Groups appear when everyone finishes or you close the activity.';content.appendChild(instruction);
@@ -4634,17 +5340,57 @@ function renderEngagementRuntime() {
   const submittedCount = Number(runtime.participants) || respondentNames.length;
   const submitted = document.createElement('p');
   submitted.className = 'keynope-engagement-submitted';
-  const groupingActivity = definition.kind === 'onboarding' || definition.kind === 'pair' || definition.kind === 'cards' || definition.kind === 'impostor';
+  const groupingActivity = definition.kind === 'shuffle' || definition.kind === 'chosen' || definition.kind === 'onboarding' || definition.kind === 'pair' || definition.kind === 'cards' || definition.kind === 'impostor';
   submitted.textContent = revealed
     ? submittedCount + ' participant' + (submittedCount === 1 ? '' : 's')
     : submittedCount + (groupingActivity ? ' joined' : ' submitted');
   content.appendChild(submitted);
   const controls = document.createElement('footer'); controls.className = 'keynope-engagement-controls';
   const reset = engagementButton('Reset','reset',resetEngagementRuntime);
+  const resetControls = [reset];
+  if (!runtime.readOnly && engagementHasCompleted(runtime)) {
+    reset.classList.add('with-reopen');
+    resetControls.push(engagementButton('Reopen','reopen',reopenEngagementRuntime));
+  }
   const close = engagementButton('Close','',closeEngagementRuntime);
+  if (!runtime.readOnly && runtime.phase === 0) {
+    controls.append(...resetControls,close);
+    appendReadyActivityControls(controls,runtime);
+    board.append(head); if(join)board.append(join); board.append(content,controls);
+    keynopeEngagementOverlay.replaceChildren(board); return;
+  }
+  if (!runtime.readOnly && engagementIsRunning(runtime)) controls.append(engagementButton('Stop','',stopEngagementRuntime));
+  if(definition.kind==='shuffle'&&!runtime.readOnly){
+    const game=KeynopeGames.init(runtime);
+    const action=engagementButton(runtime.phase>=3?'Shuffle again':'Shuffle groups','primary',async()=>{
+      action.disabled=true;try{await shuffleEngagementGroups();}catch(error){showEngagementToast(error.message);}finally{action.disabled=false;}
+    });
+    action.disabled=!runtime.localPreview&&!runtime.roomReady;
+    controls.append(...resetControls,close,action);
+    if(game.originalGroups&&game.stage!=='reverted')controls.append(engagementButton('Revert to original groups','',async()=>{try{await shuffleEngagementGroups(true);}catch(error){showEngagementToast(error.message);}}));
+    board.append(head);if(join)board.append(join);board.append(content,controls);keynopeEngagementOverlay.replaceChildren(board);return;
+  }
+  if (!runtime.readOnly && runtime.completedReview) {
+    controls.append(...resetControls,close);
+    if(definition.kind==='truefalse'&&(definition.questions||[]).length>1){
+      controls.append(engagementButton('Previous question','',()=>{runtime.questionIndex=Math.max(0,runtime.questionIndex-1);renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(false);}));
+      controls.append(engagementButton('Next question','',()=>{runtime.questionIndex=Math.min(definition.questions.length-1,runtime.questionIndex+1);renderEngagementRuntime();publishEngagementRuntime();publishHostedEngagementState(false);}));
+    }
+    board.append(head,content,controls);keynopeEngagementOverlay.replaceChildren(board);return;
+  }
+  if (!runtime.readOnly && definition.kind === 'chosen') {
+    controls.append(...resetControls,close);
+    if(runtime.phase===1){
+      const draw=engagementButton('Draw now','primary',advanceEngagementRuntime);
+      draw.disabled=!Object.values(runtime.memberNames||{}).some(Boolean);controls.append(draw);
+      controls.append(engagementButton('+1 min','',()=>addEngagementMinute(runtime)));
+      if(runtime.deadlineMs||runtime.pausedRemainingMs)controls.append(engagementButton(runtime.pausedRemainingMs?'Resume timer':'Pause timer','',()=>toggleEngagementTimer(runtime)));
+    }
+    board.append(head);if(join)board.append(join);board.append(content,controls);keynopeEngagementOverlay.replaceChildren(board);return;
+  }
   if (!runtime.readOnly && definition.kind === 'ball') {
     const game=KeynopeGames.init(runtime);
-    controls.append(reset,close);
+    controls.append(...resetControls,close);
     if(game.stage==='join') {
       const lock=engagementButton('Lock & toss randomly','primary',advanceEngagementRuntime);
       lock.disabled=!game.volunteers.length;controls.append(lock);
@@ -4658,10 +5404,10 @@ function renderEngagementRuntime() {
     board.append(head);if(join)board.append(join);board.append(content,controls);keynopeEngagementOverlay.replaceChildren(board);return;
   }
   if (!runtime.readOnly && definition.kind === 'onboarding') {
-    controls.append(reset,close); board.append(head); if (join) board.append(join); board.append(content,controls); keynopeEngagementOverlay.replaceChildren(board); return;
+    controls.append(...resetControls,close); board.append(head); if (join) board.append(join); board.append(content,controls); keynopeEngagementOverlay.replaceChildren(board); return;
   }
   if (!runtime.readOnly && definition.kind === 'truefalse') {
-    controls.append(reset,close);
+    controls.append(...resetControls,close);
     if (runtime.questionRevealed) {
       const isLast = (Number(runtime.questionIndex) || 0) >= Math.max(0,(definition.questions || []).length - 1);
       controls.append(engagementButton(isLast ? 'Done' : 'Next','primary',advanceEngagementRuntime));
@@ -4669,7 +5415,7 @@ function renderEngagementRuntime() {
     board.append(head); if (join) board.append(join); board.append(content,controls); keynopeEngagementOverlay.replaceChildren(board); return;
   }
   if (!runtime.readOnly && definition.kind === 'pair') {
-    controls.append(reset,close);
+    controls.append(...resetControls,close);
     if (runtime.phase === 1) {
       controls.append(engagementButton('+1 min','',() => addEngagementMinute(runtime)));
       controls.append(engagementButton(runtime.pausedRemainingMs ? 'Resume timer' : 'Pause timer','',() => toggleEngagementTimer(runtime)));
@@ -4688,7 +5434,7 @@ function renderEngagementRuntime() {
     return;
   }
   if (!runtime.readOnly && definition.kind === 'cards') {
-    controls.append(reset,close);
+    controls.append(...resetControls,close);
     if (runtime.phase === 1) {
       controls.append(engagementButton('+1 min','',() => addEngagementMinute(runtime)));
       controls.append(engagementButton(runtime.pausedRemainingMs ? 'Resume timer' : 'Pause timer','',() => toggleEngagementTimer(runtime)));
@@ -4701,7 +5447,7 @@ function renderEngagementRuntime() {
     return;
   }
   if (!runtime.readOnly && definition.kind === 'impostor') {
-    controls.append(reset,close);
+    controls.append(...resetControls,close);
     if (runtime.phase === 1) {
       controls.append(engagementButton('+1 min','',() => addEngagementMinute(runtime)));
       controls.append(engagementButton(runtime.pausedRemainingMs ? 'Resume timer' : 'Pause timer','',() => toggleEngagementTimer(runtime)));
@@ -4714,11 +5460,11 @@ function renderEngagementRuntime() {
     return;
   }
   const grouping = definition.kind === 'pair' || definition.kind === 'cards';
-  const terminalPhase = runtime.phase >= keynopeEngagementPhases.length - 1 || ((definition.kind === 'draw' || definition.kind === 'introduction') && runtime.phase >= 3);
+  const terminalPhase = runtime.phase >= keynopeEngagementPhases.length - 1 || ((definition.kind === 'draw' || definition.kind === 'introduction' || definition.kind === 'deducer' || definition.kind === 'finalanswer') && runtime.phase >= 3);
   const nextPhase = grouping && runtime.phase === 1 ? 'REVEAL' : keynopeEngagementPhases[runtime.phase + 1];
-  const nextLabel = definition.kind==='prerequisites'&&runtime.phase===1?'Stop & reveal':terminalPhase ? 'Done' : 'Next: ' + nextPhase;
+  const nextLabel = (['prerequisites','deducer','finalanswer'].includes(definition.kind))&&runtime.phase===1?'Stop & reveal':terminalPhase ? 'Done' : 'Next: ' + nextPhase;
   const next = engagementButton(nextLabel,'primary',terminalPhase ? closeEngagementRuntime : advanceEngagementRuntime);
-	if (!runtime.readOnly) controls.append(reset,close,next);
+	if (!runtime.readOnly) controls.append(...resetControls,close,next);
   if (!runtime.readOnly && definition.timerSeconds > 0 && runtime.phase === 1) {
     controls.insertBefore(engagementButton('+1 min','',() => addEngagementMinute(runtime)),next);
     controls.insertBefore(engagementButton(runtime.pausedRemainingMs ? 'Resume timer' : 'Pause timer','',() => toggleEngagementTimer(runtime)),next);
@@ -4731,7 +5477,16 @@ function renderEngagementRuntime() {
 function openEngagementRuntime(showOverlay = true) {
   const definition = currentEngagementDefinition();
   if (!definition) return false;
-  if (keynopeEngagementRuntime && keynopeEngagementRuntime.slide === deck.pages[pageIndex].slide) {
+  if (keynopeRunningActivity?.definition.id === definition.id && keynopeEngagementRuntime !== keynopeRunningActivity) {
+    closeEngagementRuntime(false);
+    keynopeEngagementRuntime = keynopeRunningActivity;
+  }
+  if (keynopeEngagementRuntime?.definition.id === definition.id) {
+    keynopeEngagementRuntime.slide = deck.pages[pageIndex].slide;
+    if (keynopeEngagementRuntime.localPreview && engagementPresentationActive()) {
+      keynopeEngagementRuntime.localPreview = false;
+      startHostedEngagement();
+    }
     if (showOverlay && !keynopeEngagementOverlay) {
       keynopeEngagementOverlay = document.createElement('div');
       keynopeEngagementOverlay.className = 'keynope-engagement-overlay';
@@ -4742,26 +5497,43 @@ function openEngagementRuntime(showOverlay = true) {
     }
     return true;
   }
-  closeEngagementRuntime(true,false);
+  closeEngagementRuntime();
 	const session = engagementSessionFor(definition);
-	const runtimeDefinition = JSON.parse(JSON.stringify(definition));
+	let runtimeDefinition = JSON.parse(JSON.stringify(definition));
 	runtimeDefinition.code = session.code;
-	const savedRuntime = session.runtime && session.runtime.definition.kind === definition.kind ? session.runtime : null;
-	if (!savedRuntime && (runtimeDefinition.kind === 'pair' || runtimeDefinition.kind === 'cards' || runtimeDefinition.kind === 'impostor')) session.deadlineMs = Date.now() + (Number(runtimeDefinition.joinSeconds) || 120) * 1000;
-	else if (!savedRuntime && runtimeDefinition.timerSeconds > 0 && !session.deadlineMs) session.deadlineMs = Date.now() + runtimeDefinition.timerSeconds * 1000;
-	keynopeEngagementRuntime = {startedAt:Date.now(),stoppedAt:0,finishedAt:{},definition:runtimeDefinition,slide:deck.pages[pageIndex].slide,phase:1,counts:[],ideas:[],assignments:[],respondents:[],attributions:[],groups:[],entryResponses:[],questionVotes:{},questionIndex:0,questionRevealed:false,memberNames:{},cardAssignments:{},roleAssignments:{},pairAssignments:{},pairMessages:[],readOnly:false,sessionCode:session.code,sessionId:session.sessionId || definition.id,joinUrl:session.joinUrl,qrCode:session.qrCode || '',roomReady:false,deadlineMs:session.deadlineMs || 0,pausedRemainingMs:0,participants:0};
-	if (savedRuntime) keynopeEngagementRuntime = {...savedRuntime,definition:runtimeDefinition,slide:deck.pages[pageIndex].slide,
-    deadlineMs:savedRuntime.resumeTimerMs ? Date.now()+savedRuntime.resumeTimerMs : 0,resumeTimerMs:0};
+	let savedRuntime = session.runtime && session.runtime.definition.kind === definition.kind ? session.runtime : null;
+  const result = session.result === undefined ? window.keynopeActivityResult?.(definition.id) : session.result;
+  if (!savedRuntime && result?.version===1 && result.activityId===definition.id && result.kind===definition.kind) {
+    runtimeDefinition = {...(result.definition || runtimeDefinition),code:session.code};
+    savedRuntime = {...result.state,completedReview:true,readOnly:false,activityChannel:null,hostingConnection:false,
+      resumeTimerMs:0,deadlineMs:0,pausedRemainingMs:0,sessionCode:session.code,sessionId:session.sessionId,
+      joinUrl:session.joinUrl,qrCode:session.qrCode||'',roomReady:false};
+    // An archive always opens at the final answer, not the last review-page visited.
+    if(definition.kind==='truefalse'){savedRuntime.questionIndex=Math.max(0,(runtimeDefinition.questions||[]).length-1);savedRuntime.questionRevealed=true;}
+    session.result = result; session.resultSignature = JSON.stringify(result);
+  }
+	if (!savedRuntime) session.deadlineMs = 0;
+	keynopeEngagementRuntime = {startedAt:0,stoppedAt:0,finishedAt:{},definition:runtimeDefinition,slide:deck.pages[pageIndex].slide,phase:0,counts:[],ideas:[],assignments:[],respondents:[],attributions:[],groups:[],entryResponses:[],questionVotes:{},questionIndex:0,questionRevealed:false,memberNames:{},cardAssignments:{},roleAssignments:{},pairAssignments:{},pairMessages:[],readOnly:false,sessionCode:session.code,sessionId:session.sessionId || definition.id,joinUrl:session.joinUrl,qrCode:session.qrCode || '',roomReady:false,deadlineMs:0,pausedRemainingMs:0,participants:0};
+	if (savedRuntime) keynopeEngagementRuntime = Object.assign(savedRuntime,{definition:savedRuntime.completedReview && savedRuntime.definition ? savedRuntime.definition : runtimeDefinition,slide:deck.pages[pageIndex].slide});
+  if (!keynopeRunningActivity && engagementIsRunning(keynopeEngagementRuntime)) keynopeRunningActivity = keynopeEngagementRuntime;
+  // Decide at opening time, including when restoring a previously live result.
+  // Editing/reviewing must not connect to or replace the participants' activity.
+  keynopeEngagementRuntime.localPreview = !engagementPresentationActive();
+  keynopeEngagementRuntime.roomReady = false;
+  if(keynopeEngagementRuntime.completedReview && definition.kind==='truefalse') {
+    keynopeEngagementRuntime.questionIndex=Math.max(0,(keynopeEngagementRuntime.definition.questions||[]).length-1);
+    keynopeEngagementRuntime.questionRevealed=true;
+  }
 	if (showOverlay) {
 		keynopeEngagementOverlay = document.createElement('div');
 		keynopeEngagementOverlay.className = 'keynope-engagement-overlay';
 		keynopeEngagementOverlay.setAttribute('role','dialog'); keynopeEngagementOverlay.setAttribute('aria-modal','true');
 		document.body.appendChild(keynopeEngagementOverlay);
 	}
-	for (const button of document.querySelectorAll('[aria-label="Activities"]')) button.classList.add('active');
   renderActivityMarker();
   const runtime = keynopeEngagementRuntime;
   if (!savedRuntime) {
+    if(definition.kind==='pressure')runtime.pressurePage=deck.pages[pageIndex].page||0;
     runtime.counts = (definition.options || []).map(() => 0);
     runtime.assignments = (definition.cards || []).map(() => -1);
   }
@@ -4774,9 +5546,10 @@ function openEngagementRuntime(showOverlay = true) {
 }
 function syncEngagementRuntime(runtime) {
   if (keynopeEngagementControllerSurface) return;
-	if (!runtime) { if (keynopeEngagementRuntime) closeEngagementRuntime(false); return; }
+	if (!runtime) { if (keynopeEngagementRuntime) disposeEngagementRuntimes(); return; }
   keynopeEngagementRuntime = {
     definition:runtime.definition,
+    game:runtime.game ? JSON.parse(JSON.stringify(runtime.game)) : undefined,
     slide:Number(runtime.slide),
     phase:Number(runtime.phase) || 0,
     counts:Array.isArray(runtime.counts) ? runtime.counts.slice() : [],
@@ -4788,8 +5561,10 @@ function syncEngagementRuntime(runtime) {
     sessionCode:runtime.sessionCode || '',
     joinUrl:runtime.joinUrl || '',
     qrCode:runtime.qrCode || '',
+    hideActivityQR:!!runtime.hideActivityQR,
     roomReady:!!runtime.roomReady,
     deadlineMs:Number(runtime.deadlineMs) || 0,
+    pausedRemainingMs:Number(runtime.pausedRemainingMs) || 0,
     participants:Number(runtime.participants) || 0,
     questionIndex:Number(runtime.questionIndex) || 0,
     questionRevealed:!!runtime.questionRevealed,
@@ -4805,6 +5580,7 @@ function syncEngagementRuntime(runtime) {
   runEngagementCountdown(keynopeEngagementRuntime);
 }
 	document.addEventListener('keydown',event => {
+	if(event.target?.closest?.('.keynope-engagement-blocker'))return;
 	if (keynopeOnboardingResetBlocker) {
 		event.stopImmediatePropagation();
 		if (event.key === 'Escape') {
@@ -5321,19 +6097,7 @@ function drawCanvasPageLabel(page) {
   presenterContext.fillStyle = '#ffffff';
   presenterContext.fillText(text, Math.max(0, (deck.cols - [...text].length) * canvasCharWidth), Math.max(0, (deck.rows - 1) * canvasCell));
 }
-const timerFontGlyphs = {
-  '0': ['  ████  ', ' ██  ██ ', ' ██ ███ ', ' ██████ ', ' ███ ██ ', ' ██  ██ ', '  ████  ', '        '],
-  '1': ['   ██   ', '  ███   ', '   ██   ', '   ██   ', '   ██   ', '   ██   ', ' ██████ ', '        '],
-  '2': ['  ████  ', ' ██  ██ ', '     ██ ', '   ███  ', '  ██    ', ' ██  ██ ', ' ██████ ', '        '],
-  '3': ['  ████  ', ' ██  ██ ', '     ██ ', '   ███  ', '     ██ ', ' ██  ██ ', '  ████  ', '        '],
-  '4': ['    ███ ', '   ████ ', '  ██ ██ ', ' ██  ██ ', ' ███████', '     ██ ', '     ██ ', '        '],
-  '5': [' ██████ ', ' ██     ', ' █████  ', '     ██ ', '     ██ ', ' ██  ██ ', '  ████  ', '        '],
-  '6': ['   ███  ', '  ██    ', ' ██     ', ' █████  ', ' ██  ██ ', ' ██  ██ ', '  ████  ', '        '],
-  '7': [' ██████ ', ' ██  ██ ', '     ██ ', '    ██  ', '   ██   ', '   ██   ', '   ██   ', '        '],
-  '8': ['  ████  ', ' ██  ██ ', ' ██  ██ ', '  ████  ', ' ██  ██ ', ' ██  ██ ', '  ████  ', '        '],
-  '9': ['  ████  ', ' ██  ██ ', ' ██  ██ ', '  █████ ', '     ██ ', '    ██  ', '  ███   ', '        '],
-  ':': ['        ', '        ', '   ██   ', '        ', '        ', '   ██   ', '        ', '        ']
-};
+const timerFontGlyphs = KeynopeGames.timerGlyphs;
 function presenterTimerText() {
   if (!presenterTimerMode) return {text: '', done: false};
   if (presenterTimerMode === 'config') {
@@ -5853,7 +6617,7 @@ function drawCanvasLinkUnderlines(lines) {
 }
 function render() {
   const page = deck.pages[pageIndex];
-	if (keynopeEngagementRuntime && keynopeEngagementRuntime.slide !== page.slide) closeEngagementRuntime();
+	if (keynopeEngagementOverlay && keynopeEngagementRuntime && keynopeEngagementRuntime.definition.id !== page.engagement?.id) closeEngagementRuntime();
   stage.style.background = page.bg;
   effectLayer.style.color = page.fg;
   contentLayer.style.color = page.fg;
@@ -6355,7 +7119,6 @@ let getEditorConnectorPreview = () => [];
 function drawFrame() {
   const page = presenterPageAt(pageIndex);
   if (!page) return;
-  if (!keynopeAppSurface && page.tabOnly) { drawPresenterSnow(); return; }
   if (window.KEYNOPE_PRESENTER && !presenterPresenting && !presenterMainSurface && !keynopeAppSurface) {
     drawPresenterSnow();
     return;
@@ -6408,7 +7171,6 @@ function drawPresenterPage(page, frameValue, contentLines, hideChrome = false) {
 function drawPresenterPageFallback() {
   const page = presenterPageAt(pageIndex);
   if (!page) return;
-  if (!keynopeAppSurface && page.tabOnly) { drawPresenterSnow(); return; }
   presenterCanvas.style.display = 'block';
   effectLayer.style.display = 'none';
   contentLayer.style.display = 'none';
@@ -6927,13 +7689,16 @@ if (keynopeAppSurface) {
   let nativeEditorFontLibrary = null;
   let lastPublishedEditorDirty = null;
   let lastPublishedEditorTabsAvailable = null;
+  let lastPublishedEditorQRVisible = null;
   function publishEditorDirtyState() {
     const tabsAvailable = !!editorState?.hasActivities && !editorState?.masterMode;
-    if (tabsAvailable !== lastPublishedEditorTabsAvailable) {
+    const qrVisible = !editorState?.hideActivityQR;
+    if (tabsAvailable !== lastPublishedEditorTabsAvailable || qrVisible !== lastPublishedEditorQRVisible) {
       lastPublishedEditorTabsAvailable = tabsAvailable;
-      window.webkit?.messageHandlers?.keynopePresenter?.postMessage({action:'editor-tabs-availability',available:tabsAvailable});
+      lastPublishedEditorQRVisible = qrVisible;
+      window.webkit?.messageHandlers?.keynopePresenter?.postMessage({action:'editor-tabs-availability',available:tabsAvailable,activityQRVisible:qrVisible});
     }
-    const dirty = !!(editorState && editorState.dirty) || !!activeInlineEditor?.isDirty();
+    const dirty = !!(editorState && editorState.dirty) || !!activeInlineEditor?.isDirty() || window.keynopeHasPendingActivityResults();
     saveButton.disabled = !dirty;
     if (dirty === lastPublishedEditorDirty && !window.KEYNOPE_WEB_EDITOR) return;
     lastPublishedEditorDirty = dirty;
@@ -6963,6 +7728,10 @@ if (keynopeAppSurface) {
     editorState = await response.json();
     keynopeEditorMasterMode = !!editorState.masterMode;
     editorStateVersion = editorState.version;
+    if (action.action === 'set-engagement-result') {
+      publishEditorDirtyState();
+      return;
+    }
     if (action.action === 'start-timer' || action.action === 'stop-timer') {
       presenterTimerMode = editorState.timerMode || '';
       presenterTimerInput = '';
@@ -6979,6 +7748,9 @@ if (keynopeAppSurface) {
   function editorAction(action) {
     return queueEditorOperation(() => performEditorAction(action));
   }
+  window.keynopeActivityResult = id => editorState?.slides?.find(slide=>slide.engagement?.id===id)?.engagementResult;
+  window.keynopeStoreActivityResult = (id,result) => editorAction({action:'set-engagement-result',name:id,engagementResult:result});
+  window.keynopeActivityResultsChanged = publishEditorDirtyState;
   function editorElementIndexByID(id, fallback = -1) {
     const slide = editorState && editorState.slides && editorState.slides[editorState.current];
     const elements = slide ? (slide.elements || []) : [];
@@ -7246,6 +8018,126 @@ if (keynopeAppSurface) {
     activeEngagementEditor.remove();
     activeEngagementEditor = null;
   }
+  async function openTrainingParticipants(code,sessionId) {
+    const blocker=document.createElement('div');blocker.className='keynope-modal-blocker';blocker.style.zIndex='2147483647';
+    const dialog=document.createElement('section');dialog.className='keynope-engagement-dialog';dialog.setAttribute('role','dialog');dialog.setAttribute('aria-modal','true');dialog.setAttribute('aria-label','Training participants');
+    const heading=document.createElement('h2');heading.textContent='Participants';
+    const status=document.createElement('p');status.setAttribute('role','status');status.textContent=code?'Loading participants…':'Start an activity to open the participant room.';
+    const list=document.createElement('div');list.style.cssText='max-height:55vh;overflow-y:auto;display:grid;gap:8px';
+    const close=document.createElement('button');close.textContent='Close';close.type='button';
+    let connection=null,closed=false;
+    const dismiss=()=>{closed=true;blocker.remove();connection?.close().catch(()=>{});};
+    close.onclick=dismiss;
+    blocker.addEventListener('keydown',event=>{event.stopPropagation();if(event.key==='Escape'){event.preventDefault();dismiss();}});
+    const actions=document.createElement('div');actions.className='keynope-engagement-actions';actions.append(close);
+    dialog.append(heading,status,list,actions);blocker.append(dialog);document.body.append(blocker);close.focus();
+    if(!code)return;
+    try{
+      const connect=await keynopeActivityConnector();
+      connection=await connect({code,sessionId,presenter:true,displayName:'Presenter',onDepartures:items=>removeTrainingParticipants(code,items),onError:error=>{if(!closed)status.textContent=error.message;},onRoster:members=>{
+        if(closed)return;
+        const people=[...new Map(members.map(member=>[member.identity,member])).values()].sort((a,b)=>a.displayName.localeCompare(b.displayName));
+        status.textContent=people.length+' participant'+(people.length===1?'':'s');list.replaceChildren();
+        for(const person of people){
+          const row=document.createElement('div');row.className='keynope-engagement-actions';row.style.cssText='display:flex;align-items:center;gap:12px;margin:0';
+          const name=document.createElement('span');name.textContent=person.displayName;name.style.cssText='flex:1;min-width:0;overflow-wrap:anywhere';
+          const remove=document.createElement('button');remove.type='button';remove.textContent='Remove';remove.setAttribute('aria-label','Remove '+person.displayName);
+          remove.onclick=()=>{
+            const question=document.createElement('span');question.textContent='Remove '+person.displayName+' from training?';
+            const cancel=document.createElement('button');cancel.textContent='Cancel';
+            const confirm=document.createElement('button');confirm.textContent='Confirm';
+            cancel.onclick=()=>row.replaceChildren(name,remove);
+            confirm.onclick=async()=>{confirm.disabled=true;cancel.disabled=true;try{if(!connection)throw Error('Still connecting. Please retry.');await connection.removeParticipant(person.identity);row.remove();}catch(error){status.textContent=error.message;row.replaceChildren(name,remove);}};
+            row.replaceChildren(question,cancel,confirm);cancel.focus();
+          };
+          row.append(name,remove);list.append(row);
+        }
+      }});
+      if(closed)connection.close().catch(()=>{});
+    }catch(error){if(!closed)status.textContent=error.message;}
+  }
+  async function openTrainingGroups(code,sessionId){
+    const blocker=document.createElement('div');blocker.className='keynope-modal-blocker keynope-engagement-blocker';blocker.style.zIndex='2147483647';
+    const dialog=document.createElement('section');dialog.className='keynope-engagement-dialog activity-chooser keynope-group-editor';dialog.setAttribute('role','dialog');dialog.setAttribute('aria-modal','true');dialog.setAttribute('aria-label','Group editor');
+    const title=document.createElement('h2');title.textContent='Groups';
+    const help=document.createElement('p');help.textContent='Create groups and move people using the selector beside each name. Unassigned people stay in the lobby. Apply replaces the old group chats with fresh Pairing channels.';
+    const status=document.createElement('p');status.setAttribute('role','status');status.textContent=code?'Loading participants and groups…':'Start an activity or add Onboarding to create a participant room first.';
+    const list=document.createElement('div');list.style.cssText='max-height:50vh;overflow:auto;display:grid;gap:12px;padding:3px';
+    let connection=null,closed=false,dirty=false,busy=false,people=[],groups=[],baseEpoch='',initial=true;
+    const names=()=>Object.fromEntries(people.map(p=>[p.identity,p.displayName]));
+    const apply=document.createElement('button');apply.type='button';apply.className='primary';apply.textContent='Apply groups';apply.disabled=true;
+    const close=document.createElement('button');close.type='button';close.textContent='Cancel';
+    const dismiss=()=>{if(busy)return;closed=true;blocker.remove();connection?.close().catch(()=>{});};close.onclick=dismiss;
+    const add=document.createElement('button');add.type='button';add.textContent='Add group';add.disabled=!code;
+    const reload=document.createElement('button');reload.type='button';reload.textContent='Reload groups';
+    const mark=()=>{dirty=true;apply.disabled=!connection||busy;status.textContent='Changes not applied yet.';};
+    function renderGroups(){
+      list.replaceChildren();
+      const known=new Set(people.map(p=>p.identity));groups=KeynopeGroups.normalize(groups,known);
+      const assigned=new Set(groups.flatMap(g=>g.members));
+      const sections=[{id:null,label:'Unassigned',members:people.filter(p=>!assigned.has(p.identity)).map(p=>p.identity)},...groups];
+      for(const group of sections){
+        const section=document.createElement('section');section.style.cssText='padding:14px;background:#17212a;border:1px solid #526779;border-radius:8px';
+        const head=document.createElement('div');head.style.cssText='display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:10px';
+        if(group.id===null){const heading=document.createElement('h3');heading.textContent='Unassigned';head.append(heading);}
+        else{
+          const label=document.createElement('input');label.value=group.label;label.maxLength=80;label.setAttribute('aria-label','Group name');label.style.cssText='flex:1 1 180px;min-width:0;width:100%';
+          label.oninput=()=>{group.label=label.value.trim()||'Group';mark();};label.onchange=renderGroups;
+          const remove=engagementButton('Remove group','',()=>{
+            const perform=()=>{groups=groups.filter(g=>g!==group);mark();renderGroups();};
+            const runtime=keynopeEngagementRuntime,game=['deducer','finalanswer'].includes(runtime?.definition.kind)&&runtime.sessionCode===code?runtime.game:null;
+            const index=game?.groups.findIndex((g,i)=>(g.id||'deducer-'+i)===group.id);
+            if(index>=0&&game.entries.some(entry=>entry.item===index))head.replaceChildren(document.createTextNode('This group’s deductions will also be removed when applied.'),engagementButton('Keep group','',renderGroups),engagementButton('Remove group and deductions','',perform));
+            else perform();
+          });head.append(label,remove);
+        }
+        const count=document.createElement('span');count.textContent=group.members.length+' members';head.append(count);section.append(head);
+        if(!group.members.length){const empty=document.createElement('p');empty.textContent=group.id===null?'Everyone has a group.':'Move participants here using their group selector.';section.append(empty);}
+        const lookup=names();
+        for(const id of group.members){
+          const row=document.createElement('label');row.style.cssText='display:flex;align-items:center;gap:12px;margin:6px 0';
+          const name=document.createElement('span');name.textContent=lookup[id]||'Participant';name.style.cssText='flex:1;min-width:0;overflow-wrap:anywhere';
+          const select=document.createElement('select');select.style.cssText='width:45%;min-width:100px;max-width:230px';select.setAttribute('aria-label','Group for '+(lookup[id]||'Participant'));
+          for(const option of [{id:'',label:'Unassigned'},...groups]){const item=document.createElement('option');item.value=option.id;item.textContent=option.label;select.append(item);}select.value=group.id||'';
+          select.onchange=()=>{for(const g of groups)g.members=g.members.filter(member=>member!==id);groups.find(g=>g.id===select.value)?.members.push(id);mark();renderGroups();};row.append(name,select);section.append(row);
+        }
+        list.append(section);
+      }
+    }
+    function loadGroups(){
+      const current=keynopePairingRoom?.sessionCode===code?keynopePairingRoom:null;
+      baseEpoch=current?.epoch||'';groups=KeynopeGroups.fromRoom(current);dirty=false;initial=false;renderGroups();apply.disabled=true;
+    }
+    reload.onclick=()=>{loadGroups();status.textContent='Groups reloaded.';};
+    add.onclick=()=>{groups.push({id:'manual-'+randomActivityCode(),label:'Group '+(groups.length+1),members:[]});mark();renderGroups();list.lastElementChild?.scrollIntoView({block:'nearest'});list.lastElementChild?.querySelector('input')?.focus();};
+    apply.onclick=async()=>{
+      if(!connection||busy)return;
+      const currentEpoch=keynopePairingRoom?.sessionCode===code?keynopePairingRoom.epoch:'';
+      if(currentEpoch!==baseEpoch){status.textContent='Groups changed while you were editing. Reload groups before applying.';return;}
+      busy=true;apply.disabled=true;close.disabled=true;add.disabled=true;reload.disabled=true;status.textContent='Updating group channels…';
+      try{
+        const runtime=keynopeEngagementRuntime;
+        if(runtime?.sessionCode===code&&runtime.definition.kind==='deducer'&&!runtime.localPreview)KeynopeGames.init(runtime).manualGroups=true;
+        await setPairingGroups(code,KeynopeGroups.normalize(groups,new Set(people.map(p=>p.identity))),names(),connection);
+        baseEpoch=keynopePairingRoom.epoch;
+        if(runtime?.sessionCode===code&&!runtime.localPreview){renderEngagementRuntime();publishEngagementRuntime();await publishHostedEngagementState(false);}
+        busy=false;dismiss();showEngagementToast('Groups updated. New Pairing channels are ready.');
+      }catch(error){baseEpoch=keynopePairingRoom?.sessionCode===code?keynopePairingRoom.epoch:'';status.textContent='Could not update groups: '+error.message+'. Apply again to retry.';}
+      finally{busy=false;apply.disabled=false;close.disabled=false;add.disabled=false;reload.disabled=false;}
+    };
+    blocker.addEventListener('keydown',event=>{event.stopPropagation();if(event.key==='Escape'){event.preventDefault();dismiss();}});
+    const actions=document.createElement('div');actions.className='keynope-engagement-actions';actions.append(add,reload,close,apply);
+    dialog.append(title,help,status,list,actions);blocker.append(dialog);document.body.append(blocker);close.focus();
+    if(!code)return;
+    try{
+      const connect=await keynopeActivityConnector();
+      connection=await connect({code,sessionId,presenter:true,displayName:'Presenter',onError:error=>{if(!closed)status.textContent=error.message;},onDepartures:members=>removeTrainingParticipants(code,members),
+        onEvent:event=>{receivePairingRoom(event,code);if(!closed&&!dirty&&!initial)loadGroups();},
+        onRoster:members=>{if(closed)return;people=[...new Map(members.map(p=>[p.identity,p])).values()].sort((a,b)=>a.displayName.localeCompare(b.displayName));if(initial)loadGroups();else renderGroups();if(!dirty)status.textContent=people.length+' participants · '+groups.length+' groups';}
+      });
+      if(closed){connection.close().catch(()=>{});return;}apply.disabled=!dirty;
+    }catch(error){if(!closed)status.textContent=error.message;}
+  }
   function openEngagementEditor() {
     if (!editorState || editorState.masterMode) return;
     closeEngagementEditor();
@@ -7256,23 +8148,39 @@ if (keynopeAppSurface) {
     const blocker = document.createElement('div');
     blocker.className = 'keynope-modal-blocker keynope-engagement-blocker';
     const dialog = document.createElement('section');
-    dialog.className = 'keynope-engagement-dialog';
+    dialog.className = 'keynope-engagement-dialog activity-chooser';
     dialog.setAttribute('role','dialog');
     dialog.setAttribute('aria-modal','true');
-    dialog.innerHTML = '<h2>Activity</h2>';
+    dialog.innerHTML = '<h2 id="keynope-activity-title">Activity</h2>';
+    dialog.setAttribute('aria-labelledby','keynope-activity-title');
+    const categories=document.createElement('div');categories.className='keynope-activity-categories';categories.setAttribute('role','tablist');categories.setAttribute('aria-label','Activity categories');
     const kinds = document.createElement('div');
     kinds.className = 'keynope-engagement-kind';
+    kinds.id='keynope-activity-choices';kinds.setAttribute('role','tabpanel');
+    const configure=document.createElement('h3');configure.className='keynope-activity-configure';
     const form = document.createElement('div');
     const actions = document.createElement('div');
     actions.className = 'keynope-engagement-actions';
     const remove = document.createElement('button');
     remove.type = 'button'; remove.className = 'danger'; remove.textContent = 'Remove';
     remove.hidden = !original;
+    const participants = document.createElement('button');
+    participants.type='button';participants.textContent='Participants';
+    participants.addEventListener('click',()=>{
+      const owner=onboardingSessionDefinition();
+      const session=original&&keynopeEngagementSessions.get(owner?'session-'+owner.id+'-activity-'+original.id:original.id);
+      openTrainingParticipants(owner?.code||session?.code||keynopeEngagementRuntime?.sessionCode,owner?.id||session?.sessionId);
+    });
+    const groups=engagementButton('Groups','',()=>{
+      const owner=onboardingSessionDefinition();
+      const session=original&&keynopeEngagementSessions.get(owner?'session-'+owner.id+'-activity-'+original.id:original.id);
+      openTrainingGroups(owner?.code||session?.code||keynopeEngagementRuntime?.sessionCode,owner?.id||session?.sessionId);
+    });
     const cancel = document.createElement('button');
     cancel.type = 'button'; cancel.textContent = 'Cancel';
     const save = document.createElement('button');
     save.type = 'button'; save.textContent = 'Save activity';
-    let dotBudgetInput, stackDotsInput, prerequisiteInputs=[];
+    let dotBudgetInput, stackDotsInput, importPreviousInput, chosenCountInput, maxEntriesInput, prerequisiteGroupingInput, prerequisiteInputs=[];
     let promptInput, optionsInput, zonesInput, cardsInput, questionsInput, correctInput, groupSizeInput, groupCountInput, impostorCountInput, anonymousInput, timerEnabledInput, timerMinutesInput, timerSecondsInput, joinMinutesInput, joinSecondsInput, discussionMinutesInput, discussionSecondsInput;
     const renderForm = () => {
       form.replaceChildren();
@@ -7286,13 +8194,44 @@ if (keynopeAppSurface) {
       promptLabel.appendChild(promptInput);
       form.appendChild(promptLabel);
       if (kind==='prerequisites') {
-        const help=document.createElement('p');help.textContent='List each prerequisite and its instructions. Participants check items off, then confirm I AM FINISHED. Stop, timeout or everyone finishing reveals balanced pairs: fastest with slowest; unfinished people are appended in random order. Named mode shows finishers and a timed ranking; Anonymous hides those. The participant checklist does not disclose pairing in advance.';form.appendChild(help);
+        const groupingLabel=document.createElement('label');groupingLabel.className='keynope-engagement-anonymous';
+        prerequisiteGroupingInput=document.createElement('input');prerequisiteGroupingInput.type='checkbox';prerequisiteGroupingInput.checked=!(original&&original.kind===kind&&original.disableGrouping);
+        groupingLabel.append(prerequisiteGroupingInput,document.createTextNode('Group participants when finished'));form.appendChild(groupingLabel);
+        const help=document.createElement('p');
+        const updateGroupingHelp=()=>{help.textContent='Participants check off prerequisites, then press I AM FINISHED. '+(prerequisiteGroupingInput.checked?'Stopping, timeout or everyone finishing creates balanced pairs from completion order. Non-anonymous mode also shows a timed ranking. Pairing is not disclosed to participants in advance.':'Stopping, timeout or everyone finishing shows finished/not-finished counts. Non-anonymous mode also lists names. No groups or new pairing channel are created.');};
+        prerequisiteGroupingInput.addEventListener('change',updateGroupingHelp);updateGroupingHelp();form.appendChild(help);
         prerequisiteInputs=[];
         const list=document.createElement('div');form.appendChild(list);
         const addItem=(item={title:'',instructions:''})=>{if(prerequisiteInputs.length>=40)return;const row=document.createElement('section');const titleLabel=document.createElement('label');titleLabel.textContent='Prerequisite';const title=document.createElement('input');title.maxLength=160;title.value=item.title;titleLabel.appendChild(title);const instructionsLabel=document.createElement('label');instructionsLabel.textContent='Instructions';const instructions=document.createElement('textarea');instructions.maxLength=4000;instructions.value=item.instructions;instructionsLabel.appendChild(instructions);const fields={title,instructions};const remove=engagementButton('Remove item','',()=>{prerequisiteInputs=prerequisiteInputs.filter(value=>value!==fields);row.remove();});row.append(titleLabel,instructionsLabel,remove);list.appendChild(row);prerequisiteInputs.push(fields);};
         (original&&original.kind===kind?original.prerequisites||[]:[{title:'Item 1',instructions:''}]).forEach(addItem);
         form.appendChild(engagementButton('Add prerequisite','',()=>addItem()));
       } else if (KeynopeGames.has(kind)) {
+        if(kind==='nominate'){
+          const help=document.createElement('p');help.textContent='Each participant votes for one other participant or skips. They may change their vote until voting closes. Reveal shows totals per nominee and skips. Anonymous hides voter names; turn it off to show who voted for whom. This does not reveal Impostor roles or change groups.';
+          form.append(help);promptInput.placeholder='Who would you like to nominate?';
+        }
+        if(kind==='shuffle'){
+          const help=document.createElement('p');help.textContent='Shuffle the existing groups without changing their sizes. Reveal shows every group and opens fresh Pairing channels. Revert restores the original grouping. Create or edit groups with the Groups button below.';form.append(help);promptInput.placeholder='Meet your new group';
+        }
+        if(kind==='finalanswer'){
+          const help=document.createElement('p');help.textContent='Use the existing groups and Pairing channels. Each group submits one shared answer, which any teammate can remove and replace while the activity is open. Create groups first with the Groups button or a grouping activity. The timer runs for 1–10 minutes.';
+          form.append(help);promptInput.placeholder='What is your group’s final answer?';
+        }
+        if(kind==='deducer'){
+          const groups=document.createElement('label');groups.textContent='Number of groups';
+          groupCountInput=document.createElement('input');groupCountInput.type='number';groupCountInput.min='1';groupCountInput.max='10';groupCountInput.step='1';groupCountInput.value=String(original&&original.kind===kind&&original.groupCount||4);groups.appendChild(groupCountInput);
+          const entries=document.createElement('label');entries.textContent='Maximum entries per group';
+          maxEntriesInput=document.createElement('input');maxEntriesInput.type='number';maxEntriesInput.min='1';maxEntriesInput.max='100';maxEntriesInput.step='1';maxEntriesInput.value=String(original&&original.kind===kind&&original.maxEntries||5);entries.appendChild(maxEntriesInput);
+          const help=document.createElement('p');help.textContent='Participants are randomly assigned to balanced groups. Each group builds one shared list: everyone in it can add, remove and reorder entries. The timer runs for 1–10 minutes. Stop or timeout reveals all groups’ deductions.';
+          form.append(groups,entries,help);promptInput.placeholder='What can you deduce from this scenario?';
+        }
+        if(kind==='pressure'){const help=document.createElement('p');help.textContent='The slide stays visible with a semi-transparent countdown. Participants see it in Activities. Pause, add time, stop or reset from the presenter controls.';form.appendChild(help);promptInput.placeholder='Work against the clock';}
+        if(kind==='chosen'){
+          const label=document.createElement('label');label.textContent='Number of people to choose';
+          chosenCountInput=document.createElement('input');chosenCountInput.type='number';chosenCountInput.min='1';chosenCountInput.max='1000';chosenCountInput.step='1';chosenCountInput.value=String(original&&original.kind===kind&&original.chosenCount||1);label.appendChild(chosenCountInput);form.appendChild(label);
+          const help=document.createElement('p');help.textContent='Randomly draw this many people from everyone who joins, without duplicates. Names are revealed to everyone. If fewer people join, everyone available is selected. Reset allows a fresh draw.';form.appendChild(help);
+          promptInput.placeholder='Who will be chosen?';
+        }
         const label=document.createElement('label');label.textContent=kind==='hunt'?'Possible findings — one per line; prefix each expected answer with *':kind==='gallery'?'Exhibits to review — one per line':kind==='teach'?'Topics — one per line':kind==='three'?'Presenter explanation (shown on reveal)':'Items / agreements — one per line';
         optionsInput=document.createElement('textarea');optionsInput.value=original&&original.kind===kind?(original.options||[]).join('\n'):'';label.appendChild(optionsInput);
         if(['gallery','hunt','teach','agreements','three'].includes(kind))form.appendChild(label);
@@ -7306,6 +8245,10 @@ if (keynopeAppSurface) {
         if(kind==='three'){const help=document.createElement('p');help.textContent='Ask the group a question in Prompt. Three different participants each submit one answer before you give your explanation. Answers appear live; collection closes automatically after the third person responds. Use Reveal to show your explanation and compare the ideas together.';form.appendChild(help);promptInput.placeholder='How would you approach this problem?';}
       } else if (kind === 'dots') {
         const label=document.createElement('label');label.textContent='Options — one per line';optionsInput=document.createElement('textarea');optionsInput.value=original&&original.kind===kind?(original.options||[]).join('\n'):'First idea\nSecond idea\nThird idea';label.appendChild(optionsInput);form.appendChild(label);
+        const automatic=document.createElement('label');importPreviousInput=document.createElement('input');importPreviousInput.type='checkbox';importPreviousInput.checked=!!(original&&original.kind===kind&&original.importPrevious);
+        automatic.append(importPreviousInput,document.createTextNode('Import automatically from previous activity'));form.insertBefore(automatic,label);
+        const help=document.createElement('p');help.className='keynope-engagement-help';help.textContent='On Start, import submitted text from the nearest preceding text-producing activity in slide order. Timers, grouping and other non-text activities are skipped. Identical entries become one voting card.';form.appendChild(help);
+        const updateImport=()=>{label.hidden=importPreviousInput.checked;help.hidden=!importPreviousInput.checked;};importPreviousInput.addEventListener('change',updateImport);updateImport();
         const budget=document.createElement('label');budget.textContent='Dots per participant';dotBudgetInput=document.createElement('input');dotBudgetInput.type='number';dotBudgetInput.min='1';dotBudgetInput.max='20';dotBudgetInput.value=original&&original.dotBudget||3;budget.appendChild(dotBudgetInput);form.appendChild(budget);
         const stacking=document.createElement('label');stackDotsInput=document.createElement('input');stackDotsInput.type='checkbox';stackDotsInput.checked=!!(original&&original.stackDots);stacking.append(stackDotsInput,document.createTextNode('Allow multiple dots per option'));form.appendChild(stacking);
       } else if (kind === 'pulse') {
@@ -7370,13 +8313,17 @@ if (keynopeAppSurface) {
       }
       const anonymousLabel = document.createElement('label');
       anonymousLabel.className = 'keynope-engagement-anonymous';
-      if(['dots','gallery','agreements'].includes(kind)&&keynopeRecentActivityItems.length)form.appendChild(engagementButton('Import ideas from last activity','',()=>{optionsInput.value=keynopeRecentActivityItems.join('\n');}));
+      if(['dots','gallery','agreements'].includes(kind)&&keynopeRecentActivityItems.length){
+        const importIdeas=engagementButton('Import ideas from last activity','',()=>{optionsInput.value=keynopeRecentActivityItems.join('\n');});
+        if(kind==='dots'){importIdeas.hidden=importPreviousInput.checked;importPreviousInput.addEventListener('change',()=>{importIdeas.hidden=importPreviousInput.checked;});}
+        form.appendChild(importIdeas);
+      }
       anonymousInput = document.createElement('input'); anonymousInput.type = 'checkbox'; anonymousInput.checked = kind === 'impostor' ? true : kind === 'onboarding' || kind === 'cards' || kind === 'pair' || kind === 'draw' || kind === 'introduction' ? false : anonymous; anonymousInput.disabled = kind === 'onboarding' || kind === 'cards' || kind === 'pair' || kind === 'draw' || kind === 'introduction' || kind === 'impostor';
       anonymousInput.addEventListener('change',() => { anonymous = anonymousInput.checked; });
       if(kind==='prerequisites')anonymousInput.checked=original&&original.kind===kind?!original.named:false;
       const anonymousText = document.createElement('span'); anonymousText.textContent = kind === 'cards' ? 'Names shown on reveal' : kind === 'pair' ? 'Names used for pairing' : kind === 'draw' ? 'Names shown with drawings' : kind === 'introduction' ? 'Names shown with introductions' : 'Anonymous';
       anonymousLabel.append(anonymousInput,anonymousText);
-      if (kind !== 'ball' && kind !== 'teach' && kind !== 'finishpair' && kind !== 'onboarding' && kind !== 'cards' && kind !== 'pair' && kind !== 'impostor') form.appendChild(anonymousLabel);
+      if (kind !== 'shuffle' && kind !== 'deducer' && kind !== 'finalanswer' && kind !== 'pressure' && kind !== 'chosen' && kind !== 'ball' && kind !== 'teach' && kind !== 'finishpair' && kind !== 'onboarding' && kind !== 'cards' && kind !== 'pair' && kind !== 'impostor') form.appendChild(anonymousLabel);
       if (kind === 'pair' || kind === 'cards' || kind === 'impostor') {
         const pairDuration = (labelText,totalSeconds,prefix) => {
           const label = document.createElement('label'); label.className = 'keynope-engagement-timer';
@@ -7391,17 +8338,19 @@ if (keynopeAppSurface) {
         const timerName = kind === 'pair' ? 'Pair Share' : kind === 'cards' ? 'Playing Cards' : 'Impostor';
         [joinMinutesInput,joinSecondsInput] = pairDuration('Join allowance',Number(original && original.joinSeconds) || 120,timerName + ' join time');
         if (kind === 'pair') [discussionMinutesInput,discussionSecondsInput] = pairDuration('Discussion time',Number(original && original.discussionSeconds) || 300,'Pair Share discussion time');
-      } else if (kind !== 'onboarding') {
+      } else if (kind !== 'onboarding' && kind !== 'shuffle') {
         const timerLabel = document.createElement('label');
         timerLabel.className = 'keynope-engagement-timer';
         timerEnabledInput = document.createElement('input');
         timerEnabledInput.type = 'checkbox';
-        timerEnabledInput.checked = !!(original && original.timerSeconds > 0);
+        timerEnabledInput.checked = kind==='deducer' || kind==='finalanswer' || kind==='pressure' || !!(original && original.timerSeconds > 0);
+        if(kind==='pressure'||kind==='deducer'||kind==='finalanswer'){timerEnabledInput.hidden=true;timerEnabledInput.disabled=true;}
         const timerText = document.createElement('span'); timerText.textContent = 'Timer';
         const timerFields = document.createElement('span'); timerFields.className = 'keynope-engagement-time-fields';
-        const originalSeconds = Number(original && original.timerSeconds) || 60;
+        const originalSeconds = Number(original && original.kind===kind && original.timerSeconds) || (kind==='pressure'||kind==='deducer'||kind==='finalanswer'?300:60);
         timerMinutesInput = document.createElement('input'); timerMinutesInput.type = 'number'; timerMinutesInput.min = '0'; timerMinutesInput.max = '99'; timerMinutesInput.value = String(Math.floor(originalSeconds / 60)).padStart(2,'0'); timerMinutesInput.setAttribute('aria-label','Activity timer minutes');
         timerSecondsInput = document.createElement('input'); timerSecondsInput.type = 'number'; timerSecondsInput.min = '0'; timerSecondsInput.max = '59'; timerSecondsInput.value = String(originalSeconds % 60).padStart(2,'0'); timerSecondsInput.setAttribute('aria-label','Activity timer seconds');
+        if(kind==='deducer'||kind==='finalanswer'){timerMinutesInput.min='1';timerMinutesInput.max='10';}
         const colon = document.createElement('span'); colon.textContent = ':';
         timerFields.append(timerMinutesInput,colon,timerSecondsInput);
         timerFields.hidden = !timerEnabledInput.checked;
@@ -7411,19 +8360,61 @@ if (keynopeAppSurface) {
       }
       requestAnimationFrame(() => promptInput.focus());
     };
-    for (const item of [...Object.entries(KeynopeGames.names),['onboarding','Onboarding'],['dots','Dot Voting'],['finishpair','The Race'],['prerequisites','Prerequisites'],['pulse','Pulse'],['storm','Storm'],['sort','Sort'],['dual','Dual'],['quiz','Quiz'],['truefalse','Fact or Fiction'],['match','Mix & Match'],['questions','Questions'],['wall','Feedback Wall'],['draw','Quick Draw'],['introduction','Introduction'],['pair','Pair Share'],['expertise','Expertise'],['cards','Playing Cards'],['impostor','Impostor']]) {
-      const button = document.createElement('button');
-      button.type = 'button'; button.textContent = item[1]; button.classList.toggle('active',kind === item[0]);
-      button.addEventListener('click',() => { kind = item[0]; for (const child of kinds.children) child.classList.toggle('active',child === button); renderForm(); });
-      kinds.appendChild(button);
+    const activityChoices=[...Object.entries(KeynopeGames.names),['onboarding','Onboarding'],['dots','Dot Voting'],['finishpair','The Race'],['prerequisites','Prerequisites'],['pulse','Pulse'],['storm','Storm'],['sort','Sort'],['dual','Dual'],['quiz','Quiz'],['truefalse','Fact or Fiction'],['match','Mix & Match'],['questions','Questions'],['wall','Feedback Wall'],['draw','Quick Draw'],['introduction','Introduction'],['pair','Pair Share'],['expertise','Expertise'],['cards','Playing Cards'],['impostor','Impostor']].sort((a,b)=>a[1].localeCompare(b[1],'en',{sensitivity:'base'}));
+    const activityCategories=[
+      ['all','All',null],
+      ['start','Getting Started',['onboarding','prerequisites','expertise','introduction','draw','agreements']],
+      ['discussion','Discussion',['ball','pair','three','teach','deducer','finalanswer','questions','gallery']],
+      ['ideas','Ideas & Feedback',['storm','wall','dual','fame','gallery','agreements','pulse','questions']],
+      ['sorting','Sort & Prioritise',['sort','match','dots','questions','deducer','nominate']],
+      ['learning','Learn & Practise',['quiz','truefalse','hunt','teach','pressure','prerequisites']],
+      ['groups','Groups & Selection',['cards','pair','finishpair','chosen','impostor','deducer','finalanswer','shuffle','nominate']],
+    ];
+    let category='all';
+    const renderChoices=()=>{
+      kinds.replaceChildren();
+      const filter=activityCategories.find(item=>item[0]===category)[2];
+      for(const [id,label] of activityChoices){
+        if(filter&&!filter.includes(id))continue;
+        const button=document.createElement('button');button.type='button';button.textContent=label;button.classList.toggle('active',kind===id);button.setAttribute('aria-pressed',String(kind===id));
+        button.addEventListener('click',()=>{
+          if(kind===id){promptInput.focus();return;}
+          kind=id;renderChoices();renderForm();
+        });
+        kinds.append(button);
+      }
+      configure.textContent='Configure: '+(activityChoices.find(item=>item[0]===kind)?.[1]||kind);
+      kinds.setAttribute('aria-labelledby','keynope-activity-category-'+category);
+      for(const tab of categories.children){const active=tab.dataset.category===category;tab.setAttribute('aria-selected',String(active));tab.tabIndex=active?0:-1;}
+    };
+    for(const [id,label] of activityCategories){
+      const tab=document.createElement('button');tab.type='button';tab.textContent=label;tab.dataset.category=id;tab.id='keynope-activity-category-'+id;tab.setAttribute('role','tab');tab.setAttribute('aria-controls',kinds.id);
+      tab.addEventListener('click',()=>{category=id;renderChoices();});
+      tab.addEventListener('keydown',event=>{
+        if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+        event.preventDefault();event.stopPropagation();
+        const tabs=[...categories.children],index=tabs.indexOf(tab),next=event.key==='Home'?0:event.key==='End'?tabs.length-1:(index+(event.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;
+        category=tabs[next].dataset.category;renderChoices();tabs[next].focus();
+      });
+      categories.append(tab);
     }
+    renderChoices();
     remove.addEventListener('click',async () => { await editorAction({action:'remove-engagement'}); closeEngagementEditor(); });
     cancel.addEventListener('click',closeEngagementEditor);
     save.addEventListener('click',async () => {
       const engagementData = {id:original && original.id || '',kind,prompt:(promptInput.value || '').trim(),named:!anonymousInput.checked};
       if (kind === 'onboarding' && original && original.kind === kind && original.code) { engagementData.code = original.code; }
-      if (kind === 'prerequisites') engagementData.prerequisites=prerequisiteInputs.map(item=>({title:item.title.value.trim(),instructions:item.instructions.value.trim()})); if (kind === 'dots') { engagementData.options=engagementLines(optionsInput.value);engagementData.dotBudget=Number(dotBudgetInput.value);engagementData.stackDots=stackDotsInput.checked; }
+      if (kind === 'prerequisites') {engagementData.prerequisites=prerequisiteInputs.map(item=>({title:item.title.value.trim(),instructions:item.instructions.value.trim()}));engagementData.disableGrouping=!prerequisiteGroupingInput.checked;} if (kind === 'dots') { engagementData.importPrevious=importPreviousInput.checked;engagementData.options=importPreviousInput.checked?[]:engagementLines(optionsInput.value);engagementData.dotBudget=Number(dotBudgetInput.value);engagementData.stackDots=stackDotsInput.checked; }
       if (KeynopeGames.has(kind))engagementData.options=engagementLines(optionsInput.value);
+      if(kind==='chosen'){
+        if(!chosenCountInput.checkValidity()||!chosenCountInput.value){chosenCountInput.reportValidity();chosenCountInput.focus();return;}
+        engagementData.chosenCount=Number(chosenCountInput.value);engagementData.named=true;
+      }
+      if(kind==='deducer'){
+        for(const input of [groupCountInput,maxEntriesInput])if(!input.value||!input.checkValidity()){input.reportValidity();input.focus();return;}
+        engagementData.groupCount=Number(groupCountInput.value);engagementData.maxEntries=Number(maxEntriesInput.value);engagementData.named=true;
+      }
+      if(kind==='finalanswer'){engagementData.maxEntries=1;engagementData.named=true;}
       if (kind === 'pulse') engagementData.options = engagementLines(optionsInput.value);
       if (kind === 'sort' || kind === 'match') { engagementData.zones = engagementLines(zonesInput.value); engagementData.cards = engagementLines(cardsInput.value); }
       if (kind === 'dual' || kind === 'wall') engagementData.options = engagementLines(optionsInput.value);
@@ -7453,8 +8444,8 @@ if (keynopeAppSurface) {
     });
     blocker.addEventListener('pointerdown',event => { if (event.target === blocker) closeEngagementEditor(); });
     blocker.addEventListener('keydown',event => { event.stopPropagation(); if (event.key === 'Escape') closeEngagementEditor(); });
-    actions.append(remove,cancel,save);
-    dialog.append(kinds,form,actions); blocker.appendChild(dialog); document.body.appendChild(blocker);
+    actions.append(remove,participants,groups,cancel,save);
+    dialog.append(categories,kinds,configure,form,actions); blocker.appendChild(dialog); document.body.appendChild(blocker);
     activeEngagementEditor = blocker;
     renderForm();
   }
@@ -7469,8 +8460,9 @@ if (keynopeAppSurface) {
   saveButton.setAttribute('aria-label','Save presentation');
   saveButton.addEventListener('click', async () => {
     if(activeInlineEditor)await activeInlineEditor.finish(true);
+    await window.keynopeFlushActivityResults();
     const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
-    if (handler && editorState && editorState.dirty) handler.postMessage({action: 'save-presentation'});
+    if (handler && editorState && (editorState.dirty || window.keynopeHasPendingActivityResults())) handler.postMessage({action: 'save-presentation'});
   });
   const mainTopbar = document.createElement('div');
   mainTopbar.className = 'keynope-topbar-mode';
@@ -8373,17 +9365,25 @@ if (keynopeAppSurface) {
   settingsTitle.textContent = 'Settings';
   const tabsButton = canvasTool('Tabs', '', () => { settingsMenu.open=false; openDeckTabsDialog(); });
   tabsButton.title = 'Configure participant tabs';
-  settingsMenu.append(settingsTitle,tabsButton);
+  const activityQRButton = canvasTool('Activity QR codes', '', () => {settingsMenu.open=false;window.keynopeToggleActivityQR();});
+  activityQRButton.setAttribute('role','menuitemcheckbox');
+  settingsMenu.append(settingsTitle,tabsButton,activityQRButton);
   settingsMenu.addEventListener('toggle',()=>{
     if(!settingsMenu.open)return;
     const rect=settingsTitle.getBoundingClientRect();
     tabsButton.style.top=(rect.bottom+4)+'px';
     tabsButton.style.left=Math.min(rect.left,innerWidth-130)+'px';
+    activityQRButton.style.top=(rect.bottom+8+tabsButton.getBoundingClientRect().height)+'px';
+    activityQRButton.style.left=Math.min(rect.left,innerWidth-190)+'px';
   });
   // The Mac app exposes Settings in its native menu bar. Browsers still
   // need an in-page entry point because they have no application menu.
   if (window.KEYNOPE_WEB_EDITOR) mainTopbar.appendChild(settingsMenu);
   window.keynopeOpenParticipantTabs = openDeckTabsDialog;
+  window.keynopeToggleActivityQR = async () => {
+    if (!editorState?.hasActivities || editorState.masterMode) return;
+    await editorAction({action:'set-activity-qr',value:editorState.hideActivityQR?1:0});
+  };
   function openDeckTabsDialog() {
     if (!editorState?.hasActivities || editorState.masterMode) return;
     closeCanvasLinkDialog();
@@ -10497,6 +11497,9 @@ if (keynopeAppSurface) {
     connectShapesButton.classList.toggle('active', !!shapeConnecting);
     for(const refresh of insertTextControls)refresh();
     tabsButton.disabled = !editorState?.hasActivities || !!editorState?.masterMode;
+    activityQRButton.disabled = tabsButton.disabled;
+    activityQRButton.setAttribute('aria-checked',String(!editorState?.hideActivityQR));
+    activityQRButton.textContent = (!editorState?.hideActivityQR?'✓ ':'')+'Activity QR codes';
     tabsButton.title = tabsButton.disabled ? 'Add an activity to configure participant tabs' : 'Configure participant tabs';
     closeCanvasTextEffectDropdown();
     publishEditorDirtyState();
@@ -11355,6 +12358,11 @@ if (keynopeAppSurface) {
     showSlideContextMenu(editorState ? editorState.current : -1, event.clientX, event.clientY);
   });
   function renderEditorPanels() {
+    const hideQR = !!editorState?.hideActivityQR;
+    if(window.keynopeHideActivityQR!==hideQR){
+      window.keynopeHideActivityQR=hideQR;
+      if(keynopeEngagementRuntime){renderEngagementRuntime();publishEngagementRuntime();}
+    }
     window.keynopeParticipantTabs = editorState?.hasActivities ? (editorState.tabs||[]) : [];
     window.keynopePresentationDocumentVersion = editorState?.version || 0;
     if (draggedMasterButton) return;
@@ -11697,6 +12705,12 @@ if (keynopeAppSurface) {
     requestAnimationFrame(renderEditorCanvasOverlay);
   };
   window.keynopeReloadWebDocument = async workspace => {
+    // The old document has already been replaced (and its discard/save prompt
+    // resolved). Do not write its result records into the newly opened deck.
+    if(keynopeEngagementRuntime)keynopeEngagementRuntime.readOnly=true;
+    disposeEngagementRuntimes();
+    keynopeEngagementSessions.clear();
+    keynopePendingActivityResults.clear();
     editorStateVersion = -1;
     editorState = null;
     await window.keynopeLoadWebWorkspace(workspace);
@@ -11712,10 +12726,23 @@ if (keynopeAppSurface) {
     } else {
       syncEditorState();
     }
+    publishEditorDirtyState();
+    if(window.keynopeHasPendingActivityResults())showEngagementToast('PRESENTATION SAVED; SOME ACTIVITY RESULTS ARE STILL PENDING. KEEP THIS WINDOW OPEN AND RETRY SAVE.');
   };
   window.keynopeDidExport = showEditorExportConfirmation;
   const toolbar = document.createElement('div');
   toolbar.className = 'keynope-app-toolbar';
+  keynopeActivityStatusButton = document.createElement('button');
+  keynopeActivityStatusButton.type = 'button';
+  keynopeActivityStatusButton.className = 'keynope-active-activity';
+  keynopeActivityStatusButton.hidden = true;
+  keynopeActivityStatusButton.addEventListener('click',() => goToActiveActivity().catch(() => showEngagementToast('COULD NOT OPEN ACTIVITY')));
+  toolbar.appendChild(keynopeActivityStatusButton);
+  window.keynopeGoToActivitySlide = async slide => {
+    if (activeInlineEditor) await activeInlineEditor.finish(true);
+    if (editorState?.masterMode) await editorAction({action:'toggle-master-mode'});
+    await editorAction({action:'select-slide',slide});
+  };
   const timerInputBlocker = document.createElement('div');
   timerInputBlocker.className = 'keynope-input-blocker';
   timerInputBlocker.hidden = true;
@@ -11890,9 +12917,9 @@ if (keynopeAppSurface) {
     const presenting = editorPresentationMode !== 'none';
     if (masterMode && editorSpeakerNotesVisible) setSpeakerNotesVisible(false, false);
     notesToggleButton.hidden = masterMode;
+    renderActiveActivityStatus();
     timerButton.hidden = masterMode;
 	engagementRunButton.hidden = masterMode;
-	engagementRunButton.classList.toggle('active',!!currentEngagementDefinition());
     previousButton.hidden = masterMode;
     nextButton.hidden = masterMode;
     presentButton.hidden = masterMode || presenting;
@@ -11969,6 +12996,7 @@ if (keynopeAppSurface) {
     return true;
   }
   addEventListener('keydown', e => {
+    if (e.target?.closest?.('.keynope-engagement-blocker')) return;
     if (e.target?.closest?.('.keynope-tabs-overlay')) return;
     if (presenterTimerMode === 'config' && !e.metaKey && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
@@ -12309,6 +13337,12 @@ func parseSlide(text, base string) Slide {
 		if engagementMetaRE.MatchString(trimmed) {
 			if definition, err := decodeEngagementMetadata(trimmed); err == nil {
 				slide.Engagement = definition
+			}
+			continue
+		}
+		if engagementResultRE.MatchString(trimmed) {
+			if result, err := decodeEngagementResult(trimmed); err == nil {
+				slide.EngagementResult = result
 			}
 			continue
 		}
@@ -14025,6 +15059,7 @@ func cloneSlide(slide Slide) Slide {
 	copySlide := slide
 	copySlide.Elements = append([]Element(nil), slide.Elements...)
 	copySlide.Engagement = cloneEngagement(slide.Engagement)
+	copySlide.EngagementResult = cloneEngagementResult(slide.EngagementResult)
 	return copySlide
 }
 

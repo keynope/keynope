@@ -31,11 +31,12 @@ const (
 var masterDeckMetaRE = regexp.MustCompile(`(?m)^<!--\s*keynope-masters\s+version=([0-9]+)\s+base64:([A-Za-z0-9+/=]+)\s*-->\s*`)
 
 type Deck struct {
-	Tabs    []DeckTab
-	Slides  []Slide
-	Masters MasterDeck
-	Assets  map[string]DeckAsset
-	Fonts   map[string]DeckFont
+	HideActivityQR bool
+	Tabs           []DeckTab
+	Slides         []Slide
+	Masters        MasterDeck
+	Assets         map[string]DeckAsset
+	Fonts          map[string]DeckFont
 }
 
 type DeckFont struct {
@@ -401,6 +402,7 @@ func (masters MasterDeck) Clone() MasterDeck {
 
 func cloneDeck(deck Deck) Deck {
 	out := Deck{Slides: cloneSlides(deck.Slides), Masters: deck.Masters.Clone()}
+	out.HideActivityQR = deck.HideActivityQR
 	out.Tabs = append([]DeckTab(nil), deck.Tabs...)
 	if len(deck.Assets) > 0 {
 		out.Assets = make(map[string]DeckAsset, len(deck.Assets))
@@ -449,11 +451,11 @@ func (deck Deck) ResolveSlide(index int, includePlaceholders bool) Slide {
 		if source.PageNumber == pageNumberShow {
 			source.Elements = append(source.Elements, resolvedPageNumberElement(deck.Masters, "", index))
 		}
-		return source
+		return deck.applyActivityQRSetting(source)
 	}
 	layout, ok := deck.Masters.Layout(source.LayoutID)
 	if !ok {
-		return source
+		return deck.applyActivityQRSetting(source)
 	}
 	resolved := inheritedSlideStyle(deck.Masters, source.LayoutID)
 	applySourceStyle(&resolved, source)
@@ -461,6 +463,7 @@ func (deck Deck) ResolveSlide(index int, includePlaceholders bool) Slide {
 	resolved.TabID = source.TabID
 	resolved.Notes = source.Notes
 	resolved.Engagement = cloneEngagement(source.Engagement)
+	resolved.EngagementResult = cloneEngagementResult(source.EngagementResult)
 	bound := map[string]Element{}
 	for _, element := range source.Elements {
 		if element.MasterSlotID != "" {
@@ -547,7 +550,7 @@ func (deck Deck) ResolveSlide(index int, includePlaceholders bool) Slide {
 			resolved.Elements = append(resolved.Elements, element)
 		}
 	}
-	return resolved
+	return deck.applyActivityQRSetting(resolved)
 }
 
 func (deck Deck) effectivePageNumberMode(source Slide) string {

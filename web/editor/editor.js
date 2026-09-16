@@ -35,6 +35,12 @@
   setLoadingProgress(1, 'STARTING');
   const nativeFetch = window.fetch.bind(window);
   const baseURL = new URL('./', document.currentScript.src);
+  const build = new URL(document.currentScript.src).searchParams.get('build');
+  function assetURL(name) {
+    const url = new URL(name, baseURL);
+    if (build) url.searchParams.set('build', build);
+    return url;
+  }
   const databaseName = 'keynope-web-editor';
   const draftKey = 'current';
   let dirty = false;
@@ -140,15 +146,15 @@
     setLoadingProgress(18, 'LOADING PRESENTATION');
     const draft = await readDraft();
     if (draft && typeof draft.markdown === 'string') return draft;
-    const response = await nativeFetch(new URL('Welcome.md', baseURL), {cache: 'no-store'});
+    const response = await nativeFetch(assetURL('Welcome.md'), {cache: 'no-store'});
     if (!response.ok) throw new Error('Could not load the starter presentation');
     return {markdown: await response.text(), name: 'Untitled.md', untitled: true};
   }
 
   async function bootRuntime() {
-    await loadScript(new URL('wasm_exec.js', baseURL));
+    await loadScript(assetURL('wasm_exec.js'));
     const go = new Go();
-    const wasmURL = new URL('keynope-editor.wasm', baseURL);
+    const wasmURL = assetURL('keynope-editor.wasm');
     setLoadingProgress(4, 'LOADING EDITOR');
     const response = await nativeFetch(wasmURL);
     if (!response.ok) throw new Error('Could not load the Keynope editor');
@@ -197,6 +203,7 @@
   }
 
   const stateOnlyEditorActions = new Set([
+    'set-engagement-result',
     'select-element',
     'select-elements',
     'enter-group',
@@ -249,6 +256,7 @@
   };
 
   async function documentPayload(name = currentName) {
+    await window.keynopeFlushActivityResults?.();
     const response = await window.fetch('/api/editor/document', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -351,7 +359,7 @@
 
   async function newPresentation() {
     if (dirty && !confirm('Discard the unsaved changes and create a new presentation?')) return;
-    const response = await nativeFetch(new URL('Welcome.md', baseURL), {cache:'no-store'});
+    const response = await nativeFetch(assetURL('Welcome.md'), {cache:'no-store'});
     await loadDocument(await response.text(), 'Untitled.md', true);
     dirty = true;
     const revision = ++draftRevision;
@@ -461,7 +469,7 @@
     };
     addEventListener('keydown', escape, true);
     try {
-      const response = await nativeFetch(new URL('licenses.txt', baseURL));
+      const response = await nativeFetch(assetURL('licenses.txt'));
       dialog.querySelector('pre').textContent = response.ok ? await response.text() : 'License information is unavailable.';
     } catch (_) {
       dialog.querySelector('pre').textContent = 'License information is unavailable.';
@@ -520,6 +528,6 @@
       if (addWebControls()) observer.disconnect();
     });
     observer.observe(document.body, {childList:true, subtree:true});
-    if ('serviceWorker' in navigator) navigator.serviceWorker.register(new URL('service-worker.js', baseURL)).catch(() => {});
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register(new URL('service-worker.js', baseURL), {updateViaCache:'none'}).then(registration => registration.update()).catch(() => {});
   });
 })();
