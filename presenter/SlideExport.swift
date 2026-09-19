@@ -1,5 +1,5 @@
 import Cocoa
-@preconcurrency import WebKit
+import WebKit
 import PDFKit
 
 // PDFKit objects stay on one actor; only immutable image/PDF bytes cross the
@@ -134,13 +134,31 @@ final class SlideExportRenderer: NSObject, WKNavigationDelegate {
         if let error { continuation.resume(throwing: error) } else { continuation.resume() }
     }
 
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finishLoading() }
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { finishLoading(error) }
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { finishLoading(error) }
-    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        let error = NSError(domain: "sh.keynope.export", code: 2, userInfo: [NSLocalizedDescriptionKey: "The export renderer stopped unexpectedly."])
-        finishLoading(error)
-        finishCapture(.failure(error))
+    nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        Task { @MainActor [weak self] in self?.finishLoading() }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        let message = error.localizedDescription
+        Task { @MainActor [weak self] in self?.finishLoading(Self.navigationError(message)) }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        let message = error.localizedDescription
+        Task { @MainActor [weak self] in self?.finishLoading(Self.navigationError(message)) }
+    }
+
+    nonisolated func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let error = NSError(domain: "sh.keynope.export", code: 2, userInfo: [NSLocalizedDescriptionKey: "The export renderer stopped unexpectedly."])
+            self.finishLoading(error)
+            self.finishCapture(.failure(error))
+        }
+    }
+
+    private static func navigationError(_ message: String) -> NSError {
+        NSError(domain: "sh.keynope.export", code: 8, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
     func pages() async throws -> [[String: Any]] {
