@@ -456,7 +456,9 @@ func TestActivityQRCodeEndpoint(t *testing.T) {
 }
 
 func TestActivityMasterRequiredElementsCannotBeDeleted(t *testing.T) {
-	session := newNativeEditorSession("Untitled.md", Deck{Slides: []Slide{{}}}, true)
+	masters := defaultMasterDeck()
+	masters.Layouts = append(masters.Layouts, defaultActivityMaster())
+	session := newNativeEditorSession("Untitled.md", Deck{Slides: []Slide{{}}, Masters: masters}, true)
 	if err := session.apply(nativeEditorAction{Action: "toggle-master-mode"}); err != nil {
 		t.Fatal(err)
 	}
@@ -507,10 +509,11 @@ func TestResolvedLayoutSlideCarriesEngagement(t *testing.T) {
 func TestPresenterEngagementStateIsTransientAndSynchronized(t *testing.T) {
 	companion := &presenterCompanion{}
 	runtime := EngagementRuntimeState{
-		Definition: EngagementDefinition{Kind: "pulse", Prompt: "Ready?", Options: []string{"No", "Yes"}},
-		Slide:      2,
-		Phase:      3,
-		Counts:     []int{1, 4},
+		AppearanceMode: "modern",
+		Definition:     EngagementDefinition{Kind: "pulse", Prompt: "Ready?", Options: []string{"No", "Yes"}},
+		Slide:          2,
+		Phase:          3,
+		Counts:         []int{1, 4},
 	}
 	payload, err := json.Marshal(runtime)
 	if err != nil {
@@ -524,6 +527,9 @@ func TestPresenterEngagementStateIsTransientAndSynchronized(t *testing.T) {
 	}
 	if companion.state.Engagement == nil || companion.state.Engagement.Counts[1] != 4 || companion.state.Version != 1 {
 		t.Fatalf("presenter state = %#v", companion.state)
+	}
+	if companion.state.Engagement.AppearanceMode != "modern" || cloneEngagementRuntime(companion.state.Engagement).AppearanceMode != "modern" {
+		t.Fatal("activity appearance lost in native presenter handoff")
 	}
 
 	clearRequest := httptest.NewRequest(http.MethodPost, "/engagement", bytes.NewBufferString("null"))

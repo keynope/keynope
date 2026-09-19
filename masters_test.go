@@ -35,11 +35,17 @@ func TestStarterDeckUsesBundledWelcomePresentation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(deck.Masters.Layouts) != 6 || len(deck.Slides) != 2 || deck.Slides[0].LayoutID != "layout-9456b14efba5" || deck.Slides[1].LayoutID != "title" {
-		t.Fatalf("starter deck = %#v", deck)
+	if len(deck.Masters.Layouts) != 1 || len(deck.Slides) != 1 {
+		t.Fatalf("starter has %d master layouts and %d slides, want 1 and 1", len(deck.Masters.Layouts), len(deck.Slides))
 	}
-	if len(deck.Slides[0].Elements) < 5 || deck.Slides[0].Elements[4].Text != "*KEYNOPE*" {
-		t.Fatalf("starter welcome slide = %#v", deck.Slides[0].Elements)
+	if deck.Masters.Layouts[0].ID != "blank" {
+		t.Fatalf("starter master layout = %q, want blank", deck.Masters.Layouts[0].ID)
+	}
+	if len(deck.Assets) != 1 || len(deck.Slides[0].Elements) != 6 {
+		t.Fatalf("starter has %d assets and %d elements, want 1 and 6", len(deck.Assets), len(deck.Slides[0].Elements))
+	}
+	if deck.Slides[0].Elements[2].Text != "KEYNOPE" {
+		t.Fatalf("starter title = %q, want KEYNOPE", deck.Slides[0].Elements[2].Text)
 	}
 }
 
@@ -62,7 +68,7 @@ func TestMasterDeckRoundTripDoesNotCreateSlides(t *testing.T) {
 	if len(parsed.Slides) != 1 {
 		t.Fatalf("master layouts leaked into slide count: %d", len(parsed.Slides))
 	}
-	if len(parsed.Masters.Layouts) != 5 {
+	if len(parsed.Masters.Layouts) != 4 {
 		t.Fatalf("layout count = %d", len(parsed.Masters.Layouts))
 	}
 	resolved := parsed.ResolveSlide(0, false)
@@ -380,6 +386,14 @@ func TestResolvedMasterContentFeedsExportWithoutAddingSlides(t *testing.T) {
 		}
 		for _, line := range page.Lines {
 			roles[line.Role] = true
+		}
+		if page.Scene != nil {
+			for _, object := range page.Scene.Objects {
+				roles[object.Kind] = true
+				if object.Text != nil {
+					roles[object.Text.Role] = true
+				}
+			}
 		}
 	}
 	if !roles["shape"] || !roles["heading"] {

@@ -6,8 +6,60 @@ import (
 	"math"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
+
+func TestRetiredShapeLabelMigration(t *testing.T) {
+	shape := labelledShape("circle")
+	q, _ := url.ParseQuery(shape.Query)
+	raw := []byte(`{"text":"Hello ** literal","query":"font=old&glyph=blocks&render=text-image&ttf-size=123&fg=%23ffff00","extension":{"keep":true}}`)
+	q.Set("shape-label", base64.StdEncoding.EncodeToString(raw))
+	shape.Query = q.Encode()
+	deck := Deck{Slides: []Slide{{Elements: []Element{shape}}}}
+	deck.Masters.Base.Slide.Elements = []Element{shape}
+	deck.Masters.Layouts = []MasterLayout{{ID: "test", Slide: Slide{Elements: []Element{shape}}}}
+	standardizeDeckText(&deck)
+	encoded, err := serializeDeck("labels.md", deck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := parseDeckData("labels.md", encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := shapeLabel(loaded.Slides[0].Elements[0]); !ok || !sharedRetroText(got) || got.Text != "Hello ** literal" {
+		t.Fatalf("migrated label did not survive save/reopen: %+v", got)
+	}
+	for _, migrated := range []Element{deck.Slides[0].Elements[0], deck.Masters.Base.Slide.Elements[0], deck.Masters.Layouts[0].Slide.Elements[0]} {
+		label, ok := shapeLabel(migrated)
+		if !ok || label.Text != "Hello ** literal" || !sharedRetroText(label) || trueTypeSize(label) != 123 {
+			t.Fatalf("label not migrated: %+v", label)
+		}
+		mq, _ := url.ParseQuery(migrated.Query)
+		payload, _ := base64.StdEncoding.DecodeString(mq.Get("shape-label"))
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &fields); err != nil || string(fields["extension"]) != `{"keep":true}` {
+			t.Fatalf("label extension lost: %s", payload)
+		}
+		mq.Del("shape-label")
+		original, _ := url.ParseQuery(shape.Query)
+		original.Del("shape-label")
+		if !reflect.DeepEqual(mq, original) || migrated.ID != shape.ID || migrated.Kind != shape.Kind {
+			t.Fatal("shape geometry, identity or paint changed")
+		}
+		if standardTextElement(migrated) != migrated {
+			t.Fatal("label migration not idempotent")
+		}
+	}
+	for _, invalid := range []string{"", "not-base64", base64.StdEncoding.EncodeToString([]byte("null")), base64.StdEncoding.EncodeToString([]byte("{bad"))} {
+		q.Set("shape-label", invalid)
+		shape.Query = q.Encode()
+		if standardTextElement(shape) != shape {
+			t.Fatal("malformed label changed")
+		}
+	}
+}
 
 func labelledShape(kind string) Element {
 	data, _ := json.Marshal(shapeLabelData{Text: "Hello shape", Query: "ttf-size=97&fg=%23ffff00&gradient-start=%23ff0000&gradient-end=%23ffffff"})
@@ -137,6 +189,68 @@ func TestMultilineShapeLabelGrowsDown(t *testing.T) {
 	}
 	if q.Get("left") != "80" || q.Get("top") != "20" || shapeSubcellOffset(q, "shape-offset-x") != .5 || shapeSubcellOffset(q, "shape-offset-y") != .5 {
 		t.Fatal("growing downward must preserve the fractional top-left origin")
+	}
+}
+
+func TestShapeLabelGrowthPreservesContinuousOtherAxis(t *testing.T) {
+	for _, tc := range []struct{ width, height, text, preserved string }{
+		{"100.125", "2.375", "One\nTwo\nThree", "width"},
+		{"2.125", "30.375", "A long line to grow the shape horizontally", "height"},
+	} {
+		e := labelledShape("square")
+		q, _ := url.ParseQuery(e.Query)
+		q.Set("width", tc.width)
+		q.Set("height", tc.height)
+		q.Set("object-offset-x", "0.125")
+		q.Set("object-offset-y", "0.375")
+		data, _ := json.Marshal(shapeLabelData{Text: tc.text, Query: "ttf-size=97"})
+		q.Set("shape-label", base64.StdEncoding.EncodeToString(data))
+		e.Query = q.Encode()
+		fitShapeLabel(&e, 245, 56)
+		got, _ := url.ParseQuery(e.Query)
+		if got.Get(tc.preserved) != q.Get(tc.preserved) {
+			t.Fatalf("%s rounded from %s to %s", tc.preserved, q.Get(tc.preserved), got.Get(tc.preserved))
+		}
+		grown := "width"
+		if tc.preserved == "width" {
+			grown = "height"
+		}
+		if shapeDimension(got, grown, 1) <= shapeDimension(q, grown, 1) {
+			t.Fatal("fixture did not grow")
+		}
+		for _, key := range []string{"left", "top", "object-offset-x", "object-offset-y"} {
+			if got.Get(key) != q.Get(key) {
+				t.Fatalf("growth moved %s", key)
+			}
+		}
+		once := e.Query
+		fitShapeLabel(&e, 245, 56)
+		if e.Query != once {
+			t.Fatal("repeated fitting changed settled geometry")
+		}
+	}
+}
+
+func TestAnchoredShapeLabelGrowthKeepsPreciseOrigin(t *testing.T) {
+	e := labelledShape("square")
+	q, _ := url.ParseQuery(e.Query)
+	q.Del("left")
+	q.Del("top")
+	q.Set("align", "center")
+	q.Set("valign", "middle")
+	q.Set("width", "100.125")
+	q.Set("height", "2.375")
+	e.Query = q.Encode()
+	fitShapeLabel(&e, 245, 56)
+	got, _ := url.ParseQuery(e.Query)
+	p := parseImagePlacement(e.Query)
+	x := float64(*p.left) + shapeSubcellOffset(got, "shape-offset-x") + objectPlacementOffset(got, "x")
+	y := float64(*p.top) + shapeSubcellOffset(got, "shape-offset-y") + objectPlacementOffset(got, "y")
+	if math.Abs(x-(245-100.125)/2) > 1e-9 || math.Abs(y-(56-2.375)/2) > 1e-9 {
+		t.Fatalf("growth moved anchored origin: %g,%g", x, y)
+	}
+	if got.Get("align") != "" || got.Get("valign") != "" {
+		t.Fatal("growth retained competing anchors")
 	}
 }
 

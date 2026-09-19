@@ -47,9 +47,9 @@ Use File → Open to select a Markdown deck, or File → New for an unsaved star
 
 Text uses the bundled Keynope C64 TrueType face by default. The T button inserts “Text”; H1, H2 and T select heading, subtitle and body sizes. Size and horizontal width are independently adjustable. Dragging the text-box corners changes its available space and wrapping, not the font size.
 
-Choose Default, Blocks, Braille, ASCII or Dense in the text rendering-style selector. These treatments sample the same TrueType face and retain its size, margins, alignment, colours and effects. Choose Default to return to the font. Gradients, outlines, shadows, rotation and transparency work with each treatment.
+Text is always stored as semantic text and rendered through the shared TrueType layout engine. Apply the Retro treatment for the bundled C64 face or Modern for the bundled professional fonts. Gradients, outlines, shadows, rotation and transparency work in both treatments.
 
-Text metadata, including existing `render=truetype` objects, represents ordinary editable text. Older bitmap text is upgraded on load; old decks may lay out differently. Explicit custom glyph/FIGlet fonts remain supported.
+Older bitmap, custom-glyph and FIGlet text is upgraded on load while retaining its content and placement. Saving writes the supported TrueType representation; retired font artwork and sampled-text settings are not retained.
 
 ## Visuals and Effects
 
@@ -72,12 +72,6 @@ The Mac and web editors add an activity slide from the permanent Activities icon
 Each activity is inserted after the current slide with the built-in Activity master, an eight-character room code, and a centered ASCII QR code for its `keynope.sh/join/<code>` URL. Keynope monitors the short-lived room automatically during presentation while leaving the activity slide visible. Participants choose a remembered display name and respond from their own device. The presenter receives aggregate votes, ideas, card placements, and the names of respondents live. Open the controls and results from the Activities icon or with `G` in an HTML presentation.
 
 Every activity follows the same `OPEN → LOCKED → REVEAL → DISCUSS` flow; `Enter` advances, `R` resets the current responses, and `Esc` or `Q` closes it. Activity definitions and codes travel with the Markdown deck as `keynope-engagement` metadata. Rooms expire after 24 hours of inactivity, and participant responses are never written into the deck.
-
-## Custom Fonts
-
-The Mac and web editors include a glyph editor for creating variable-width Keynope fonts. Each font covers the 95 printable ASCII characters. Select text to choose a font, or use the `Aa` font-editor button to paint glyphs, resize their advance width, clone the default face, import/export JSON or FIGlet `.flf`/`.tlf` files, and keep reusable fonts in your personal library. FIGlet mode supports literal ASCII and non-emoji Unicode cell art.
-
-Fonts referenced by a deck are stored as gzip-compressed `keynope-fonts` metadata in the Markdown file. Text elements refer to them with `font=<id>`, so the same deck renders with its chosen fonts in the Mac app, web editor, presenter, and HTML export without external font files. The desktop library stores compressed font files in the Keynope application-support directory for the sandboxed Mac app; the web editor uses browser-local storage.
 
 ### Colour emoji fonts
 

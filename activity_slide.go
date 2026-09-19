@@ -60,6 +60,7 @@ func activityRoleElement(role string) (Element, bool) {
 // Apply the deck preference to legacy Activity-master elements as well as
 // expose it to the presentation HTML. Never mutate the authored master.
 func (deck Deck) applyActivityQRSetting(slide Slide) Slide {
+	slide.ThemeColors = deck.themeColors(deck.AppearanceMode())
 	slide.HideActivityQR = deck.HideActivityQR
 	if !deck.HideActivityQR || slide.Engagement == nil {
 		return slide

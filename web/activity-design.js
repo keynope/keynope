@@ -71,8 +71,12 @@ globalThis.KeynopeActivityDesign = (() => {
     three:['Three answers, then the explanation','Compare the three participant answers with the presenter’s explanation. What did each perspective add?']
   };
   const colours={mint:'#8de5bb',gold:'#ffd479',blue:'#91c9ff',violet:'#c3adff',coral:'#ffa595'};
+  function appearance(root,mode) {
+    root.dataset.activityAppearance=mode==='modern'?'modern':'retro';
+  }
   function mount(root,r,{presenter=false}={}) {
     if(!r?.definition)return;
+    appearance(root,r.appearanceMode);
     const [name,title,help,tone,path]=activities[r.definition.kind]||['Activity','Your turn','Follow the presenter’s instructions.','mint','M4 4h16v16H4Z'];
     root.classList.add('kn-activity');root.dataset.activityKind=r.definition.kind;root.dataset.activityId=r.definition.id||'';
     root.style.setProperty('--activity-accent',colours[tone]);
@@ -105,6 +109,22 @@ globalThis.KeynopeActivityDesign = (() => {
     const style=document.createElement('style');style.id='kn-activity-design';style.textContent=css;document.head.append(style);
   }
   const css=`
+  body [data-activity-appearance=modern],body [data-activity-appearance=modern] :is(button,input,textarea,select,label,h1,h2,h3,p,span,div):not(.keynope-engagement-qr,.keynope-engagement-drawing *,.keynope-introduction-avatar *,.keynope-introduction-layer,.pressure-clock *){font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important}
+  [data-activity-appearance=modern]{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:16px;line-height:1.55;letter-spacing:normal}
+  .keynope-engagement-overlay[data-activity-appearance=modern]{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+  .keynope-engagement-overlay[data-activity-appearance=modern]:not(.pressure-cooker){background:rgba(15,23,42,.94)}
+  [data-activity-appearance=modern] .keynope-engagement-board{border:1px solid #475569;border-radius:18px;padding:28px;gap:24px;background:#111827;box-shadow:0 24px 64px #0006}
+  [data-activity-appearance=modern] .keynope-engagement-head{align-items:center;flex-wrap:wrap}
+  [data-activity-appearance=modern] .keynope-engagement-head h1{font-weight:650;line-height:1.15;letter-spacing:-.025em}
+  [data-activity-appearance=modern] :is(.keynope-engagement-phase,.keynope-engagement-join){border-radius:8px}
+  [data-activity-appearance=modern] :is(.keynope-engagement-controls button,.keynope-engagement-copy){font:inherit;min-height:44px;border-radius:8px;padding:8px 16px}
+  [data-activity-appearance=modern] .keynope-engagement-countdown{font-family:inherit;font-variant-numeric:tabular-nums;letter-spacing:normal}
+  [data-activity-appearance=modern] .keynope-engagement-join-text{font-family:inherit;letter-spacing:normal}
+  .kn-activity[data-activity-appearance=modern] .kn-activity-intro{background:#1e293b;border:1px solid #475569;border-radius:12px;padding:24px}
+  .kn-activity[data-activity-appearance=modern] :is(.keynope-engagement-choice,.keynope-engagement-sort-card){font-family:inherit}
+  .kn-activity[data-activity-appearance=modern] .kn-activity-eyebrow{letter-spacing:.06em;font-size:12px}
+  .kn-activity[data-activity-appearance=modern] .kn-activity-intro p{font-size:16px;line-height:1.55}
+  @media(max-width:600px){[data-activity-appearance=modern] .keynope-engagement-board{padding:16px;border-radius:12px;gap:16px}}
   .kn-activity{--activity-accent:#8de5bb;--activity-ink:#f3f5ee;--activity-muted:#b1becb;min-width:0;color:var(--activity-ink);line-height:1.55}
   .kn-activity-intro{display:flex;gap:18px;align-items:flex-start;margin:0 0 28px;padding:24px;border:1px solid #3d4d5b;border-left:4px solid var(--activity-accent);background:linear-gradient(125deg,#213039,#151d27 70%);border-radius:4px 18px 18px 4px}
   .kn-activity-intro>svg{flex:none;width:44px;height:44px;padding:10px;box-sizing:content-box;color:var(--activity-accent);background:#0f1822;border:1px solid #405361;border-radius:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
@@ -145,7 +165,7 @@ globalThis.KeynopeActivityDesign = (() => {
   .kn-activity :is(.results,.keynope-engagement-results).kn-idea-board{grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:16px}
   .kn-idea-board>:is(.idea,.keynope-engagement-result-idea){min-height:110px}
   .kn-review-nav{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:18px 0 8px;padding:12px;background:#18232e;border:1px solid #536372;border-radius:10px}
-  .kn-review-nav>span{flex:1;color:#cbd9e3;font-size:13px}.kn-review-nav button{min-height:44px;padding:8px 14px}
+  .kn-review-nav>span{flex:1;color:#cbd9e3;font-size:13px}.kn-review-nav button{min-height:44px;padding:8px 14px;border:1px solid #64748b;background:#243244;color:#f1f5f9;font:inherit;cursor:pointer}.kn-review-nav button:disabled{opacity:.45;cursor:default}
   .kn-activity [hidden]{display:none!important}
   .kn-activity .sort-zones{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
   .kn-activity .sort-zone{background:#141f29;border:1px dashed #667481;min-height:160px;padding:14px}
@@ -205,13 +225,55 @@ globalThis.KeynopeActivityDesign = (() => {
   .keynope-engagement-submitted{font-size:13px;color:#b1becb;border-top:1px solid #405261;padding-top:16px}
   .keynope-engagement-qr{margin:0 auto 24px;box-shadow:0 0 0 8px white;max-width:100%}
   @media(max-width:600px){.kn-activity-intro{padding:18px 14px;gap:12px;margin-bottom:20px}.kn-activity-intro>svg{width:24px;height:24px;padding:7px;border-radius:8px}.kn-activity .kn-activity-intro h2{font-size:21px}.kn-activity .kn-activity-intro p{font-size:12px}.kn-activity :is(.choices,.keynope-engagement-pulse){grid-template-columns:repeat(2,minmax(0,1fr))}.kn-activity .sort-zones{grid-template-columns:repeat(2,minmax(0,1fr))}.kn-activity .sort-zone{padding:10px}.kn-activity .sort-item{font-size:12px}.kn-activity .result{flex-wrap:wrap}.keynope-engagement-board{padding:18px}.keynope-engagement-controls{bottom:-18px}.kn-activity-intro .kn-activity-eyebrow{font-size:10px}.kn-activity :is(.quiz-options,.match-grid)>label{min-height:48px;padding:12px}}
-  @media(prefers-reduced-motion:reduce){.kn-activity *{animation:none!important;transition:none!important}.kn-activity .marquee-track{transform:none!important}.kn-activity .marquee{overflow-x:auto}}
+  .kn-portrait-gallery[data-gallery-view=grid] :is(.marquee,.keynope-engagement-marquee){overflow:visible}
+  .kn-portrait-gallery[data-gallery-view=grid] :is(.marquee-track,.keynope-engagement-marquee-track){display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));width:100%;animation:none!important;transform:none!important;gap:16px}
+  .kn-portrait-gallery figure{min-width:0;margin:0;padding:12px;display:grid;justify-items:center;gap:10px}
+  body [data-activity-appearance=modern] .kn-portrait-gallery figcaption{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;font-size:15px;line-height:1.4}
+  .kn-portrait-gallery[data-gallery-view=grid] .keynope-engagement-drawing{grid-template-columns:repeat(20,7px);grid-template-rows:repeat(20,7px)}
+  .kn-portrait-gallery[data-gallery-view=grid] .keynope-engagement-drawing i{width:7px;height:7px;font-size:8px;line-height:7px}
+  .kn-portrait-gallery[data-gallery-view=grid] .keynope-introduction-avatar{--avatar-cell:7px}
+  .kn-portrait-gallery figure[hidden]{display:none!important}
+  .kn-portrait-gallery[data-gallery-paused=true] :is(.marquee-track,.keynope-engagement-marquee-track),.kn-portrait-gallery:focus-within :is(.marquee-track,.keynope-engagement-marquee-track){animation-play-state:paused}
+  .kn-portrait-gallery [role=region]:focus-visible{outline:3px solid var(--activity-accent);outline-offset:4px}
+  @media(prefers-reduced-motion:reduce){.kn-activity *{animation:none!important;transition:none!important}.kn-activity :is(.marquee-track,.keynope-engagement-marquee-track){transform:none!important}.kn-activity :is(.marquee,.keynope-engagement-marquee){overflow-x:auto}}
   `;
   function pulseMeter(button,index,total) {
     const meter=document.createElement('span');meter.className='kn-pulse-meter';meter.setAttribute('aria-hidden','true');
     for(let i=0;i<total;i++){const bar=document.createElement('i');bar.style.height=(8+i*4)+'px';bar.className=i<=index?'on':'';meter.append(bar);}button.prepend(meter);
   }
+  function portraitGallery(container,r){
+    const marquee=container.querySelector('.marquee,.keynope-engagement-marquee');
+    const track=marquee?.querySelector('.marquee-track,.keynope-engagement-marquee-track');
+    if(!track||!track.children.length||marquee.parentElement.classList.contains('kn-portrait-gallery'))return;
+    const portraits=Array.from(track.children),shell=document.createElement('section');shell.className='kn-portrait-gallery';
+    marquee.before(shell);shell.append(marquee);
+    shell.addEventListener('keydown',event=>{if(event.key!=='Escape')event.stopPropagation();});
+    marquee.tabIndex=0;marquee.setAttribute('role','region');marquee.setAttribute('aria-label','Participant portraits');
+    const nav=document.createElement('nav');nav.className='kn-review-nav';nav.setAttribute('aria-label','Portrait gallery controls');
+    const button=(label)=>{const node=document.createElement('button');node.type='button';node.textContent=label;return node;};
+    const view=button('Browse portraits'),pause=button('Pause portraits'),prev=button('Previous portraits'),next=button('Next portraits'),status=document.createElement('span');
+    status.setAttribute('role','status');status.setAttribute('aria-live','polite');
+    nav.append(view,pause,prev,status,next);shell.prepend(nav);
+    // Local viewing preferences only: never rewrite answers, names or drawings.
+    let grid=r.visualGalleryView==='grid'||(!r.visualGalleryView&&globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+    let page=Math.max(0,Math.min(Math.ceil(portraits.length/8)-1,Number(r.visualGalleryPage)||0));
+    let paused=!!r.visualGalleryPaused;
+    const update=()=>{
+      shell.dataset.galleryView=grid?'grid':'marquee';shell.dataset.galleryPaused=String(paused);
+      view.textContent=grid?'Show marquee':'Browse portraits';view.setAttribute('aria-pressed',String(grid));
+      pause.textContent=paused?'Resume portraits':'Pause portraits';pause.setAttribute('aria-pressed',String(paused));pause.hidden=grid;
+      prev.hidden=next.hidden=!grid;prev.disabled=page===0;next.disabled=(page+1)*8>=portraits.length;
+      portraits.forEach((portrait,index)=>portrait.hidden=grid&&Math.floor(index/8)!==page);
+      status.textContent=grid?(page*8+1)+'–'+Math.min(portraits.length,(page+1)*8)+' of '+portraits.length:portraits.length+' portraits';
+    };
+    view.onclick=()=>{grid=!grid;r.visualGalleryView=grid?'grid':'marquee';update();};
+    pause.onclick=()=>{paused=!paused;r.visualGalleryPaused=paused;update();};
+    prev.onclick=()=>{page--;r.visualGalleryPage=page;update();};next.onclick=()=>{page++;r.visualGalleryPage=page;update();};
+    marquee.addEventListener('keydown',event=>{if(!grid||event.target!==marquee)return;if(event.key==='ArrowRight'&&!next.disabled){event.preventDefault();next.click();}else if(event.key==='ArrowLeft'&&!prev.disabled){event.preventDefault();prev.click();}});
+    update();
+  }
   function results(container,r){
+    if(['draw','introduction'].includes(r.definition.kind)){portraitGallery(container,r);return;}
     const kind=r.definition.kind,rows=Array.from(container.children);
     if(kind==='storm')container.classList.add('kn-idea-board');
     let counts=null;
@@ -229,5 +291,5 @@ globalThis.KeynopeActivityDesign = (() => {
     prev.onclick=()=>{r.visualReviewPage--;update();};next.onclick=()=>{r.visualReviewPage++;update();};nav.append(label,prev,next);container.before(nav);update();
   }
   install();
-  return {mount,install,pulseMeter,results,activities};
+  return {mount,install,appearance,pulseMeter,results,activities};
 })();

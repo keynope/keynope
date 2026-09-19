@@ -47,21 +47,94 @@ type EngagementDefinition struct {
 	JoinSeconds       int  `json:"joinSeconds,omitempty"`
 	DiscussionSeconds int  `json:"discussionSeconds,omitempty"`
 	// Named is opt-in. Its zero value keeps activities anonymous by default.
-	Named          bool `json:"named,omitempty"`
-	DotBudget      int  `json:"dotBudget,omitempty"`
-	StackDots      bool `json:"stackDots,omitempty"`
-	ImportPrevious bool `json:"importPrevious,omitempty"`
+	Named          bool            `json:"named,omitempty"`
+	DotBudget      int             `json:"dotBudget,omitempty"`
+	StackDots      bool            `json:"stackDots,omitempty"`
+	ImportPrevious bool            `json:"importPrevious,omitempty"`
+	Extra          *jsonExtensions `json:"-"`
 }
 
 type EngagementQuestion struct {
-	Prompt  string   `json:"prompt"`
-	Options []string `json:"options"`
-	Correct int      `json:"correct"`
+	Prompt  string          `json:"prompt"`
+	Options []string        `json:"options"`
+	Correct int             `json:"correct"`
+	Extra   *jsonExtensions `json:"-"`
 }
 
 type PrerequisiteItem struct {
-	Title        string `json:"title"`
-	Instructions string `json:"instructions"`
+	Title        string          `json:"title"`
+	Instructions string          `json:"instructions"`
+	Extra        *jsonExtensions `json:"-"`
+}
+
+func (d EngagementDefinition) MarshalJSON() ([]byte, error) {
+	type stored EngagementDefinition
+	return encodeJSONExtensions(stored(d), d.Extra)
+}
+
+func (d *EngagementDefinition) UnmarshalJSON(data []byte) error {
+	type stored EngagementDefinition
+	var value stored
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	extra, err := decodeJSONExtensions(data, "id", "code", "kind", "prompt", "options", "zones", "cards", "questions", "prerequisites", "disableGrouping", "correct", "groupSize", "groupCount", "impostorCount", "chosenCount", "maxEntries", "timerSeconds", "joinSeconds", "discussionSeconds", "named", "dotBudget", "stackDots", "importPrevious")
+	if err != nil {
+		return err
+	}
+	// Never retain retired connection credentials as forward-compatible
+	// authored metadata. Session authentication remains ephemeral.
+	if extra != nil {
+		for _, key := range []string{"stateKey", "presenterKey", "signingKey", "privateKey", "webCryptoKey"} {
+			delete(*extra, key)
+		}
+		if len(*extra) == 0 {
+			extra = nil
+		}
+	}
+	*d = EngagementDefinition(value)
+	d.Extra = extra
+	return nil
+}
+
+func (q EngagementQuestion) MarshalJSON() ([]byte, error) {
+	type stored EngagementQuestion
+	return encodeJSONExtensions(stored(q), q.Extra)
+}
+
+func (q *EngagementQuestion) UnmarshalJSON(data []byte) error {
+	type stored EngagementQuestion
+	var value stored
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	extra, err := decodeJSONExtensions(data, "prompt", "options", "correct")
+	if err != nil {
+		return err
+	}
+	*q = EngagementQuestion(value)
+	q.Extra = extra
+	return nil
+}
+
+func (p PrerequisiteItem) MarshalJSON() ([]byte, error) {
+	type stored PrerequisiteItem
+	return encodeJSONExtensions(stored(p), p.Extra)
+}
+
+func (p *PrerequisiteItem) UnmarshalJSON(data []byte) error {
+	type stored PrerequisiteItem
+	var value stored
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	extra, err := decodeJSONExtensions(data, "title", "instructions")
+	if err != nil {
+		return err
+	}
+	*p = PrerequisiteItem(value)
+	p.Extra = extra
+	return nil
 }
 
 type EngagementAttribution struct {
@@ -153,6 +226,7 @@ func activityJoinURL(definition *EngagementDefinition) string {
 // EngagementRuntimeState is transient presenter state shared between Keynope's
 // controller and presentation surfaces. It is never serialized into Markdown.
 type EngagementRuntimeState struct {
+	AppearanceMode    string                  `json:"appearanceMode,omitempty"`
 	Definition        EngagementDefinition    `json:"definition"`
 	Slide             int                     `json:"slide"`
 	Phase             int                     `json:"phase"`
@@ -222,6 +296,7 @@ func cloneEngagement(definition *EngagementDefinition) *EngagementDefinition {
 		return nil
 	}
 	copyDefinition := *definition
+	copyDefinition.Extra = cloneJSONExtensions(definition.Extra)
 	copyDefinition.Options = append([]string(nil), definition.Options...)
 	copyDefinition.Zones = append([]string(nil), definition.Zones...)
 	copyDefinition.Cards = append([]string(nil), definition.Cards...)
@@ -229,6 +304,10 @@ func cloneEngagement(definition *EngagementDefinition) *EngagementDefinition {
 	copyDefinition.Prerequisites = append([]PrerequisiteItem(nil), definition.Prerequisites...)
 	for index := range copyDefinition.Questions {
 		copyDefinition.Questions[index].Options = append([]string(nil), definition.Questions[index].Options...)
+		copyDefinition.Questions[index].Extra = cloneJSONExtensions(definition.Questions[index].Extra)
+	}
+	for index := range copyDefinition.Prerequisites {
+		copyDefinition.Prerequisites[index].Extra = cloneJSONExtensions(definition.Prerequisites[index].Extra)
 	}
 	return &copyDefinition
 }

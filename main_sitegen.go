@@ -29,5 +29,8 @@ func main() {
 	if err := os.WriteFile(filepath.Join(os.Args[2], "licenses.txt"), []byte(bundledLicenseText()), 0644); err != nil {
 		panic(err)
 	}
+	if err := os.WriteFile(filepath.Join(os.Args[2], "modern-fonts.css"), []byte(modernFontsCSS()), 0644); err != nil {
+		panic(err)
+	}
 	fmt.Println("Generated editor shell and bundled licenses")
 }

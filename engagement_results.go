@@ -19,6 +19,27 @@ type EngagementResult struct {
 	Kind       string                     `json:"kind"`
 	Definition *EngagementDefinition      `json:"definition,omitempty"`
 	State      map[string]json.RawMessage `json:"state"`
+	Extra      *jsonExtensions            `json:"-"`
+}
+
+func (r EngagementResult) MarshalJSON() ([]byte, error) {
+	type stored EngagementResult
+	return encodeJSONExtensions(stored(r), r.Extra)
+}
+
+func (r *EngagementResult) UnmarshalJSON(data []byte) error {
+	type stored EngagementResult
+	var value stored
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	extra, err := decodeJSONExtensions(data, "version", "activityId", "kind", "definition", "state")
+	if err != nil {
+		return err
+	}
+	*r = EngagementResult(value)
+	r.Extra = extra
+	return nil
 }
 
 const maxEngagementResultBytes = 1 << 20
@@ -41,6 +62,7 @@ func cloneEngagementResult(result *EngagementResult) *EngagementResult {
 		return nil
 	}
 	copy := *result
+	copy.Extra = cloneJSONExtensions(result.Extra)
 	copy.Definition = cloneEngagement(result.Definition)
 	copy.State = make(map[string]json.RawMessage, len(result.State))
 	for key, value := range result.State {
@@ -63,7 +85,10 @@ func validateEngagementResult(result *EngagementResult) error {
 	if json.Unmarshal(result.State["phase"], &phase) != nil || phase < 3 || phase > 4 {
 		return fmt.Errorf("activity results must be in reveal or discuss state")
 	}
-	for key := range result.State {
+	for key, raw := range result.State {
+		if key == "" || len(key) > 100 || !json.Valid(raw) {
+			return fmt.Errorf("invalid activity result field: %s", key)
+		}
 		if !engagementResultFields[key] {
 			return fmt.Errorf("unsupported activity result field: %s", key)
 		}

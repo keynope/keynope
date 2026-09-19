@@ -124,6 +124,7 @@ func masterSlideAt(deck *Deck, selected int) *Slide {
 
 func cloneMasterLayoutFresh(source MasterLayout) MasterLayout {
 	clone := source
+	clone.Extra = cloneJSONExtensions(source.Extra)
 	clone.ID = newStableID("layout")
 	clone.Name = source.Name + " Copy"
 	clone.Slide = cloneSlide(source.Slide)

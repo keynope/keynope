@@ -15,7 +15,7 @@ func renderJustifiedTextRows(element Element, width int) []string {
 	values.Del("align")
 	element.Query = values.Encode()
 	render := func(spans []styledTextSpan) []string {
-		if rendersAsTextImage(element) || elementUsesDeckFont(element) {
+		if rendersAsTextImage(element) {
 			return renderTextImageStyledSpans(element, 1<<20, spans)
 		}
 		if element.Kind == "heading" {
@@ -112,7 +112,7 @@ func renderJustifiedTextRows(element Element, width int) []string {
 	}
 	if element.Kind == "bullet" {
 		marker := renderBulletMarkerRows()
-		if rendersAsTextImage(element) || elementUsesDeckFont(element) {
+		if rendersAsTextImage(element) {
 			marker = render([]styledTextSpan{{Text: "·"}})
 		}
 		indent := min(max(0, width-1), maxLineDisplayWidth(marker)+space)

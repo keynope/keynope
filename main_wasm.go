@@ -21,12 +21,21 @@ type wasmResponse struct {
 }
 
 type wasmWorkspace struct {
-	Cols  int          `json:"cols"`
-	Rows  int          `json:"rows"`
-	Pages []exportPage `json:"pages"`
+	DocumentRevision int64        `json:"documentRevision"`
+	Cols             int          `json:"cols"`
+	Rows             int          `json:"rows"`
+	Pages            []exportPage `json:"pages"`
+	Revision         int          `json:"revision"`
+	BaseRevision     int          `json:"baseRevision,omitempty"`
+	ReplaceSlides    []int        `json:"replaceSlides,omitempty"`
+	SlideCount       int          `json:"slideCount"`
+	Master           bool         `json:"master,omitempty"`
 }
 
 var wasmCallbacks []js.Func
+var wasmPageCache workspacePageCache
+var wasmWorkspaceRevision int
+var wasmWorkspaceCanDelta bool
 
 func wasmJSON(value any) string {
 	data, err := json.Marshal(value)
@@ -58,7 +67,9 @@ func wasmEditorInit(_ js.Value, args []js.Value) any {
 		return wasmJSON(wasmResponse{Status: http.StatusBadRequest, Body: "deck has no slides"})
 	}
 	activeNativeEditor = newNativeEditorSession(path, deck, untitled, parsedDeckElementOrderChanged)
-	return wasmJSON(wasmResponse{Status: http.StatusOK, ContentType: "application/json", Body: wasmJSON(activeNativeEditor.state())})
+	wasmPageCache = workspacePageCache{}
+	wasmWorkspaceCanDelta = false
+	return wasmJSON(wasmResponse{Status: http.StatusOK, ContentType: "application/json", Body: wasmJSON(activeNativeEditor.transportState())})
 }
 
 func wasmEditorHandler(path string) http.HandlerFunc {
@@ -68,24 +79,32 @@ func wasmEditorHandler(path string) http.HandlerFunc {
 	switch path {
 	case "/api/editor/state":
 		return activeNativeEditor.handleState
+	case "/api/editor/scene":
+		return activeNativeEditor.handleScene
+	case "/api/editor/scene-fonts":
+		return activeNativeEditor.handleSceneFonts
 	case "/api/editor/action":
 		return activeNativeEditor.handleAction
 	case "/api/editor/preview":
 		return activeNativeEditor.handlePreview
 	case "/api/editor/connector-preview":
 		return activeNativeEditor.handleConnectorPreview
+	case "/api/editor/connector-draft":
+		return activeNativeEditor.handleConnectorDraft
 	case "/api/editor/fit-text":
 		return activeNativeEditor.handleFitText
 	case "/api/editor/normalize-text-kind":
 		return activeNativeEditor.handleNormalizeTextKind
 	case "/api/editor/emojis":
 		return activeNativeEditor.handleEmojiCatalog
+	case "/api/editor/emoji-text-fonts":
+		return activeNativeEditor.handleEmojiTextFonts
+	case "/api/editor/shape-draft":
+		return activeNativeEditor.handleShapeDraft
+	case "/api/editor/media-draft":
+		return activeNativeEditor.handleMediaDraft
 	case "/api/editor/activity-qr":
 		return activeNativeEditor.handleActivityQR
-	case "/api/editor/fonts/default":
-		return activeNativeEditor.handleDefaultFont
-	case "/api/editor/fonts/library":
-		return activeNativeEditor.handleFontLibrary
 	case "/api/editor/workspace":
 		return activeNativeEditor.handleWorkspace
 	case "/api/editor/upload":
@@ -165,29 +184,45 @@ func currentWASMWorkspace() (wasmWorkspace, error) {
 	}
 	cols, rows := authoredRenderSize(authoredTerminalWidth, authoredTerminalHeight)
 	activeNativeEditor.mu.RLock()
-	deck := cloneDeck(activeNativeEditor.deck)
+	deck := cloneDeckForRender(activeNativeEditor.deck)
 	masterMode, currentMaster := activeNativeEditor.masterMode, activeNativeEditor.currentMaster
+	documentRevision := activeNativeEditor.version
 	activeNativeEditor.mu.RUnlock()
-	workspace := wasmWorkspace{Cols: cols, Rows: rows}
-	if masterMode {
-		if currentMaster < 0 || currentMaster > len(deck.Masters.Layouts) {
-			return wasmWorkspace{}, errInvalidEditorAction
-		}
-		workspace.Pages = exportSlidePages(masterViewPreview(deck.Masters, currentMaster), currentMaster, len(deck.Masters.Layouts)+1, cols, rows)
-		return workspace, nil
-	}
-	resolved := deck.ResolvedSlides()
-	for slideIndex, slide := range resolved {
-		workspace.Pages = append(workspace.Pages, exportSlidePages(slide, slideIndex, len(resolved), cols, rows)...)
-	}
-	return workspace, nil
+	workspace := wasmWorkspace{Cols: cols, Rows: rows, SlideCount: len(deck.Slides), Master: masterMode}
+	workspace.DocumentRevision = documentRevision
+	var err error
+	workspace.Pages, err = wasmPageCache.renderOwned(deck, masterMode, currentMaster, cols, rows)
+	return workspace, err
 }
 
-func wasmEditorWorkspace(_ js.Value, _ []js.Value) any {
+func wasmEditorWorkspace(_ js.Value, args []js.Value) any {
+	base := 0
+	if len(args) > 0 && args[0].Type() == js.TypeNumber {
+		base = args[0].Int()
+	}
+	oldCols, oldRows := wasmPageCache.cols, wasmPageCache.rows
 	workspace, err := currentWASMWorkspace()
 	if err != nil {
 		return wasmJSON(wasmResponse{Status: http.StatusBadRequest, Body: err.Error()})
 	}
+	if base > 0 && base == wasmWorkspaceRevision && wasmWorkspaceCanDelta && !workspace.Master && oldCols == workspace.Cols && oldRows == workspace.Rows {
+		workspace.BaseRevision = base
+		workspace.ReplaceSlides = append([]int(nil), wasmPageCache.changed...)
+		changed := map[int]bool{}
+		for _, index := range workspace.ReplaceSlides {
+			changed[index] = true
+		}
+		pages := make([]exportPage, 0)
+		for _, page := range workspace.Pages {
+			if changed[page.Slide] {
+				pages = append(pages, page)
+			}
+		}
+		workspace.Pages = pages
+	}
+	wasmWorkspaceRevision++
+	workspace.Revision = wasmWorkspaceRevision
+	wasmWorkspaceCanDelta = !workspace.Master
 	return wasmJSON(wasmResponse{Status: http.StatusOK, ContentType: "application/json", Body: wasmJSON(workspace)})
 }
 

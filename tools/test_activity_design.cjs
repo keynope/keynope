@@ -1,10 +1,10 @@
 // Visual behaviour regression checks, independent of the live channel transport.
-const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const browsers=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const assert=require('node:assert/strict');
 const path=require('node:path');
-const fs=require('node:fs');
 (async()=>{
-  const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
+  const engine=process.env.TEST_BROWSER||'chromium';
+  const browser=await browsers[engine].launch({headless:true,...(engine==='chromium'&&process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   try{
     const page=await browser.newPage({viewport:{width:390,height:844},reducedMotion:'reduce'});
     await page.setContent('<body style="background:#111c26;color:white;font:16px monospace"><main id="root"></main></body>');
@@ -35,17 +35,15 @@ const fs=require('node:fs');
     assert.equal(await page.locator('.kn-activity-intro.is-reveal').count(),1);
     // Cover every registered activity so new additions cannot silently inherit
     // generic reveal prose. Both surfaces share this module.
-    const source=fs.readFileSync('web/activity-design.js','utf8');
-    const catalog=source.slice(source.indexOf('const activities = {'),source.indexOf('const revealCopy = {'));
-    const kinds=[...catalog.matchAll(/^    (\w+):\[/gm)].map(match=>match[1]);
-    assert.equal(kinds.length,32);
+    const kinds=require('./activity_test_catalog.cjs');
     const headings=new Set();
     for(const kind of kinds){
-      for(const presenter of [false,true]){
-        const copy=await page.evaluate(({kind,presenter})=>{
-          root.replaceChildren();KeynopeActivityDesign.mount(root,{definition:{kind},phase:3},{presenter});
+      for(const appearanceMode of ['retro','modern'])for(const width of [320,390])for(const presenter of [false,true]){
+        await page.setViewportSize({width,height:844});
+        const copy=await page.evaluate(({kind,presenter,appearanceMode})=>{
+          root.replaceChildren();KeynopeActivityDesign.mount(root,{appearanceMode,definition:{kind},phase:3},{presenter});
           return {title:root.querySelector('h2').textContent,help:root.querySelector('p').textContent,label:root.querySelector('.kn-activity-eyebrow').textContent};
-        },{kind,presenter});
+        },{kind,presenter,appearanceMode});
         assert(copy.title&&copy.help,kind+' needs reveal copy');
         assert(!/See what we made together|Explore the results and listen|Review the responses below/.test(copy.title+' '+copy.help),kind+' has generic reveal text');
         assert(!copy.label.includes('TOGETHER'));
@@ -70,6 +68,6 @@ const fs=require('node:fs');
     await page.setViewportSize({width:1440,height:1000});
     await page.evaluate(kinds=>{root.replaceChildren();root.style.cssText='display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px';for(const kind of kinds){const card=document.createElement('section');root.append(card);KeynopeActivityDesign.mount(card,{definition:{kind},phase:3});}},kinds);
     await page.screenshot({path:'/tmp/keynope-activity-reveal-copy.png',fullPage:true});
-    console.log('PASS activity design: pagination, vote bars, all 32 custom reveal headings, host/participant copy, phase labels and mobile width');
+    console.log(`PASS activity design in ${engine}: pagination, vote bars, all ${kinds.length} custom reveal headings, both skins, host/participant copy, phase labels and 320/390px width`);
   }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

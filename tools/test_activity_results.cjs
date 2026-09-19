@@ -13,8 +13,7 @@ for(const name of ['engagementIsRunning','engagementHasCompleted','archiveEngage
 }
 const flush=()=>vm.runInContext('keynopeActivityResultWrites',context);
 (async()=>{
-  const kinds=['shuffle','deducer','finalanswer','pulse','storm','sort','dual','quiz','match','questions','wall','draw','introduction','expertise','cards','impostor','dots','finishpair','prerequisites','chosen','pressure','ball','gallery','hunt','teach','fame','agreements','three','pair','truefalse'];
-  kinds.push('nominate');
+  const kinds=require('./activity_test_catalog.cjs').filter(kind=>kind!=='onboarding');
   for(const kind of kinds){
     context.keynopeEngagementSessions.clear();
     const definition={id:kind,kind,questions:[{prompt:'First'},{prompt:'Last'}],options:['One','Two'],timerSeconds:60};
@@ -41,5 +40,5 @@ const flush=()=>vm.runInContext('keynopeActivityResultWrites',context);
     const runtime={definition:{id:'incomplete-'+kind,kind,questions:[{},{}]},phase:kind==='pair'?3:1,questionIndex:0,questionRevealed:true};
     context.archiveEngagementResult(runtime);await flush();assert(!stored.has(runtime.definition.id),'incomplete '+kind+' saved as final');
   }
-  console.log('All 31 non-lobby activities: archive, final-screen restore, reset, credentials/chat exclusion; incomplete activities remain live.');
+  console.log(`All ${kinds.length} non-lobby activities: archive, final-screen restore, reset, credentials/chat exclusion; incomplete activities remain live.`);
 })().catch(error=>{console.error(error);process.exitCode=1;});

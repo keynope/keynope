@@ -22,6 +22,7 @@ const server=http.createServer((req,res)=>{
    if(process.argv[2]){await page.waitForFunction(()=>typeof keynopeLoadWebWorkspace==='function');await syncNative();}
    const button=name=>page.getByRole('button',{name,exact:true});
    if(await button('Done').isVisible()&&await button('Done').isEnabled())await button('Done').click();
+   if(!await button('Add emoji').isVisible())await button('Insert').click();
    await button('Add emoji').click();
    const choice=button('smiling face with heart-eyes');await choice.waitFor({timeout:30000});
    await page.waitForFunction(()=>{const c=document.querySelector('[aria-label="smiling face with heart-eyes"] canvas');return c&&c.getContext('2d').getImageData(0,0,c.width,c.height).data.some((v,i)=>i%4===3&&v>100);});
@@ -31,7 +32,7 @@ const server=http.createServer((req,res)=>{
    const selected=()=>page.evaluate(async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.slides[s.current].elements[s.selected];});
    assert.equal((await selected()).text,'😍');assert.equal(new URLSearchParams((await selected()).query).get('render'),'truetype');
    await size.fill('137');await size.press('Tab');
-   await page.waitForFunction(()=>document.querySelector('.keynope-ttf-size')?.value==='137');
+   await page.waitForFunction(async()=>{const s=await fetch('/api/editor/state').then(r=>r.json()),e=s.slides[s.current].elements[s.selected];return new URLSearchParams(e.query||'').get('ttf-size')==='137';});
    await syncNative();
    await page.getByRole('tab',{name:'Style',exact:true}).click();
    const tint=page.getByRole('checkbox',{name:'Enable emoji tint',exact:true});await tint.check();
@@ -45,21 +46,17 @@ const server=http.createServer((req,res)=>{
    await tint.uncheck();assert.equal(new URLSearchParams((await selected()).query).has('tint'),false);
    await page.getByRole('tab',{name:'Text',exact:true}).click();
    await button('Edit text').click();
-   const input=page.getByRole('textbox',{name:'Edit element text',exact:true});await input.fill('D😍D 👩🏽‍🚀 🇳🇱');
-   await button('Commit').click();await input.waitFor({state:'detached'});
-   const data=await page.evaluate(async native=>{
-    const w=native?await fetch('/test/workspace').then(r=>r.json()):JSON.parse(JSON.parse(window.keynopeWasmWorkspace()).body);
-    const find=v=>{if(v&&typeof v==='object'){if(v.trueType?.text==='D😍D 👩🏽‍🚀 🇳🇱')return v.trueType;for(const x of Object.values(v)){const found=find(x);if(found)return found;}}};return find(w);
-   },!!process.argv[2]);
-   assert(data,'edited text exported by engine');assert.equal(data.emojis.length,3);assert.equal(Object.keys(data.emojiFonts).length,3);
-   const rendered=await page.evaluate(async data=>{
-    await KeynopeTrueType.readyFor(data);const canvas=document.createElement('canvas');canvas.width=1200;canvas.height=300;
-    const line={col:0,row:0,parts:[{color:'#fff'}],trueType:{...data,width:1200,height:300}};
-    KeynopeTrueType.draw(canvas.getContext('2d'),line,1,1,1920,1080);
-    const pixels=canvas.getContext('2d').getImageData(0,0,1200,300).data;let coloured=0;for(let i=0;i<pixels.length;i+=4)if(pixels[i+3]>100&&Math.max(pixels[i],pixels[i+1],pixels[i+2])-Math.min(pixels[i],pixels[i+1],pixels[i+2])>60)coloured++;
-    return {coloured,rows:KeynopeTrueType.metrics(line,1920,1080).rows.length};
-   },data);
-   assert(rendered.coloured>1000,'real exported text paints colour emoji');
+   const input=page.getByRole('textbox',{name:'Edit slide text',exact:true});await input.fill('D😍D 👩🏽‍🚀 🇳🇱');
+   await button('Apply text').click();await input.waitFor({state:'detached'});
+   const data=await page.evaluate(async()=>{
+    const state=await fetch('/api/editor/state').then(r=>r.json()),scene=await fetch('/api/editor/scene?slide='+state.current).then(r=>r.json());
+    const plain=text=>(text.runs||[]).map(run=>run.text||'').join('')||(text.paragraphs||[]).flatMap((paragraph,index)=>[index?'\n':'',...(paragraph.runs||[]).map(run=>run.text||'')]).join('');
+    return scene.objects.find(object=>object.text&&plain(object.text)==='D😍D 👩🏽‍🚀 🇳🇱')?.text;
+   });
+   assert(data,'edited text exported through the shared scene');assert.equal(Object.keys(data.emojiFonts||{}).length,3);
+   const shaped=page.locator('#stage .keynope-shaped-text').filter({hasText:'D😍D 👩🏽‍🚀 🇳🇱'}).last();await shaped.waitFor();
+   const rendered=await shaped.locator('.keynope-shaped-emoji').evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().width));
+   assert.equal(rendered.length,3,'shared text renderer paints every emoji sequence once');assert(rendered.every(width=>width>0),'every emoji has visible shaped width');
    await syncNative();
    await page.screenshot({path:'output/emoji-editor-tests/'+(process.argv[2]?'native-':'wasm-')+engine+'-slide.png'});
    assert.deepEqual(errors,[]);console.log('PASS '+engine+': '+(process.argv[2]?'native':'WASM')+' picker, capped insertion, resize, mixed-text edit and self-contained font payload');

@@ -60,7 +60,7 @@ func TestConnectorForegroundPreviewAndInheritedColor(t *testing.T) {
 			}
 		}
 	}
-	expected := exportLines(connectorPathLines(*e, -1, connectorPath(*e, a, b), connectorRasterBounds{a, b, connectorObstacles(slide, lines)}), slide, 245, 56, 1)
+	expected := exportLines(connectorPathLines(*e, -1, connectorPath(*e, a, b), connectorRasterBounds{a, b, connectorObstacles(slide, lines, 245, 56), 245, 56}), slide, 245, 56, 1)
 	want, _ := json.Marshal(expected)
 	got, _ := json.Marshal(preview.Lines)
 	if !bytes.Equal(want, got) {
@@ -189,7 +189,7 @@ func TestConnectorCapsMeetShapeWithoutOverlap(t *testing.T) {
 						}
 						points := []connectorPoint{{a.X, a.Y}, {b.X, b.Y}}
 						e := Element{Kind: "connector", Query: "connector-width=" + width + "&connector-arrows=" + arrows + "&connector-arrow-width=6"}
-						lines := connectorPathLines(e, 0, points, connectorRasterBounds{a, b, []connectorObstacle{obstacle}})
+						lines := connectorPathLines(e, 0, points, connectorRasterBounds{a, b, []connectorObstacle{obstacle}, 245, 56})
 						touch := false
 						for _, line := range lines {
 							for col, r := range []rune(line.Text) {
@@ -301,7 +301,7 @@ func TestShapeConnectorFollowsAndRoundTrips(t *testing.T) {
 	}
 	for _, e := range deck.Slides[0].Elements {
 		if e.Kind == "connector" && !validShapeConnector(e, deck.Slides[0]) {
-			t.Fatal("lost saved identity")
+			t.Fatalf("lost saved identity: %+v; markdown: %s", deck.Slides[0].Elements, data)
 		}
 	}
 	copy := append([]Element(nil), slide.Elements...)
@@ -364,7 +364,7 @@ func TestElbowConnectorAvoidsSilhouette(t *testing.T) {
 	lines := layout(slide, 245, 56)
 	ports := slideShapePorts(slide, lines, 245, 56)
 	a, b, _ := connectorEndpoints(slide.Elements[2], ports)
-	points := routedConnectorPath(slide.Elements[2], a, b, connectorObstacles(slide, lines), 245, 56)
+	points := routedConnectorPath(slide.Elements[2], a, b, connectorObstacles(slide, lines, 245, 56), 245, 56)
 	if len(points) < 4 {
 		t.Fatal(points)
 	}

@@ -24,16 +24,13 @@ DerivedData/
 terraform/
 
 # Local design utilities and manual test fixtures (not release inputs).
+/attic/
 /editor.html
 /eyes-editor.html
 /mouths-editor.html
 /multi.html
 /test.html
 /test.md
-/tools/activity_contact_sheets.cjs
-/tools/audit_activities.cjs
-/tools/extract_character_assets.go
-/tools/serve_multi.py
 /characters_svg/*/
 /characters_svg/*_kn.png
 

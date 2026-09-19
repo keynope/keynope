@@ -21,9 +21,11 @@ func participantSlideMarkdown(deck Deck, index int) ([]byte, error) {
 	slide := cloneSlide(deck.ResolvedSlides()[index])
 	slide.Notes, slide.LayoutID, slide.Engagement = "", "", nil
 	slide.EngagementResult = nil
-	slide.TabID = "" // Explicit tab requests render normally, outside the slide show.
+	slide.Extra = nil // Compatible authoring extensions are not participant data.
+	slide.TabID = ""  // Explicit tab requests render normally, outside the slide show.
 	for i := range slide.Elements {
 		e := &slide.Elements[i]
+		e.Extra = nil
 		query, _ := url.ParseQuery(e.Query)
 		if e.Inherited {
 			query.Set("participant-inherited", "1")
@@ -37,7 +39,11 @@ func participantSlideMarkdown(deck Deck, index int) ([]byte, error) {
 			e.Kind, e.Text, e.Path = "text", "[IMG]", ""
 		}
 	}
-	return serializeDeck("Presentation.md", Deck{Slides: []Slide{slide}, Assets: deck.Assets, Fonts: deck.Fonts})
+	return serializeDeck("Presentation.md", Deck{
+		Slides:         []Slide{slide},
+		Assets:         deck.Assets,
+		HideActivityQR: deck.HideActivityQR,
+	})
 }
 
 func restoreParticipantLayers(slide *Slide) {
@@ -55,22 +61,19 @@ func restoreParticipantLayers(slide *Slide) {
 }
 
 func participantRenderedDeck(deck Deck, index int) (exportDeck, error) {
-	data, err := participantSlideMarkdown(deck, index)
-	if err != nil {
-		return exportDeck{}, err
-	}
-	safe, err := parseDeckData("Presentation.md", data)
-	if err != nil {
-		return exportDeck{}, err
-	}
-	restoreParticipantLayers(&safe.Slides[0])
 	cols, rows := authoredRenderSize(245, 56)
-	pages := exportSlidePages(safe.Slides[0], index, len(deck.Slides), cols, rows)
-	for i := range pages {
-		pages[i].Engagement = nil
-		pages[i].HideChromePageNumber = true
+	scene, err := buildDocumentSlideScene(deck, index, cols, rows)
+	if err != nil {
+		return exportDeck{}, err
 	}
-	return exportDeck{Cols: cols, Rows: rows, Pages: pages}, nil
+	// The typed projection excludes notes, definitions and private results.
+	// All treatments use the same projection, including headerless decks.
+	page := exportPage{Scene: &scene, Slide: index, PageCount: 1, SlideCount: len(deck.Slides), Lines: []exportLine{}, BG: scene.Background, HideChromePageNumber: true, HideActivityQR: deck.HideActivityQR}
+	resolved := deck.ResolveSlide(index, false)
+	page.Effect, page.Background = resolved.Effect, resolved.Background
+	page.FG = ansiCSSColour(slideFG(resolved))
+	page.BackgroundLines = staticBackgroundExportLines(resolved.Background, cols, rows, page.FG, slideBG(resolved))
+	return exportDeck{Cols: cols, Rows: rows, Pages: []exportPage{page}}, nil
 }
 
 func (s *nativeEditorSession) handleParticipantPage(w http.ResponseWriter, r *http.Request) {

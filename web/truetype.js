@@ -1,6 +1,10 @@
 // Standard text. Sizes are authored pixels on a 1920x1080 reference slide.
 // Code preserves literal text; other text supports the deck's inline styles.
 const KeynopeTrueType = (() => {
+  const reportFontReadiness=(ready,error)=>{
+    if(typeof globalThis.dispatchEvent!=='function'||typeof CustomEvent!=='function')return;
+    globalThis.dispatchEvent(new CustomEvent('keynope-font-readiness',{detail:{source:'c64',ready,error:error?.message||''}}));
+  };
   const is = element => !!element && new URLSearchParams(element.query||'').get('render')==='truetype';
   const defaults = () => typeof deck!=='undefined'&&typeof pageIndex!=='undefined'?deck.pages?.[pageIndex]||{}:{};
   const presetSize = level => Math.max(1,Math.min(512,Math.round((level===1?386:level===2?193:97)*(defaults().ttfSize||97)/97)));
@@ -11,7 +15,7 @@ const KeynopeTrueType = (() => {
   };
   const face=new FontFace('KeynopeC64','url(data:font/ttf;base64,'+keynopeTTFFontData+')');
   document.fonts.add(face);
-  const ready=face.load().then(()=>{if(typeof drawFrame==='function')requestAnimationFrame(()=>drawFrame());return true;}).catch(()=>false);
+  const ready=face.load().then(()=>{reportFontReadiness(true);if(typeof drawFrame==='function')requestAnimationFrame(()=>drawFrame());return true;}).catch(error=>{reportFontReadiness(false,error);return false;});
   const emojiFaces=new Map();
   function loadEmoji(key,data){
     if(emojiFaces.has(key)){const record=emojiFaces.get(key);emojiFaces.delete(key);emojiFaces.set(key,record);return record;}
@@ -25,10 +29,16 @@ const KeynopeTrueType = (() => {
       for(const [oldKey,old] of emojiFaces){if(emojiFaces.size<=256)break;if(old!==record&&old.loaded){document.fonts.delete(old.font);emojiFaces.delete(oldKey);}}
       if(typeof drawFrame==='function')requestAnimationFrame(()=>drawFrame());
       return true;
-    }).catch(()=>false);
+    }).catch(error=>{record.error=error;return false;});
     return record;
   }
-  function readyFor(data){return Promise.all([ready,...Object.entries(data.emojiFonts||{}).map(([key,value])=>loadEmoji(key,value).promise)]);}
+  async function readyFor(data){
+    const entries=Object.entries(data?.emojiFonts||{}),results=await Promise.all([ready,...entries.map(([key,value])=>loadEmoji(key,value).promise)]);
+    if(!results[0])throw new Error('Bundled Keynope C64 font could not be loaded.');
+    const failed=entries.filter((_,index)=>!results[index+1]).map(([key])=>key);
+    if(failed.length)throw new Error('Bundled emoji font data could not be loaded for '+failed.join(', ')+'.');
+    return true;
+  }
   const emojiRasters=new Map();let emojiRasterBytes=0;
   function emojiRaster(key,font,size){
     // Adjacent COLR contours are antialiased independently. Align their original
@@ -85,6 +95,13 @@ const KeynopeTrueType = (() => {
   function metrics(line,cols,rows){
     const data=line.trueType,scaleX=1920/cols,scaleY=1080/rows;
     const styles=styledCharacters(data.text,data.kind,data.emojis);
+    // Run styles are validated against the rendered source, including emoji
+    // continuation codepoints but excluding hidden colour tags.
+    if(Array.isArray(data.richRuns)){
+      const visible=styles.filter(s=>!s.hidden||s.emojiContinuation);
+      const rich=data.richRuns.flatMap(run=>Array.from(run.text||'',char=>({char,bold:!!run.bold,italic:!!run.italic,underline:!!run.underline,color:/^#[0-9a-f]{6}$/i.test(run.color||'')?run.color:null})));
+      if(rich.map(s=>s.char).join('')===visible.map(s=>s.char).join(''))visible.forEach((style,i)=>Object.assign(style,rich[i],{explicitWeight:true}));
+    }
     const orientation=new URLSearchParams(data.query||'').get('orientation')||'';
     const boxWidth=data.width*scaleX,boxHeight=data.height*scaleY;
     const sideways=orientation==='cw'||orientation==='ccw';
@@ -127,10 +144,9 @@ const KeynopeTrueType = (() => {
       const measure=shapeLabelMeasureContext;
       let top=Infinity,bottom=-Infinity;
       lines.forEach((row,i)=>{
-        const text=row.styles.filter(s=>!s.hidden&&!s.emoji).map(s=>s.char).join('');
-        if(text.trim()){
-          measure.font=(query.get('ttf-weight')==='bold'||row.styles.some(s=>s.bold)?'bold ':'')+data.size+'px KeynopeC64,monospace';
-          const ink=measure.measureText(text),baseline=i*lineHeight+data.size*.8;
+        for(const style of row.styles.filter(s=>!s.hidden&&!s.emoji&&s.char.trim())){
+          measure.font=styledFont(style,query,data.size);
+          const ink=measure.measureText(style.char),baseline=i*lineHeight+data.size*.8;
           top=Math.min(top,baseline-ink.actualBoundingBoxAscent);bottom=Math.max(bottom,baseline+ink.actualBoundingBoxDescent);
         }
         if(row.styles.some(s=>s.emoji)){top=Math.min(top,i*lineHeight);bottom=Math.max(bottom,i*lineHeight+emojiSize);}
@@ -140,6 +156,7 @@ const KeynopeTrueType = (() => {
     return {width,height,boxWidth,boxHeight,orientation,widthScale,advance,lineHeight,emojiSize,emojiWidth,emojiGap,offsetY,rows:lines};
   }
   const shapeLabelMeasureContext=document.createElement('canvas').getContext('2d');
+  const styledFont=(style,q,size)=>(style?.italic?'italic ':'')+((style?.explicitWeight?style.bold:style?.bold||q.get('ttf-weight')==='bold')?'bold ':'')+size+'px KeynopeC64,monospace';
   function initialBounds(text,fontSize,cols,rows,percent=widthPercent({})){
     const ctx=document.createElement('canvas').getContext('2d');ctx.font=fontSize+'px KeynopeC64,monospace';
     const lines=String(text).split('\n');let width=1,height=1;
@@ -147,42 +164,6 @@ const KeynopeTrueType = (() => {
     return {width:Math.max(1,Math.min(cols,Math.ceil(width*.4167*percent/100*cols/1920))),height:Math.max(1,Math.min(rows,Math.ceil(height*rows/1080)))};
   }
   const painted=new Map();let paintedBytes=0;
-  // Sample the font's coloured ink, not a substitute bitmap alphabet. All
-  // treatments keep the same layout/caret/box, and can be changed losslessly.
-  function rasterTreatment(layer,mode,size,widthScale){
-    if(!['blocks','braille','ascii','dense'].includes(mode))return layer;
-    const source=layer.getContext('2d').getImageData(0,0,layer.width,layer.height);
-    const result=document.createElement('canvas');result.width=layer.width;result.height=layer.height;result.keynopePadding=layer.keynopePadding;
-    const ctx=result.getContext('2d'),step=Math.max(1,Math.min(8,size/12)),cw=Math.max(1,step*widthScale/.4167),ch=step*2;
-    const sample=(x,y,w,h)=>{
-      let r=0,g=0,b=0,a=0,n=0;
-      for(let yy=Math.floor(y);yy<Math.min(source.height,Math.ceil(y+h));yy++)for(let xx=Math.floor(x);xx<Math.min(source.width,Math.ceil(x+w));xx++){
-        if(xx<0||yy<0)continue;const i=(yy*source.width+xx)*4,alpha=source.data[i+3]/255;
-        r+=source.data[i]*alpha;g+=source.data[i+1]*alpha;b+=source.data[i+2]*alpha;a+=alpha;n++;
-      }
-      return {coverage:n?a/n:0,color:a?'rgb('+Math.round(r/a)+','+Math.round(g/a)+','+Math.round(b/a)+')':'#fff'};
-    };
-    ctx.textBaseline='top';ctx.font=ch+'px monospace';
-    for(let y=0;y<layer.height;y+=ch)for(let x=0;x<layer.width;x+=cw){
-      const pixel=sample(x,y,cw,ch);if(pixel.coverage<.035)continue;
-      ctx.fillStyle=pixel.color;
-      if(mode==='blocks'){
-        for(let dy=0;dy<2;dy++){const half=sample(x,y+dy*ch/2,cw,ch/2);if(half.coverage>=.25){ctx.fillStyle=half.color;const left=Math.floor(x),top=Math.floor(y+dy*ch/2);ctx.fillRect(left,top,Math.ceil(x+cw)-left,Math.ceil(y+(dy+1)*ch/2)-top);}}
-        continue;
-      }
-      let glyph;
-      if(mode==='braille'){
-        let bits=0;const dots=[[1,8],[2,16],[4,32],[64,128]];
-        for(let dy=0;dy<4;dy++)for(let dx=0;dx<2;dx++)if(sample(x+dx*cw/2,y+dy*ch/4,cw/2,ch/4).coverage>=.25)bits|=dots[dy][dx];
-        if(!bits)continue;glyph=String.fromCharCode(0x2800+bits);
-      }else{
-        const ramp=mode==='dense'?' .,:;irsXA253hMHGS#9B&@':' .:-=+*#%@';
-        glyph=ramp[Math.max(1,Math.min(ramp.length-1,Math.round(pixel.coverage*(ramp.length-1))))];
-      }
-      const advance=ctx.measureText(glyph).width||cw;ctx.save();ctx.translate(x,y);ctx.scale(cw/advance,1);ctx.fillText(glyph,0,0);ctx.restore();
-    }
-    return result;
-  }
   function paint(line,m,q,color){
     const data=line.trueType,key=JSON.stringify([{...data,emojiFonts:undefined},m.width,m.height,m.offsetY,color,line.link]);
     if(painted.has(key))return painted.get(key);
@@ -197,8 +178,9 @@ const KeynopeTrueType = (() => {
     ink.scale(m.widthScale,1);
     for(const [i,row] of m.rows.entries()){
       const baseline=m.offsetY+i*m.lineHeight+data.size*.8;
+      row.styles.forEach((style,j)=>{if(style.underline&&!style.hidden)ink.fillRect(row.positions[j]/m.widthScale,baseline+data.size*.07,(row.positions[j+1]-row.positions[j])/m.widthScale,Math.max(1,data.size*.045));});
       if(row.bullet){ink.beginPath();ink.arc((row.offset+m.advance*.65)/m.widthScale,baseline-data.size*.3,data.size*.085,0,Math.PI*2);ink.fill();}
-      Array.from(row.text).forEach((ch,j)=>{if(row.styles[j]?.hidden||row.styles[j]?.emoji)return;ink.font=(row.styles[j]?.bold||q.get('ttf-weight')==='bold'?'bold ':'')+data.size+'px KeynopeC64,monospace';ink.fillText(ch,row.positions[j]/m.widthScale,baseline);});
+      Array.from(row.text).forEach((ch,j)=>{if(row.styles[j]?.hidden||row.styles[j]?.emoji)return;ink.font=styledFont(row.styles[j],q,data.size);ink.fillText(ch,row.positions[j]/m.widthScale,baseline);});
     }
     ink.restore();
     const emojiLayer=document.createElement('canvas');emojiLayer.width=mask.width;emojiLayer.height=mask.height;
@@ -233,18 +215,19 @@ const KeynopeTrueType = (() => {
       emojiInk.globalCompositeOperation='source-in';emojiInk.fillStyle=fill;emojiInk.fillRect(0,0,m.width,m.height);emojiInk.globalCompositeOperation='source-over';
     }
     ink.globalCompositeOperation='source-atop';ink.save();ink.scale(m.widthScale,1);
-    for(const [i,row] of m.rows.entries())Array.from(row.text).forEach((ch,j)=>{const style=row.styles[j];if(!style?.color||style.hidden||style.emoji)return;ink.fillStyle=style.color;ink.font=(style.bold||q.get('ttf-weight')==='bold'?'bold ':'')+data.size+'px KeynopeC64,monospace';ink.fillText(ch,row.positions[j]/m.widthScale,m.offsetY+i*m.lineHeight+data.size*.8);});
+    for(const [i,row] of m.rows.entries())Array.from(row.text).forEach((ch,j)=>{const style=row.styles[j];if(!style?.color||style.hidden||style.emoji)return;ink.fillStyle=style.color;ink.font=styledFont(style,q,data.size);ink.fillText(ch,row.positions[j]/m.widthScale,m.offsetY+i*m.lineHeight+data.size*.8);});
+    for(const [i,row] of m.rows.entries())row.styles.forEach((style,j)=>{if(style.underline&&style.color&&!style.hidden){ink.fillStyle=style.color;ink.fillRect(row.positions[j]/m.widthScale,m.offsetY+i*m.lineHeight+data.size*.87,(row.positions[j+1]-row.positions[j])/m.widthScale,Math.max(1,data.size*.045));}});
     ink.restore();ctx.drawImage(mask,0,0);ctx.drawImage(emojiLayer,0,0);
-    if(data.kind==='code'){
+    if(data.kind==='code'&&q.get('transparent')!=='1'){
       ctx.globalCompositeOperation='destination-over';ctx.fillStyle=q.get('bg')||'#333333';ctx.beginPath();ctx.roundRect(padding,padding,m.width,m.height,Math.min(8,data.size*.08));ctx.fill();ctx.globalCompositeOperation='source-over';
     }
     if(line.link){ctx.fillStyle=color;for(const [i,row] of m.rows.entries())ctx.fillRect(padding+row.offset,padding+m.offsetY+i*m.lineHeight+data.size*.84,row.inkWidth-row.offset,Math.max(1,data.size*.025));}
-    const output=rasterTreatment(layer,q.get('glyph'),data.size,m.widthScale);
-    // Tint after glyph conversion; change RGB only, never coverage or layout.
+    const output=layer;
+    // Tint font ink directly; obsolete glyph tags no longer sample text.
     // The emoji-only mask excludes surrounding text, backdrops and outlines.
     const tint=/^#([0-9a-f]{6})$/i.exec(q.get('tint')||'');
     if(tint&&data.emojis?.length){
-      const mask=rasterTreatment(emojiLayer,q.get('glyph'),data.size,m.widthScale);
+      const mask=emojiLayer;
       const coverage=mask.getContext('2d').getImageData(0,0,mask.width,mask.height).data;
       const target=output.getContext('2d'),pixels=target.getImageData(0,0,output.width,output.height),rgb=[0,2,4].map(i=>parseInt(tint[1].slice(i,i+2),16));
       for(let i=0;i<pixels.data.length;i+=4){
@@ -286,7 +269,10 @@ const KeynopeTrueType = (() => {
       }
     }
     ctx.restore();
-    ctx.globalAlpha=q.get('transparent')==='1'?.5:1;
+    if(data.kind==='code'&&q.get('transparent')==='1'){
+      ctx.globalAlpha=.5;ctx.fillStyle=q.get('bg')||'#333333';ctx.beginPath();ctx.roundRect(0,0,m.width,m.height,Math.min(8,data.size*.08));ctx.fill();
+    }
+    ctx.globalAlpha=q.get('transparent')==='1'&&data.kind!=='code'?.5:1;
     if(q.get('shadow')==='soft'||q.get('shadow')==='solid'){
       ctx.shadowColor=q.get('shadow-color')||'#ffffff';ctx.shadowOffsetX=(Number(q.get('shadow-x'))||1)*1920/cols*sx;
       ctx.shadowOffsetY=(Number(q.get('shadow-y'))||1)*1080/rows*sy;ctx.shadowBlur=q.get('shadow')==='soft'?Math.max(1,data.size*.09*sy):0;

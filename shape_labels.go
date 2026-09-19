@@ -13,8 +13,60 @@ import (
 // The label belongs to its shape, not to the slide's selection/order list.
 // A separate query keeps typography independent of the shape's fill/effects.
 type shapeLabelData struct {
-	Text  string `json:"text"`
-	Query string `json:"query,omitempty"`
+	Text  string          `json:"text"`
+	Query string          `json:"query,omitempty"`
+	Extra *jsonExtensions `json:"-"`
+}
+
+func (s shapeLabelData) MarshalJSON() ([]byte, error) {
+	type stored shapeLabelData
+	return encodeJSONExtensions(stored(s), s.Extra)
+}
+
+func (s *shapeLabelData) UnmarshalJSON(data []byte) error {
+	type stored shapeLabelData
+	var value stored
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	extra, err := decodeJSONExtensions(data, "text", "query")
+	if err != nil {
+		return err
+	}
+	*s = shapeLabelData(value)
+	s.Extra = extra
+	return nil
+}
+
+// Migrate only the nested typography. Shape geometry/paint and unknown label
+// extension fields must survive this document-boundary operation unchanged.
+func standardShapeLabel(element Element) Element {
+	q, _ := url.ParseQuery(element.Query)
+	raw, err := base64.StdEncoding.DecodeString(q.Get("shape-label"))
+	if err != nil || len(raw) > 65536 {
+		return element
+	}
+	var fields map[string]json.RawMessage
+	var label shapeLabelData
+	if json.Unmarshal(raw, &fields) != nil || fields == nil || json.Unmarshal(raw, &label) != nil {
+		return element
+	}
+	values, _ := url.ParseQuery(label.Query)
+	if values.Get("render") == "truetype" && !values.Has("font") && !values.Has("glyph") && !values.Has("source") && !values.Has("scale") && !values.Has("text-size") {
+		return element
+	}
+	updated := standardTextElement(Element{Kind: "text", Text: label.Text, Query: label.Query})
+	if updated.Query == label.Query {
+		return element
+	}
+	fields["query"], _ = json.Marshal(updated.Query)
+	encoded, err := json.Marshal(fields)
+	if err != nil {
+		return element
+	}
+	q.Set("shape-label", base64.StdEncoding.EncodeToString(encoded))
+	element.Query = q.Encode()
+	return element
 }
 
 func shapeLabel(e Element) (Element, bool) {
@@ -34,7 +86,7 @@ func shapeLabel(e Element) (Element, bool) {
 	if !v.Has("fg") {
 		v.Set("fg", "#ffffff")
 	}
-	return Element{Kind: "text", Text: data.Text, Query: v.Encode(), ID: e.ID}, true
+	return standardTextElement(Element{Kind: "text", Text: data.Text, Query: v.Encode(), ID: e.ID}), true
 }
 
 var shapeLabelColourTag = regexp.MustCompile(`(?i)\[color=#[0-9a-f]{6}\]|\[/color\]`)
@@ -153,17 +205,31 @@ func fitShapeLabel(e *Element, cols, rows int) {
 	top := placementTopRow(p, rows, (h+1)/2, 0)
 	// Keep the existing top-left corner fixed: text growth extends the right
 	// and/or bottom edge. The label is centred again in the expanded shape.
-	x := float64(left) + shapeSubcellOffset(q, "shape-offset-x")
-	y := float64(top) + shapeSubcellOffset(q, "shape-offset-y")
+	x, y := preciseShapeAnchor(q, float64(left), float64(top), cols, rows)
+	x += shapeSubcellOffset(q, "shape-offset-x") + objectPlacementOffset(q, "x")
+	y += shapeSubcellOffset(q, "shape-offset-y") + objectPlacementOffset(q, "y")
 	for _, k := range []string{"left_pct", "right_pct", "right", "bottom", "align", "valign", "row_delta"} {
 		q.Del(k)
 	}
 	q.Set("left", strconv.Itoa(int(math.Floor(x))))
 	q.Set("top", strconv.Itoa(int(math.Floor(y))))
-	q.Set("shape-offset-x", strconv.FormatFloat(x-math.Floor(x), 'f', 1, 64))
-	q.Set("shape-offset-y", strconv.FormatFloat(y-math.Floor(y), 'f', 1, 64))
-	q.Set("width", strconv.FormatFloat(float64(nw)/2, 'f', 1, 64))
-	q.Set("height", strconv.FormatFloat(float64(nh)/2, 'f', 1, 64))
+	for axis, value := range map[string]float64{"x": x, "y": y} {
+		fraction := value - math.Floor(value)
+		half := math.Floor(fraction*2) / 2
+		q.Set("shape-offset-"+axis, strconv.FormatFloat(half, 'f', 1, 64))
+		q.Del("object-offset-" + axis)
+		if remainder := fraction - half; remainder != 0 {
+			q.Set("object-offset-"+axis, strconv.FormatFloat(remainder, 'f', -1, 64))
+		}
+	}
+	// Sampling decides whether an axis must grow, but must not round the
+	// authored dimension on the other axis (or create an inherited override).
+	if nw != w {
+		q.Set("width", strconv.FormatFloat(float64(nw)/2, 'f', 1, 64))
+	}
+	if nh != h {
+		q.Set("height", strconv.FormatFloat(float64(nh)/2, 'f', 1, 64))
+	}
 	e.Query = q.Encode()
 }
 

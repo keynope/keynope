@@ -50,6 +50,25 @@
   let currentName = 'Untitled.md';
   let runtimeReady;
   let workspaceLoaded = false;
+  let workspaceSnapshot = null;
+
+  function readWorkspace() {
+    let envelope = JSON.parse(window.keynopeWasmWorkspace(workspaceSnapshot?.revision || 0));
+    if (envelope.status !== 200) throw Error(envelope.body || 'Could not refresh workspace');
+    let next = JSON.parse(envelope.body);
+    if (next.baseRevision && (!workspaceSnapshot || next.baseRevision !== workspaceSnapshot.revision || next.cols !== workspaceSnapshot.cols || next.rows !== workspaceSnapshot.rows)) {
+      envelope = JSON.parse(window.keynopeWasmWorkspace());
+      if (envelope.status !== 200) throw Error(envelope.body || 'Could not resynchronise workspace');
+      next = JSON.parse(envelope.body);
+    }
+    if (next.baseRevision) {
+      const replaced = new Set(next.replaceSlides || []);
+      const retained = workspaceSnapshot.pages.filter(page => page.slide < next.slideCount && !replaced.has(page.slide));
+      next.pages = retained.concat(next.pages).sort((a,b) => a.slide-b.slide || a.page-b.page);
+    }
+    workspaceSnapshot = next;
+    return next;
+  }
   function finishLoading() {
     if (!loading.isConnected) return;
     setLoadingProgress(20, 'READY');
@@ -117,7 +136,7 @@
 
   function responseFromEnvelope(raw) {
     const envelope = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    return new Response(envelope.body || '', {
+    return new Response([204,205,304].includes(envelope.status) ? null : (envelope.body || ''), {
       status: envelope.status || 500,
       headers: {'Content-Type': envelope.contentType || 'text/plain; charset=utf-8'}
     });
@@ -193,11 +212,9 @@
   }
 
   async function refreshWorkspace(state) {
-    const envelope = JSON.parse(window.keynopeWasmWorkspace());
-    if (envelope.status !== 200) return;
-    const workspace = JSON.parse(envelope.body);
+    const workspace = readWorkspace();
     if (state && Number.isInteger(state.current)) workspace.current = state.current;
-    if (window.keynopeLoadWebWorkspace) await window.keynopeLoadWebWorkspace(workspace);
+    if (window.keynopeLoadWebWorkspace) await window.keynopeLoadWebWorkspace(workspace,state);
     workspaceLoaded = true;
     finishLoading();
   }
@@ -237,11 +254,13 @@
       raw = window.keynopeWasmRequest(method, target.pathname + target.search, body);
     }
     const envelope = JSON.parse(raw);
+    let actionName = '';
     let refresh = target.pathname === '/api/editor/upload' ||
       (target.pathname === '/api/editor/state' && !workspaceLoaded);
     if (target.pathname === '/api/editor/action') {
       try {
         const action = JSON.parse(typeof init.body === 'string' ? init.body : '{}').action || '';
+        actionName = action;
         refresh = !stateOnlyEditorActions.has(action);
       } catch (_) {
         refresh = true;
@@ -250,12 +269,17 @@
     if (envelope.status >= 200 && envelope.status < 300 && refresh) {
       let state = null;
       try { state = JSON.parse(envelope.body); } catch (_) {}
-      await refreshWorkspace(state);
+      // Selecting an existing normal slide changes the viewport, not content.
+      // Master workspaces contain one resolved page, so keep their refresh path.
+      const navigated = actionName === 'select-slide' && Number.isInteger(state?.current) && !state.masterMode && workspaceLoaded &&
+        window.keynopeNavigateWebWorkspace?.(state.current,state);
+      if (!navigated) await refreshWorkspace(state);
     }
     return responseFromEnvelope(envelope);
   };
 
-  async function documentPayload(name = currentName) {
+  async function documentPayload(name = currentName, prepare = true) {
+    if(prepare)await window.keynopePrepareDocumentSave?.();
     await window.keynopeFlushActivityResults?.();
     const response = await window.fetch('/api/editor/document', {
       method: 'POST',
@@ -266,15 +290,16 @@
     return response.json();
   }
 
-  async function saveBlob(blob, suggestedName, types, rememberHandle = false) {
+  async function saveBlob(blob, suggestedName, types, rememberHandle = false, forbiddenHandle = null) {
     if ('showSaveFilePicker' in window) {
       const handle = rememberHandle && documentFileHandle
         ? documentFileHandle
         : await window.showSaveFilePicker({suggestedName, types});
-      if (rememberHandle) documentFileHandle = handle;
+      if (forbiddenHandle && await handle.isSameEntry(forbiddenHandle)) throw new Error('Choose a different file to keep the original presentation intact.');
       const stream = await handle.createWritable();
       await stream.write(blob);
       await stream.close();
+      if (rememberHandle) documentFileHandle = handle;
       return handle.name || suggestedName;
     }
     const url = URL.createObjectURL(blob);
@@ -308,8 +333,21 @@
     if (window.keynopeDidSave) window.keynopeDidSave(savedState);
   }
 
+  async function savePresentationCopy() {
+    await runtimeReady;
+    const name=(currentName||'Untitled.md').replace(/\.md$/i,'')+' copy.md';
+    const payload=await documentPayload(name);
+    await saveBlob(new Blob([payload.content],{type:'text/markdown;charset=utf-8'}),name,[{
+      description:'Keynope Markdown deck',accept:{'text/markdown':['.md']}
+    }],false,documentFileHandle);
+    // A copy is not the active document's saved baseline: retain its path,
+    // dirty state, recovery draft and existing file handle.
+    window.showEngagementToast?.('Copy saved');
+  }
+
   async function exportHTML(openAfterExport = false, presentationWindow = null) {
     await runtimeReady;
+    await window.keynopePrepareDocumentSave?.();
     const baseName = (currentName || 'Untitled.md').replace(/\.[^.]+$/, '') || 'Keynope';
     const response = await window.fetch('/api/editor/export-document', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -334,7 +372,9 @@
   async function autosaveDraft(revision = draftRevision) {
     if (!dirty || revision !== draftRevision) return;
     try {
-      const payload = await documentPayload(currentName);
+      // Background recovery snapshots must not apply/close the user's editor.
+      // Explicit Save/Present still prepare pending text before serialization.
+      const payload = await documentPayload(currentName, false);
       if (!dirty || revision !== draftRevision) return;
       await writeDraft({markdown:payload.content, name:currentName, untitled:true, updated:Date.now()});
     } catch (_) {}
@@ -349,8 +389,8 @@
     currentName = name;
     documentFileHandle = null;
     workspaceLoaded = false;
-    const workspaceEnvelope = JSON.parse(window.keynopeWasmWorkspace());
-    const workspace = JSON.parse(workspaceEnvelope.body);
+    workspaceSnapshot = null;
+    const workspace = readWorkspace();
     workspace.current = 0;
     if (window.keynopeReloadWebDocument) await window.keynopeReloadWebDocument(workspace);
     workspaceLoaded = true;
@@ -426,16 +466,19 @@
     openButton.setAttribute('aria-label', openButton.title);
     openButton.onclick = openPresentation;
     controls.append(newButton, openButton);
-    topbar.querySelector('[data-ribbon="insert"]').prepend(controls);
+    (topbar.querySelector('.keynope-ribbon-quick') || topbar.querySelector('[data-ribbon="insert"]')).prepend(controls);
     return true;
   }
 
   async function showAbout() {
     const existing = document.querySelector('.keynope-web-about');
     if (existing) {
-      existing.remove();
+      const closeButton = existing.querySelector('.keynope-web-about-close');
+      if (closeButton) closeButton.click(); else existing.remove();
       return;
     }
+    const launcher = document.querySelector('button[aria-label="About Keynope"]');
+    const previousFocus = launcher && launcher.isConnected ? launcher : document.activeElement;
     const blocker = document.createElement('div');
     blocker.className = 'keynope-web-about';
     const dialog = document.createElement('section');
@@ -453,21 +496,35 @@
     ].join('');
     blocker.appendChild(dialog);
     document.body.appendChild(blocker);
-    let escape;
+    let keyboard;
+    let closed = false;
     const close = () => {
-      if (escape) removeEventListener('keydown', escape, true);
+      if (closed) return;
+      closed = true;
+      if (keyboard) removeEventListener('keydown', keyboard, true);
       blocker.remove();
+      if (previousFocus && previousFocus.isConnected) previousFocus.focus({preventScroll:true});
     };
-    dialog.querySelector('.keynope-web-about-close').onclick = close;
+    const closeButton = dialog.querySelector('.keynope-web-about-close');
+    closeButton.onclick = close;
     blocker.addEventListener('pointerdown', event => {
       if (event.target === blocker) close();
     });
-    escape = event => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      close();
+    keyboard = event => {
+      if (!blocker.isConnected) return;
+      if (event.key === 'Escape') {
+        event.preventDefault(); event.stopImmediatePropagation(); close(); return;
+      }
+      if (event.key !== 'Tab' || event.altKey || event.ctrlKey || event.metaKey) return;
+      const controls = [...dialog.querySelectorAll('button,input,select,textarea,a[href],summary,[tabindex]')]
+        .filter(node => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden');
+      if (!controls.length) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      const index = controls.indexOf(document.activeElement), step = event.shiftKey ? -1 : 1;
+      controls[((index < 0 ? (event.shiftKey ? 0 : -1) : index) + step + controls.length) % controls.length].focus();
     };
-    addEventListener('keydown', escape, true);
+    addEventListener('keydown', keyboard, true);
+    closeButton.focus();
     try {
       const response = await nativeFetch(assetURL('licenses.txt'));
       dialog.querySelector('pre').textContent = response.ok ? await response.text() : 'License information is unavailable.';
@@ -487,6 +544,8 @@
         if (dirty) draftTimer = setTimeout(() => autosaveDraft(revision), 250);
       } else if (action === 'save-presentation') {
         savePresentation().catch(error => reportFailure('Could not save presentation', error));
+      } else if (action === 'save-presentation-copy') {
+        savePresentationCopy().catch(error => reportFailure('Could not save a copy', error));
       } else if (action === 'export-html') {
         exportHTML(false).catch(error => reportFailure('Could not export presentation', error));
       } else if (action === 'show-main') {

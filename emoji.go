@@ -87,6 +87,7 @@ func bundledLicenseText() string {
 		{title: "KEYNOPE", text: keynopeLicenseText},
 		{title: "KEYNOPE EMOJI GLYPHS NOTICE", text: emojiNoticeText},
 		{title: "SIL OPEN FONT LICENSE 1.1", text: emojiOFLText},
+		{title: "GO FONT FAMILY", text: modernFontLicense},
 		{title: "NOTO REGIONAL FLAGS", text: emojiRegionFlagsLicenseText},
 		{title: "UNICODE DATA FILES", text: unicodeLicenseText},
 	}

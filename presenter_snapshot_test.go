@@ -23,3 +23,16 @@ func TestPresenterSnapshotUsesUpdatedPagesInSlideOrder(t *testing.T) {
 		t.Fatal("snapshot aliases cached page slice")
 	}
 }
+
+func TestPresenterSingleSlideSnapshotCarriesAtomicDeckRevision(t *testing.T) {
+	p := &presenterCompanion{pages: map[int][]exportPage{0: {{Slide: 0, FG: "current"}}}}
+	p.state.DeckVersion = 7
+	pages, version := p.slideSnapshotAt(0)
+	if len(pages) != 1 || pages[0].FG != "current" || version != 7 {
+		t.Fatalf("non-atomic slide snapshot: pages=%+v version=%d", pages, version)
+	}
+	pages[0].FG = "mutated"
+	if p.pages[0][0].FG != "current" {
+		t.Fatal("single-slide snapshot aliases the published slice")
+	}
+}

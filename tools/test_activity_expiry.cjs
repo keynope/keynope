@@ -13,8 +13,7 @@ for(const name of ['engagementRuntimeAlive','engagementHasCompleted','engagement
  const start=source.indexOf((name==='revealImpostorRoles'?'async ':'')+'function '+name+'(');
  assert(start>=0,name);vm.runInContext(source.slice(start,source.indexOf('\n}',start)+2),c);
 }
-const kinds=['shuffle','deducer','finalanswer','pulse','storm','sort','dual','quiz','match','questions','wall','draw','introduction','expertise','cards','impostor','dots','finishpair','prerequisites','chosen','pressure','ball','gallery','hunt','teach','fame','agreements','three','pair','truefalse'];
-kinds.push('nominate');
+const kinds=require('./activity_test_catalog.cjs').filter(kind=>kind!=='onboarding');
 function runtime(kind){return {definition:{id:kind,kind,options:['A','B'],questions:[{},{}],groupCount:1,chosenCount:1},
  phase:1,deadlineMs:Date.now()-100,pausedRemainingMs:0,memberNames:{a:'Alex',b:'Bea'},
  counts:[1,2],attributions:[{displayName:'Alex',idea:'Keep me'}],entryResponses:[{id:'response',idea:'Keep me'}],
@@ -49,5 +48,5 @@ function runtime(kind){return {definition:{id:kind,kind,options:['A','B'],questi
  const r=runtime('storm');r.deadlineMs=Date.now()+5000;assert(c.engagementAcceptsResponse(r,{}));r.deadlineMs=Date.now()-1;assert(!c.engagementAcceptsResponse(r,{}));
  r.definition.kind='questions';r.phase=2;r.deadlineMs=0;assert(c.engagementAcceptsResponse(r,{questionDots:[]}));
  r.definition.kind='pair';r.phase=3;assert(c.engagementAcceptsResponse(r,{chat:'hello'}));
- console.log('PASS: all 31 exercises finalize and archive on expiry; empty rooms, late-response lock, voting, pauses and read-only views.');
+ console.log(`PASS: all ${kinds.length} exercises finalize and archive on expiry; empty rooms, late-response lock, voting, pauses and read-only views.`);
 })().catch(e=>{console.error(e);process.exitCode=1});

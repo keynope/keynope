@@ -15,8 +15,7 @@ for(const name of ['engagementHasCompleted','engagementIsRunning','engagementDis
 function activity(kind,timerSeconds=120){return {definition:{id:kind,kind,timerSeconds,questions:[{},{}]},phase:1,
   deadlineMs:now+90000,memberNames:{a:'Alex'},ideas:['Keep me'],game:{stage:'join',entries:[{text:'Keep me too'}]},
   finishedAt:{a:123},questionIndex:1,groups:[],attributions:[],questionVotes:{a:['q1']}};}
-const kinds=['onboarding','shuffle','deducer','finalanswer','pulse','storm','dots','sort','dual','quiz','match','questions','wall','draw','introduction','expertise','cards','impostor','finishpair','prerequisites','chosen','pressure','ball','gallery','hunt','teach','fame','agreements','three','pair','truefalse'];
-kinds.push('nominate');
+const kinds=require('./activity_test_catalog.cjs');
 for(const kind of kinds){
  const r=activity(kind);c.keynopeEngagementRuntime=c.keynopeRunningActivity=r;
  if(kind==='questions')r.phase=2;
@@ -58,4 +57,4 @@ c.keynopeRunningActivity=null;c.keynopeEngagementRuntime=null;
 sessions.set('saved',{result:{state:{phase:3}}});assert.equal(c.engagementDisplayState({id:'saved'}),'completed');
 sessions.set('saved',{result:null,runtime:{definition:{id:'saved',kind:'storm'},phase:0}});
 assert.equal(c.engagementDisplayState({id:'saved'}),'clean');
-console.log('PASS 32 activity types: Reopen preserves entries/answers/groups, working phase and remaining time + one minute; paused/expired/untimed/archived states, conflicts and activity colours.');
+console.log(`PASS ${kinds.length} activity types: Reopen preserves entries/answers/groups, working phase and remaining time + one minute; paused/expired/untimed/archived states, conflicts and activity colours.`);

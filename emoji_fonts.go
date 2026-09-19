@@ -87,5 +87,5 @@ func trueTypeEmojiData(text string) ([]exportEmojiRun, map[string]string) {
 func exportTrueTypeElement(element Element, width, height int) *exportTrueType {
 	runs, fonts := trueTypeEmojiData(element.Text)
 	return &exportTrueType{Kind: element.Kind, Text: element.Text, Query: element.Query,
-		Size: trueTypeSize(element), Width: width, Height: height, Emojis: runs, EmojiFonts: fonts}
+		Size: trueTypeSize(element), Width: width, Height: height, Emojis: runs, EmojiFonts: fonts, RichRuns: exportedRichRuns(element)}
 }
