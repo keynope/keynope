@@ -96,7 +96,9 @@ final class SlideExportRenderer: NSObject, WKNavigationDelegate {
     private var loading: CheckedContinuation<Void, Error>?
     private var timeout: Task<Void, Never>?
     private var closed = false
-    private var capture: CheckedContinuation<NSImage, Error>?
+    // Continuations may resume outside the main actor. Keep AppKit objects on
+    // the actor and pass only immutable, Sendable image bytes across it.
+    private var capture: CheckedContinuation<Data, Error>?
     private var captureTimeout: Task<Void, Never>?
     private var captureGeneration = 0
 
@@ -132,13 +134,31 @@ final class SlideExportRenderer: NSObject, WKNavigationDelegate {
         if let error { continuation.resume(throwing: error) } else { continuation.resume() }
     }
 
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finishLoading() }
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { finishLoading(error) }
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { finishLoading(error) }
-    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        let error = NSError(domain: "sh.keynope.export", code: 2, userInfo: [NSLocalizedDescriptionKey: "The export renderer stopped unexpectedly."])
-        finishLoading(error)
-        finishCapture(.failure(error))
+    nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        Task { @MainActor [weak self] in self?.finishLoading() }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        let message = error.localizedDescription
+        Task { @MainActor [weak self] in self?.finishLoading(Self.navigationError(message)) }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        let message = error.localizedDescription
+        Task { @MainActor [weak self] in self?.finishLoading(Self.navigationError(message)) }
+    }
+
+    nonisolated func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let error = NSError(domain: "sh.keynope.export", code: 2, userInfo: [NSLocalizedDescriptionKey: "The export renderer stopped unexpectedly."])
+            self.finishLoading(error)
+            self.finishCapture(.failure(error))
+        }
+    }
+
+    private static func navigationError(_ message: String) -> NSError {
+        NSError(domain: "sh.keynope.export", code: 8, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
     func pages() async throws -> [[String: Any]] {
@@ -151,7 +171,7 @@ final class SlideExportRenderer: NSObject, WKNavigationDelegate {
         return pages
     }
 
-    func image(page: Int) async throws -> NSImage {
+    func imageData(page: Int) async throws -> Data {
         try checkOpen()
         guard capture == nil else {
             throw NSError(domain: "sh.keynope.export", code: 6, userInfo: [NSLocalizedDescriptionKey: "A slide capture is already running."])
@@ -182,7 +202,7 @@ final class SlideExportRenderer: NSObject, WKNavigationDelegate {
                     self.view.takeSnapshot(with: config) { [weak self] image, error in
                         guard let self, self.captureGeneration == generation else { return }
                         if let error { self.finishCapture(.failure(error)) }
-                        else if let image { self.finishCapture(.success(image)) }
+                        else if let image, let data = image.tiffRepresentation { self.finishCapture(.success(data)) }
                         else { self.finishCapture(.failure(CocoaError(.fileReadUnknown))) }
                     }
                 } catch {
@@ -192,7 +212,7 @@ final class SlideExportRenderer: NSObject, WKNavigationDelegate {
         }
     }
 
-    private func finishCapture(_ result: Result<NSImage, Error>) {
+    private func finishCapture(_ result: Result<Data, Error>) {
         captureTimeout?.cancel(); captureTimeout = nil
         guard let continuation = capture else { return }
         capture = nil
