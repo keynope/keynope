@@ -9,6 +9,48 @@ import (
 	"strconv"
 )
 
+// Font families have substantially different native advances. These factors
+// express the authored width that gives each face the same useful optical
+// baseline as C64. Mono is mathematically stable across the embedded faces;
+// proportional is an inspected presentation-oriented compromise because its
+// width necessarily varies with the selected text.
+func normalizedFontWidthFactor(font string) float64 {
+	switch font {
+	case "mono":
+		return .5556
+	case "sans":
+		return .49
+	default:
+		return 1
+	}
+}
+
+func resolvedModernFont(deck Deck, element Element, query url.Values) string {
+	if font := query.Get("modern-font"); font == "c64" || font == "mono" || font == "sans" {
+		return font
+	}
+	if deck.usesConcreteAppearance() {
+		return "c64"
+	}
+	if element.Kind == "code" {
+		return "mono"
+	}
+	return "sans"
+}
+
+func normalizeWidthForFontSwitch(query url.Values, oldFont, newFont string) {
+	if oldFont == newFont || newFont == "" {
+		return
+	}
+	width := 100.0
+	if parsed, err := strconv.ParseFloat(query.Get("modern-width"), 64); err == nil && parsed >= 1 && parsed <= 200 {
+		width = parsed
+	}
+	conceptual := width / normalizedFontWidthFactor(oldFont)
+	next := math.Max(1, math.Min(200, conceptual*normalizedFontWidthFactor(newFont)))
+	query.Set("modern-width", strconv.FormatFloat(next, 'f', -1, 64))
+}
+
 // Inspector typography changes never round-trip content through the editor's
 // run model. Preflight the complete stable-ID selection, then commit queries
 // together. Family/size are Modern-only; emphasis is shared across treatments.
@@ -121,10 +163,12 @@ func applyModernTextStyle(deck *Deck, action nativeEditorAction, editingGroup st
 			}
 		}
 		if action.ModernFont != nil && modern {
+			oldFont := resolvedModernFont(*deck, element, query)
 			if *action.ModernFont == "" {
 				query.Del("modern-font")
 			} else {
 				query.Set("modern-font", *action.ModernFont)
+				normalizeWidthForFontSwitch(query, oldFont, *action.ModernFont)
 			}
 		}
 		if action.ModernSize != nil && modern {

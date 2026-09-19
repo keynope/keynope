@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/url"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -109,6 +110,40 @@ func TestModernTextStyleBatchAtomicity(t *testing.T) {
 	}
 	if !reflect.DeepEqual(deck.Slides[0].Elements[1], before.Slides[0].Elements[1]) {
 		t.Fatal("entered group changed sibling")
+	}
+}
+
+func TestFontSwitchNormalizesOpticalWidth(t *testing.T) {
+	deck := Deck{
+		Appearance: &DeckAppearance{Version: 3},
+		Slides: []Slide{{Elements: []Element{{
+			ID: "text", Kind: "text", Text: "The quick brown fox", Query: "render=truetype&modern-font=c64&modern-size=270&modern-width=140",
+		}}}},
+	}
+	font := "mono"
+	action := nativeEditorAction{Slide: 0, ObjectIDs: []string{"text"}, ModernFont: &font}
+	if changed, err := applyModernTextStyle(&deck, action, ""); err != nil || !changed {
+		t.Fatalf("C64 to mono: changed=%v err=%v", changed, err)
+	}
+	q, _ := url.ParseQuery(deck.Slides[0].Elements[0].Query)
+	if got, _ := strconv.ParseFloat(q.Get("modern-width"), 64); math.Abs(got-77.784) > .001 || q.Get("modern-size") != "270" {
+		t.Fatalf("C64 140 did not normalize to mono 77.784 at the same size: %v", q)
+	}
+	font = "sans"
+	if changed, err := applyModernTextStyle(&deck, action, ""); err != nil || !changed {
+		t.Fatalf("mono to sans: changed=%v err=%v", changed, err)
+	}
+	q, _ = url.ParseQuery(deck.Slides[0].Elements[0].Query)
+	if got, _ := strconv.ParseFloat(q.Get("modern-width"), 64); math.Abs(got-68.6) > .001 {
+		t.Fatalf("C64 140 did not normalize to proportional 68.6: %v", q)
+	}
+	font = "c64"
+	if changed, err := applyModernTextStyle(&deck, action, ""); err != nil || !changed {
+		t.Fatalf("sans to C64: changed=%v err=%v", changed, err)
+	}
+	q, _ = url.ParseQuery(deck.Slides[0].Elements[0].Query)
+	if got, _ := strconv.ParseFloat(q.Get("modern-width"), 64); math.Abs(got-140) > .001 {
+		t.Fatalf("round trip did not restore C64 width: %v", q)
 	}
 }
 

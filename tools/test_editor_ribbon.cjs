@@ -129,7 +129,7 @@ const server=http.createServer((req,res)=>{
   const appearance=page.locator('.keynope-slide-context');
   await appearance.getByLabel('Font size (TTF)',{exact:true}).fill('110');await appearance.getByLabel('Font size (TTF)',{exact:true}).press('Tab');
   await page.waitForFunction(async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.slides[s.current].ttfSize===110;});
-  await appearance.getByLabel('Font width (%)',{exact:true}).fill('90');await appearance.getByLabel('Font width (%)',{exact:true}).press('Tab');
+  await appearance.getByLabel('Font width',{exact:true}).fill('90');await appearance.getByLabel('Font width',{exact:true}).press('Tab');
   await page.waitForFunction(async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.slides[s.current].ttfWidth===90;});
   await page.keyboard.press('Escape');
   await page.locator('.keynope-slides-header button').click();

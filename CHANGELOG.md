@@ -4,6 +4,18 @@ All notable changes to `keynope` are documented in this file.
 
 This project follows semantic versioning.
 
+## 1.7.1
+
+Changed:
+
+- Font-family changes now preserve approximate visual dimensions. C64, Go Mono, and Go proportional text use measured optical width normalization while retaining the authored font size.
+- Font size and font width controls now use consistent grouped fields with directly associated increase and decrease buttons.
+
+Fixed:
+
+- Numeric inspector fields immediately reflect direct edits and relative `+` / `−` changes instead of displaying the previous value.
+- Shape-label typography, paragraph spacing, opacity, width, and rotation fields no longer fall back to stale rendered-scene values after a mutation.
+
 ## 0.1.7
 
 - Added modern mode
