@@ -920,9 +920,8 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                         try progress.checkCancellation()
                         progress.update("Rendering slide \(position + 1) of \(pages.count)…", completed: position, total: pages.count)
                         guard let index = page["index"] as? Int else { continue }
-                        let image = try await renderer.image(page: index)
+                        let bytes = try await renderer.imageData(page: index)
                         try progress.checkCancellation()
-                        guard let bytes = image.tiffRepresentation else { throw CocoaError(.fileWriteUnknown) }
                         try await output.append(imageData: bytes)
                     }
                     progress.update("Writing PDF…", completed: pages.count, total: pages.count)
@@ -934,9 +933,9 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 } else {
                     progress.update("Rendering selected slide…", completed: 0)
                     guard let index = pages[selector.indexOfSelectedItem]["index"] as? Int else { throw CocoaError(.fileWriteUnknown) }
-                    let image = try await renderer.image(page: index)
+                    let tiff = try await renderer.imageData(page: index)
                     try progress.checkCancellation()
-                    guard let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
+                    guard let bitmap = NSBitmapImageRep(data: tiff),
                           let bytes = bitmap.representation(using: .png, properties: [:]) else { throw CocoaError(.fileWriteUnknown) }
                     try bytes.write(to: destination, options: .atomic)
                 }
