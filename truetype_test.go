@@ -190,8 +190,6 @@ func TestTrueTypeBrowser(t *testing.T) {
 	mux.HandleFunc("/api/editor/workspace", s.handleWorkspace)
 	mux.HandleFunc("/api/editor/preview", s.handlePreview)
 	mux.HandleFunc("/api/editor/document", s.handleDocument)
-	mux.HandleFunc("/api/editor/fonts/default", s.handleDefaultFont)
-	mux.HandleFunc("/api/editor/fonts/library", s.handleFontLibrary)
 	mux.HandleFunc("/api/editor/emojis", s.handleEmojiCatalog)
 	mux.HandleFunc("/test/workspace", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.RLock()

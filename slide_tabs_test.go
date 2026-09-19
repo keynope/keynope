@@ -90,8 +90,8 @@ func TestTabSlidesExcludedFromNavigationButRenderAsParticipantTabs(t *testing.T)
 	if s.current != 0 {
 		t.Fatal("previous entered tab slide")
 	}
-	if s.apply(nativeEditorAction{Action: "navigate-presentation", Slide: 1}) == nil {
-		t.Fatal("presenter navigated to tab")
+	if err := s.apply(nativeEditorAction{Action: "navigate-presentation", Slide: 1}); err != nil {
+		t.Fatalf("explicit cheat-sheet selection failed: %v", err)
 	}
 	slide := s.deck.ResolvedSlides()[1]
 	pages := exportSlidePages(slide, 1, 5, 245, 56)
@@ -116,8 +116,8 @@ func TestTabSlidesExcludedFromNavigationButRenderAsParticipantTabs(t *testing.T)
 	}
 	p := &presenterCompanion{pages: map[int][]exportPage{1: pages}}
 	p.Update(1, 0, true, nil)
-	if p.state.Presenting {
-		t.Fatal("native presentation showed tab")
+	if !p.state.Presenting {
+		t.Fatal("explicitly selected cheat sheet was hidden from presentation")
 	}
 	p.helper, p.target = true, "main"
 	if !p.presentationEnabled() {
@@ -141,6 +141,26 @@ func TestTabSlidesExcludedFromNavigationButRenderAsParticipantTabs(t *testing.T)
 	tabAction(t, s, nativeEditorAction{Action: "toggle-master-mode"})
 	if s.apply(nativeEditorAction{Action: "toggle-slide-tab"}) == nil {
 		t.Fatal("master marked as participant tab")
+	}
+}
+
+func TestCheatSheetSelectionFollowsExternalPresentation(t *testing.T) {
+	s := tabTestSession(t)
+	s.deck.Slides[1].TabID = "reference"
+	s.companion = &presenterCompanion{helper: true, target: "external", pages: map[int][]exportPage{1: {{Slide: 1, TabOnly: true}}}}
+	tabAction(t, s, nativeEditorAction{Action: "select-slide", Slide: 1})
+	if s.companion.state.Slide != 1 || !s.companion.state.Presenting {
+		t.Fatal("selected cheat sheet did not follow to external presentation")
+	}
+	s.companion.paused = true
+	tabAction(t, s, nativeEditorAction{Action: "select-slide", Slide: 1})
+	if s.companion.state.Presenting {
+		t.Fatal("cheat-sheet selection resumed a paused presentation")
+	}
+	s.companion.paused, s.companion.target = false, "none"
+	tabAction(t, s, nativeEditorAction{Action: "select-slide", Slide: 1})
+	if s.companion.state.Presenting {
+		t.Fatal("cheat-sheet selection started a stopped presentation")
 	}
 }
 

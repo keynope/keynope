@@ -1,6 +1,12 @@
 /* Shared workshop presentation language. No remote fonts, trackers or animation loops. */
 globalThis.KeynopeActivityDesign = (() => {
   const activities = {
+    nominate:['Nominate','Who gets your vote?','Choose another participant and press Vote, or Skip to abstain. You can change your choice until voting closes. Results appear on reveal.','gold','M4 11h16v10H4ZM8 3h8v11H8Zm2 5 2 2 3-4'],
+    shuffle:['Shuffle','Meet a new mix of people','The presenter will shuffle the existing groups. Your new group will appear here, with its own Pairing channel.','blue','M3 6h4l10 12h4M3 18h4L17 6h4m-4-3 4 3-4 3m0 6 4 3-4 3'],
+    finalanswer:['Final Answer','One group. One answer.','Discuss with your existing group and agree on one shared idea. Anyone in your group can submit it or remove it to make a replacement before time runs out.','mint','M4 4h16v16H4ZM7 12l3 3 7-7'],
+    deducer:['Deducer','Think together. Narrow it down.','Work with your group to build a shared, ordered list of deductions before time runs out. Everyone can add, remove and reorder entries.','mint','M4 4h16v16H4ZM8 8h8M8 12h8M8 16h5'],
+    pressure:['Pressure Cooker','Against the clock','Work on the task on the slide before the countdown reaches zero.','coral','M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16ZM12 7v5l4 2M9 1h6'],
+    chosen:['The Chosen','Waiting for the draw','You are in the draw. The presenter will randomly choose people from everyone who has joined.','gold','m12 3 3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1Z'],
     onboarding:['Onboarding','Make yourself at home','Join the conversation in Lobby. Your next activity will open here automatically.','mint','M4 6h16v11H8l-4 4ZM8 10h8M8 13h5'],
     pulse:['Pulse','Go with your gut','Choose the response that feels right. You can change it until responses close.','mint','M3 12h4l3-7 4 14 3-7h4'],
     storm:['Storm','One spark can start something','Send a short idea. Then another. There is room for more than one good thought.','gold','m13 2-9 12h7l-1 8 10-13h-8Z'],
@@ -28,9 +34,49 @@ globalThis.KeynopeActivityDesign = (() => {
     agreements:['Working Agreements','Decide how you work together','Support an agreement or raise a concern. You can also propose one of your own.','mint','m3 12 5 5L21 4M4 4h7M3 21h18'],
     three:['Three Before Me','Let the room think first','Three different people answer before the presenter explains. One response per person.','violet','M5 5h14l-6 7 6 7H5']
   };
+  // Every activity has its own conclusion. Keep wording independent of names
+  // being visible: anonymous activities must make sense with counts alone.
+  const revealCopy = {
+    shuffle:['Meet your new group','Find your name and open Pairing channel. The presenter can revert to the original groups after this round.'],
+    nominate:['The nominations are in','See how the votes were distributed. Skips are counted separately; nobody is automatically removed or assigned a role.'],
+    finalanswer:['The final answers','One shared idea from each group. Compare your conclusions and explain the thinking behind them.'],
+    deducer:['Your group deductions','Compare the groups’ ordered lists. What did you agree on, and where did your reasoning take different paths?'],
+    pressure:['Time is up','The countdown has finished. Bring your task to a stopping point and follow the presenter’s next instructions.'],
+    chosen:['The Chosen','The draw is complete. These people were selected.'],
+    onboarding:['Your workshop room','Use the room tabs to follow the presentation, chat, and take part in activities.'],
+    pulse:['The pulse of the room','Compare the responses to see where the room stands and where opinions differ.'],
+    storm:['Ideas from the room','Review everyone’s ideas, spot common themes, and discuss which ones to explore further.'],
+    dots:['Where the votes landed','Compare the vote totals and discuss which ideas deserve attention next.'],
+    sort:['How the room sorted it','Compare the placements in each category. Discuss cards that landed in different places.'],
+    dual:['Two sides of the reflection','Read the responses to both prompts. Look for connections, contrasts, and useful next steps.'],
+    quiz:['Check your answers','Compare the responses with the correct answers and discuss the reasoning behind each one.'],
+    truefalse:['Fact or Fiction: the answer','Check the revealed answer to this statement and discuss what makes it fact or fiction.'],
+    match:['The connections you made','Compare which categories were linked to each card and discuss the different connections.'],
+    questions:['Your questions, prioritised','Work through the questions in vote order, starting with the ones the room most wants answered.'],
+    wall:['Feedback to take forward','Review the feedback under each heading. Discuss what to keep, what to improve, and what to take away.'],
+    draw:['Meet the pixel people','Explore the self-portraits and the names beneath them. Find yours and introduce yourself.'],
+    introduction:['A room full of characters','Put a name to each face and get to know the people in your workshop.'],
+    pair:['Meet your discussion group','Find your partner or group, open Pairing channel, and discuss the prompt before time runs out.'],
+    expertise:['The expertise in the room','Explore the skills and topics people shared. Look for knowledge you can exchange or build on.'],
+    cards:['Find your card group','Find your name under a card rank, then open Pairing channel to meet your group.'],
+    impostor:['Your secret role','Your role is shown only on your screen. Keep it hidden from the people around you.'],
+    finishpair:['Your balanced groups','Earlier finishers have been paired with later finishers. Open Pairing channel to meet your group.'],
+    prerequisites:['Ready to work together','The checklist round is complete. Find your balanced group and meet in Pairing channel.'],
+    ball:['Ball Toss is complete','The round has ended. Take a moment to reflect on what people shared.'],
+    gallery:['Explore the gallery feedback','Browse by exhibit and feedback type. Open a strength, question, or suggestion to discuss it with the room.'],
+    hunt:['What the evidence tells us','Compare the selected findings with the expected answers. Discuss why each finding is relevant—or not.'],
+    teach:['What we taught each other','Review the groups’ topics and notes. Share what you learned and clarify any remaining questions.'],
+    fame:['Recognition from the room','Read the messages of appreciation and celebrate the contributions they recognise.'],
+    agreements:['Agreements to work by','Review the support and concerns for each proposal. Discuss what needs to change before the group commits.'],
+    three:['Three answers, then the explanation','Compare the three participant answers with the presenter’s explanation. What did each perspective add?']
+  };
   const colours={mint:'#8de5bb',gold:'#ffd479',blue:'#91c9ff',violet:'#c3adff',coral:'#ffa595'};
+  function appearance(root,mode) {
+    root.dataset.activityAppearance=mode==='modern'?'modern':'retro';
+  }
   function mount(root,r,{presenter=false}={}) {
     if(!r?.definition)return;
+    appearance(root,r.appearanceMode);
     const [name,title,help,tone,path]=activities[r.definition.kind]||['Activity','Your turn','Follow the presenter’s instructions.','mint','M4 4h16v16H4Z'];
     root.classList.add('kn-activity');root.dataset.activityKind=r.definition.kind;root.dataset.activityId=r.definition.id||'';
     root.style.setProperty('--activity-accent',colours[tone]);
@@ -38,14 +84,23 @@ globalThis.KeynopeActivityDesign = (() => {
     const intro=document.createElement('header');intro.className='kn-activity-intro';
     const icon=document.createElementNS('http://www.w3.org/2000/svg','svg');icon.setAttribute('viewBox','0 0 24 24');icon.setAttribute('aria-hidden','true');
     const line=document.createElementNS(icon.namespaceURI,'path');line.setAttribute('d',path);icon.append(line);
-    const text=document.createElement('div'),eyebrow=document.createElement('div');eyebrow.className='kn-activity-eyebrow';eyebrow.textContent=name+' / '+(presenter?'HOST':voting?'VOTE':reveal?'TOGETHER':locked?'PAUSED':'YOUR TURN');
-    const heading=document.createElement('h2');heading.textContent=voting?'Choose what matters most':reveal?'See what we made together':locked?'A moment to reflect':title;
-    const description=document.createElement('p');description.textContent=voting?'Three dots. One per question. Submit the questions you want to explore first.':reveal?(r.definition.kind==='impostor'?'Your role stays on your screen. Keep it secret.':'Explore the results and listen to the stories behind them.'):locked?'The presenter has closed responses. Stay here for the next step.':help;
+    const text=document.createElement('div'),eyebrow=document.createElement('div');eyebrow.className='kn-activity-eyebrow';eyebrow.textContent=name+' / '+(voting?'VOTE':reveal?'REVEAL':presenter?'HOST':locked?'PAUSED':'YOUR TURN');
+    const heading=document.createElement('h2');heading.textContent=voting?'Choose what matters most':locked?'A moment to reflect':title;
+    const description=document.createElement('p');description.textContent=voting?'Three dots. One per question. Submit the questions you want to explore first.':locked?'The presenter has closed responses. Stay here for the next step.':help;
     if(reveal){
       intro.classList.add('is-reveal');
-      const endings={impostor:['The secret is yours','Keep your role private. Nobody else needs to see this screen.'],pair:['Meet your partner','Make space for both voices. Your discussion time starts now.'],cards:['Your next team is here','Look for your card and meet the people in your group.'],finishpair:['A new perspective awaits','Meet your balanced group in Pairing channel.'],prerequisites:['Ready for what comes next','Meet your group and explore the completion results below.'],truefalse:['Time for the answer','Compare your instinct with the answer, then discuss why.'],questions:['Let curiosity lead','Start with the highest-voted questions and work through them together.'],draw:['Meet the pixel people','Every portrait has a person behind it. Find yours and say hello.'],introduction:['A room full of characters','Put a name to each face and get to know your workshop crew.']};
-      if(endings[r.definition.kind]){heading.textContent=endings[r.definition.kind][0];description.textContent=endings[r.definition.kind][1];}
+      const copy=revealCopy[r.definition.kind]||[name+' results','Review the responses below.'];
+      heading.textContent=copy[0];description.textContent=copy[1];
+      if(r.definition.kind==='prerequisites'&&r.definition.disableGrouping){heading.textContent='Checklist completion';description.textContent='See how many participants finished and how many still have prerequisites to complete.';}
+      if(r.definition.kind==='impostor'&&presenter){heading.textContent='Roles have been assigned';description.textContent='Participants can see their own role privately. Ask everyone to keep their screen hidden.';}
+      if(r.definition.kind==='pair'){
+        eyebrow.textContent=name+' / '+(r.phase>=4?'DONE':'DISCUSS');
+        if(r.phase>=4){heading.textContent='Bring your discussion back';description.textContent='The discussion round has ended. Be ready to share a takeaway or question from your group.';}
+      }
+      if(['ball','teach','pressure'].includes(r.definition.kind))eyebrow.textContent=name+' / DONE';
     }
+    if(r.definition.kind==='onboarding')eyebrow.textContent=name+' / LOBBY';
+    if(r.definition.kind==='chosen')eyebrow.textContent='The Chosen / '+(reveal?'REVEAL':'WAITING FOR DRAW');
     text.append(eyebrow,heading,description);intro.append(icon,text);root.prepend(intro);
     return intro;
   }
@@ -54,6 +109,22 @@ globalThis.KeynopeActivityDesign = (() => {
     const style=document.createElement('style');style.id='kn-activity-design';style.textContent=css;document.head.append(style);
   }
   const css=`
+  body [data-activity-appearance=modern],body [data-activity-appearance=modern] :is(button,input,textarea,select,label,h1,h2,h3,p,span,div):not(.keynope-engagement-qr,.keynope-engagement-drawing *,.keynope-introduction-avatar *,.keynope-introduction-layer,.pressure-clock *){font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important}
+  [data-activity-appearance=modern]{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:16px;line-height:1.55;letter-spacing:normal}
+  .keynope-engagement-overlay[data-activity-appearance=modern]{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+  .keynope-engagement-overlay[data-activity-appearance=modern]:not(.pressure-cooker){background:rgba(15,23,42,.94)}
+  [data-activity-appearance=modern] .keynope-engagement-board{border:1px solid #475569;border-radius:18px;padding:28px;gap:24px;background:#111827;box-shadow:0 24px 64px #0006}
+  [data-activity-appearance=modern] .keynope-engagement-head{align-items:center;flex-wrap:wrap}
+  [data-activity-appearance=modern] .keynope-engagement-head h1{font-weight:650;line-height:1.15;letter-spacing:-.025em}
+  [data-activity-appearance=modern] :is(.keynope-engagement-phase,.keynope-engagement-join){border-radius:8px}
+  [data-activity-appearance=modern] :is(.keynope-engagement-controls button,.keynope-engagement-copy){font:inherit;min-height:44px;border-radius:8px;padding:8px 16px}
+  [data-activity-appearance=modern] .keynope-engagement-countdown{font-family:inherit;font-variant-numeric:tabular-nums;letter-spacing:normal}
+  [data-activity-appearance=modern] .keynope-engagement-join-text{font-family:inherit;letter-spacing:normal}
+  .kn-activity[data-activity-appearance=modern] .kn-activity-intro{background:#1e293b;border:1px solid #475569;border-radius:12px;padding:24px}
+  .kn-activity[data-activity-appearance=modern] :is(.keynope-engagement-choice,.keynope-engagement-sort-card){font-family:inherit}
+  .kn-activity[data-activity-appearance=modern] .kn-activity-eyebrow{letter-spacing:.06em;font-size:12px}
+  .kn-activity[data-activity-appearance=modern] .kn-activity-intro p{font-size:16px;line-height:1.55}
+  @media(max-width:600px){[data-activity-appearance=modern] .keynope-engagement-board{padding:16px;border-radius:12px;gap:16px}}
   .kn-activity{--activity-accent:#8de5bb;--activity-ink:#f3f5ee;--activity-muted:#b1becb;min-width:0;color:var(--activity-ink);line-height:1.55}
   .kn-activity-intro{display:flex;gap:18px;align-items:flex-start;margin:0 0 28px;padding:24px;border:1px solid #3d4d5b;border-left:4px solid var(--activity-accent);background:linear-gradient(125deg,#213039,#151d27 70%);border-radius:4px 18px 18px 4px}
   .kn-activity-intro>svg{flex:none;width:44px;height:44px;padding:10px;box-sizing:content-box;color:var(--activity-accent);background:#0f1822;border:1px solid #405361;border-radius:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
@@ -94,7 +165,7 @@ globalThis.KeynopeActivityDesign = (() => {
   .kn-activity :is(.results,.keynope-engagement-results).kn-idea-board{grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:16px}
   .kn-idea-board>:is(.idea,.keynope-engagement-result-idea){min-height:110px}
   .kn-review-nav{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:18px 0 8px;padding:12px;background:#18232e;border:1px solid #536372;border-radius:10px}
-  .kn-review-nav>span{flex:1;color:#cbd9e3;font-size:13px}.kn-review-nav button{min-height:44px;padding:8px 14px}
+  .kn-review-nav>span{flex:1;color:#cbd9e3;font-size:13px}.kn-review-nav button{min-height:44px;padding:8px 14px;border:1px solid #64748b;background:#243244;color:#f1f5f9;font:inherit;cursor:pointer}.kn-review-nav button:disabled{opacity:.45;cursor:default}
   .kn-activity [hidden]{display:none!important}
   .kn-activity .sort-zones{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
   .kn-activity .sort-zone{background:#141f29;border:1px dashed #667481;min-height:160px;padding:14px}
@@ -124,6 +195,10 @@ globalThis.KeynopeActivityDesign = (() => {
   .kn-activity.keynope-workshop button.kn-primary{background:var(--activity-accent);color:#10212a;border-color:var(--activity-accent);font-weight:800;min-height:48px}
   .kn-activity[data-activity-kind=hunt] label:has(input[type=checkbox]){display:flex;align-items:center;gap:14px;padding:18px;border:1px solid #4b6070;border-radius:10px;background:#182530;cursor:pointer}
   .kn-activity[data-activity-kind=hunt] label:has(input:checked){border-color:var(--activity-accent);background:#233943}
+  .kn-chosen-stage{text-align:center;padding:24px!important;border:1px solid #b89750!important;border-radius:16px;background:radial-gradient(ellipse at top,#403620,#111c26 80%)}
+  .kn-chosen-names{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,200px),1fr));gap:14px;width:100%}
+  .kn-chosen-name{display:flex;align-items:center;justify-content:center;gap:12px;padding:20px;border:1px solid #ffd479;border-radius:12px;background:#302b20;overflow-wrap:anywhere;min-width:0;font-size:clamp(18px,3vw,30px)}
+  .kn-chosen-name strong{min-width:0}.kn-chosen-name span,.kn-chosen-status{color:#ffd479}
   .kn-ball-stage{text-align:center;padding:24px;border:1px solid #5b6464;border-radius:16px;background:radial-gradient(ellipse at top,#3d382d,#17222e 75%)}
   .kn-ball-stage>div{line-height:1.2;text-shadow:3px 4px #655536;margin-bottom:12px}
   .kn-activity.keynope-workshop .kn-contribution{padding:22px;background:#202b38;border:1px solid #526170;border-top:3px solid var(--activity-accent);border-radius:12px;color:#eff4ed;line-height:1.7}
@@ -150,13 +225,55 @@ globalThis.KeynopeActivityDesign = (() => {
   .keynope-engagement-submitted{font-size:13px;color:#b1becb;border-top:1px solid #405261;padding-top:16px}
   .keynope-engagement-qr{margin:0 auto 24px;box-shadow:0 0 0 8px white;max-width:100%}
   @media(max-width:600px){.kn-activity-intro{padding:18px 14px;gap:12px;margin-bottom:20px}.kn-activity-intro>svg{width:24px;height:24px;padding:7px;border-radius:8px}.kn-activity .kn-activity-intro h2{font-size:21px}.kn-activity .kn-activity-intro p{font-size:12px}.kn-activity :is(.choices,.keynope-engagement-pulse){grid-template-columns:repeat(2,minmax(0,1fr))}.kn-activity .sort-zones{grid-template-columns:repeat(2,minmax(0,1fr))}.kn-activity .sort-zone{padding:10px}.kn-activity .sort-item{font-size:12px}.kn-activity .result{flex-wrap:wrap}.keynope-engagement-board{padding:18px}.keynope-engagement-controls{bottom:-18px}.kn-activity-intro .kn-activity-eyebrow{font-size:10px}.kn-activity :is(.quiz-options,.match-grid)>label{min-height:48px;padding:12px}}
-  @media(prefers-reduced-motion:reduce){.kn-activity *{animation:none!important;transition:none!important}.kn-activity .marquee-track{transform:none!important}.kn-activity .marquee{overflow-x:auto}}
+  .kn-portrait-gallery[data-gallery-view=grid] :is(.marquee,.keynope-engagement-marquee){overflow:visible}
+  .kn-portrait-gallery[data-gallery-view=grid] :is(.marquee-track,.keynope-engagement-marquee-track){display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));width:100%;animation:none!important;transform:none!important;gap:16px}
+  .kn-portrait-gallery figure{min-width:0;margin:0;padding:12px;display:grid;justify-items:center;gap:10px}
+  body [data-activity-appearance=modern] .kn-portrait-gallery figcaption{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;font-size:15px;line-height:1.4}
+  .kn-portrait-gallery[data-gallery-view=grid] .keynope-engagement-drawing{grid-template-columns:repeat(20,7px);grid-template-rows:repeat(20,7px)}
+  .kn-portrait-gallery[data-gallery-view=grid] .keynope-engagement-drawing i{width:7px;height:7px;font-size:8px;line-height:7px}
+  .kn-portrait-gallery[data-gallery-view=grid] .keynope-introduction-avatar{--avatar-cell:7px}
+  .kn-portrait-gallery figure[hidden]{display:none!important}
+  .kn-portrait-gallery[data-gallery-paused=true] :is(.marquee-track,.keynope-engagement-marquee-track),.kn-portrait-gallery:focus-within :is(.marquee-track,.keynope-engagement-marquee-track){animation-play-state:paused}
+  .kn-portrait-gallery [role=region]:focus-visible{outline:3px solid var(--activity-accent);outline-offset:4px}
+  @media(prefers-reduced-motion:reduce){.kn-activity *{animation:none!important;transition:none!important}.kn-activity :is(.marquee-track,.keynope-engagement-marquee-track){transform:none!important}.kn-activity :is(.marquee,.keynope-engagement-marquee){overflow-x:auto}}
   `;
   function pulseMeter(button,index,total) {
     const meter=document.createElement('span');meter.className='kn-pulse-meter';meter.setAttribute('aria-hidden','true');
     for(let i=0;i<total;i++){const bar=document.createElement('i');bar.style.height=(8+i*4)+'px';bar.className=i<=index?'on':'';meter.append(bar);}button.prepend(meter);
   }
+  function portraitGallery(container,r){
+    const marquee=container.querySelector('.marquee,.keynope-engagement-marquee');
+    const track=marquee?.querySelector('.marquee-track,.keynope-engagement-marquee-track');
+    if(!track||!track.children.length||marquee.parentElement.classList.contains('kn-portrait-gallery'))return;
+    const portraits=Array.from(track.children),shell=document.createElement('section');shell.className='kn-portrait-gallery';
+    marquee.before(shell);shell.append(marquee);
+    shell.addEventListener('keydown',event=>{if(event.key!=='Escape')event.stopPropagation();});
+    marquee.tabIndex=0;marquee.setAttribute('role','region');marquee.setAttribute('aria-label','Participant portraits');
+    const nav=document.createElement('nav');nav.className='kn-review-nav';nav.setAttribute('aria-label','Portrait gallery controls');
+    const button=(label)=>{const node=document.createElement('button');node.type='button';node.textContent=label;return node;};
+    const view=button('Browse portraits'),pause=button('Pause portraits'),prev=button('Previous portraits'),next=button('Next portraits'),status=document.createElement('span');
+    status.setAttribute('role','status');status.setAttribute('aria-live','polite');
+    nav.append(view,pause,prev,status,next);shell.prepend(nav);
+    // Local viewing preferences only: never rewrite answers, names or drawings.
+    let grid=r.visualGalleryView==='grid'||(!r.visualGalleryView&&globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+    let page=Math.max(0,Math.min(Math.ceil(portraits.length/8)-1,Number(r.visualGalleryPage)||0));
+    let paused=!!r.visualGalleryPaused;
+    const update=()=>{
+      shell.dataset.galleryView=grid?'grid':'marquee';shell.dataset.galleryPaused=String(paused);
+      view.textContent=grid?'Show marquee':'Browse portraits';view.setAttribute('aria-pressed',String(grid));
+      pause.textContent=paused?'Resume portraits':'Pause portraits';pause.setAttribute('aria-pressed',String(paused));pause.hidden=grid;
+      prev.hidden=next.hidden=!grid;prev.disabled=page===0;next.disabled=(page+1)*8>=portraits.length;
+      portraits.forEach((portrait,index)=>portrait.hidden=grid&&Math.floor(index/8)!==page);
+      status.textContent=grid?(page*8+1)+'–'+Math.min(portraits.length,(page+1)*8)+' of '+portraits.length:portraits.length+' portraits';
+    };
+    view.onclick=()=>{grid=!grid;r.visualGalleryView=grid?'grid':'marquee';update();};
+    pause.onclick=()=>{paused=!paused;r.visualGalleryPaused=paused;update();};
+    prev.onclick=()=>{page--;r.visualGalleryPage=page;update();};next.onclick=()=>{page++;r.visualGalleryPage=page;update();};
+    marquee.addEventListener('keydown',event=>{if(!grid||event.target!==marquee)return;if(event.key==='ArrowRight'&&!next.disabled){event.preventDefault();next.click();}else if(event.key==='ArrowLeft'&&!prev.disabled){event.preventDefault();prev.click();}});
+    update();
+  }
   function results(container,r){
+    if(['draw','introduction'].includes(r.definition.kind)){portraitGallery(container,r);return;}
     const kind=r.definition.kind,rows=Array.from(container.children);
     if(kind==='storm')container.classList.add('kn-idea-board');
     let counts=null;
@@ -174,5 +291,5 @@ globalThis.KeynopeActivityDesign = (() => {
     prev.onclick=()=>{r.visualReviewPage--;update();};next.onclick=()=>{r.visualReviewPage++;update();};nav.append(label,prev,next);container.before(nav);update();
   }
   install();
-  return {mount,install,pulseMeter,results,activities};
+  return {mount,install,appearance,pulseMeter,results,activities};
 })();

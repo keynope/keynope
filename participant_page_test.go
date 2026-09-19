@@ -19,7 +19,10 @@ func TestParticipantMarkdownPreservesWelcomePageRendering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for index, slide := range deck.ResolvedSlides() {
+	for index := range deck.Slides {
+		// This test covers the legacy Markdown transport adapter specifically.
+		// Shared-scene participant projection is tested independently below.
+		slide := deck.ResolveSlide(index, false)
 		want := exportSlidePages(slide, index, len(deck.Slides), 245, 56)
 		data, err := participantSlideMarkdown(deck, index)
 		if err != nil {
@@ -29,8 +32,9 @@ func TestParticipantMarkdownPreservesWelcomePageRendering(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		restoreParticipantLayers(&parsed.Slides[0])
-		got := exportSlidePages(parsed.Slides[0], index, len(deck.Slides), 245, 56)
+		participantSlide := parsed.ResolveSlide(0, false)
+		restoreParticipantLayers(&participantSlide)
+		got := exportSlidePages(participantSlide, index, len(deck.Slides), 245, 56)
 		// Saving canonicalizes element indices; participants cannot select them.
 		for _, pages := range [][]exportPage{want, got} {
 			for i := range pages {
@@ -82,11 +86,11 @@ func TestParticipantJustifiedTextBox(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := exportSlidePages(deck.Slides[0], 0, 1, 245, 56)
-			wantLines, _ := json.Marshal(want[0].Lines)
-			gotLines, _ := json.Marshal(got.Pages[0].Lines)
+			want := exportSlidePages(deck.slideRenderPreview(0, 245, 56), 0, 1, 245, 56)
+			wantLines, _ := json.Marshal(want[0].Scene)
+			gotLines, _ := json.Marshal(got.Pages[0].Scene)
 			if string(wantLines) != string(gotLines) {
-				t.Fatalf("participant glyphs/positions differ from presenter's justified box\nwant %s\ngot %s",wantLines,gotLines)
+				t.Fatalf("participant glyphs/positions differ from presenter's justified box\nwant %s\ngot %s", wantLines, gotLines)
 			}
 		})
 	}
@@ -97,7 +101,6 @@ func TestParticipantMarkdownContainsOnlyCurrentSlide(t *testing.T) {
 	oldWidth, oldHeight := authoredTerminalWidth, authoredTerminalHeight
 	defer func() { authoredTerminalWidth, authoredTerminalHeight = oldWidth, oldHeight }()
 	authoredTerminalWidth, authoredTerminalHeight = 245, 56
-	font := testDeckFont("participant-font")
 	deck := Deck{
 		Slides: []Slide{
 			{Elements: []Element{{Kind: "text", Text: "PRIVATE OTHER SLIDE"}}},
@@ -106,7 +109,6 @@ func TestParticipantMarkdownContainsOnlyCurrentSlide(t *testing.T) {
 				{Kind: "image", Path: "/private/personal/photo.png"},
 			}},
 		},
-		Fonts:   map[string]DeckFont{font.ID: font, "unused": testDeckFont("unused")},
 		Assets:  map[string]DeckAsset{"unused": {MIME: "image/png", Data: []byte("PRIVATE ASSET")}},
 		Masters: MasterDeck{Base: MasterLayout{ID: "base", Slide: Slide{BG: "48;2;12;34;56", BGSet: true}}, Layouts: []MasterLayout{{ID: "blank"}}},
 	}
@@ -114,7 +116,7 @@ func TestParticipantMarkdownContainsOnlyCurrentSlide(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{"PRIVATE", "/private/personal", "keynope-masters", "keynope-assets"} {
+	for _, secret := range []string{"PRIVATE", "/private/personal", "keynope-masters", "keynope-assets", "keynope-fonts"} {
 		if strings.Contains(string(data), secret) {
 			t.Fatalf("disclosed %q", secret)
 		}
@@ -123,7 +125,7 @@ func TestParticipantMarkdownContainsOnlyCurrentSlide(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(parsed.Slides) != 1 || len(parsed.Fonts) != 1 || parsed.Slides[0].BG != "48;2;12;34;56" {
+	if len(parsed.Slides) != 1 || !isTrueType(parsed.Slides[0].Elements[0]) || parsed.Slides[0].BG != "48;2;12;34;56" {
 		t.Fatalf("lost current slide appearance/font: %+v", parsed)
 	}
 	if !strings.Contains(string(data), "[IMG]") {

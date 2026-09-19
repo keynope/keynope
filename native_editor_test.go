@@ -77,7 +77,7 @@ func TestNativeEditorMutationsPersistAndUndo(t *testing.T) {
 		t.Fatal(err)
 	}
 	state = session.state()
-	if len(state.Slides[0].Elements) != 2 || state.Selected != -1 || len(state.Selection) != 0 {
+	if len(state.Slides[0].Elements) != 2 || state.Selected != 0 || len(state.Selection) != 1 || state.Selection[0] != 0 {
 		t.Fatalf("state after redo = %#v", state)
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -140,7 +140,7 @@ func TestNativeEditorUploadUsesVisibleImagePlacement(t *testing.T) {
 	if len(session.deck.Assets) != 1 {
 		t.Fatalf("embedded assets = %#v", session.deck.Assets)
 	}
-	if image.Query != "left=1&scale=1.0&top=1" {
+	if image.Query != "image-style=modern&left=1&scale=1.0&top=1" {
 		t.Fatalf("uploaded image query = %q", image.Query)
 	}
 	if _, err := os.Stat(image.Path); err != nil {
@@ -447,11 +447,44 @@ func TestNativeEditorPreviewRendersWithoutMutatingDeck(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &pages); err != nil {
 		t.Fatal(err)
 	}
-	if recorder.Code != http.StatusOK || len(pages) == 0 || len(pages[0].Lines) == 0 {
+	if recorder.Code != http.StatusOK || len(pages) == 0 || pages[0].Scene == nil || len(pages[0].Scene.Objects) == 0 || pages[0].Scene.Objects[0].Text == nil || pages[0].Scene.Objects[0].Text.Runs[0].Text != "Preview glyphs" {
 		t.Fatalf("preview status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	if got := session.state().Slides[0].Elements[0].Text; got != "Original" {
 		t.Fatalf("preview mutated deck text to %q", got)
+	}
+}
+
+func TestNativeEditorShapePreviewKeepsWorkspaceEditingAnnotation(t *testing.T) {
+	shape := Element{Kind: "shape", Text: "[shape:square]", ID: "shape-1", Query: "shape=square&left=8&top=6&width=12&height=6"}
+	deck := Deck{Appearance: &DeckAppearance{Version: 3}, Slides: []Slide{{Elements: []Element{shape}}}}
+	session := newNativeEditorSession(filepath.Join(t.TempDir(), "deck.md"), deck)
+	resized := shape
+	resized.Query = "shape=square&left=8&top=6&width=18&height=9"
+	body, err := json.Marshal(nativeEditorAction{Element: 0, ElementData: &resized, Cols: 80, Rows: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	session.handlePreview(recorder, httptest.NewRequest(http.MethodPost, "/api/editor/preview", bytes.NewReader(body)))
+	var pages []exportPage
+	if err := json.Unmarshal(recorder.Body.Bytes(), &pages); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusOK || len(pages) != 1 || pages[0].Scene == nil || len(pages[0].Scene.Objects) != 1 {
+		t.Fatalf("preview status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	object := pages[0].Scene.Objects[0]
+	if !object.Editable || object.Label == nil || object.LabelPaint == nil {
+		t.Fatalf("shape preview lost editor annotation: %#v", object)
+	}
+	workspace := editorSlideWorkspacePages(session.deck, 0, 80, 25)
+	if len(workspace) != 1 || workspace[0].Scene == nil || len(workspace[0].Scene.Objects) != 1 {
+		t.Fatalf("workspace scene unavailable: %#v", workspace)
+	}
+	want := workspace[0].Scene.Objects[0]
+	if object.LabelStyle != want.LabelStyle || !reflect.DeepEqual(object.Label, want.Label) || !reflect.DeepEqual(object.LabelPaint, want.LabelPaint) {
+		t.Fatalf("preview annotation differs from workspace\npreview=%#v\nworkspace=%#v", object, want)
 	}
 }
 
@@ -474,8 +507,10 @@ func TestNativeEditorInlinePreviewReturnsExactBulletCaret(t *testing.T) {
 	if recorder.Code != http.StatusOK || len(preview.Pages) == 0 {
 		t.Fatalf("inline preview status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	if preview.Caret.Row != 10 || preview.Caret.Col != 40 || preview.Caret.Cells != 4 {
-		t.Fatalf("inline bullet caret = %#v, want row 10 col 40 cells 4", preview.Caret)
+	// The preview now normalizes incoming legacy text to the same C64 TTF
+	// metrics as the session, rather than sampling the old bitmap font.
+	if preview.Caret.Row != 8 || preview.Caret.Col != 40 || preview.Caret.Cells != 4 {
+		t.Fatalf("inline bullet caret = %#v, want row 8 col 40 cells 4", preview.Caret)
 	}
 }
 
@@ -676,7 +711,7 @@ func TestNativeEditorFitsLargestTextSizeInsideDragBox(t *testing.T) {
 	if smallSize, largeSize := textSize(small.Element), textSize(large.Element); largeSize <= smallSize {
 		t.Fatalf("fitted sizes small=%d large=%d", smallSize, largeSize)
 	}
-	if got := session.state().Slides[0].Elements[0].Query; got != "render=truetype" {
+	if got := session.state().Slides[0].Elements[0].Query; got != "modern-font=c64&render=truetype" {
 		t.Fatalf("fit preview mutated deck query to %q", got)
 	}
 }
@@ -751,7 +786,7 @@ func TestNativeEditorClonesMasterImmediatelyBelowSource(t *testing.T) {
 	if state.Current != 3 {
 		t.Fatalf("selected master after clone = %d, want 3", state.Current)
 	}
-	if len(state.Masters.Layouts) != 6 || state.Masters.Layouts[1].ID != sourceID {
+	if len(state.Masters.Layouts) != 5 || state.Masters.Layouts[1].ID != sourceID {
 		t.Fatalf("master order after clone = %#v", state.Masters.Layouts)
 	}
 	clone := state.Masters.Layouts[2]
@@ -1099,6 +1134,13 @@ func TestNormalizeTextKindFindsUnidentifiedLocalElementAfterMasterContent(t *tes
 		t.Fatalf("master-resolved heading was not moved onto the current page: %q", result.Element.Query)
 	}
 	visible := false
+	if scene := result.Pages[0].Scene; scene != nil {
+		for _, object := range scene.Objects {
+			if object.ID == result.Element.ID && object.Text != nil {
+				visible = true
+			}
+		}
+	}
 	for _, line := range result.Pages[0].Lines {
 		if line.Element > 0 && len(line.Parts) > 0 {
 			visible = true
@@ -1377,7 +1419,7 @@ func TestNativeEditorStarterSelectionSurvivesVerticalReordering(t *testing.T) {
 }
 
 func TestNativeEditorRefreshScopeAvoidsFullDeckReloadForElementMutations(t *testing.T) {
-	for _, action := range []string{"add-element", "duplicate-element", "paste-elements", "update-element", "update-elements", "convert-text-kind", "convert-selected-text-kind", "delete-element", "delete-selection", "move-element", "update-slide", "set-layout"} {
+	for _, action := range []string{"add-element", "duplicate-element", "paste-elements", "update-element", "update-elements", "convert-text-kind", "convert-selected-text-kind", "delete-element", "delete-selection", "move-element", "update-slide", "set-layout", "group-elements", "ungroup-elements"} {
 		if got := nativeEditorRefreshScope(action); got != "slide" {
 			t.Fatalf("refresh scope for %q = %q, want slide", action, got)
 		}
@@ -1388,6 +1430,47 @@ func TestNativeEditorRefreshScopeAvoidsFullDeckReloadForElementMutations(t *test
 	for _, action := range []string{"add-slide", "delete-slide", "undo", "redo", "update-layout"} {
 		if got := nativeEditorRefreshScope(action); got != "deck" {
 			t.Fatalf("refresh scope for %q = %q, want deck", action, got)
+		}
+	}
+}
+
+func TestNativeEditorRefreshPlanScopesUndoToChangedSlide(t *testing.T) {
+	before := Deck{Masters: defaultMasterDeck(), Slides: []Slide{{Elements: []Element{{Kind: "text", Text: "One"}}}, {Elements: []Element{{Kind: "text", Text: "Two"}}}}}
+	after := cloneDeck(before)
+	after.Slides[1].Elements[0].Text = "Changed"
+	if scope, slide := nativeEditorRefreshPlan("undo", before, after, 0, 0); scope != "slide" || slide != 1 {
+		t.Fatalf("single-slide undo plan = %q/%d, want slide/1", scope, slide)
+	}
+	after.Slides[0].Elements[0].Text = "Also changed"
+	if scope, _ := nativeEditorRefreshPlan("redo", before, after, 0, 0); scope != "deck" {
+		t.Fatalf("multi-slide redo plan = %q, want deck", scope)
+	}
+	if scope, _ := nativeEditorRefreshPlan("undo", before, cloneDeck(before), 0, 0); scope != "" {
+		t.Fatalf("unchanged undo plan = %q, want no refresh", scope)
+	}
+}
+
+func TestNativeEditorRefreshPlanKeepsStructuralAndRequestedTargets(t *testing.T) {
+	before := Deck{Masters: defaultMasterDeck(), Slides: []Slide{{}, {}}}
+	after := cloneDeck(before)
+	after.HideActivityQR = true
+	if scope, _ := nativeEditorRefreshPlan("undo", before, after, 0, 0); scope != "deck" {
+		t.Fatalf("shared-setting undo plan = %q, want deck", scope)
+	}
+	if scope, slide := nativeEditorRefreshPlan("set-scene-text", before, before, 0, 1); scope != "slide" || slide != 1 {
+		t.Fatalf("scene text plan = %q/%d, want slide/1", scope, slide)
+	}
+}
+
+func TestNativeEditorMasterRefreshScopeSkipsSidebarOnlyChanges(t *testing.T) {
+	for _, action := range []string{"add-slide", "add-layout", "clone-slide", "rename-master", "reorder-master", "update-slide-notes"} {
+		if got := nativeEditorMasterRefreshScope(action); got != "" {
+			t.Fatalf("master action %q refresh scope = %q, want none", action, got)
+		}
+	}
+	for _, action := range []string{"update-element", "delete-layout", "undo", "redo"} {
+		if got := nativeEditorMasterRefreshScope(action); got != "deck" {
+			t.Fatalf("master action %q refresh scope = %q, want deck", action, got)
 		}
 	}
 }
@@ -1541,18 +1624,11 @@ func TestNativeEditorUntitledUndoNeverClearsDirty(t *testing.T) {
 	}
 }
 
-func TestNativeEditorFontLifecycle(t *testing.T) {
+func TestNativeEditorRetiredFontReferenceMigrates(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	deck := Deck{Slides: []Slide{{Elements: []Element{{Kind: "text", Text: "A"}}}}}
 	session := newNativeEditorSession("Untitled.md", deck, true)
-	font := testDeckFont("arcade")
-	if err := session.apply(nativeEditorAction{Action: "upsert-font", FontData: &font}); err != nil {
-		t.Fatal(err)
-	}
 	state := session.state()
-	if state.Fonts["arcade"].Name != "Test Face" {
-		t.Fatalf("font missing from editor state: %#v", state.Fonts)
-	}
 	element := state.Slides[0].Elements[0]
 	element.Query = "font=arcade"
 	if err := session.apply(nativeEditorAction{Action: "update-element", Element: 0, ElementData: &element}); err != nil {
@@ -1562,31 +1638,13 @@ func TestNativeEditorFontLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(data, []byte("keynope-fonts version=1")) || !bytes.Contains(data, []byte("font=arcade")) {
-		t.Fatalf("font was not embedded and referenced:\n%s", data)
+	if bytes.Contains(data, []byte("font=arcade")) || !isTrueType(session.deck.Slides[0].Elements[0]) {
+		t.Fatal("retired font reference was not migrated to TrueType")
 	}
-	if err := session.apply(nativeEditorAction{Action: "delete-font", Name: "arcade"}); err != nil {
-		t.Fatal(err)
-	}
-	state = session.state()
-	if len(state.Fonts) != 0 || strings.Contains(state.Slides[0].Elements[0].Query, "font=") {
-		t.Fatalf("font deletion left state behind: %#v / %q", state.Fonts, state.Slides[0].Elements[0].Query)
-	}
-}
-
-func TestNativeEditorDefaultFontEndpoint(t *testing.T) {
-	session := newNativeEditorSession("Untitled.md", Deck{Slides: []Slide{{}}}, true)
-	request := httptest.NewRequest(http.MethodGet, "/api/editor/fonts/default", nil)
-	response := httptest.NewRecorder()
-	session.handleDefaultFont(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
-	}
-	var font DeckFont
-	if err := json.Unmarshal(response.Body.Bytes(), &font); err != nil {
-		t.Fatal(err)
-	}
-	if font.ID != "default" || len(font.Normal) != 95 || len(font.Bold) != 95 {
-		t.Fatalf("unexpected default font payload: id=%q normal=%d bold=%d", font.ID, len(font.Normal), len(font.Bold))
+	for _, action := range []string{"upsert-font", "delete-font", "delete-library-font"} {
+		before := session.version
+		if err := session.apply(nativeEditorAction{Action: action, Name: "arcade"}); err == nil || session.version != before {
+			t.Fatalf("retired font action accepted or changed state: %s", action)
+		}
 	}
 }

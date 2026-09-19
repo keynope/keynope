@@ -7,17 +7,18 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
-	"sync"
 )
 
 type connectorObstacle struct {
-	X, Y  float64
-	W, H  int
-	Shape string
-	ID    string
+	X, Y          float64
+	W, H          int
+	Shape         string
+	ID            string
+	Rotation      float64
+	Width, Height float64 // Continuous cells; zero retains legacy raster dimensions.
 }
 
-func connectorObstacles(slide Slide, lines []Line) []connectorObstacle {
+func connectorObstacles(slide Slide, lines []Line, width, height int) []connectorObstacle {
 	seen := map[int]bool{}
 	var result []connectorObstacle
 	for _, l := range lines {
@@ -26,9 +27,49 @@ func connectorObstacles(slide Slide, lines []Line) []connectorObstacle {
 		}
 		seen[l.Element] = true
 		q, _ := url.ParseQuery(l.Query)
-		result = append(result, connectorObstacle{float64(l.Col) + shapeSubcellOffset(q, "shape-offset-x"), float64(l.Row) + shapeSubcellOffset(q, "shape-offset-y"), shapeHalfCells(q, "width", 12), shapeHalfCells(q, "height", 6), shapeName(slide.Elements[l.Element]), slide.Elements[l.Element].ID})
+		x, y := preciseShapeAnchor(q, float64(l.Col), float64(l.Row), width, height)
+		angle, _ := strconv.ParseFloat(q.Get("object-rotation"), 64)
+		if math.IsNaN(angle) || math.IsInf(angle, 0) {
+			angle = 0
+		}
+		result = append(result, connectorObstacle{X: x + shapeSubcellOffset(q, "shape-offset-x") + objectPlacementOffset(q, "x"), Y: y + shapeSubcellOffset(q, "shape-offset-y") + objectPlacementOffset(q, "y"), W: shapeHalfCells(q, "width", 12), H: shapeHalfCells(q, "height", 6), Width: shapeDimension(q, "width", 12), Height: shapeDimension(q, "height", 6), Shape: shapeName(slide.Elements[l.Element]), ID: slide.Elements[l.Element].ID, Rotation: math.Mod(angle, 360)})
 	}
 	return result
+}
+
+type projectedConnectorObstacle struct {
+	object                   connectorObstacle
+	cx, cy, sx, sy, c, s     float64
+	left, top, right, bottom float64
+}
+
+func projectConnectorObstacle(o connectorObstacle, width, height int) projectedConnectorObstacle {
+	if o.Width <= 0 {
+		o.Width = float64(o.W) / 2
+	}
+	if o.Height <= 0 {
+		o.Height = float64(o.H) / 2
+	}
+	p := projectedConnectorObstacle{object: o, cx: o.X + o.Width/2, cy: o.Y + o.Height/2, sx: 1920 / float64(max(1, width)), sy: 1080 / float64(max(1, height))}
+	p.c, p.s = math.Cos(o.Rotation*math.Pi/180), math.Sin(o.Rotation*math.Pi/180)
+	hw, hh := o.Width/2*p.sx, o.Height/2*p.sy
+	rx, ry := (math.Abs(p.c)*hw+math.Abs(p.s)*hh)/p.sx, (math.Abs(p.s)*hw+math.Abs(p.c)*hh)/p.sy
+	p.left, p.right, p.top, p.bottom = p.cx-rx, p.cx+rx, p.cy-ry, p.cy+ry
+	return p
+}
+
+func (p *projectedConnectorObstacle) contains(x, y float64) bool {
+	if x < p.left || x > p.right || y < p.top || y > p.bottom {
+		return false
+	}
+	dx, dy := (x-p.cx)*p.sx, (y-p.cy)*p.sy
+	x, y = p.cx+(dx*p.c+dy*p.s)/p.sx, p.cy+(-dx*p.s+dy*p.c)/p.sy
+	o := &p.object
+	if o.Width <= 0 || o.Height <= 0 {
+		return false
+	}
+	px, py := int(math.Floor((x-o.X)*float64(o.W)/o.Width)), int(math.Floor((y-o.Y)*float64(o.H)/o.Height))
+	return px >= 0 && py >= 0 && px < o.W && py < o.H && shapeCellFilled(o.Shape, px, py, o.W, o.H)
 }
 func connectorNumber(q url.Values, key string, fallback, limit float64) float64 {
 	v, err := strconv.ParseFloat(q.Get(key), 64)
@@ -45,37 +86,60 @@ func connectorNumber(q url.Values, key string, fallback, limit float64) float64 
 // A weighted rectilinear shortest-path search. Actual silhouette pixels, not
 // bounding rectangles, incur crossing cost. Crossings remain possible when
 // blocked in; clear routes always win over ordinary distance/bend costs.
-var connectorRouteCache = struct {
-	sync.Mutex
-	paths map[string][]connectorPoint
-}{paths: map[string][]connectorPoint{}}
-
 type routeNode struct {
-	state int
-	cost  float64
+	state    int
+	cost     float64
+	priority float64
 }
 type routeHeap []routeNode
 
 func (h routeHeap) Len() int           { return len(h) }
-func (h routeHeap) Less(i, j int) bool { return h[i].cost < h[j].cost }
+func (h routeHeap) Less(i, j int) bool { return h[i].priority < h[j].priority }
 func (h routeHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
 func (h *routeHeap) Push(v any)        { *h = append(*h, v.(routeNode)) }
 func (h *routeHeap) Pop() any          { old := *h; v := old[len(old)-1]; *h = old[:len(old)-1]; return v }
 
+// A routing pass borrows immutable obstacles. Compute their fingerprint lazily,
+// once per pass, rather than serializing the whole slide for every connector.
+type connectorRoutingPass struct {
+	obstacles []connectorObstacle
+	digest    [32]byte
+	ready     bool
+}
+
+func (pass *connectorRoutingPass) key(a, b shapePort, width, height int, lineWidth float64) [32]byte {
+	if !pass.ready {
+		data, _ := json.Marshal(pass.obstacles)
+		pass.digest = connectorRouteKey(data)
+		pass.ready = true
+	}
+	data, _ := json.Marshal([]any{a, b, pass.digest, width, height, lineWidth})
+	return connectorRouteKey(data)
+}
+
 func routedConnectorPath(e Element, a, b shapePort, obstacles []connectorObstacle, width, height int) []connectorPoint {
+	pass := connectorRoutingPass{obstacles: obstacles}
+	return pass.path(e, a, b, width, height)
+}
+
+func (pass *connectorRoutingPass) path(e Element, a, b shapePort, width, height int) []connectorPoint {
+	obstacles := pass.obstacles
+	if a.Direction != "" {
+		a.Side = a.Direction
+	}
+	if b.Direction != "" {
+		b.Side = b.Direction
+	}
 	q, _ := url.ParseQuery(e.Query)
 	fallback := connectorPath(e, a, b)
 	if q.Get("connector-mode") != "elbow" || len(decodeConnectorRoute(q.Get("connector-route"))) > 0 {
 		return fallback
 	}
 	lineWidth := connectorNumber(q, "connector-width", 1, 8)
-	keyBytes, _ := json.Marshal([]any{a, b, obstacles, width, height, lineWidth})
-	key := string(keyBytes)
-	connectorRouteCache.Lock()
-	cached := connectorRouteCache.paths[key]
-	connectorRouteCache.Unlock()
+	key := pass.key(a, b, width, height, lineWidth)
+	cached := connectorRouteCache.get(key)
 	if cached != nil {
-		return append([]connectorPoint(nil), cached...)
+		return cached
 	}
 	stub := func(p shapePort) connectorPoint {
 		v := connectorPoint{p.X, p.Y}
@@ -112,25 +176,25 @@ func routedConnectorPath(e Element, a, b shapePort, obstacles []connectorObstacl
 		return out
 	}
 	xs, ys := []float64{u.X, v.X}, []float64{u.Y, v.Y}
+	projected := make([]projectedConnectorObstacle, 0, len(obstacles))
 	for _, o := range obstacles {
-		xs = append(xs, o.X-lineWidth-1, o.X+float64(o.W)/2+lineWidth+1)
-		ys = append(ys, o.Y-lineWidth/2-.5, o.Y+float64(o.H)/2+lineWidth/2+.5)
+		p := projectConnectorObstacle(o, width, height)
+		projected = append(projected, p)
+		xs = append(xs, p.left-lineWidth-1, p.right+lineWidth+1)
+		ys = append(ys, p.top-lineWidth/2-.5, p.bottom+lineWidth/2+.5)
 	}
 	xs = coords(width, math.Max(2, math.Ceil(float64(width)/160)), xs)
 	ys = coords(height, math.Max(1, math.Ceil(float64(height)/100)), ys)
 	nx, ny := len(xs), len(ys)
-	if nx*ny > 100000 {
+	// Dense slides add two exact silhouette-clearance coordinates per object.
+	// The previous 100k-cell cutoff was low enough for ordinary workshop
+	// diagrams to fall back to a crossing elbow even when a clear route existed.
+	// Keep a hard memory bound, but let the A* search below handle representative
+	// dense scenes without exploring the complete Cartesian grid.
+	if nx*ny > 400000 {
 		return fallback
 	}
-	inside := func(x, y float64) bool {
-		for _, o := range obstacles {
-			px, py := int(math.Floor((x-o.X)*2)), int(math.Floor((y-o.Y)*2))
-			if px >= 0 && py >= 0 && px < o.W && py < o.H && shapeCellFilled(o.Shape, px, py, o.W, o.H) {
-				return true
-			}
-		}
-		return false
-	}
+	inside := indexConnectorObstacles(projected).contains
 	edgeCost := func(p, n connectorPoint) float64 {
 		distance := math.Abs(p.X-n.X) + 2*math.Abs(p.Y-n.Y)
 		steps := max(1, int(math.Ceil(distance*2)))
@@ -163,7 +227,11 @@ func routedConnectorPath(e Element, a, b shapePort, obstacles []connectorObstacl
 		prev[i] = -1
 	}
 	dist[start], dist[start+1] = 0, 0
-	queue := &routeHeap{{start, 0}, {start + 1, 0}}
+	heuristic := func(cell int) float64 {
+		x, y := cell%nx, cell/nx
+		return math.Abs(xs[x]-v.X) + 2*math.Abs(ys[y]-v.Y)
+	}
+	queue := &routeHeap{{state: start, priority: heuristic(start / 2)}, {state: start + 1, priority: heuristic(start / 2)}}
 	heap.Init(queue)
 	end := -1
 	for queue.Len() > 0 {
@@ -197,7 +265,7 @@ func routedConnectorPath(e Element, a, b shapePort, obstacles []connectorObstacl
 			if total < dist[state] {
 				dist[state] = total
 				prev[state] = cur.state
-				heap.Push(queue, routeNode{state, total})
+				heap.Push(queue, routeNode{state: state, cost: total, priority: total + heuristic(nextCell)})
 			}
 		}
 	}
@@ -224,11 +292,6 @@ func routedConnectorPath(e Element, a, b shapePort, obstacles []connectorObstacl
 			i++
 		}
 	}
-	connectorRouteCache.Lock()
-	if len(connectorRouteCache.paths) >= 128 {
-		connectorRouteCache.paths = map[string][]connectorPoint{}
-	}
-	connectorRouteCache.paths[key] = append([]connectorPoint(nil), points...)
-	connectorRouteCache.Unlock()
+	connectorRouteCache.put(key, points)
 	return points
 }

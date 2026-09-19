@@ -59,13 +59,7 @@ const server=http.createServer((req,res)=>{
     assert.equal(await bar.getByRole('spinbutton',{name:'TrueType font size',exact:true}).inputValue(),String(size));
   }
   await tab('Style').click();assert(await button('Add outline').isVisible());
-  for(const mode of ['braille','ascii','dense','blocks','']){
-    await bar.getByRole('combobox',{name:'Text rendering style',exact:true}).selectOption(mode);
-    await page.waitForFunction(async mode=>{const s=await fetch('/api/editor/state').then(r=>r.json()),e=s.slides[s.current].elements[s.selected],q=new URLSearchParams(e.query);return q.get('render')==='truetype'&&(q.get('glyph')||'')===mode;},mode);
-    const s=await state(),q=new URLSearchParams(s.slides[s.current].elements[s.selected].query);
-    for(const key of ['width','height','ttf-width'])assert.equal(q.get(key),afterQuery.get(key),'treatment preserves '+key);
-    assert.equal(q.get('ttf-size'),'97');
-  }
+  assert.equal(await page.getByRole('combobox',{name:'Text rendering style',exact:true}).count(),0,'retired text treatments are not offered');
   await button('Add outline').click();await page.waitForTimeout(300);
   assert.equal(await tab('Style').getAttribute('aria-selected'),'true');
   await tab('Arrange').click();assert(await button('Justify text').isHidden());

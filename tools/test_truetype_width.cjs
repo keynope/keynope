@@ -8,6 +8,17 @@ const playwright=require(process.env.PLAYWRIGHT_MODULE||'playwright');
    await page.setContent('<style>body{background:#171717;color:white;font:16px monospace}canvas{display:block;border:1px solid #555;margin:8px}</style><h2>TrueType horizontal width</h2>');
    await page.addScriptTag({content:'const keynopeTTFFontData='+JSON.stringify(fs.readFileSync('assets/keynope-c64.ttf.base64','utf8').trim())+';\n'+fs.readFileSync('web/truetype.js','utf8')});
    await page.evaluate(()=>KeynopeTrueType.ready);
+   const retiredTreatments=await page.evaluate(()=>{
+    const render=tag=>{
+     const line={col:4,row:4,parts:[{color:'#ffffff'}],trueType:{text:'C64 text',kind:'text',size:60,width:450,height:100,query:'outline=light&gradient-start=%23ff0055&gradient-end=%2355ffff&'+tag}};
+     const c=document.createElement('canvas');c.width=600;c.height=180;
+     KeynopeTrueType.draw(c.getContext('2d'),line,1,1,1920,1080);
+     return c.toDataURL();
+    };
+    const original=render('');
+    return ['glyph=blocks','glyph=braille','glyph=ascii','glyph=dense','font=custom'].map(tag=>({tag,same:render(tag)===original}));
+   });
+   for(const result of retiredTreatments)assert(result.same,`retired ${result.tag} must not alter TrueType export pixels`);
    const defaults=await page.evaluate(()=>({width:KeynopeTrueType.widthPercent({}),explicit:KeynopeTrueType.widthPercent({query:'ttf-width=100'}),bounds:KeynopeTrueType.initialBounds('ABCD',100,1920,1080)}));
    assert.equal(defaults.width,100);assert.equal(defaults.explicit,100);assert.equal(defaults.bounds.width,134);
    const aligned=await page.evaluate(()=>{
@@ -16,6 +27,28 @@ const playwright=require(process.env.PLAYWRIGHT_MODULE||'playwright');
     return {end:m.rows.map(r=>r.inkWidth),starts:m.rows.map(r=>r.positions[0]),offsetY:m.offsetY};
    });
    assert(aligned.end.every(x=>Math.abs(x-500)<.0001));assert.equal(aligned.offsetY,156);assert(aligned.starts[1]>aligned.starts[0]);
+   const rich=await page.evaluate(()=>{
+    const line={col:0,row:0,parts:[{color:'#ffffff'}],trueType:{text:'A[color=#ff0000]B[/color]C',kind:'text',size:60,width:500,height:100,query:'ttf-weight=bold',richRuns:[{text:'A'},{text:'B',bold:true,color:'#ff0000'},{text:'C',italic:true}]}};
+    const m=KeynopeTrueType.metrics(line,1920,1080),calls=[],original=CanvasRenderingContext2D.prototype.fillText;
+    CanvasRenderingContext2D.prototype.fillText=function(text,...args){calls.push({text,font:this.font});return original.call(this,text,...args);};
+    try{const c=document.createElement('canvas');c.width=500;c.height=100;KeynopeTrueType.draw(c.getContext('2d'),line,1,1,1920,1080);}finally{CanvasRenderingContext2D.prototype.fillText=original;}
+    line.trueType.richRuns=[{text:'stale text',bold:true}];
+    return {styles:m.rows[0].styles.filter(s=>!s.hidden).map(s=>({char:s.char,bold:s.bold,italic:s.italic,color:s.color})),calls,stale:KeynopeTrueType.metrics(line,1920,1080).rows[0].styles.some(s=>s.explicitWeight)};
+   });
+   assert.deepEqual(rich.styles,[{char:'A',bold:false,italic:false,color:null},{char:'B',bold:true,italic:false,color:'#ff0000'},{char:'C',bold:false,italic:true,color:null}]);
+   assert(rich.calls.some(c=>c.text==='A'&&!c.font.includes('bold')),'explicit regular overrides whole-element bold');
+   assert(rich.calls.some(c=>c.text==='B'&&c.font.includes('bold')),'Retro paints bold run');
+   assert(rich.calls.some(c=>c.text==='C'&&c.font.includes('italic')),'Retro paints italic run');
+   assert.equal(rich.stale,false,'mismatched source styles are ignored');
+   const underline=await page.evaluate(()=>{
+    const line={col:0,row:0,parts:[{color:'#ffffff'}],trueType:{text:'A',kind:'text',size:60,width:200,height:100,query:'',richRuns:[{text:'A',underline:true,color:'#ff0000'}]}};
+    const c=document.createElement('canvas');c.width=200;c.height=100;const ctx=c.getContext('2d');
+    KeynopeTrueType.draw(ctx,line,1,1,1920,1080);const on=Array.from(ctx.getImageData(5,53,1,1).data);
+    ctx.clearRect(0,0,200,100);line.trueType.richRuns[0].underline=false;KeynopeTrueType.draw(ctx,line,1,1,1920,1080);
+    return {on,off:Array.from(ctx.getImageData(5,53,1,1).data)};
+   });
+   assert(underline.on[0]>240&&underline.on[1]<10&&underline.on[3]>240,'Retro underline uses the run colour');
+   assert.equal(underline.off[3],0,'removing underline clears its pixels');
    const result=await page.evaluate(()=>{
     const make=(percent,text='C64 TEXT',kind='text',extra='')=>({col:20,row:20,element:1,parts:[{color:'#ffffff'}],trueType:{text,kind,size:60,width:500,height:160,query:'ttf-width='+percent+'&'+extra}});
     function paint(line,label){

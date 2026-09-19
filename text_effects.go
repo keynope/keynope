@@ -39,6 +39,10 @@ func parseElementTextGradient(query string) (textGradient, bool) {
 	if err != nil {
 		return textGradient{}, false
 	}
+	return textGradientFromValues(values)
+}
+
+func textGradientFromValues(values url.Values) (textGradient, bool) {
 	start, startOK := parseRGBHex(values.Get("gradient-start"))
 	end, endOK := parseRGBHex(values.Get("gradient-end"))
 	if !startOK || !endOK {
@@ -58,6 +62,10 @@ func parseElementTextShadow(query string) (textShadow, bool) {
 	if err != nil {
 		return textShadow{}, false
 	}
+	return textShadowFromValues(values)
+}
+
+func textShadowFromValues(values url.Values) (textShadow, bool) {
 	var glyph rune
 	switch values.Get("shadow") {
 	case "soft":

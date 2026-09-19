@@ -1,9 +1,10 @@
 // Visual behaviour regression checks, independent of the live channel transport.
-const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const browsers=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const assert=require('node:assert/strict');
 const path=require('node:path');
 (async()=>{
-  const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
+  const engine=process.env.TEST_BROWSER||'chromium';
+  const browser=await browsers[engine].launch({headless:true,...(engine==='chromium'&&process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   try{
     const page=await browser.newPage({viewport:{width:390,height:844},reducedMotion:'reduce'});
     await page.setContent('<body style="background:#111c26;color:white;font:16px monospace"><main id="root"></main></body>');
@@ -32,6 +33,41 @@ const path=require('node:path');
     });
     assert.deepEqual(await page.locator('.kn-result-fill').evaluateAll(rows=>rows.map(r=>r.style.width)),['0%','100%','50%']);
     assert.equal(await page.locator('.kn-activity-intro.is-reveal').count(),1);
-    console.log('PASS activity design: 40-result pagination, mobile width, proportional vote bars, reveal state');
+    // Cover every registered activity so new additions cannot silently inherit
+    // generic reveal prose. Both surfaces share this module.
+    const kinds=require('./activity_test_catalog.cjs');
+    const headings=new Set();
+    for(const kind of kinds){
+      for(const appearanceMode of ['retro','modern'])for(const width of [320,390])for(const presenter of [false,true]){
+        await page.setViewportSize({width,height:844});
+        const copy=await page.evaluate(({kind,presenter,appearanceMode})=>{
+          root.replaceChildren();KeynopeActivityDesign.mount(root,{appearanceMode,definition:{kind},phase:3},{presenter});
+          return {title:root.querySelector('h2').textContent,help:root.querySelector('p').textContent,label:root.querySelector('.kn-activity-eyebrow').textContent};
+        },{kind,presenter,appearanceMode});
+        assert(copy.title&&copy.help,kind+' needs reveal copy');
+        assert(!/See what we made together|Explore the results and listen|Review the responses below/.test(copy.title+' '+copy.help),kind+' has generic reveal text');
+        assert(!copy.label.includes('TOGETHER'));
+        if(!presenter)headings.add(copy.title);
+        assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),kind+' must fit on mobile');
+      }
+    }
+    assert.equal(headings.size,kinds.length,'Each activity has its own reveal heading');
+    for(const [kind,phase,questionRevealed,label,title] of [
+      ['storm',3,false,'REVEAL','Ideas from the room'],
+      ['questions',2,false,'VOTE','Choose what matters most'],
+      ['truefalse',1,true,'REVEAL','Fact or Fiction: the answer'],
+      ['pair',3,false,'DISCUSS','Meet your discussion group'],
+      ['pair',4,false,'DONE','Bring your discussion back'],
+      ['chosen',1,false,'WAITING FOR DRAW','Waiting for the draw']
+    ]){
+      await page.evaluate(({kind,phase,questionRevealed})=>{root.replaceChildren();KeynopeActivityDesign.mount(root,{definition:{kind},phase,questionRevealed});},{kind,phase,questionRevealed});
+      assert((await page.locator('.kn-activity-eyebrow').textContent()).endsWith(label));
+      assert.equal(await page.locator('h2').textContent(),title);
+    }
+    // A compact contact sheet makes the new copy easy to visually review.
+    await page.setViewportSize({width:1440,height:1000});
+    await page.evaluate(kinds=>{root.replaceChildren();root.style.cssText='display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px';for(const kind of kinds){const card=document.createElement('section');root.append(card);KeynopeActivityDesign.mount(card,{definition:{kind},phase:3});}},kinds);
+    await page.screenshot({path:'/tmp/keynope-activity-reveal-copy.png',fullPage:true});
+    console.log(`PASS activity design in ${engine}: pagination, vote bars, all ${kinds.length} custom reveal headings, both skins, host/participant copy, phase labels and 320/390px width`);
   }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

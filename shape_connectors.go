@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"strconv"
 )
 
 type connectorPoint struct {
@@ -38,6 +39,12 @@ func decodeConnectorRoute(value string) []connectorPoint {
 }
 
 func connectorPath(e Element, a, b shapePort) []connectorPoint {
+	if a.Direction != "" {
+		a.Side = a.Direction
+	}
+	if b.Direction != "" {
+		b.Side = b.Direction
+	}
 	q, _ := url.ParseQuery(e.Query)
 	start, end := connectorPoint{a.X, a.Y}, connectorPoint{b.X, b.Y}
 	if q.Get("connector-mode") != "elbow" {
@@ -106,7 +113,7 @@ func connectorPath(e Element, a, b shapePort) []connectorPoint {
 	// never moves the other end of a manually edited route.
 	for i := 1; i < len(points)-1 && len(points) > 4; {
 		p, c, n := points[i-1], points[i], points[i+1]
-		if p.X == c.X && c.X == n.X || p.Y == c.Y && c.Y == n.Y {
+		if p.X == c.X && c.X == n.X && (c.Y-p.Y)*(n.Y-c.Y) >= 0 || p.Y == c.Y && c.Y == n.Y && (c.X-p.X)*(n.X-c.X) >= 0 {
 			points = append(points[:i], points[i+1:]...)
 		} else {
 			i++
@@ -117,36 +124,103 @@ func connectorPath(e Element, a, b shapePort) []connectorPoint {
 
 func slideShapeConnectors(slide Slide, lines []Line, width, height int) []shapeConnector {
 	var result []shapeConnector
-	ports := slideShapePorts(slide, lines, width, height)
-	obstacles := connectorObstacles(slide, lines)
+	var portIndex connectorPortIndex
+	var routing connectorRoutingPass
+	routingReady := false
 	for _, e := range slide.Elements {
 		if e.Kind != "connector" {
 			continue
 		}
-		a, b, ok := connectorEndpoints(e, ports)
+		// Ordinary slides need no attachment projection. Dangling connectors
+		// need ports for validation, but no routing obstacle construction.
+		if portIndex == nil {
+			portIndex = indexConnectorPorts(slideShapePorts(slide, lines, width, height))
+		}
+		q, _ := url.ParseQuery(e.Query)
+		a, b, ok := portIndex.endpoints(q)
 		if !ok {
 			continue
 		}
-		q, _ := url.ParseQuery(e.Query)
-		result = append(result, shapeConnector{e.ID, routedConnectorPath(e, a, b, obstacles, width, height), q.Get("connector-arrows")})
+		if !routingReady {
+			routing.obstacles = connectorObstacles(slide, lines, width, height)
+			routingReady = true
+		}
+		result = append(result, shapeConnector{e.ID, routing.path(e, a, b, width, height), q.Get("connector-arrows")})
 	}
 	return result
 }
 
 // Ports are measured in canvas cells, at the silhouette rather than its box.
 type shapePort struct {
-	ID   string  `json:"id"`
-	Side string  `json:"side"`
-	X    float64 `json:"x"`
-	Y    float64 `json:"y"`
+	ID        string  `json:"id"`
+	Side      string  `json:"side"`
+	X         float64 `json:"x"`
+	Y         float64 `json:"y"`
+	Direction string  `json:"direction,omitempty"` // World-facing routing direction; Side remains the authored attachment.
+}
+
+func rotateShapePorts(ports []shapePort, element Element, x, y float64, width, height int) []shapePort {
+	q, _ := url.ParseQuery(element.Query)
+	return rotateShapePortsFromValues(ports, q, x, y, width, height)
+}
+
+func rotateShapePortsFromValues(ports []shapePort, q url.Values, x, y float64, width, height int) []shapePort {
+	angle, err := strconv.ParseFloat(q.Get("object-rotation"), 64)
+	if err != nil || math.IsNaN(angle) || math.IsInf(angle, 0) || width <= 0 || height <= 0 {
+		return ports
+	}
+	radians := math.Mod(angle, 360) * math.Pi / 180
+	c, s := math.Cos(radians), math.Sin(radians)
+	sx, sy := 1920/float64(width), 1080/float64(height)
+	cx := x + shapeSubcellOffset(q, "shape-offset-x") + objectPlacementOffset(q, "x") + shapeDimension(q, "width", 12)/2
+	cy := y + shapeSubcellOffset(q, "shape-offset-y") + objectPlacementOffset(q, "y") + shapeDimension(q, "height", 6)/2
+	for i := range ports {
+		p := &ports[i]
+		dx, dy := (p.X-cx)*sx, (p.Y-cy)*sy
+		p.X, p.Y = cx+(dx*c-dy*s)/sx, cy+(dx*s+dy*c)/sy
+		nx, ny := 0.0, 0.0
+		switch p.Side {
+		case "top":
+			ny = -1
+		case "bottom":
+			ny = 1
+		case "left":
+			nx = -1
+		case "right":
+			nx = 1
+		}
+		nx, ny = nx*c-ny*s, nx*s+ny*c
+		if math.Abs(nx) > math.Abs(ny) {
+			if nx < 0 {
+				p.Direction = "left"
+			} else {
+				p.Direction = "right"
+			}
+		} else {
+			if ny < 0 {
+				p.Direction = "top"
+			} else {
+				p.Direction = "bottom"
+			}
+		}
+	}
+	return ports
 }
 
 func shapePorts(element Element, x, y float64) []shapePort {
 	q, _ := url.ParseQuery(element.Query)
+	return shapePortsFromValues(element.ID, q, x, y)
+}
+
+func shapePortsFromValues(id string, q url.Values, x, y float64) []shapePort {
 	w, h := shapeHalfCells(q, "width", 12), shapeHalfCells(q, "height", 6)
-	x += shapeSubcellOffset(q, "shape-offset-x")
-	y += shapeSubcellOffset(q, "shape-offset-y")
+	sx, sy := shapeDimension(q, "width", 12)/float64(w), shapeDimension(q, "height", 6)/float64(h)
+	x += shapeSubcellOffset(q, "shape-offset-x") + objectPlacementOffset(q, "x")
+	y += shapeSubcellOffset(q, "shape-offset-y") + objectPlacementOffset(q, "y")
 	cx, cy := (w-1)/2, (h-1)/2
+	// The silhouette is constant during this scan. Resolving its name parses
+	// metadata, so do it once rather than for every candidate edge pixel.
+	name := shapeNameFromValues(q)
 	var result []shapePort
 	for _, side := range []string{"top", "right", "bottom", "left"} {
 		for step := 0; step < max(w, h); step++ {
@@ -164,19 +238,19 @@ func shapePorts(element Element, x, y float64) []shapePort {
 			if px < 0 || py < 0 || px >= w || py >= h {
 				break
 			}
-			if !shapeCellFilled(shapeName(element), px, py, w, h) {
+			if !shapeCellFilled(name, px, py, w, h) {
 				continue
 			}
-			port := shapePort{ID: element.ID, Side: side, X: x + float64(w)/4, Y: y + float64(h)/4}
+			port := shapePort{ID: id, Side: side, X: x + float64(w)*sx/2, Y: y + float64(h)*sy/2}
 			switch side {
 			case "top":
-				port.Y = y + float64(py)/2
+				port.Y = y + float64(py)*sy
 			case "bottom":
-				port.Y = y + float64(py+1)/2
+				port.Y = y + float64(py+1)*sy
 			case "left":
-				port.X = x + float64(px)/2
+				port.X = x + float64(px)*sx
 			case "right":
-				port.X = x + float64(px+1)/2
+				port.X = x + float64(px+1)*sx
 			}
 			result = append(result, port)
 			break
@@ -186,7 +260,8 @@ func shapePorts(element Element, x, y float64) []shapePort {
 }
 
 func slideShapePorts(slide Slide, lines []Line, width, height int) []shapePort {
-	slide = cloneSlide(slide)
+	// Label fitting changes only elements, not activity definitions/results.
+	slide.Elements = append([]Element(nil), slide.Elements...)
 	fitSlideShapeLabels(&slide, width, height)
 	seen := map[int]bool{}
 	var ports []shapePort
@@ -196,21 +271,38 @@ func slideShapePorts(slide Slide, lines []Line, width, height int) []shapePort {
 		}
 		seen[line.Element] = true
 		e := slide.Elements[line.Element]
-		ports = append(ports, shapePorts(e, float64(line.Col), float64(line.Row))...)
+		q, _ := url.ParseQuery(e.Query)
+		x, y := preciseShapeAnchor(q, float64(line.Col), float64(line.Row), width, height)
+		ports = append(ports, rotateShapePortsFromValues(shapePortsFromValues(e.ID, q, x, y), q, x, y, width, height)...)
 	}
 	return ports
 }
 
 func connectorEndpoints(e Element, ports []shapePort) (shapePort, shapePort, bool) {
 	q, _ := url.ParseQuery(e.Query)
-	var a, b shapePort
+	return indexConnectorPorts(ports).endpoints(q)
+}
+
+// Index authored attachment sides, not the rotated world-facing directions.
+// Rebuild once per layout pass so moved/rotated shapes cannot leave stale ports.
+type connectorPortIndex map[[2]string]shapePort
+
+func indexConnectorPorts(ports []shapePort) connectorPortIndex {
+	index := make(connectorPortIndex, len(ports))
 	for _, p := range ports {
-		if p.ID == q.Get("connector-from") && p.Side == q.Get("connector-from-side") {
-			a = p
-		}
-		if p.ID == q.Get("connector-to") && p.Side == q.Get("connector-to-side") {
-			b = p
-		}
+		index[[2]string{p.ID, p.Side}] = p
+	}
+	return index
+}
+
+func (index connectorPortIndex) endpoints(q url.Values) (shapePort, shapePort, bool) {
+	a := index[[2]string{q.Get("connector-from"), q.Get("connector-from-side")}]
+	b := index[[2]string{q.Get("connector-to"), q.Get("connector-to-side")}]
+	if a.Direction != "" {
+		a.Side = a.Direction
+	}
+	if b.Direction != "" {
+		b.Side = b.Direction
 	}
 	return a, b, a.ID != "" && b.ID != "" && a.ID != b.ID
 }
@@ -243,26 +335,30 @@ func shapeConnectorLines(slide Slide, lines []Line, width, height int) []Line {
 		return nil
 	}
 	ports := slideShapePorts(slide, lines, width, height)
-	obstacles := connectorObstacles(slide, lines)
+	portIndex := indexConnectorPorts(ports)
+	obstacles := connectorObstacles(slide, lines, width, height)
+	routing := connectorRoutingPass{obstacles: obstacles}
 	var result []Line
 	for index, e := range slide.Elements {
 		if e.Kind != "connector" {
 			continue
 		}
-		a, b, ok := connectorEndpoints(e, ports)
+		q, _ := url.ParseQuery(e.Query)
+		a, b, ok := portIndex.endpoints(q)
 		if !ok {
 			continue
 		}
-		points := routedConnectorPath(e, a, b, obstacles, width, height)
-		result = append(result, connectorPathLines(e, index, points, connectorRasterBounds{a, b, obstacles})...)
+		points := routing.path(e, a, b, width, height)
+		result = append(result, connectorPathLines(e, index, points, connectorRasterBounds{a, b, obstacles, width, height})...)
 	}
 	return result
 }
 
 // Both the drag preview and saved connectors use this exact semi-block raster.
 type connectorRasterBounds struct {
-	From, To shapePort
-	Shapes   []connectorObstacle
+	From, To      shapePort
+	Shapes        []connectorObstacle
+	Width, Height int
 }
 
 func connectorPathLines(e Element, index int, points []connectorPoint, bounds ...connectorRasterBounds) []Line {
@@ -291,11 +387,11 @@ func connectorPathLines(e Element, index int, points []connectorPoint, bounds ..
 		mask[y] = make([]bool, w*2)
 	}
 	var caps []shapePort
-	var endpointShapes []connectorObstacle
+	var endpointShapes []projectedConnectorObstacle
 	if len(bounds) > 0 {
 		for _, shape := range bounds[0].Shapes {
 			if shape.ID != "" && (shape.ID == bounds[0].From.ID || shape.ID == bounds[0].To.ID) {
-				endpointShapes = append(endpointShapes, shape)
+				endpointShapes = append(endpointShapes, projectConnectorObstacle(shape, bounds[0].Width, bounds[0].Height))
 			}
 		}
 	}
@@ -306,6 +402,9 @@ func connectorPathLines(e Element, index int, points []connectorPoint, bounds ..
 		// A tip/cap touching the boundary must not fill the cell inside it.
 		left, top := float64(x0)+float64(x)/2, float64(y0)+float64(y)/2
 		for _, cap := range caps {
+			if cap.Direction != "" {
+				cap.Side = cap.Direction
+			}
 			switch cap.Side {
 			case "left":
 				if left+.5 > cap.X+1e-9 {
@@ -327,9 +426,8 @@ func connectorPathLines(e Element, index int, points []connectorPoint, bounds ..
 		}
 		// Wide tips beside curved/sloping edges must also respect the actual
 		// source/target silhouette. Other shapes retain normal layer ordering.
-		for _, shape := range endpointShapes {
-			sx, sy := int(math.Floor((left+.25-shape.X)*2)), int(math.Floor((top+.25-shape.Y)*2))
-			if sx >= 0 && sy >= 0 && sx < shape.W && sy < shape.H && shapeCellFilled(shape.Shape, sx, sy, shape.W, shape.H) {
+		for i := range endpointShapes {
+			if endpointShapes[i].contains(left+.25, top+.25) {
 				return
 			}
 		}
@@ -455,9 +553,9 @@ func (s *nativeEditorSession) handleConnectorPreview(w http.ResponseWriter, r *h
 		return
 	}
 	lines := displayLines(slide, request.Cols, request.Rows, request.Page)
-	obstacles := connectorObstacles(slide, lines)
+	obstacles := connectorObstacles(slide, lines, request.Cols, request.Rows)
 	points := routedConnectorPath(request.Element, request.From, request.To, obstacles, request.Cols, request.Rows)
-	raster := connectorPathLines(request.Element, -1, points, connectorRasterBounds{request.From, request.To, obstacles})
+	raster := connectorPathLines(request.Element, -1, points, connectorRasterBounds{request.From, request.To, obstacles, request.Cols, request.Rows})
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(struct {
 		Lines  []exportLine     `json:"lines"`

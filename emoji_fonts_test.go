@@ -57,8 +57,8 @@ func TestColourFontSequencesAndMetrics(t *testing.T) {
 
 func TestLegacyEmojiMigratesToColourFont(t *testing.T) {
 	e := standardTextElement(Element{Kind: "text", Text: "😍", Query: "render=text-image&source=bitmap&scale=5&text-size=25&glyph=braille"})
-	if !isTrueType(e) || trueTypeSize(e) < 400 || !strings.Contains(e.Query, "glyph=braille") {
-		t.Fatalf("migration lost size or treatment: %+v", e)
+	if !isTrueType(e) || trueTypeSize(e) < 400 || strings.Contains(e.Query, "glyph=") {
+		t.Fatalf("migration lost size or retained retired text treatment: %+v", e)
 	}
 }
 

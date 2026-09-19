@@ -4,6 +4,7 @@ import Darwin
 @preconcurrency import ScreenCaptureKit
 import UniformTypeIdentifiers
 import WebKit
+import PDFKit
 
 final class PresenterWindow: NSWindow {
     override var canBecomeKey: Bool { true }
@@ -37,20 +38,45 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var recentDecksMenu: NSMenu?
     private var saveMenuItem: NSMenuItem?
     private var participantTabsMenuItem: NSMenuItem?
+    private var activityQRMenuItem: NSMenuItem?
     private var shareableContent: SCShareableContent?
     private var loadingShareSources = false
     private let screenShareController = ScreenShareController()
     private var presentationMode: String = "none"
     private var presentationPaused = false
+    private var presentationDisplayID: CGDirectDisplayID?
     private var participantPresentationTimer: Timer?
+    private var presentationPreparationGeneration = 0
     private var terminatingAfterEditorClose = false
     private var documentDirty = true
     private var savingDocument = false
+    private var exportingSlides = false
+    private var slideExportTask: Task<Void, Never>?
     private var closeAfterSave = false
     private var terminateAfterSave = false
     private var discardingUnsavedChanges = false
     private var actionAfterSave: (() -> Void)?
     private let presentationModeKey = "keynope.presenter.mode"
+#if KEYNOPE_NATIVE_ACCEPTANCE
+    private struct NativePanelAcceptanceStep {
+        let title: String
+        let destination: URL?
+        let response: NSApplication.ModalResponse
+    }
+    private struct NativeAcceptanceEditorState: Decodable {
+        struct Diagnostic: Decodable { let code: String }
+        let diagnostics: [Diagnostic]?
+    }
+    private struct NativeAcceptancePresenterState: Decodable {
+        let slide: Int
+        let page: Int
+        let presenting: Bool
+        let timerMode: String?
+        let timerEndMs: Int64?
+    }
+    private var nativePanelAcceptanceStep: NativePanelAcceptanceStep?
+    private var nativePanelAcceptanceFailure: String?
+#endif
 
     init(
         url: URL,
@@ -73,9 +99,19 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         self.didSaveDeckHandler = didSaveDeckHandler
         self.inputHandler = inputHandler
         super.init()
+    }
+
+    private func updateParticipantPublicationTimer() {
+        guard presentationMode != "none" else {
+            participantPresentationTimer?.invalidate()
+            participantPresentationTimer = nil
+            return
+        }
+        guard participantPresentationTimer == nil else { return }
         participantPresentationTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.editorWebView?.evaluateJavaScript("window.keynopePublishParticipantPage?.()")
+                guard let self, self.presentationMode != "none" else { return }
+                self.editorWebView?.evaluateJavaScript("window.keynopePublishParticipantPage?.()")
             }
         }
     }
@@ -98,6 +134,11 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         if appMode {
             createMainMenu()
             showEditorWindow()
+#if KEYNOPE_NATIVE_ACCEPTANCE
+            if let root = ProcessInfo.processInfo.environment["KEYNOPE_NATIVE_ACCEPTANCE_ROOT"], !root.isEmpty {
+                Task { await runNativePanelAcceptance(root: URL(fileURLWithPath: root, isDirectory: true)) }
+            }
+#endif
         }
     }
 
@@ -127,6 +168,8 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         } else {
             item.button?.title = "K"
         }
+        item.button?.setAccessibilityLabel("Keynope Presenter")
+        item.button?.setAccessibilityHelp("Open presentation controls")
         item.button?.toolTip = "Keynope Presenter"
 
         let menu = NSMenu()
@@ -170,6 +213,32 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let aboutItem = applicationMenu.addItem(withTitle: "About Keynope", action: #selector(showAbout), keyEquivalent: "")
         aboutItem.target = self
         applicationMenu.addItem(NSMenuItem.separator())
+        let settingsItem = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
+        let settingsMenu = NSMenu(title: "Settings")
+        settingsMenu.autoenablesItems = false
+        let tabsItem = settingsMenu.addItem(withTitle: "Tabs…", action: #selector(showParticipantTabs), keyEquivalent: "")
+        tabsItem.target = self
+        tabsItem.isEnabled = false
+        participantTabsMenuItem = tabsItem
+        let qrItem = settingsMenu.addItem(withTitle: "Activity QR Codes", action: #selector(toggleActivityQR), keyEquivalent: "")
+        qrItem.target = self
+        qrItem.isEnabled = false
+        qrItem.state = .on
+        activityQRMenuItem = qrItem
+        settingsItem.submenu = settingsMenu
+        applicationMenu.addItem(settingsItem)
+        applicationMenu.addItem(NSMenuItem.separator())
+        let servicesItem = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
+        let servicesMenu = NSMenu(title: "Services")
+        servicesItem.submenu = servicesMenu
+        applicationMenu.addItem(servicesItem)
+        NSApp.servicesMenu = servicesMenu
+        applicationMenu.addItem(NSMenuItem.separator())
+        applicationMenu.addItem(withTitle: "Hide Keynope", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = applicationMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        applicationMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        applicationMenu.addItem(NSMenuItem.separator())
         applicationMenu.addItem(withTitle: "Quit Keynope", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         applicationItem.submenu = applicationMenu
         mainMenu.addItem(applicationItem)
@@ -187,6 +256,12 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let saveAsItem = fileMenu.addItem(withTitle: "Save As…", action: #selector(saveDeckAs), keyEquivalent: "S")
         saveAsItem.keyEquivalentModifierMask = [.command, .shift]
         saveAsItem.target = self
+        let saveCopyItem = fileMenu.addItem(withTitle: "Save a Copy…", action: #selector(saveDeckCopy), keyEquivalent: "")
+        saveCopyItem.target = self
+        let pdfItem = fileMenu.addItem(withTitle: "Export Presentation as PDF…", action: #selector(exportPDF), keyEquivalent: "")
+        pdfItem.target = self
+        let pngItem = fileMenu.addItem(withTitle: "Export Slide as PNG…", action: #selector(exportPNG), keyEquivalent: "")
+        pngItem.target = self
         let recentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
         let recentMenu = NSMenu(title: "Open Recent")
         recentMenu.delegate = self
@@ -214,20 +289,15 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         editItem.submenu = editMenu
         mainMenu.addItem(editItem)
 
-        let settingsItem = NSMenuItem()
-        let settingsMenu = NSMenu(title: "Settings")
-        settingsMenu.autoenablesItems = false
-        let tabsItem = settingsMenu.addItem(withTitle: "Tabs…", action: #selector(showParticipantTabs), keyEquivalent: "")
-        tabsItem.target = self
-        tabsItem.isEnabled = false
-        participantTabsMenuItem = tabsItem
-        settingsItem.submenu = settingsMenu
-        mainMenu.addItem(settingsItem)
-
         let windowItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windowMenu.addItem(NSMenuItem.separator())
         let showItem = windowMenu.addItem(withTitle: "Show Keynope", action: #selector(showEditor), keyEquivalent: "0")
         showItem.target = self
+        windowMenu.addItem(NSMenuItem.separator())
+        windowMenu.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
         windowItem.submenu = windowMenu
         mainMenu.addItem(windowItem)
         NSApp.mainMenu = mainMenu
@@ -242,6 +312,11 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         guard participantTabsMenuItem?.isEnabled == true else { return }
         showEditor()
         editorWebView?.evaluateJavaScript("window.keynopeOpenParticipantTabs?.()")
+    }
+
+    @objc private func toggleActivityQR() {
+        guard activityQRMenuItem?.isEnabled == true else { return }
+        editorWebView?.evaluateJavaScript("window.keynopeToggleActivityQR?.()")
     }
 
     private var versionedAppName: String {
@@ -269,6 +344,13 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let config = WKWebViewConfiguration()
         config.userContentController.add(self, name: "keynopeInput")
         config.userContentController.add(self, name: "keynopePresenter")
+        if ProcessInfo.processInfo.environment["KEYNOPE_PERFORMANCE"] == "1" {
+            config.userContentController.addUserScript(WKUserScript(
+                source: "window.KEYNOPE_PERFORMANCE = true;",
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            ))
+        }
         let visibleFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let windowSize = NSSize(
             width: min(1440, max(1100, visibleFrame.width * 0.92)),
@@ -278,6 +360,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let view = WKWebView(frame: initialFrame, configuration: config)
         view.uiDelegate = self
         view.autoresizingMask = [.width, .height]
+        view.setAccessibilityLabel("Keynope presentation editor")
         view.load(URLRequest(url: editorURL()))
         let newWindow = PresenterWindow(
             contentRect: initialFrame,
@@ -533,6 +616,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             ("KEYNOPE", "Keynope-LICENSE"),
             ("KEYNOPE EMOJI GLYPHS NOTICE", "NOTICE"),
             ("SIL OPEN FONT LICENSE 1.1", "OFL"),
+            ("GO FONT FAMILY", "GO-FONT-LICENSE"),
             ("NOTO REGIONAL FLAGS", "NOTO-REGION-FLAGS-LICENSE"),
             ("UNICODE DATA FILES", "UNICODE-LICENSE")
         ]
@@ -597,9 +681,22 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.directoryURL = try? presentationsLibraryURL()
-        guard panel.runModal() == .OK, let url = panel.url?.standardizedFileURL else {
+        guard runDocumentPanel(panel) == .OK, let url = panel.url?.standardizedFileURL else {
             return
         }
+        _ = requestDocumentReplacement { [weak self] in
+            self?.openSelectedDeck(url)
+        }
+    }
+
+    @objc private func openRecentDeck(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        _ = requestDocumentReplacement { [weak self] in
+            self?.replaceDeck(path: path)
+        }
+    }
+
+    private func openSelectedDeck(_ url: URL) {
         do {
             try selectedDeckURLHandler?(url)
             replaceDeck(path: url.path)
@@ -610,9 +707,24 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
     }
 
-    @objc private func openRecentDeck(_ sender: NSMenuItem) {
-        guard let path = sender.representedObject as? String else { return }
-        replaceDeck(path: path)
+    @discardableResult
+    private func requestDocumentReplacement(_ replacement: @escaping () -> Void) -> Bool {
+        guard !savingDocument else { return false }
+        guard documentDirty else {
+            replacement()
+            return true
+        }
+        switch unsavedChangesAlert().runModal() {
+        case .alertFirstButtonReturn:
+            actionAfterSave = replacement
+            saveDocument(forceSaveAs: false)
+            return true
+        case .alertSecondButtonReturn:
+            replacement()
+            return true
+        default:
+            return false
+        }
     }
 
     private func refreshRecentDecksMenu() {
@@ -663,18 +775,8 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     @objc private func newDeck() {
-        guard documentDirty else {
-            openNewDeck()
-            return
-        }
-        switch unsavedChangesAlert().runModal() {
-        case .alertFirstButtonReturn:
-            actionAfterSave = { [weak self] in self?.openNewDeck() }
-            saveDocument(forceSaveAs: false)
-        case .alertSecondButtonReturn:
-            openNewDeck()
-        default:
-            break
+        _ = requestDocumentReplacement { [weak self] in
+            self?.openNewDeck()
         }
     }
 
@@ -686,6 +788,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         presenterURL = newURL
         editorWebView?.load(URLRequest(url: editorURL()))
         participantTabsMenuItem?.isEnabled = false
+        activityQRMenuItem?.isEnabled = false
         documentDirty = true
         saveMenuItem?.isEnabled = true
         updateEditorWindowTitle()
@@ -714,25 +817,154 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         saveDocument(forceSaveAs: true)
     }
 
+    @objc private func saveDeckCopy() {
+        saveDocument(forceSaveAs: true, copyOnly: true)
+    }
+
+    @objc private func exportPDF() { exportSlides(pdf: true) }
+    @objc private func exportPNG() { exportSlides(pdf: false) }
+
+    private func configureDocumentDestinationPanel(
+        _ panel: NSSavePanel,
+        extension fileExtension: String,
+        copySuffix: Bool = false
+    ) {
+        if let deck = activeDeckURLHandler?() {
+            let base = deck.deletingPathExtension().lastPathComponent
+            panel.directoryURL = deck.deletingLastPathComponent()
+            panel.nameFieldStringValue = base + (copySuffix ? " copy" : "") + "." + fileExtension
+        } else {
+            panel.directoryURL = try? presentationsLibraryURL()
+            panel.nameFieldStringValue = "Untitled" + (copySuffix ? " copy" : "") + "." + fileExtension
+        }
+    }
+
+    private func runDocumentPanel(_ panel: NSSavePanel) -> NSApplication.ModalResponse {
+#if KEYNOPE_NATIVE_ACCEPTANCE
+        if let step = nativePanelAcceptanceStep {
+            nativePanelAcceptanceStep = nil
+            if panel.title != step.title {
+                nativePanelAcceptanceFailure = "Expected panel ‘\(step.title)’ but Keynope presented ‘\(panel.title ?? "")’"
+                return .cancel
+            }
+            if let destination = step.destination {
+                if panel is NSOpenPanel {
+                    panel.directoryURL = destination
+                } else {
+                    panel.directoryURL = destination.deletingLastPathComponent()
+                    panel.nameFieldStringValue = destination.lastPathComponent
+                }
+            }
+            let timer = Timer(timeInterval: 0.15, repeats: false) { _ in
+                MainActor.assumeIsolated {
+                    NSApp.stopModal(withCode: step.response)
+                    panel.orderOut(nil)
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            return panel.runModal()
+        }
+#endif
+        return panel.runModal()
+    }
+
+    private func exportSlides(pdf: Bool) {
+        guard !exportingSlides, let endpoint = editorEndpoint("/api/editor/export-document") else { return }
+        exportingSlides = true
+        slideExportTask = Task {
+            let renderer = SlideExportRenderer()
+            let progress = SlideExportProgress()
+            progress.onCancel = { [weak self, weak renderer] in
+                self?.slideExportTask?.cancel()
+                renderer?.close()
+            }
+            progress.show()
+            defer { progress.close(); renderer.close(); exportingSlides = false; slideExportTask = nil }
+            do {
+                _ = try await editorWebView?.callAsyncJavaScript("await window.keynopePrepareDocumentSave?.();", arguments: [:], in: nil, contentWorld: .page)
+                var request = URLRequest(url: endpoint)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONSerialization.data(withJSONObject: ["path": "Snapshot.html"])
+                let (data, response) = try await URLSession.shared.data(for: request)
+                try progress.checkCancellation()
+                guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                    throw NSError(domain: "sh.keynope.export", code: 5, userInfo: [NSLocalizedDescriptionKey: "The presentation could not be prepared for export."])
+                }
+                let document = try JSONDecoder().decode(ExportDocumentResponse.self, from: data)
+                try await renderer.load(document.content)
+                try progress.checkCancellation()
+                let pages = try await renderer.pages()
+                try progress.checkCancellation()
+                progress.hide()
+                let panel = NSSavePanel()
+                panel.title = pdf ? "Export Presentation as PDF" : "Export Slide as PNG"
+                panel.prompt = "Export"
+                panel.allowedContentTypes = [pdf ? .pdf : .png]
+                panel.canCreateDirectories = true
+                let name = activeDeckURLHandler?()?.deletingPathExtension().lastPathComponent ?? "Untitled"
+                configureDocumentDestinationPanel(panel, extension: pdf ? "pdf" : "png")
+                let selector = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 240, height: 28))
+                if !pdf {
+                    for page in pages { selector.addItem(withTitle: "Slide " + (page["label"] as? String ?? "")) }
+                    selector.setAccessibilityLabel("Slide to export")
+                    panel.accessoryView = selector
+                }
+                panel.message = "Static slide artwork only. Activity results and generated join codes are excluded. Animations use their first frame."
+                guard runDocumentPanel(panel) == .OK, let destination = panel.url else { return }
+                progress.show()
+                try progress.checkCancellation()
+                if pdf {
+                    let output = SlidePDFEncoder(title: name)
+                    for (position, page) in pages.enumerated() {
+                        try progress.checkCancellation()
+                        progress.update("Rendering slide \(position + 1) of \(pages.count)…", completed: position, total: pages.count)
+                        guard let index = page["index"] as? Int else { continue }
+                        let image = try await renderer.image(page: index)
+                        try progress.checkCancellation()
+                        guard let bytes = image.tiffRepresentation else { throw CocoaError(.fileWriteUnknown) }
+                        try await output.append(imageData: bytes)
+                    }
+                    progress.update("Writing PDF…", completed: pages.count, total: pages.count)
+                    await Task.yield()
+                    try progress.checkCancellation()
+                    let bytes = try await output.finish()
+                    try progress.checkCancellation()
+                    try bytes.write(to: destination, options: .atomic)
+                } else {
+                    progress.update("Rendering selected slide…", completed: 0)
+                    guard let index = pages[selector.indexOfSelectedItem]["index"] as? Int else { throw CocoaError(.fileWriteUnknown) }
+                    let image = try await renderer.image(page: index)
+                    try progress.checkCancellation()
+                    guard let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
+                          let bytes = bitmap.representation(using: .png, properties: [:]) else { throw CocoaError(.fileWriteUnknown) }
+                    try bytes.write(to: destination, options: .atomic)
+                }
+                _ = try? await editorWebView?.evaluateJavaScript("window.keynopeDidExport?.()")
+            } catch {
+                if progress.cancelled || Task.isCancelled || error is CancellationError { return }
+                progress.hide()
+                let alert = NSAlert(error: error)
+                alert.messageText = "Could Not Export Presentation"
+                alert.runModal()
+            }
+        }
+    }
+
     private func exportHTML() {
         let panel = NSSavePanel()
         panel.title = "Export Keynope Presentation to HTML"
         panel.prompt = "Export"
         panel.allowedContentTypes = [UTType.html]
         panel.canCreateDirectories = true
-        if let deck = activeDeckURLHandler?() {
-            panel.directoryURL = deck.deletingLastPathComponent()
-            panel.nameFieldStringValue = deck.deletingPathExtension().lastPathComponent + ".html"
-        } else {
-            panel.directoryURL = try? presentationsLibraryURL()
-            panel.nameFieldStringValue = "Untitled.html"
-        }
-        guard panel.runModal() == .OK,
+        configureDocumentDestinationPanel(panel, extension: "html")
+        guard runDocumentPanel(panel) == .OK,
               let destination = panel.url?.standardizedFileURL,
               let endpoint = editorEndpoint("/api/editor/export-document") else { return }
         Task {
             do {
                 let existing = (try? String(contentsOf: destination, encoding: .utf8)) ?? ""
+                _ = try await editorWebView?.callAsyncJavaScript("await window.keynopePrepareDocumentSave?.();", arguments: [:], in: nil, contentWorld: .page)
                 var request = URLRequest(url: endpoint)
                 request.httpMethod = "POST"
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -756,35 +988,50 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
     }
 
-    private func saveDocument(forceSaveAs: Bool) {
+    private func saveDocument(forceSaveAs: Bool, copyOnly: Bool = false) {
         guard !savingDocument else { return }
         var destination = forceSaveAs ? nil : activeDeckURLHandler?()
         if destination == nil {
             let panel = NSSavePanel()
-            panel.title = "Save Keynope Presentation"
+            panel.title = copyOnly ? "Save a Copy of Presentation" : "Save Keynope Presentation"
             panel.prompt = "Save"
             panel.allowedContentTypes = [UTType(filenameExtension: "md")].compactMap { $0 }
             panel.canCreateDirectories = true
-            panel.nameFieldStringValue = "Untitled.md"
-            panel.directoryURL = try? presentationsLibraryURL()
-            guard panel.runModal() == .OK else {
-                closeAfterSave = false
-                actionAfterSave = nil
-                if terminateAfterSave {
-                    terminateAfterSave = false
-                    NSApp.reply(toApplicationShouldTerminate: false)
-                }
+            configureDocumentDestinationPanel(panel, extension: "md", copySuffix: copyOnly)
+            guard runDocumentPanel(panel) == .OK else {
+                cancelDeferredSaveContinuation()
                 return
             }
             destination = panel.url
         }
+        if copyOnly, let original = activeDeckURLHandler?(), let destination,
+           original.resolvingSymlinksInPath().standardizedFileURL == destination.resolvingSymlinksInPath().standardizedFileURL {
+            let alert = NSAlert()
+            alert.messageText = "Choose a Different File"
+            alert.informativeText = "Save a Copy keeps the original presentation intact. Choose another filename or location."
+            alert.runModal()
+            return
+        }
         guard let destination = destination?.standardizedFileURL,
               let documentURL = editorEndpoint("/api/editor/document"),
-              let actionURL = editorEndpoint("/api/editor/action") else { return }
+              let actionURL = editorEndpoint("/api/editor/action") else {
+            cancelDeferredSaveContinuation()
+            return
+        }
         savingDocument = true
         saveMenuItem?.isEnabled = false
         Task {
             do {
+                let activityResultsPending: Bool
+                if let webView = self.editorWebView {
+                    _ = try await webView.callAsyncJavaScript("await window.keynopePrepareDocumentSave?.();", arguments: [:], in: nil, contentWorld: .page)
+                    // A failed auxiliary result write must never veto saving the
+                    // deck itself, including when an older page is still open.
+                    let flushed = try await webView.callAsyncJavaScript("try { return (await window.keynopeFlushActivityResults?.()) !== false; } catch (error) { console.warn('Activity results pending:', error); return false; }", arguments: [:], in: nil, contentWorld: .page)
+                    activityResultsPending = (flushed as? Bool) == false
+                } else {
+                    activityResultsPending = false
+                }
                 var request = URLRequest(url: documentURL)
                 request.httpMethod = "POST"
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -795,6 +1042,12 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 }
                 let document = try JSONDecoder().decode(SaveDocumentResponse.self, from: data)
                 try Data(document.content.utf8).write(to: destination, options: .atomic)
+                if copyOnly {
+                    self.savingDocument = false
+                    self.saveMenuItem?.isEnabled = self.documentDirty
+                    _ = try? await self.editorWebView?.evaluateJavaScript("window.showEngagementToast?.('Copy saved')")
+                    return
+                }
                 var confirm = URLRequest(url: actionURL)
                 confirm.httpMethod = "POST"
                 confirm.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -805,11 +1058,22 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 }
                 await MainActor.run {
                     self.savingDocument = false
-                    self.documentDirty = false
-                    self.saveMenuItem?.isEnabled = false
+                    self.documentDirty = activityResultsPending
+                    self.saveMenuItem?.isEnabled = activityResultsPending
                     self.didSaveDeckHandler?(destination.path)
                     self.updateEditorWindowTitle(deckPath: destination.path)
                     self.editorWebView?.evaluateJavaScript("window.keynopeDidSave && window.keynopeDidSave()")
+                    // The deck was saved, but do not discard recoverable results
+                    // by automatically closing or opening another document.
+                    if activityResultsPending {
+                        self.closeAfterSave = false
+                        self.actionAfterSave = nil
+                        if self.terminateAfterSave {
+                            self.terminateAfterSave = false
+                            NSApp.reply(toApplicationShouldTerminate: false)
+                        }
+                        return
+                    }
                     if let action = self.actionAfterSave {
                         self.actionAfterSave = nil
                         action()
@@ -843,6 +1107,15 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
     }
 
+    private func cancelDeferredSaveContinuation() {
+        closeAfterSave = false
+        actionAfterSave = nil
+        if terminateAfterSave {
+            terminateAfterSave = false
+            NSApp.reply(toApplicationShouldTerminate: false)
+        }
+    }
+
     private func replaceDeck(path: String) {
         guard let newURL = openDeckHandler?(path) else {
             return
@@ -853,15 +1126,30 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         saveMenuItem?.isEnabled = false
         editorWebView?.load(URLRequest(url: editorURL()))
         participantTabsMenuItem?.isEnabled = false
+        activityQRMenuItem?.isEnabled = false
         updateEditorWindowTitle(deckPath: path)
         showEditorWindow()
     }
 
-    private var hasExternalDisplay: Bool {
-        guard let main = NSScreen.main else {
-            return NSScreen.screens.count > 1
+    private var editorHostScreen: NSScreen? {
+        editorWindow?.screen ?? NSScreen.main ?? NSScreen.screens.first
+    }
+
+    private func externalScreen() -> NSScreen? {
+        guard let host = editorHostScreen else {
+            return NSScreen.screens.dropFirst().first
         }
-        return NSScreen.screens.contains { $0 != main }
+        let hostID = screenDisplayID(host)
+        return NSScreen.screens.first { candidate in
+            if let hostID, let candidateID = screenDisplayID(candidate) {
+                return candidateID != hostID
+            }
+            return candidate !== host
+        }
+    }
+
+    private var hasExternalDisplay: Bool {
+        externalScreen() != nil
     }
 
     private func updateDisplayState() {
@@ -909,33 +1197,51 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     private func targetScreen(preferExternal: Bool) -> NSScreen {
-        if preferExternal, let main = NSScreen.main {
-            if let external = NSScreen.screens.first(where: { $0 != main }) {
-                return external
-            }
+        if preferExternal, let external = externalScreen() {
+            return external
         }
-        return NSScreen.main ?? NSScreen.screens.first!
+        return editorHostScreen ?? NSScreen.screens.first!
     }
 
     private func showPresentation(preferExternal: Bool, remember: Bool = true) {
+        presentationPreparationGeneration += 1
+        let generation = presentationPreparationGeneration
+        Task {
+            do {
+                _ = try await editorWebView?.callAsyncJavaScript("await window.keynopePrepareDocumentSave?.();", arguments: [:], in: nil, contentWorld: .page)
+                guard generation == presentationPreparationGeneration else { return }
+                openPreparedPresentation(preferExternal: preferExternal, remember: remember)
+            } catch {
+                guard generation == presentationPreparationGeneration else { return }
+                let alert = NSAlert(error: error)
+                alert.messageText = "Could Not Start Presentation"
+                alert.runModal()
+            }
+        }
+    }
+
+    private func openPreparedPresentation(preferExternal: Bool, remember: Bool) {
         if preferExternal && !hasExternalDisplay {
             noPresentation()
             return
         }
         presentationMode = preferExternal ? "external" : "main"
         presentationPaused = false
+        updateParticipantPublicationTimer()
         if remember {
             UserDefaults.standard.set(presentationMode, forKey: presentationModeKey)
         }
         reportPresentationMode()
 
         let screen = targetScreen(preferExternal: preferExternal)
+        presentationDisplayID = screenDisplayID(screen)
         let frame = screen.frame
         let config = WKWebViewConfiguration()
         config.userContentController.add(self, name: "keynopePresenter")
         let composite = PresenterCompositeView(frame: NSRect(origin: .zero, size: frame.size), configuration: config)
         let view = composite.webView
         view.autoresizingMask = [.width, .height]
+        view.setAccessibilityLabel("Keynope presentation output")
         view.load(URLRequest(url: presenterURLForSurface(preferExternal ? "external" : "main")))
 
         let newWindow = PresenterWindow(
@@ -1040,6 +1346,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     private func noPresentation(remember: Bool = true) {
+        presentationPreparationGeneration += 1
         Task {
             await screenShareController.stop()
         }
@@ -1047,9 +1354,11 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         window = nil
         webView = nil
         compositeView = nil
+        presentationDisplayID = nil
         screenShareController.previewView = nil
         presentationMode = "none"
         presentationPaused = false
+        updateParticipantPublicationTimer()
         if remember {
             UserDefaults.standard.set(presentationMode, forKey: presentationModeKey)
         }
@@ -1060,6 +1369,17 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     @objc private func screenParametersChanged() {
+        if presentationMode != "none" {
+            guard let displayID = presentationDisplayID,
+                  let target = NSScreen.screens.first(where: { screenDisplayID($0) == displayID }) else {
+                noPresentation(remember: false)
+                updateDisplayState()
+                return
+            }
+            if let window, !NSEqualRects(window.frame, target.frame) {
+                window.setFrame(target.frame, display: true, animate: false)
+            }
+        }
         updateDisplayState()
     }
 
@@ -1340,6 +1660,8 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 showAbout()
             } else if action == "save-presentation" {
                 saveDocument(forceSaveAs: false)
+            } else if action == "save-presentation-copy" {
+                saveDocument(forceSaveAs: true, copyOnly: true)
             } else if action == "export-html" {
                 exportHTML()
             } else if action == "editor-dirty-state", let dirty = body["dirty"] as? Bool {
@@ -1348,9 +1670,358 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 updateEditorWindowTitle()
             } else if action == "editor-tabs-availability", let available = body["available"] as? Bool {
                 participantTabsMenuItem?.isEnabled = available
+                activityQRMenuItem?.isEnabled = available
+                activityQRMenuItem?.state = (body["activityQRVisible"] as? Bool ?? true) ? .on : .off
+            } else if action == "editor-performance",
+                      ProcessInfo.processInfo.environment["KEYNOPE_PERFORMANCE"] == "1" {
+                let kind = body["kind"] as? String ?? "unknown"
+                let response = body["responseMs"] as? Double ?? 0
+                let command = body["commandMs"] as? Double ?? 0
+                let frame = body["frameMs"] as? Double ?? 0
+                let source = body["frameSource"] as? String ?? "unknown"
+                let visibility = body["visibility"] as? String ?? "unknown"
+                NSLog("Keynope performance %@ response=%.2fms command=%.2fms frame=%.2fms source=%@ visibility=%@", kind, response, command, frame, source, visibility)
             }
         }
     }
+
+#if KEYNOPE_NATIVE_ACCEPTANCE
+    private struct NativeAcceptanceError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    private func waitForNativeAcceptance(
+        _ label: String,
+        timeout: TimeInterval = 45,
+        condition: @escaping @MainActor () -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            if Date() >= deadline {
+                throw NativeAcceptanceError(message: "Timed out waiting for \(label)")
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
+    private func requireNativeAcceptance(_ condition: Bool, _ label: String, checks: inout [String]) throws {
+        guard condition else { throw NativeAcceptanceError(message: label) }
+        checks.append(label)
+    }
+
+    private func nativeAcceptancePresenterState() async throws -> NativeAcceptancePresenterState {
+        guard let url = editorEndpoint("/state") else {
+            throw NativeAcceptanceError(message: "Could not form the presenter-state URL")
+        }
+        let (data, response) = try await URLSession.shared.data(from: url)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw NativeAcceptanceError(message: "Could not read presenter state")
+        }
+        return try JSONDecoder().decode(NativeAcceptancePresenterState.self, from: data)
+    }
+
+    private func waitForNativePresenterState(
+        _ label: String,
+        timeout: TimeInterval = 45,
+        condition: @escaping (NativeAcceptancePresenterState) -> Bool
+    ) async throws -> NativeAcceptancePresenterState {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            let state = try await nativeAcceptancePresenterState()
+            if condition(state) { return state }
+            if Date() >= deadline {
+                throw NativeAcceptanceError(message: "Timed out waiting for \(label)")
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
+    private func waitForNativeJavaScript(
+        _ label: String,
+        in view: WKWebView,
+        expression: String,
+        timeout: TimeInterval = 45
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if (try? await view.evaluateJavaScript(expression) as? Bool) == true { return }
+            if Date() >= deadline {
+                throw NativeAcceptanceError(message: "Timed out waiting for \(label)")
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
+    private func postNativeAcceptanceEditorAction(_ body: [String: Any]) async throws {
+        guard let url = editorEndpoint("/api/editor/action") else {
+            throw NativeAcceptanceError(message: "Could not form the editor-action URL")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw NativeAcceptanceError(message: String(data: data, encoding: .utf8) ?? "Native editor action failed")
+        }
+    }
+
+    private func expectNativePanel(
+        title: String,
+        destination: URL? = nil,
+        response: NSApplication.ModalResponse
+    ) {
+        nativePanelAcceptanceFailure = nil
+        nativePanelAcceptanceStep = NativePanelAcceptanceStep(title: title, destination: destination, response: response)
+    }
+
+    private func requireNativePanelConsumed(_ label: String, checks: inout [String]) throws {
+        if let failure = nativePanelAcceptanceFailure {
+            throw NativeAcceptanceError(message: failure)
+        }
+        try requireNativeAcceptance(nativePanelAcceptanceStep == nil, label, checks: &checks)
+    }
+
+    private func nativeMenu(named title: String) -> NSMenu? {
+        NSApp.mainMenu?.items.compactMap(\.submenu).first(where: { $0.title == title })
+    }
+
+    private func performNativeMenuItem(menu menuTitle: String, item itemTitle: String) throws {
+        guard let menu = nativeMenu(named: menuTitle),
+              let item = menu.items.first(where: { $0.title == itemTitle }),
+              let action = item.action else {
+            throw NativeAcceptanceError(message: "Missing \(menuTitle) → \(itemTitle)")
+        }
+        guard NSApp.sendAction(action, to: item.target, from: item) else {
+            throw NativeAcceptanceError(message: "AppKit did not deliver \(menuTitle) → \(itemTitle)")
+        }
+    }
+
+    @discardableResult
+    private func performNativeShortcut(_ characters: String, keyCode: UInt16, modifiers: NSEvent.ModifierFlags) throws -> Bool {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: modifiers,
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: editorWindow?.windowNumber ?? 0,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: characters.lowercased(),
+            isARepeat: false,
+            keyCode: keyCode
+        ) else {
+            throw NativeAcceptanceError(message: "Could not create the \(characters) shortcut event")
+        }
+        return NSApp.mainMenu?.performKeyEquivalent(with: event) == true
+    }
+
+    private func finishNativePanelAcceptance(root: URL, checks: [String], failure: String?) {
+        let report: [String: Any] = [
+            "passed": failure == nil,
+            "checks": checks,
+            "failure": failure ?? ""
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: root.appendingPathComponent("report.json"), options: .atomic)
+        }
+        discardingUnsavedChanges = true
+        NSApp.terminate(nil)
+    }
+
+    private func runNativePanelAcceptance(root: URL) async {
+        var checks: [String] = []
+        let fileManager = FileManager.default
+        let original = root.appendingPathComponent("original.md")
+        let recovered = root.appendingPathComponent("recovered.md")
+        let saved = root.appendingPathComponent("saved.md")
+        let copy = root.appendingPathComponent("copy.md")
+        let cancelledCopy = root.appendingPathComponent("cancelled-copy.md")
+        let html = root.appendingPathComponent("deck.html")
+        let cancelledHTML = root.appendingPathComponent("cancelled.html")
+        let png = root.appendingPathComponent("slide.png")
+        let cancelledPNG = root.appendingPathComponent("cancelled.png")
+        let pdf = root.appendingPathComponent("deck.pdf")
+        let cancelledPDF = root.appendingPathComponent("cancelled.pdf")
+
+        do {
+            try await waitForNativeAcceptance("initial editor load") {
+                self.editorWebView?.isLoading == false && self.documentDirty == false
+            }
+            try requireNativeAcceptance(activeDeckURLHandler?()?.standardizedFileURL == original.standardizedFileURL, "opened the initial deck through the native app", checks: &checks)
+            try requireNativeAcceptance(statusItem?.button?.accessibilityLabel() == "Keynope Presenter", "menu-bar presentation controls expose a stable native accessibility label", checks: &checks)
+            try requireNativeAcceptance(editorWebView?.accessibilityLabel() == "Keynope presentation editor", "editor WebView exposes a stable native accessibility entry label", checks: &checks)
+
+            let fileTitles = Set(nativeMenu(named: "File")?.items.map(\.title) ?? [])
+            try requireNativeAcceptance(["New Presentation", "Open…", "Save", "Save As…", "Save a Copy…", "Export Presentation as PDF…", "Export Slide as PNG…"].allSatisfy(fileTitles.contains), "native File menu exposes the standard document commands", checks: &checks)
+            let openMenuItem = nativeMenu(named: "File")?.items.first(where: { $0.title == "Open…" })
+            let saveAsMenuItem = nativeMenu(named: "File")?.items.first(where: { $0.title == "Save As…" })
+            try requireNativeAcceptance(openMenuItem?.keyEquivalent.lowercased() == "o" && openMenuItem?.keyEquivalentModifierMask == [.command], "Command-O is wired to native Open", checks: &checks)
+            try requireNativeAcceptance(saveAsMenuItem?.keyEquivalent.uppercased() == "S" && saveAsMenuItem?.keyEquivalentModifierMask == [.command, .shift], "Command-Shift-S is wired to native Save As", checks: &checks)
+            let applicationSubmenus = NSApp.mainMenu?.items.compactMap(\.submenu) ?? []
+            try requireNativeAcceptance(applicationSubmenus.contains(where: { menu in menu.items.contains(where: { $0.title == "Settings" }) && menu.items.contains(where: { $0.title == "Services" }) }), "native application menu exposes Settings and Services", checks: &checks)
+            let windowTitles = Set(nativeMenu(named: "Window")?.items.map(\.title) ?? [])
+            try requireNativeAcceptance(["Minimize", "Zoom", "Show Keynope", "Bring All to Front"].allSatisfy(windowTitles.contains), "native Window menu exposes standard window commands", checks: &checks)
+
+            editorWindow?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            try requireNativeAcceptance(try performNativeShortcut("m", keyCode: 46, modifiers: [.command]), "Command-M routed to Window → Minimize", checks: &checks)
+            editorWindow?.performMiniaturize(nil)
+            try await waitForNativeAcceptance("window minimization") { self.editorWindow?.isMiniaturized == true }
+            editorWindow?.deminiaturize(nil)
+            try await waitForNativeAcceptance("window restoration") { self.editorWindow?.isMiniaturized == false }
+            try requireNativeAcceptance(true, "Window → Minimize uses the native window action and restores cleanly", checks: &checks)
+
+            showPresentation(preferExternal: false)
+            try await waitForNativeAcceptance("main-display presentation window", timeout: 60) {
+                self.presentationMode == "main" && self.window?.isVisible == true && self.webView?.isLoading == false
+            }
+            let presentationState = try await waitForNativePresenterState("presenting state") { $0.presenting }
+            try requireNativeAcceptance(presentationState.slide == 0 && presentationState.page == 0, "native presentation opened on the active slide", checks: &checks)
+            try requireNativeAcceptance(webView?.accessibilityLabel() == "Keynope presentation output", "presentation WebView is distinct from the editor in the native accessibility tree", checks: &checks)
+            let expectedFrame = targetScreen(preferExternal: false).frame
+            try requireNativeAcceptance(window?.styleMask.contains(.borderless) == true && NSEqualRects(window?.frame ?? .zero, expectedFrame), "main-display presentation uses a borderless screen-sized native window", checks: &checks)
+            try requireNativeAcceptance(presentationDisplayID == window?.screen.flatMap(screenDisplayID), "native presentation retains its physical display identity across screen-geometry notifications", checks: &checks)
+            try requireNativeAcceptance(editorWindow?.isVisible == true && mainDisplayItem?.state == .on && noPresentationItem?.state == .off, "editor and native presentation controls expose the active main-display state", checks: &checks)
+
+            pausePresentation()
+            _ = try await waitForNativePresenterState("paused presentation state") { !$0.presenting }
+            try requireNativeAcceptance(presentationPaused && shareRootItem?.isEnabled == true, "Pause keeps the presentation target while suspending output", checks: &checks)
+            resumePresentation()
+            _ = try await waitForNativePresenterState("resumed presentation state") { $0.presenting }
+            try requireNativeAcceptance(!presentationPaused, "Resume restores native presentation output", checks: &checks)
+
+            try await postNativeAcceptanceEditorAction(["action": "navigate-presentation", "slide": 1, "page": 0])
+            _ = try await waitForNativePresenterState("cheat-sheet navigation") { $0.presenting && $0.slide == 1 && $0.page == 0 }
+            guard let presentationWebView = webView else {
+                throw NativeAcceptanceError(message: "Native presentation WebView disappeared")
+            }
+            try await waitForNativeJavaScript(
+                "cheat-sheet presentation paint",
+                in: presentationWebView,
+                expression: "window.keynopePresentationPosition?.().tabOnly === true"
+            )
+            try requireNativeAcceptance(true, "tab-only cheat sheet follows the active native presentation", checks: &checks)
+
+            _ = try await presentationWebView.evaluateJavaScript("['0','0','0','3','0','Enter'].forEach(key => dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true})))")
+            let timerState = try await waitForNativePresenterState("native presentation timer") {
+                $0.timerMode == "running" && ($0.timerEndMs ?? 0) > Int64(Date().timeIntervalSince1970 * 1000)
+            }
+            try requireNativeAcceptance((timerState.timerEndMs ?? 0) > 0, "timer deadline reaches the native presentation state", checks: &checks)
+            try await waitForNativeJavaScript("timer paint", in: presentationWebView, expression: "presenterTimerText().text.length > 0", timeout: 10)
+            try requireNativeAcceptance(true, "native presenter renders the shared timer", checks: &checks)
+            _ = try await presentationWebView.evaluateJavaScript("dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))")
+            _ = try await waitForNativePresenterState("stopped native timer") { ($0.timerMode ?? "").isEmpty && ($0.timerEndMs ?? 0) == 0 }
+            try requireNativeAcceptance(true, "stopping the timer clears the shared deadline", checks: &checks)
+
+            noPresentation()
+            _ = try await waitForNativePresenterState("stopped presentation state") { !$0.presenting }
+            try requireNativeAcceptance(window == nil && webView == nil && presentationMode == "none" && presentationDisplayID == nil, "Stop closes and releases the native presentation surface and display identity", checks: &checks)
+            try requireNativeAcceptance(editorWindow?.isVisible == true && noPresentationItem?.state == .on && mainDisplayItem?.state == .off && shareRootItem?.isEnabled == false, "Stop restores the editor and disables presentation-only controls", checks: &checks)
+
+            let initialDirty = documentDirty
+            expectNativePanel(title: "Save Keynope Presentation", destination: root.appendingPathComponent("cancelled-save.md"), response: .cancel)
+            try performNativeMenuItem(menu: "File", item: "Save As…")
+            try requireNativePanelConsumed("cancelled Save As through NSSavePanel", checks: &checks)
+            try requireNativeAcceptance(documentDirty == initialDirty && activeDeckURLHandler?()?.standardizedFileURL == original.standardizedFileURL, "cancelled Save As retained document URL and dirty state", checks: &checks)
+
+            expectNativePanel(title: "Save Keynope Presentation", destination: saved, response: .OK)
+            try performNativeMenuItem(menu: "File", item: "Save As…")
+            try await waitForNativeAcceptance("Save As completion") {
+                !self.savingDocument && fileManager.fileExists(atPath: saved.path) && self.activeDeckURLHandler?()?.standardizedFileURL == saved.standardizedFileURL
+            }
+            try requireNativePanelConsumed("completed Save As through NSSavePanel", checks: &checks)
+            try requireNativeAcceptance(documentDirty == false, "Save As cleared dirty state", checks: &checks)
+
+            expectNativePanel(title: "Save a Copy of Presentation", destination: copy, response: .OK)
+            try performNativeMenuItem(menu: "File", item: "Save a Copy…")
+            try await waitForNativeAcceptance("Save a Copy completion") {
+                !self.savingDocument && fileManager.fileExists(atPath: copy.path)
+            }
+            try requireNativePanelConsumed("completed Save a Copy through NSSavePanel", checks: &checks)
+            try requireNativeAcceptance(activeDeckURLHandler?()?.standardizedFileURL == saved.standardizedFileURL && documentDirty == false, "Save a Copy retained original document URL and dirty state", checks: &checks)
+
+            expectNativePanel(title: "Save a Copy of Presentation", destination: cancelledCopy, response: .cancel)
+            try performNativeMenuItem(menu: "File", item: "Save a Copy…")
+            try requireNativePanelConsumed("cancelled Save a Copy through NSSavePanel", checks: &checks)
+            try requireNativeAcceptance(!fileManager.fileExists(atPath: cancelledCopy.path) && activeDeckURLHandler?()?.standardizedFileURL == saved.standardizedFileURL && documentDirty == false, "cancelled Save a Copy left document and filesystem unchanged", checks: &checks)
+
+            expectNativePanel(title: "Export Keynope Presentation to HTML", destination: cancelledHTML, response: .cancel)
+            exportHTML()
+            try requireNativePanelConsumed("cancelled HTML export through NSSavePanel", checks: &checks)
+            try requireNativeAcceptance(!fileManager.fileExists(atPath: cancelledHTML.path), "cancelled HTML export wrote no file", checks: &checks)
+
+            expectNativePanel(title: "Export Keynope Presentation to HTML", destination: html, response: .OK)
+            exportHTML()
+            try await waitForNativeAcceptance("HTML export completion") { fileManager.fileExists(atPath: html.path) }
+            try requireNativePanelConsumed("completed HTML export through NSSavePanel", checks: &checks)
+            let htmlText = try String(contentsOf: html, encoding: .utf8)
+            try requireNativeAcceptance(htmlText.localizedCaseInsensitiveContains("<!doctype html"), "HTML export produced a standalone document", checks: &checks)
+
+            expectNativePanel(title: "Export Slide as PNG", destination: cancelledPNG, response: .cancel)
+            try performNativeMenuItem(menu: "File", item: "Export Slide as PNG…")
+            try await waitForNativeAcceptance("cancelled PNG export") { !self.exportingSlides && self.nativePanelAcceptanceStep == nil }
+            try requireNativePanelConsumed("cancelled PNG export through NSSavePanel", checks: &checks)
+            try requireNativeAcceptance(!fileManager.fileExists(atPath: cancelledPNG.path), "cancelled PNG export wrote no file", checks: &checks)
+
+            expectNativePanel(title: "Export Slide as PNG", destination: png, response: .OK)
+            try performNativeMenuItem(menu: "File", item: "Export Slide as PNG…")
+            try await waitForNativeAcceptance("PNG export completion", timeout: 90) {
+                !self.exportingSlides && fileManager.fileExists(atPath: png.path)
+            }
+            try requireNativePanelConsumed("completed PNG export through NSSavePanel", checks: &checks)
+            let pngData = try Data(contentsOf: png)
+            try requireNativeAcceptance(pngData.starts(with: [0x89, 0x50, 0x4e, 0x47]), "PNG export produced PNG bytes", checks: &checks)
+
+            expectNativePanel(title: "Export Presentation as PDF", destination: cancelledPDF, response: .cancel)
+            try performNativeMenuItem(menu: "File", item: "Export Presentation as PDF…")
+            try await waitForNativeAcceptance("cancelled PDF export", timeout: 90) { !self.exportingSlides && self.nativePanelAcceptanceStep == nil }
+            try requireNativePanelConsumed("cancelled PDF export through NSSavePanel", checks: &checks)
+            try requireNativeAcceptance(!fileManager.fileExists(atPath: cancelledPDF.path), "cancelled PDF export wrote no file", checks: &checks)
+
+            expectNativePanel(title: "Export Presentation as PDF", destination: pdf, response: .OK)
+            try performNativeMenuItem(menu: "File", item: "Export Presentation as PDF…")
+            try await waitForNativeAcceptance("PDF export completion", timeout: 120) {
+                !self.exportingSlides && fileManager.fileExists(atPath: pdf.path)
+            }
+            try requireNativePanelConsumed("completed PDF export through NSSavePanel", checks: &checks)
+            let pdfData = try Data(contentsOf: pdf)
+            try requireNativeAcceptance(pdfData.starts(with: Array("%PDF".utf8)), "PDF export produced PDF bytes", checks: &checks)
+
+            expectNativePanel(title: "Open a Keynope Deck", destination: recovered, response: .OK)
+            try performNativeMenuItem(menu: "File", item: "Open…")
+            try await waitForNativeAcceptance("recoverable deck open", timeout: 60) {
+                self.activeDeckURLHandler?()?.standardizedFileURL == recovered.standardizedFileURL && self.editorWebView?.isLoading == false && self.documentDirty == false
+            }
+            try requireNativePanelConsumed("opened a recoverable deck through NSOpenPanel", checks: &checks)
+            guard let stateURL = editorEndpoint("/api/editor/state") else {
+                throw NativeAcceptanceError(message: "Could not form the editor-state URL after recovery")
+            }
+            let (stateData, stateResponse) = try await URLSession.shared.data(from: stateURL)
+            guard (stateResponse as? HTTPURLResponse)?.statusCode == 200 else {
+                throw NativeAcceptanceError(message: "Could not read editor state after recovery")
+            }
+            let recoveredState = try JSONDecoder().decode(NativeAcceptanceEditorState.self, from: stateData)
+            try requireNativeAcceptance(recoveredState.diagnostics?.contains(where: { $0.code == "appearance-recovered" }) == true, "recoverable optional metadata surfaced its editor diagnostic", checks: &checks)
+
+            expectNativePanel(title: "Open a Keynope Deck", destination: original, response: .cancel)
+            try performNativeMenuItem(menu: "File", item: "Open…")
+            try requireNativePanelConsumed("cancelled Open through NSOpenPanel", checks: &checks)
+            try requireNativeAcceptance(activeDeckURLHandler?()?.standardizedFileURL == recovered.standardizedFileURL && documentDirty == false, "cancelled Open retained document URL and dirty state", checks: &checks)
+
+            try requireNativeAcceptance(activeDeckURLHandler?()?.standardizedFileURL == recovered.standardizedFileURL, "exports did not replace the active deck", checks: &checks)
+            try performNativeMenuItem(menu: "File", item: "New Presentation")
+            try await waitForNativeAcceptance("new presentation", timeout: 60) {
+                self.activeDeckURLHandler?() == nil && self.editorWebView?.isLoading == false && self.documentDirty == true
+            }
+            try requireNativeAcceptance(editorWindow?.title.contains("Untitled *") == true, "File → New created a dirty untitled deck and updated the native title", checks: &checks)
+            finishNativePanelAcceptance(root: root, checks: checks, failure: nil)
+        } catch {
+            finishNativePanelAcceptance(root: root, checks: checks, failure: error.localizedDescription)
+        }
+    }
+#endif
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return appMode
@@ -1422,8 +2093,11 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             sender.reply(toOpenOrPrint: .failure)
             return
         }
-        replaceDeck(path: path)
-        sender.reply(toOpenOrPrint: .success)
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        let accepted = requestDocumentReplacement { [weak self] in
+            self?.openSelectedDeck(url)
+        }
+        sender.reply(toOpenOrPrint: accepted ? .success : .failure)
     }
 }
 

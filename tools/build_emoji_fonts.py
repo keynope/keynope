@@ -18,6 +18,7 @@ import zipfile
 from fontTools.fontBuilder import FontBuilder
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 from fontTools.colorLib.builder import buildCOLR, buildCPAL
+from fontTools.feaLib.builder import addOpenTypeFeaturesFromString
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -57,8 +58,10 @@ def build(item):
             if color is not None:
                 colors[color].append((x * 10, (79 - y) * 20, end * 10, (80 - y) * 20))
             x = end
-    names = ['.notdef', 'emoji'] + ['layer' + str(i) for i in range(len(colors))]
-    glyphs = {name: TTGlyphPen(None).glyph() for name in names[:2]}
+    codepoints = [int(part, 16) for part in key.split('_')]
+    components = {point: 'part' + format(point, 'x') for point in codepoints} if len(codepoints) > 1 else {}
+    names = ['.notdef', 'emoji'] + list(components.values()) + ['layer' + str(i) for i in range(len(colors))]
+    glyphs = {name: TTGlyphPen(None).glyph() for name in ['.notdef', 'emoji', *components.values()]}
     layers = []
     palette = []
     for i, (color, rectangles) in enumerate(sorted(colors.items())):
@@ -72,12 +75,14 @@ def build(item):
         palette.append(tuple(channel / 255 for channel in color) + (1.0,))
     fb = FontBuilder(1600, isTTF=True)
     fb.setupGlyphOrder(names)
-    # Internal rendering maps a complete Unicode emoji sequence to this glyph.
-    # Also expose the ordinary character for single-codepoint artworks.
+    # Preserve the canvas renderer's PUA mapping. Native text shaping uses the
+    # actual Unicode sequence, keeping authored text and DOM offsets intact.
     cmap = {0xE000: 'emoji'}
-    if '_' not in key:
-        cmap[int(key, 16)] = 'emoji'
-    fb.setupCharacterMap(cmap)
+    if components:
+        cmap.update(components)
+    else:
+        cmap[codepoints[0]] = 'emoji'
+    fb.setupCharacterMap(cmap, uvs=[(point, 0xFE0F, None) for point in set(codepoints)])
     fb.setupGlyf(glyphs)
     # Layer glyphs must retain their own left bearing. Setting every bearing to
     # zero moves each colour's contours independently and scrambles the artwork.
@@ -92,6 +97,12 @@ def build(item):
                       'licenseInfoURL': 'https://openfontlicense.org/'})
     fb.setupOS2(sTypoAscender=1600, sTypoDescender=0, sTypoLineGap=0, usWinAscent=1600, usWinDescent=0)
     fb.setupPost(); fb.setupMaxp()
+    if components:
+        sequence = ' '.join(components[point] for point in codepoints)
+        # Required ligatures must survive disabled discretionary ligatures.
+        # Default-ignorable variation selectors are ignored by shaping; the
+        # asset keys deliberately omit FE0F, matching emojiAssetKey in Go.
+        addOpenTypeFeaturesFromString(fb.font, 'languagesystem DFLT dflt; feature rlig { sub ' + sequence + ' by emoji; } rlig;')
     fb.font['COLR'] = buildCOLR({'emoji': layers}, version=0)
     fb.font['CPAL'] = buildCPAL([palette])
     fb.font['head'].created = fb.font['head'].modified = 3849984000

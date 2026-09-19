@@ -27,13 +27,17 @@ KEYNOPE_APP_ICON_INFO := $(BIN_DIR)/KeynopeAppIconInfo.plist
 KEYNOPE_EMOJI_ASSETS := assets/emoji/keynope-emoji-glyphs.bin.gz assets/emoji/keynope-emoji-fonts.zip assets/emoji/emoji-test.txt assets/emoji/OFL.txt assets/emoji/NOTICE.txt assets/emoji/NOTO-REGION-FLAGS-LICENSE.txt assets/emoji/UNICODE-LICENSE.txt
 KEYNOPE_VERSION := $(shell awk '/^\#\# [0-9]/{print $$2; exit}' CHANGELOG.md)
 PRESENTER_ICON := assets/KeynopeMenuTemplate.png
-PRESENTER_SRC := presenter/KeynopePresenter.swift presenter/ScreenShare.swift presenter/EmbeddedIcon.swift
-PRESENTER_FRAMEWORKS := -framework Cocoa -framework WebKit -framework AVFoundation -framework ScreenCaptureKit
+PRESENTER_SRC := presenter/KeynopePresenter.swift presenter/ScreenShare.swift presenter/EmbeddedIcon.swift presenter/SlideExport.swift
+PRESENTER_FRAMEWORKS := -framework Cocoa -framework WebKit -framework AVFoundation -framework ScreenCaptureKit -framework PDFKit
 GO_SRC := $(filter-out %_test.go,$(wildcard *.go))
 GO_SRC += web/activity-games.js
 GO_SRC += web/activity-design.js
 GO_SRC += web/truetype.js assets/keynope-c64.ttf.base64
 GO_SRC += web/participant-transfer.js
+GO_SRC += web/workspace.js web/workspace.css
+GO_SRC += web/text-layout.js
+GO_SRC += web/scene.js
+GO_SRC += assets/fonts/GO-FONT-LICENSE.txt
 
 .DEFAULT_GOAL := all
 
@@ -63,6 +67,7 @@ $(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE
 	cp $(KEYNOPE_APP_WELCOME) $(KEYNOPE_APP)/Contents/Resources/Welcome.md
 	@mkdir -p $(KEYNOPE_APP)/Contents/Resources/EmojiLicenses
 	cp assets/emoji/OFL.txt assets/emoji/NOTICE.txt assets/emoji/*-LICENSE.txt $(KEYNOPE_APP)/Contents/Resources/EmojiLicenses/
+	cp assets/fonts/GO-FONT-LICENSE.txt $(KEYNOPE_APP)/Contents/Resources/EmojiLicenses/
 	cp LICENSE.txt $(KEYNOPE_APP)/Contents/Resources/EmojiLicenses/Keynope-LICENSE.txt
 	$(GO) build -o $(KEYNOPE_APP_ENGINE) .
 	$(SWIFTC) $(SWIFTFLAGS) -target $(SWIFT_TARGET) -O $(PRESENTER_FRAMEWORKS) $(PRESENTER_SRC) -o $(KEYNOPE_APP_EXECUTABLE)

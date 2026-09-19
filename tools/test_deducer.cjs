@@ -1,0 +1,43 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const context=vm.createContext({crypto:require('node:crypto').webcrypto});vm.runInContext(fs.readFileSync('web/activity-games.js','utf8'),context);
+const game=context.KeynopeGames,plain=value=>JSON.parse(JSON.stringify(value));
+const fresh=(n=20,groups=4)=>({definition:{id:'deductions',kind:'deducer',groupCount:groups,maxEntries:3,timerSeconds:300,named:true},phase:1,memberNames:Object.fromEntries(Array.from({length:n},(_,i)=>['p'+i,'Person '+i]))});
+for(let groups=1;groups<=10;groups++)for(let n=1;n<=41;n++){
+  const r=fresh(n,groups);game.syncDeducerGroups(r);const sizes=r.game.groups.map(g=>g.ids.length);
+  assert.equal(r.game.groups.length,groups);assert(Math.max(...sizes)-Math.min(...sizes)<=1);
+  const ids=r.game.groups.flatMap(g=>g.ids);assert.equal(new Set(ids).size,n);assert.equal(ids.length,n);
+  const before=JSON.stringify(r.pairAssignments);assert.equal(game.syncDeducerGroups(r),false);assert.equal(JSON.stringify(r.pairAssignments),before);
+  r.memberNames.late='Late joiner';game.syncDeducerGroups(r);const lateSizes=r.game.groups.map(g=>g.ids.length);assert(Math.max(...lateSizes)-Math.min(...lateSizes)<=1);
+}
+const r=fresh();game.syncDeducerGroups(r);
+const [a,b]=r.game.groups[0].ids,other=r.game.groups[1].ids[0];let seq=0;
+const send=(id,response,eventId='e'+(++seq))=>game.receive(r,{id:eventId,identity:id,payload:{response}});
+send(a,{action:'add',text:'First'});send(b,{action:'add',text:'Second'});send(a,{action:'add',text:'Third'});send(b,{action:'add',text:'Fourth'});
+let items=r.game.entries;assert.equal(items.length,3,'concurrent additions exceeded the shared group cap');
+const [first,second,third]=items.map(e=>e.entryId);
+send(other,{action:'remove',entryId:first});assert.equal(r.game.entries.length,3,'another group removed an entry');
+send(other,{action:'move',entryId:third,beforeId:first});assert.equal(r.game.entries[0].entryId,first,'another group reordered an entry');
+send(b,{action:'move',entryId:third,beforeId:first},'move-once');assert.deepEqual(plain(r.game.entries.map(e=>e.entryId)),[third,first,second]);
+send(a,{action:'move',entryId:third,beforeId:''});assert.deepEqual(plain(r.game.entries.map(e=>e.entryId)),[first,second,third]);
+send(b,{action:'move',entryId:third,beforeId:first},'move-once');assert.equal(r.game.entries[0].entryId,first,'duplicate event reordered twice');
+send(b,{action:'remove',entryId:first});assert.equal(r.game.entries.length,2,'member could not remove teammate entry');
+send(a,{action:'add',text:'Replacement',requestId:'same-request'});send(a,{action:'add',text:'Replacement',requestId:'same-request'});assert.equal(r.game.entries.length,3);
+send(a,{action:'move',entryId:second,beforeId:'already-deleted'});assert.equal(r.game.entries[0].entryId,second,'stale target corrupted order');
+const state=game.publicState(r);assert.equal(state.entries.length,3);assert(state.entries.every(e=>e.entryId&&!e.event&&!e.id));
+game.next(r);const end=JSON.stringify(r.game);send(a,{action:'remove',entryId:second});send(a,{action:'add',text:'Late'});assert.equal(JSON.stringify(r.game),end);assert.equal(r.phase,3);
+const expired=fresh();game.syncDeducerGroups(expired);expired.deadlineMs=Date.now()-1;game.receive(expired,{id:'expired',identity:'p0',payload:{response:{action:'add',text:'Too late'}}});assert.equal(expired.game.entries.length,0);
+console.log('Deducer: balanced random groups, stable assignments/late joins, shared caps, teammate editing, group isolation, stable-ID ordering, duplicate/stale events and timer/stop locking passed.');
+const source=fs.readFileSync('main.go','utf8'),start=source.indexOf('function replacePairingRoom(');
+let roomSequence=0;
+const rooms=vm.createContext({KeynopeGames:game,KeynopeGroups:context.KeynopeGroups,keynopeEngagementRuntime:null,keynopeRunningActivity:null,keynopePairingRoom:null,keynopePairingPublished:new WeakMap(),randomActivityCode:()=> 'room-'+(++roomSequence)});
+for(const name of ['setPairingGroups','publishPairingRoom']){const begin=source.search(new RegExp('(?:async )?function '+name+'\\('));vm.runInContext(source.slice(begin,source.indexOf('\n}',begin)+2),rooms);}
+vm.runInContext(source.slice(start,source.indexOf('\n}',start)+2),rooms);
+const syncStart=source.indexOf('function syncDeducerRuntimeGroups(');vm.runInContext(source.slice(syncStart,source.indexOf('\n}',syncStart)+2),rooms);
+const chat=fresh(4,2);chat.sessionCode='Test1234';rooms.syncDeducerRuntimeGroups(chat);
+assert.equal(rooms.keynopePairingRoom.assignments.length,4,'Deducer creates group chat assignments');
+for(const assignment of rooms.keynopePairingRoom.assignments)assert.deepEqual(plain(assignment.members),plain(chat.pairAssignments[assignment.identity].members));
+const initialRoom=rooms.keynopePairingRoom;rooms.syncDeducerRuntimeGroups(chat);assert.equal(rooms.keynopePairingRoom,initialRoom,'redraw must not reset the chat');
+chat.memberNames.late='Late';rooms.syncDeducerRuntimeGroups(chat);assert.equal(rooms.keynopePairingRoom.assignments.length,5);assert.notEqual(rooms.keynopePairingRoom.epoch,initialRoom.epoch);
+rooms.keynopePairingRoom={epoch:'other-activity'};rooms.syncDeducerRuntimeGroups(chat);assert.equal(rooms.keynopePairingRoom.assignments.length,5,'reopening Deducer restores its own chat groups');
+const beforeReset=rooms.keynopePairingRoom.epoch;delete chat.deducerPairingSignature;rooms.syncDeducerRuntimeGroups(chat);assert.notEqual(rooms.keynopePairingRoom.epoch,beforeReset,'explicit reset creates a fresh chat');
+console.log('Deducer pairing chat: correct members, stable redraws, late join, reopening and reset passed.');

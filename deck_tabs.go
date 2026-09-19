@@ -11,14 +11,36 @@ import (
 
 // Page is a one-based authored slide number, not a transient overflow page.
 type DeckTab struct {
-	SlideTab bool   `json:"slideTab,omitempty"`
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	URL      string `json:"url,omitempty"`
-	Page     int    `json:"page,omitempty"`
+	SlideTab bool            `json:"slideTab,omitempty"`
+	ID       string          `json:"id"`
+	Name     string          `json:"name"`
+	URL      string          `json:"url,omitempty"`
+	Page     int             `json:"page,omitempty"`
+	Extra    *jsonExtensions `json:"-"`
+}
+
+func (t DeckTab) MarshalJSON() ([]byte, error) {
+	type stored DeckTab
+	return encodeJSONExtensions(stored(t), t.Extra)
+}
+
+func (t *DeckTab) UnmarshalJSON(data []byte) error {
+	type stored DeckTab
+	var value stored
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	extra, err := decodeJSONExtensions(data, "slideTab", "id", "name", "url", "page")
+	if err != nil {
+		return err
+	}
+	*t = DeckTab(value)
+	t.Extra = extra
+	return nil
 }
 
 var deckTabsRE = regexp.MustCompile(`(?m)^<!--\s*keynope-tabs version=1 base64:([A-Za-z0-9+/=]+)\s*-->\s*`)
+var activityQRSettingRE = regexp.MustCompile(`(?m)^<!--\s*keynope-activity-qr=(on|off)\s*-->\s*`)
 var slideTabRE = regexp.MustCompile(`<!--\s*keynope-tab=([a-zA-Z0-9_-]{1,80})\s*-->`)
 
 // Tab slides retain their slot in Slides. Their separate display order lives

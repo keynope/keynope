@@ -35,3 +35,30 @@ func TestPrerequisitesDefinition(t *testing.T) {
 		}
 	}
 }
+
+func TestPrerequisitesOptionalGrouping(t *testing.T) {
+	for _, disabled := range []bool{false, true} {
+		def, err := normalizeEngagement(EngagementDefinition{Kind: "prerequisites", DisableGrouping: disabled, Prerequisites: []PrerequisiteItem{{Title: "Ready"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(cloneEngagement(&def))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded EngagementDefinition
+		if err = json.Unmarshal(encoded, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded.DisableGrouping != disabled {
+			t.Fatal("grouping preference lost during serialization")
+		}
+	}
+	var legacy EngagementDefinition
+	if err := json.Unmarshal([]byte(`{"kind":"prerequisites","prerequisites":[{"title":"Ready"}]}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.DisableGrouping {
+		t.Fatal("old decks must retain grouping")
+	}
+}

@@ -2,10 +2,11 @@ const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/st
 const src=fs.readFileSync('main.go','utf8');
 const start=src.indexOf('function receiveHostedEngagement('),end=src.indexOf('\n}',start)+2;
 let broadcasts=[],timers=[],renders=0;
-const runtime={definition:{kind:'ball',id:'ball'},memberNames:{},rolePublicKeys:{},activityChannel:{}};
-const context=vm.createContext({keynopeLobbyPresentation:null,keynopeEngagementRuntime:runtime,keynopeEngagementSessionEpoch:1,
+const runtime={definition:{kind:'ball',id:'ball'},memberNames:{},rolePublicKeys:{},activityChannel:{},connectionEpoch:1};
+const context=vm.createContext({keynopeTrainingDepartures:new Map(),keynopeTrainingPresenceTimes:new Map(),keynopeLobbyPresentation:null,keynopeEngagementRuntime:runtime,keynopeEngagementSessionEpoch:1,
   setTimeout:fn=>{timers.push(fn);return timers.length},renderEngagementRuntime:()=>renders++,
   publishHostedEngagementState:async definition=>broadcasts.push(definition)});
+context.engagementRuntimeAlive=r=>r===runtime;
 vm.runInContext(src.slice(start,end),context);
 const receive=(i,type)=>context.receiveHostedEngagement({identity:'user'+i,payload:{type,displayName:'User '+i}},runtime,1);
 (async()=>{

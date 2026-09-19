@@ -24,7 +24,7 @@ func TestWebExportUsesPresentationCanvasRenderer(t *testing.T) {
 		"const notesHeight = editorSpeakerNotesVisible ? 132 : 0;",
 		"--editor-notes-top",
 		"sizeCanvasToAspect(innerWidth, innerHeight, 16 / 9);",
-		"if (keynopeCanvasRenderer) {\n    drawPresenterPage(page, frame, contentLines);",
+		"if (keynopeCanvasRenderer) {\n    drawPresenterPage(page, frame, contentLines, keynopeSnapshotMode);",
 		"renderCanvasLinkHitAreas(contentLines)",
 		"if (keynopeCanvasRenderer && presenterTransitionUntil",
 		"startPageTransition(previousPageIndex, pageIndex);",
@@ -117,7 +117,6 @@ func TestWebExportUsesPresentationCanvasRenderer(t *testing.T) {
 		"function rotateCanvasText(index)",
 		"'keynope-icon-button keynope-rotate-button'",
 		"<span class=\"keynope-rotate-label\">ROTATE</span>",
-		"function canvasStyleSelect(index, element)",
 		"function canvasColourTool(index, element, renderedColour)",
 		"const colourKey = element.kind === 'heading' ? 'header' : 'fg';",
 		"function setCanvasAlignment(index, alignment)",
@@ -219,6 +218,10 @@ func TestWebExportUsesPresentationCanvasRenderer(t *testing.T) {
 		"const bounds = canvasShapeSelectionBounds(element, page.page)",
 		"function cycleCanvasSelection(reverse)",
 		"cycleCanvasSelection(e.shiftKey)",
+		"name:toggle?'toggle':''",
+		"e.shiftKey?'ungroup-elements':'group-elements'",
+		"action:'enter-group'",
+		"event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')",
 		"setCanvasAlignment(editorState.selected, e.key === '<' ? 'left' : e.key === '>' ? 'right' : 'center')",
 		"cycleCanvasOutline(editorState.selected)",
 		"presenterTimerMode === 'config' && !e.metaKey",
@@ -244,7 +247,7 @@ func TestWebExportUsesPresentationCanvasRenderer(t *testing.T) {
 		"delayMs: Math.max(1, Number(frame.delayMs) || 70)",
 		"contentAnimationElapsedMS % totalDelay",
 		"if (!keynopeEditorSelectionActive && !keynopeEditorTextEditActive) contentAnimationElapsedMS += elapsedMS;",
-		"if (!keynopeEditorTextEditActive) frame++;",
+		"if (!keynopeEditorTextEditActive && !KeynopeScene.isEditing()) frame++;",
 		"keynopeEditorTextEditActive = true;",
 		"keynopeEditorTextEditActive = false;",
 		"function canvasTextGradientTools(container,index,element)",
@@ -271,16 +274,6 @@ func TestWebExportUsesPresentationCanvasRenderer(t *testing.T) {
 		"button.setAttribute('aria-pressed',shadow ? 'true' : 'false');",
 		"values.set('gradient-start',baseColour);",
 		"values.set('shadow-color','#ffffff');",
-		"keynope.textContent = 'Keynope (Default)';",
-		"importInput.accept = '.json,.flf,.tlf,application/json,text/plain';",
-		"if (source.trimStart().startsWith('flf2a')) {",
-		"function canvasElementUsesFIGletFont(element)",
-		"await persistCurrentFont('Imported and saved FIGlet font ');",
-		"await persistCurrentFont('Imported and saved Keynope font ');",
-		"heading.textContent = 'Save font changes?';",
-		"function currentFontIsDirty()",
-		"importInput.value = '';",
-		"if (typeof importInput.showPicker === 'function')",
 		"contentFrame.delayMs - position",
 		"function canvasElementIsGIF(element)",
 		"return glyph === '' || glyph === 'blocks' || glyph === 'block';",
@@ -324,7 +317,7 @@ func TestWebExportUsesPresentationCanvasRenderer(t *testing.T) {
 		t.Fatal("master-mode sidebar button is missing its active appearance")
 	}
 	if !strings.Contains(prefix, ".keynope-canvas-element.active { border: 2px solid #ffd166;") ||
-		!strings.Contains(prefix, ".keynope-resize-handle { position: absolute; z-index: 2; width: 9px; height: 9px; border: 1px solid #111; background: #ffd166;") {
+		!strings.Contains(prefix, ".keynope-resize-handle { position: absolute; z-index: 1000002; pointer-events:auto; width: 9px; height: 9px; border: 1px solid #111; background: #ffd166;") {
 		t.Fatal("canvas element selection does not use the yellow outline and handles")
 	}
 	if !strings.Contains(prefix, ".keynope-modal-blocker { position: fixed; inset: 0; z-index: 119;") {
@@ -381,9 +374,13 @@ func TestCanvasBlockGlyphsShareRoundedPixelBoundaries(t *testing.T) {
 	javascript := exportHTMLSuffix()
 	for _, marker := range []string{
 		"const x1 = Math.round(col * canvasCharWidth);",
-		"const xMid = Math.round((col + 0.5) * canvasCharWidth);",
-		"const x2 = Math.round((col + 1) * canvasCharWidth);",
-		"const yMid = Math.round((row + 0.5) * canvasCell);",
+		"KeynopeScene.drawBlockGlyph(presenterContext,col,row,mask,canvasCharWidth,canvasCell);",
+		"const t=ctx.getTransform()",
+		"(Math.round(value*t.a+t.e)-t.e)/t.a",
+		"(Math.round(value*t.d+t.f)-t.f)/t.d",
+		"snapX((col+.5)*cw)",
+		"snapX((col+1)*cw)",
+		"snapY((row+.5)*ch)",
 		"const x2 = Math.round((col + len) * canvasCharWidth);",
 	} {
 		if !strings.Contains(javascript, marker) {

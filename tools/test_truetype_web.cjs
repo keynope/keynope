@@ -45,13 +45,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
   assert(Number(expanded.get('width'))>Number(initial.get('width')));
   assert(Number(expanded.get('height'))>Number(initial.get('height')));
   await tab('Style').click();
-  for(const mode of ['braille','ascii','dense','blocks','']){
-   await page.getByRole('combobox',{name:'Text rendering style',exact:true}).selectOption(mode);
-   await page.waitForTimeout(150);
-   const q=new URLSearchParams((await selected()).query);
-   assert.equal(q.get('render'),'truetype');assert.equal(q.get('glyph')||'',mode);
-   for(const key of ['ttf-size','width','height'])assert.equal(q.get(key),expanded.get(key));
-  }
+  assert.equal(await page.getByRole('combobox',{name:'Text rendering style',exact:true}).count(),0,'retired text treatments are not offered');
   await button('Add gradient').click();await page.getByRole('menuitemradio',{name:'Horizontal',exact:true}).click();
   await button('Add shadow').click();await page.getByRole('menuitemradio',{name:'Soft',exact:true}).click();
   await button('Add outline').click();await button('Enable see through').click();

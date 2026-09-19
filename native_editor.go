@@ -15,6 +15,7 @@ import (
 )
 
 type nativeEditorSession struct {
+	sceneResponse *sceneResponseCache
 	mu            sync.RWMutex
 	deck          Deck
 	savedDeck     Deck
@@ -57,63 +58,91 @@ func (s *nativeEditorSession) handleUpload(w http.ResponseWriter, r *http.Reques
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	element := Element{Kind: "image", Path: path, AssetID: id}
+	element := Element{Kind: "image", Path: path, AssetID: id, Query: "image-style=modern"}
 	if err := s.apply(nativeEditorAction{Action: "add-element", Kind: "image", ElementData: &element, AssetData: &asset}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(s.state())
+	_ = json.NewEncoder(w).Encode(s.transportState())
 }
 
 type nativeEditorState struct {
-	Tabs          []DeckTab           `json:"tabs"`
-	HasActivities bool                `json:"hasActivities"`
-	CanUndo       bool                `json:"canUndo"`
-	CanRedo       bool                `json:"canRedo"`
-	Version       int64               `json:"version"`
-	Path          string              `json:"path"`
-	Current       int                 `json:"current"`
-	Selected      int                 `json:"selected"`
-	EditingGroup  string              `json:"editingGroup,omitempty"`
-	Selection     []int               `json:"selection"`
-	Slides        []Slide             `json:"slides"`
-	Resolved      []Slide             `json:"resolved"`
-	Masters       MasterDeck          `json:"masters"`
-	Fonts         map[string]DeckFont `json:"fonts,omitempty"`
-	MasterMode    bool                `json:"masterMode,omitempty"`
-	Dirty         bool                `json:"dirty"`
-	Untitled      bool                `json:"untitled"`
-	TimerMode     string              `json:"timerMode,omitempty"`
-	TimerEndMS    int64               `json:"timerEndMs,omitempty"`
+	Appearance      *DeckAppearance      `json:"appearance,omitempty"`
+	Diagnostics     []documentDiagnostic `json:"diagnostics,omitempty"`
+	Tabs            []DeckTab            `json:"tabs"`
+	HasActivities   bool                 `json:"hasActivities"`
+	HideActivityQR  bool                 `json:"hideActivityQR"`
+	CanUndo         bool                 `json:"canUndo"`
+	CanRedo         bool                 `json:"canRedo"`
+	Version         int64                `json:"version"`
+	Path            string               `json:"path"`
+	Current         int                  `json:"current"`
+	Selected        int                  `json:"selected"`
+	EditingGroup    string               `json:"editingGroup,omitempty"`
+	Selection       []int                `json:"selection"`
+	Slides          []Slide              `json:"slides,omitempty"`
+	CurrentSlide    *Slide               `json:"currentSlide,omitempty"`
+	Resolved        []Slide              `json:"resolved,omitempty"`
+	ResolvedCurrent *Slide               `json:"resolvedCurrent,omitempty"`
+	Masters         MasterDeck           `json:"masters"`
+	MasterMode      bool                 `json:"masterMode,omitempty"`
+	Dirty           bool                 `json:"dirty"`
+	Untitled        bool                 `json:"untitled"`
+	TimerMode       string               `json:"timerMode,omitempty"`
+	TimerEndMS      int64                `json:"timerEndMs,omitempty"`
 }
 
 type nativeEditorAction struct {
-	Tabs           []DeckTab             `json:"tabs,omitempty"`
-	Action         string                `json:"action"`
-	Slide          int                   `json:"slide,omitempty"`
-	Page           int                   `json:"page,omitempty"`
-	Value          int                   `json:"value,omitempty"`
-	Cols           int                   `json:"cols,omitempty"`
-	Rows           int                   `json:"rows,omitempty"`
-	BoxWidth       int                   `json:"boxWidth,omitempty"`
-	BoxHeight      int                   `json:"boxHeight,omitempty"`
-	Element        int                   `json:"element,omitempty"`
-	Cursor         int                   `json:"cursor,omitempty"`
-	SelectionStart int                   `json:"selectionStart,omitempty"`
-	SelectionEnd   int                   `json:"selectionEnd,omitempty"`
-	Kind           string                `json:"kind,omitempty"`
-	Level          int                   `json:"level,omitempty"`
-	Name           string                `json:"name,omitempty"`
-	Path           string                `json:"path,omitempty"`
-	Notes          string                `json:"notes,omitempty"`
-	ElementData    *Element              `json:"elementData,omitempty"`
-	ElementIndices []int                 `json:"elementIndices,omitempty"`
-	ElementsData   []Element             `json:"elementsData,omitempty"`
-	SlideData      *Slide                `json:"slideData,omitempty"`
-	AssetData      *DeckAsset            `json:"assetData,omitempty"`
-	FontData       *DeckFont             `json:"fontData,omitempty"`
-	EngagementData *EngagementDefinition `json:"engagementData,omitempty"`
+	Crop                  *sceneCrop            `json:"crop,omitempty"`
+	ModernMask            *string               `json:"modernMask,omitempty"`
+	SceneRevision         *int64                `json:"sceneRevision,omitempty"`
+	SceneMaster           bool                  `json:"sceneMaster,omitempty"`
+	ObjectID              string                `json:"objectId,omitempty"`
+	ObjectIDs             []string              `json:"objectIds,omitempty"`
+	TextRuns              []sceneRun            `json:"textRuns,omitempty"`
+	ModernFont            *string               `json:"modernFont,omitempty"`
+	ModernLineHeight      *float64              `json:"modernLineHeight,omitempty"`
+	ModernParagraphBefore *float64              `json:"modernParagraphBefore,omitempty"`
+	ModernParagraphAfter  *float64              `json:"modernParagraphAfter,omitempty"`
+	ModernSize            *float64              `json:"modernSize,omitempty"`
+	ModernWidth           *float64              `json:"modernWidth,omitempty"`
+	ShapeTextBounds       *sceneRect            `json:"shapeTextBounds,omitempty"`
+	TextSize              *float64              `json:"textSize,omitempty"`
+	TextSizeDelta         *float64              `json:"textSizeDelta,omitempty"`
+	TextWidth             *float64              `json:"textWidth,omitempty"`
+	TextWidthDelta        *float64              `json:"textWidthDelta,omitempty"`
+	TextBold              *bool                 `json:"textBold,omitempty"`
+	TextItalic            *bool                 `json:"textItalic,omitempty"`
+	TextUnderline         *bool                 `json:"textUnderline,omitempty"`
+	LabelPaint            map[string]string     `json:"labelPaint,omitempty"`
+	TextAlign             *string               `json:"textAlign,omitempty"`
+	TextVertical          *string               `json:"textVertical,omitempty"`
+	Tabs                  []DeckTab             `json:"tabs,omitempty"`
+	Action                string                `json:"action"`
+	Slide                 int                   `json:"slide,omitempty"`
+	Page                  int                   `json:"page,omitempty"`
+	Value                 int                   `json:"value,omitempty"`
+	Cols                  int                   `json:"cols,omitempty"`
+	Rows                  int                   `json:"rows,omitempty"`
+	BoxWidth              int                   `json:"boxWidth,omitempty"`
+	BoxHeight             int                   `json:"boxHeight,omitempty"`
+	Element               int                   `json:"element,omitempty"`
+	Cursor                int                   `json:"cursor,omitempty"`
+	SelectionStart        int                   `json:"selectionStart,omitempty"`
+	SelectionEnd          int                   `json:"selectionEnd,omitempty"`
+	Kind                  string                `json:"kind,omitempty"`
+	Level                 int                   `json:"level,omitempty"`
+	Name                  string                `json:"name,omitempty"`
+	Path                  string                `json:"path,omitempty"`
+	Notes                 string                `json:"notes,omitempty"`
+	ElementData           *Element              `json:"elementData,omitempty"`
+	ElementIndices        []int                 `json:"elementIndices,omitempty"`
+	ElementsData          []Element             `json:"elementsData,omitempty"`
+	SlideData             *Slide                `json:"slideData,omitempty"`
+	AssetData             *DeckAsset            `json:"assetData,omitempty"`
+	EngagementData        *EngagementDefinition `json:"engagementData,omitempty"`
+	EngagementResult      *EngagementResult     `json:"engagementResult,omitempty"`
 }
 
 type nativeEditorCaret struct {
@@ -153,6 +182,28 @@ type nativeEditorEmojiItem struct {
 type nativeEditorEmojiCatalog struct {
 	Groups []string                `json:"groups"`
 	Items  []nativeEditorEmojiItem `json:"items"`
+}
+
+func (s *nativeEditorSession) handleEmojiTextFonts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	text := r.URL.Query().Get("text")
+	if len(text) > 8192 {
+		http.Error(w, "emoji request too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	fonts := map[string]string{}
+	for _, token := range splitEmojiText(text) {
+		if token.assetKey != "" {
+			if data := emojiFontData(token.assetKey); data != "" {
+				fonts[token.text] = data
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(fonts)
 }
 
 func (s *nativeEditorSession) handleEmojiCatalog(w http.ResponseWriter, r *http.Request) {
@@ -204,26 +255,6 @@ func (s *nativeEditorSession) handleActivityQR(w http.ResponseWriter, r *http.Re
 	_ = json.NewEncoder(w).Encode(map[string]string{"text": activityQRCodeText(value)})
 }
 
-func (s *nativeEditorSession) handleDefaultFont(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "private, max-age=3600")
-	_ = json.NewEncoder(w).Encode(defaultEditableDeckCellFont())
-}
-
-func (s *nativeEditorSession) handleFontLibrary(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(loadDeckFontLibrary())
-}
-
 func editorShapeName(name string) string {
 	switch name {
 	case "circle", "square", "triangle", "diamond":
@@ -246,10 +277,13 @@ func (s *nativeEditorSession) handleFitText(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.mu.RLock()
-	deck := cloneDeck(s.deck)
+	deck := cloneDeckForRender(s.deck)
 	current := s.current
 	masterMode, currentMaster := s.masterMode, s.currentMaster
 	s.mu.RUnlock()
+	if r.Context().Err() != nil {
+		return
+	}
 	cols, rows := action.Cols, action.Rows
 	if cols <= 0 || rows <= 0 {
 		cols, rows = authoredRenderSize(authoredTerminalWidth, authoredTerminalHeight)
@@ -298,10 +332,13 @@ func (s *nativeEditorSession) handleFitText(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		deck.Slides[current].Elements[action.Element] = best
-		preview = deck.ResolvedSlides()[current]
+		preview = deck.slideRenderPreview(current, cols, rows)
 		slideIndex, slideCount = current, len(deck.Slides)
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if masterMode {
+		preview = deck.masterRenderPreview(currentMaster, cols, rows)
+	}
 	_ = json.NewEncoder(w).Encode(nativeEditorTextFit{Element: best, Pages: exportSlidePages(preview, slideIndex, slideCount, cols, rows)})
 }
 
@@ -416,7 +453,7 @@ func (s *nativeEditorSession) handleNormalizeTextKind(w http.ResponseWriter, r *
 		return
 	}
 	s.mu.RLock()
-	deck := cloneDeck(s.deck)
+	deck := cloneDeckForRender(s.deck)
 	current := s.current
 	masterMode, currentMaster := s.masterMode, s.currentMaster
 	s.mu.RUnlock()
@@ -440,6 +477,7 @@ func (s *nativeEditorSession) handleNormalizeTextKind(w http.ResponseWriter, r *
 			http.Error(w, errInvalidEditorAction.Error(), http.StatusBadRequest)
 			return
 		}
+		normalized = preserveRunStyles(target.Elements[action.Element], normalized)
 		target.Elements[action.Element] = normalized
 		preview = masterViewPreview(deck.Masters, currentMaster)
 		normalized = normalizedTextKindPlacement(preview, normalized, action.Element, cols, rows, action.Page)
@@ -451,14 +489,18 @@ func (s *nativeEditorSession) handleNormalizeTextKind(w http.ResponseWriter, r *
 			http.Error(w, errInvalidEditorAction.Error(), http.StatusBadRequest)
 			return
 		}
+		normalized = preserveRunStyles(deck.Slides[current].Elements[action.Element], normalized)
 		deck.Slides[current].Elements[action.Element] = normalized
-		preview = deck.ResolvedSlides()[current]
+		preview = deck.slideRenderPreview(current, cols, rows)
 		normalized = normalizedTextKindPlacement(preview, normalized, action.Element, cols, rows, action.Page)
 		deck.Slides[current].Elements[action.Element] = normalized
-		preview = deck.ResolvedSlides()[current]
+		preview = deck.slideRenderPreview(current, cols, rows)
 		slideIndex, slideCount = current, len(deck.Slides)
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if masterMode {
+		preview = deck.masterRenderPreview(currentMaster, cols, rows)
+	}
 	_ = json.NewEncoder(w).Encode(nativeEditorTextFit{Element: normalized, Pages: exportSlidePages(preview, slideIndex, slideCount, cols, rows)})
 }
 
@@ -523,12 +565,16 @@ func convertNativeEditorTextKind(slide *Slide, index int, kind string, level, wi
 	}
 	width, height = max(1, width), max(1, height)
 	source := slide.Elements[index]
+	richRuns := exportedRichRuns(source)
 	blockSource := source.Kind == "bullet" || source.Kind == "code"
 	split := blockSource && (kind == "heading" || kind == "text" || kind == source.Kind)
 	if !split {
 		converted := convertedTextKindElement(source, kind, level)
 		if converted.Kind == "bullet" {
 			converted.Text = normalizeBulletText(converted.Text)
+		}
+		if richRuns != nil {
+			converted = withConvertedRuns(converted, richRuns)
 		}
 		slide.Elements[index] = converted
 		return index, nil
@@ -543,9 +589,10 @@ func convertNativeEditorTextKind(slide *Slide, index int, kind string, level, wi
 		top, left = 0, 0
 	}
 	rawLines := strings.Split(strings.ReplaceAll(source.Text, "\r\n", "\n"), "\n")
+	richLines := splitStyledLines(richRuns, source.Kind == "bullet")
 	converted := make([]Element, 0, len(rawLines))
 	cursor := 0
-	for _, rawLine := range rawLines {
+	for lineIndex, rawLine := range rawLines {
 		rowOffset, colOffset := renderedOffsetForCursor(source, width, cursor)
 		rowOffset -= max(0, editGlyphHeight(source)-1)
 		line := rawLine
@@ -556,9 +603,15 @@ func convertNativeEditorTextKind(slide *Slide, index int, kind string, level, wi
 			colOffset += leading * editGlyphWidth(source)
 			line = strings.TrimLeft(line, " \t")
 		}
+		if richRuns != nil && lineIndex < len(richLines) && len(richLines[lineIndex]) == 0 {
+			line = ""
+		}
 		if line != "" {
 			element := convertedTextKindElement(source, targetKind, targetLevel)
 			element.Text = line
+			if richRuns != nil && lineIndex < len(richLines) {
+				element = withConvertedRuns(element, richLines[lineIndex])
+			}
 			if len(converted) > 0 {
 				element.ID = newStableID(targetKind)
 				element.SlotID, element.MasterSlotID, element.PlaceholderRole = "", "", ""
@@ -575,6 +628,9 @@ func convertNativeEditorTextKind(slide *Slide, index int, kind string, level, wi
 	if len(converted) == 0 {
 		element := convertedTextKindElement(source, targetKind, targetLevel)
 		element.Text = ""
+		if richRuns != nil {
+			element = withConvertedRuns(element, nil)
+		}
 		converted = append(converted, element)
 	}
 	elements := make([]Element, 0, len(slide.Elements)-1+len(converted))
@@ -651,10 +707,13 @@ func (s *nativeEditorSession) handlePreview(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.mu.RLock()
-	deck := cloneDeck(s.deck)
+	deck := cloneDeckForRender(s.deck)
 	current := s.current
 	masterMode, currentMaster := s.masterMode, s.currentMaster
 	s.mu.RUnlock()
+	if r.Context().Err() != nil {
+		return
+	}
 	if masterMode {
 		if action.ElementData == nil || currentMaster < 0 || currentMaster > len(deck.Masters.Layouts) {
 			http.Error(w, errInvalidEditorAction.Error(), http.StatusBadRequest)
@@ -666,7 +725,7 @@ func (s *nativeEditorSession) handlePreview(w http.ResponseWriter, r *http.Reque
 			http.Error(w, errInvalidEditorAction.Error(), http.StatusBadRequest)
 			return
 		}
-		target.Elements[elementIndex] = *action.ElementData
+		target.Elements[elementIndex] = standardTextElement(preserveRunStyles(target.Elements[elementIndex], *action.ElementData))
 		action.Element = elementIndex
 		frozenImage := action.Name == "frozen-image" && target.Elements[elementIndex].Kind == "image"
 		if frozenImage {
@@ -676,7 +735,17 @@ func (s *nativeEditorSession) handlePreview(w http.ResponseWriter, r *http.Reque
 		if cols <= 0 || rows <= 0 {
 			cols, rows = authoredRenderSize(authoredTerminalWidth, authoredTerminalHeight)
 		}
-		preview := masterViewPreview(deck.Masters, currentMaster)
+		preview := deck.masterRenderPreview(currentMaster, cols, rows)
+		// Mutation previews are still editor surfaces. Keep the same authoring
+		// annotations as the committed workspace so an empty shape does not lose
+		// its editable label draft (and force a retained-owner remount) while it
+		// is being resized or moved.
+		if preview.ModernScene != nil {
+			annotateSceneEditing(preview.ModernScene, deck, target.Elements)
+		}
+		if r.Context().Err() != nil {
+			return
+		}
 		var pages []exportPage
 		if frozenImage {
 			pages = exportSlidePagesFrozen(preview, currentMaster, len(deck.Masters.Layouts)+1, cols, rows)
@@ -696,23 +765,28 @@ func (s *nativeEditorSession) handlePreview(w http.ResponseWriter, r *http.Reque
 		http.Error(w, errInvalidEditorAction.Error(), http.StatusBadRequest)
 		return
 	}
-	deck.Slides[current].Elements[elementIndex] = *action.ElementData
+	deck.Slides[current].Elements[elementIndex] = standardTextElement(preserveRunStyles(deck.Slides[current].Elements[elementIndex], *action.ElementData))
 	action.Element = elementIndex
 	frozenImage := action.Name == "frozen-image" && deck.Slides[current].Elements[elementIndex].Kind == "image"
 	if frozenImage {
 		deck.Slides[current].Elements[elementIndex].Query = setQueryValue(deck.Slides[current].Elements[elementIndex].Query, "keynope_freeze", "1")
 	}
-	resolved := deck.ResolvedSlides()
 	cols, rows := action.Cols, action.Rows
 	if cols <= 0 || rows <= 0 {
 		cols, rows = authoredRenderSize(authoredTerminalWidth, authoredTerminalHeight)
 	}
-	preview := resolved[current]
+	preview := deck.slideRenderPreview(current, cols, rows)
+	if preview.ModernScene != nil {
+		annotateSceneEditing(preview.ModernScene, deck, deck.Slides[current].Elements)
+	}
+	if r.Context().Err() != nil {
+		return
+	}
 	var pages []exportPage
 	if frozenImage {
-		pages = exportSlidePagesFrozen(preview, current, len(resolved), cols, rows)
+		pages = exportSlidePagesFrozen(preview, current, len(deck.Slides), cols, rows)
 	} else {
-		pages = exportSlidePages(preview, current, len(resolved), cols, rows)
+		pages = exportSlidePages(preview, current, len(deck.Slides), cols, rows)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	writeNativeEditorPreview(w, action, preview, pages, cols, rows)
@@ -731,7 +805,7 @@ func writeNativeEditorPreview(w http.ResponseWriter, action nativeEditorAction, 
 			break
 		}
 	}
-	visualPreview := visualFontScaledSlide(preview)
+	visualPreview := preview
 	caret := editorCaretForElement(visualPreview, elementIndex, action.Cursor, cols, rows, action.Page)
 	response := nativeEditorInlinePreview{Pages: pages, Caret: caret}
 	if action.ElementData.Kind == "shape" {
@@ -852,15 +926,36 @@ func (s *nativeEditorSession) handleWorkspace(w http.ResponseWriter, r *http.Req
 		cols, rows = authoredRenderSize(authoredTerminalWidth, authoredTerminalHeight)
 	}
 	s.mu.RLock()
-	deck := cloneDeck(s.deck)
+	deck := cloneDeckForRender(s.deck)
 	masterMode, currentMaster := s.masterMode, s.currentMaster
+	revision := s.version
 	s.mu.RUnlock()
+	if raw := r.URL.Query().Get("revision"); raw != "" {
+		requested, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || requested != revision {
+			http.Error(w, "workspace changed", http.StatusConflict)
+			return
+		}
+	}
+	if raw := r.URL.Query().Get("master"); raw != "" {
+		requested, err := strconv.Atoi(raw)
+		if err != nil {
+			http.Error(w, "invalid master", http.StatusBadRequest)
+			return
+		}
+		currentMaster = requested
+	}
 	if !masterMode || currentMaster < 0 || currentMaster > len(deck.Masters.Layouts) {
 		http.Error(w, errInvalidEditorAction.Error(), http.StatusBadRequest)
 		return
 	}
-	pages := exportSlidePages(masterViewPreview(deck.Masters, currentMaster), currentMaster, len(deck.Masters.Layouts)+1, cols, rows)
+	pages, err := editorWorkspacePages(deck, true, currentMaster, cols, rows)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(pages)
 }
 
@@ -868,10 +963,14 @@ func newNativeEditorSession(deckPath string, deck Deck, options ...bool) *native
 	isUntitled := len(options) > 0 && options[0]
 	dirtyOverride := len(options) > 1 && options[1]
 	deck = cloneDeck(deck)
+	// The editor has one object model. Resolve legacy deck/style inheritance
+	// once into concrete font and image properties before establishing the
+	// saved baseline; merely opening an older deck therefore stays clean.
+	canonicalizeConcreteAppearance(&deck)
+	dirtyOverride = ensureUniqueEngagementIDs(&deck) || dirtyOverride
 	syncSlideTabs(&deck)
 	deck.EnsureDefaultMasters()
 	standardizeDeckText(&deck)
-	registerDeckFonts(deck.Fonts)
 	ensureNativeEditorElementIDs(&deck)
 	return &nativeEditorSession{
 		deck: deck, savedDeck: cloneDeck(deck), deckPath: deckPath, untitled: isUntitled, dirtyOverride: dirtyOverride,
@@ -922,6 +1021,35 @@ func (s *nativeEditorSession) dirtyLocked() bool {
 }
 
 func (s *nativeEditorSession) state() nativeEditorState {
+	return s.stateForClient(false, false)
+}
+
+// transportState keeps the authored deck available to the editor while only
+// resolving the slide it can currently interact with. Resolving every slide on
+// every pointer/key action made large decks pay an O(deck) cost for an O(1)
+// edit. state retains the complete resolved view for internal callers and
+// focused tests; browser/native-webview responses use this narrower contract.
+func (s *nativeEditorSession) transportState() nativeEditorState {
+	return s.stateForClient(true, false)
+}
+
+// actionTransportState sends a current-slide delta for commands that cannot
+// change the authored slide collection. Structural/history commands retain a
+// complete recovery response. Master editing always transports all masters.
+func (s *nativeEditorSession) actionTransportState(action string) nativeEditorState {
+	return s.stateForClient(true, !nativeEditorActionRequiresFullSlides(action))
+}
+
+func nativeEditorActionRequiresFullSlides(action string) bool {
+	switch action {
+	case "toggle-master-mode", "add-slide", "clone-slide", "reorder-slide", "delete-slide",
+		"set-tabs", "delete-layout", "undo", "redo", "set-engagement-result":
+		return true
+	}
+	return false
+}
+
+func (s *nativeEditorSession) stateForClient(currentOnly, currentSlideOnly bool) nativeEditorState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	selection := make([]int, 0, len(s.selection))
@@ -929,25 +1057,64 @@ func (s *nativeEditorSession) state() nativeEditorState {
 		selection = append(selection, index)
 	}
 	sort.Ints(selection)
-	slides, resolved, current := cloneSlides(s.deck.Slides), s.deck.ResolvedSlides(), s.current
+	var slides, resolved []Slide
+	var currentSlide *Slide
+	current := s.current
 	if s.masterMode {
+		// Master navigation and mutations can change the layout catalogue and
+		// every inheriting slide. Keep its response self-contained.
+		currentSlideOnly = false
 		slides = []Slide{cloneSlide(s.deck.Masters.Base.Slide)}
-		resolved = []Slide{masterViewPreview(s.deck.Masters, 0)}
-		for index, layout := range s.deck.Masters.Layouts {
+		for _, layout := range s.deck.Masters.Layouts {
 			slides = append(slides, cloneSlide(layout.Slide))
-			resolved = append(resolved, masterViewPreview(s.deck.Masters, index+1))
 		}
 		current = min(s.currentMaster, len(slides)-1)
+		if !currentOnly {
+			resolved = make([]Slide, len(slides))
+			for index := range resolved {
+				resolved[index] = masterViewPreview(s.deck.Masters, index)
+			}
+		}
+	} else {
+		if currentSlideOnly {
+			if current >= 0 && current < len(s.deck.Slides) {
+				slide := cloneSlide(s.deck.Slides[current])
+				currentSlide = &slide
+			}
+		} else {
+			slides = cloneSlides(s.deck.Slides)
+		}
+		if !currentOnly {
+			resolved = make([]Slide, len(s.deck.Slides))
+			for index := range resolved {
+				// State exposes authored/resolved metadata only. ModernScene is
+				// excluded from JSON; generating every slide here wastes layout,
+				// image conversion and allocations on selection-only requests.
+				resolved[index] = s.deck.ResolveSlide(index, false)
+			}
+		}
+	}
+	var resolvedCurrent *Slide
+	if currentOnly && current >= 0 && ((!s.masterMode && current < len(s.deck.Slides)) || (s.masterMode && current < len(slides))) {
+		var slide Slide
+		if s.masterMode {
+			slide = masterViewPreview(s.deck.Masters, current)
+		} else {
+			slide = s.deck.ResolveSlide(current, false)
+		}
+		resolvedCurrent = &slide
 	}
 	timerMode, timerEndMS := "", int64(0)
 	if !s.timerDeadline.IsZero() {
 		timerMode, timerEndMS = "running", s.timerDeadline.UnixMilli()
 	}
 	return nativeEditorState{
-		Tabs: append([]DeckTab(nil), s.deck.Tabs...), HasActivities: deckHasActivities(s.deck),
+		Appearance:  s.deck.Appearance.Clone(),
+		Diagnostics: append([]documentDiagnostic(nil), s.deck.Diagnostics...),
+		Tabs:        append([]DeckTab(nil), s.deck.Tabs...), HasActivities: deckHasActivities(s.deck), HideActivityQR: s.deck.HideActivityQR,
 		CanUndo: len(s.undo) > 0, CanRedo: len(s.redo) > 0,
 		Version: s.version, Path: s.deckPath, Current: current, Selected: s.selected, MasterMode: s.masterMode,
-		Selection: selection, EditingGroup: s.editingGroup, Slides: slides, Resolved: resolved, Masters: s.deck.Masters, Fonts: cloneDeck(s.deck).Fonts,
+		Selection: selection, EditingGroup: s.editingGroup, Slides: slides, CurrentSlide: currentSlide, Resolved: resolved, ResolvedCurrent: resolvedCurrent, Masters: s.deck.Masters,
 		Dirty: s.dirtyLocked(), Untitled: s.untitled, TimerMode: timerMode, TimerEndMS: timerEndMS,
 	}
 }
@@ -1032,7 +1199,16 @@ func (s *nativeEditorSession) handleState(w http.ResponseWriter, r *http.Request
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(s.state())
+	if version, err := strconv.ParseInt(r.URL.Query().Get("version"), 10, 64); err == nil {
+		s.mu.RLock()
+		unchanged := version == s.version
+		s.mu.RUnlock()
+		if unchanged {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+	_ = json.NewEncoder(w).Encode(s.transportState())
 }
 
 func (s *nativeEditorSession) handleAction(w http.ResponseWriter, r *http.Request) {
@@ -1050,10 +1226,23 @@ func (s *nativeEditorSession) handleAction(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(s.state())
+	_ = json.NewEncoder(w).Encode(s.actionTransportState(action.Action))
+}
+
+// These commands change session/view state only. Unknown commands deliberately
+// retain the conservative history snapshot so new mutations remain undoable.
+func nativeEditorViewAction(action string) bool {
+	switch action {
+	case "select-slide", "select-element", "select-elements", "navigate-presentation", "previous-slide", "next-slide", "enter-group", "exit-group", "start-timer", "stop-timer":
+		return true
+	}
+	return false
 }
 
 func (s *nativeEditorSession) apply(action nativeEditorAction) error {
+	if action.Action == "set-engagement-result" {
+		return s.applyEngagementResult(action)
+	}
 	if action.Action == "confirm-save" {
 		if strings.TrimSpace(action.Path) == "" || !s.confirmSaved(action.Path, int64(action.Value)) {
 			return errInvalidEditorAction
@@ -1061,7 +1250,7 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		return nil
 	}
 	if action.Action == "upsert-font" || action.Action == "delete-font" || action.Action == "delete-library-font" {
-		return s.applyFontAction(action)
+		return errInvalidEditorAction
 	}
 	if action.Action == "toggle-master-mode" || s.masterMode {
 		return s.applyMaster(action)
@@ -1076,15 +1265,87 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		}
 	}
 	before := Deck{}
-	if action.Action != "select-slide" && action.Action != "select-element" {
+	if !nativeEditorViewAction(action.Action) {
 		before = cloneDeck(s.deck)
 	}
 	slideCount := len(s.deck.Slides)
+	if s.current >= 0 && s.current < slideCount {
+		if err := checkObjectLocks(s.deck.Slides[s.current], action, s.selection, s.editingGroup); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
 	switch action.Action {
-	case "select-slide", "previous-slide", "next-slide", "navigate-presentation", "add-slide", "clone-slide", "delete-slide", "add-element", "undo", "redo":
+	case "select-slide", "previous-slide", "next-slide", "navigate-presentation", "add-slide", "clone-slide", "delete-slide", "add-element":
 		s.editingGroup = ""
 	}
 	switch action.Action {
+	case "set-text-width", "set-text-size", "set-modern-text-style":
+		if action.SceneMaster || action.SceneRevision == nil || *action.SceneRevision != s.version {
+			s.mu.Unlock()
+			return fmt.Errorf("the document changed; reselect text before formatting")
+		}
+		var err error
+		if action.Action == "set-text-width" {
+			changed, err = applyTextWidthCommand(&s.deck, action, s.editingGroup)
+		} else if action.Action == "set-text-size" {
+			changed, err = applyTextSizeCommand(&s.deck, action, s.editingGroup)
+		} else {
+			changed, err = applyModernTextStyle(&s.deck, action, s.editingGroup)
+		}
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	case "set-scene-crop":
+		if action.SceneMaster || action.SceneRevision == nil || *action.SceneRevision != s.version {
+			s.mu.Unlock()
+			return fmt.Errorf("the document changed; reopen crop before applying")
+		}
+		var err error
+		changed, err = applySceneCrop(&s.deck, action)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	case "set-object-lock":
+		if s.current >= 0 && s.current < slideCount {
+			changed = setObjectLocks(&s.deck.Slides[s.current], s.selection, s.selected, action.Value == 1)
+		}
+	case "set-scene-text":
+		if action.SceneMaster || action.SceneRevision == nil || *action.SceneRevision != s.version {
+			s.mu.Unlock()
+			return fmt.Errorf("the document changed while this preview was open; reopen it before editing")
+		}
+		var err error
+		changed, err = applySceneText(&s.deck, action)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	case "set-theme":
+		appearance, err := s.deck.withTheme(action.Name)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		changed = !reflect.DeepEqual(s.deck.Appearance, appearance)
+		s.deck.Appearance = appearance
+	case "move-object-layer":
+		if s.current < 0 || s.current >= len(s.deck.Slides) {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		var err error
+		if action.Name != "" {
+			changed, err = moveObjectStack(&s.deck.Slides[s.current], action.ObjectID, action.Kind, s.editingGroup, action.Name)
+		} else {
+			changed, err = moveObjectLayer(&s.deck.Slides[s.current], action.ObjectID, action.Value, s.editingGroup)
+		}
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
 	case "group-elements", "ungroup-elements", "enter-group", "exit-group":
 		if s.current < 0 || s.current >= slideCount {
 			s.mu.Unlock()
@@ -1139,6 +1400,14 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		}
 		s.deck.Tabs[slots[action.Value]] = moved
 		s.current, s.selected, s.selection, changed = action.Slide, -1, map[int]bool{}, from != action.Value
+	case "set-activity-qr":
+		if s.masterMode || !deckHasActivities(s.deck) || (action.Value != 0 && action.Value != 1) {
+			s.mu.Unlock()
+			return errInvalidEditorAction
+		}
+		hide := action.Value == 0
+		changed = s.deck.HideActivityQR != hide
+		s.deck.HideActivityQR = hide
 	case "set-tabs":
 		if !deckHasActivities(s.deck) {
 			s.mu.Unlock()
@@ -1168,6 +1437,17 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			}
 			if !keep {
 				s.deck.Slides[i].TabID = ""
+			}
+		}
+		for index := range action.Tabs {
+			if action.Tabs[index].Extra != nil {
+				continue
+			}
+			for _, previous := range s.deck.Tabs {
+				if previous.ID == action.Tabs[index].ID {
+					action.Tabs[index].Extra = cloneJSONExtensions(previous.Extra)
+					break
+				}
 			}
 		}
 		s.deck.Tabs = append([]DeckTab(nil), action.Tabs...)
@@ -1204,7 +1484,7 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			return err
 		}
 	case "navigate-presentation":
-		if action.Slide < 0 || action.Slide >= slideCount || action.Page < 0 || s.deck.Slides[action.Slide].TabID != "" {
+		if action.Slide < 0 || action.Slide >= slideCount || action.Page < 0 {
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
@@ -1230,6 +1510,12 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.selection = map[int]bool{}
 		presenterPage = 0
 	case "add-slide":
+		cols, rows := authoredRenderSize(245, 56)
+		preset, err := slidePreset(action.Name, cols, rows)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
 		insert := min(slideCount, s.current+1)
 		remapTabPages(&s.deck, func(i int) int {
 			if i >= insert {
@@ -1239,7 +1525,7 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		})
 		s.deck.Slides = append(s.deck.Slides, Slide{})
 		copy(s.deck.Slides[insert+1:], s.deck.Slides[insert:])
-		s.deck.Slides[insert] = Slide{}
+		s.deck.Slides[insert] = preset
 		s.current, s.selected, changed = insert, -1, true
 		s.selection = map[int]bool{}
 	case "clone-slide":
@@ -1257,6 +1543,15 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.deck.Slides = append(s.deck.Slides, Slide{})
 		copy(s.deck.Slides[insert+1:], s.deck.Slides[insert:])
 		s.deck.Slides[insert] = cloneSlide(s.deck.Slides[s.current])
+		if activity := s.deck.Slides[insert].Engagement; activity != nil {
+			activity.ID, activity.Code = "", ""
+			if err := ensureActivityID(activity); err != nil {
+				s.deck = before
+				s.mu.Unlock()
+				return err
+			}
+			s.deck.Slides[insert].EngagementResult = nil
+		}
 		s.current, s.selected, changed = insert, -1, true
 		s.selection = map[int]bool{}
 	case "reorder-slide":
@@ -1316,7 +1611,36 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			s.mu.Unlock()
 			return err
 		}
+		if previous := s.deck.Slides[s.current].Engagement; previous != nil && previous.ID == definition.ID && previous.Kind == definition.Kind {
+			if definition.Extra == nil {
+				definition.Extra = cloneJSONExtensions(previous.Extra)
+			}
+			for index := range definition.Questions {
+				if definition.Questions[index].Extra == nil && index < len(previous.Questions) {
+					definition.Questions[index].Extra = cloneJSONExtensions(previous.Questions[index].Extra)
+				}
+			}
+			for index := range definition.Prerequisites {
+				if definition.Prerequisites[index].Extra == nil && index < len(previous.Prerequisites) {
+					definition.Prerequisites[index].Extra = cloneJSONExtensions(previous.Prerequisites[index].Extra)
+				}
+			}
+		}
+		for i, slide := range s.deck.Slides {
+			if i != s.current && slide.Engagement != nil && slide.Engagement.ID == definition.ID {
+				definition.ID = newStableID("activity")
+				break
+			}
+		}
 		s.deck.Slides[s.current].Engagement = &definition
+		if previous := before.Slides[s.current].Engagement; previous == nil || previous.ID != definition.ID || previous.Kind != definition.Kind {
+			s.deck.Slides[s.current].EngagementResult = nil
+		}
+		if definition.Kind == "onboarding" && before.Slides[s.current].Engagement != nil && before.Slides[s.current].Engagement.Code != definition.Code {
+			for i := range s.deck.Slides {
+				s.deck.Slides[i].EngagementResult = nil
+			}
+		}
 		changed = true
 	case "remove-engagement":
 		if s.current < 0 || s.current >= slideCount {
@@ -1325,6 +1649,7 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		}
 		if s.deck.Slides[s.current].Engagement != nil {
 			s.deck.Slides[s.current].Engagement = nil
+			s.deck.Slides[s.current].EngagementResult = nil
 			changed = true
 		}
 	case "add-element":
@@ -1370,6 +1695,20 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			return errInvalidEditorAction
 		}
 		element = standardTextElement(element)
+		if s.deck.usesConcreteAppearance() {
+			q, _ := url.ParseQuery(element.Query)
+			switch element.Kind {
+			case "heading", "text", "bullet", "code", "text-image", "page-number":
+				if !q.Has("modern-font") {
+					q.Set("modern-font", "c64")
+				}
+			case "image":
+				if !q.Has("image-style") {
+					q.Set("image-style", "modern")
+				}
+			}
+			element.Query = q.Encode()
+		}
 		s.selected = insertElementAfter(&s.deck.Slides[s.current], s.selected, element)
 		if element.AssetID != "" && action.AssetData != nil {
 			if s.deck.Assets == nil {
@@ -1443,7 +1782,7 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		s.deck.Slides[s.current].Elements[elementIndex] = updated
+		s.deck.Slides[s.current].Elements[elementIndex] = preserveRunStyles(original, updated)
 		if elementIndex != action.Element && s.selection[action.Element] {
 			delete(s.selection, action.Element)
 			s.selection[elementIndex] = true
@@ -1472,7 +1811,7 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 				s.mu.Unlock()
 				return errInvalidEditorAction
 			}
-			s.deck.Slides[s.current].Elements[elementIndex] = updated
+			s.deck.Slides[s.current].Elements[elementIndex] = preserveRunStyles(s.deck.Slides[s.current].Elements[elementIndex], updated)
 		}
 		changed = true
 	case "convert-text-kind":
@@ -1528,29 +1867,27 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		layer := ""
-		if action.Kind == "back" || action.Kind == "backward" {
-			layer = "back"
-		} else if action.Kind == "front" || action.Kind == "forward" {
-			layer = "front"
-		}
-		if layer == "" {
+		var err error
+		changed, err = moveObjectStack(&s.deck.Slides[s.current], s.deck.Slides[s.current].Elements[action.Element].ID, action.Kind, s.editingGroup)
+		if err != nil {
 			s.mu.Unlock()
-			return errInvalidEditorAction
+			return err
 		}
-		setElementLayer(&s.deck.Slides[s.current].Elements[action.Element], layer)
-		s.selected, changed = action.Element, true
+		s.selected = action.Element
 	case "update-slide":
 		if action.SlideData == nil || s.current < 0 || s.current >= slideCount {
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		updated := *action.SlideData
+		updated.Extra = cloneJSONExtensions(s.deck.Slides[s.current].Extra)
 		updated.FG = nativeEditorColorCode(updated.FG, false)
 		updated.BG = nativeEditorColorCode(updated.BG, true)
 		updated.HeaderFG = nativeEditorColorCode(updated.HeaderFG, false)
 		updated.Elements = s.deck.Slides[s.current].Elements
 		updated.TabID = s.deck.Slides[s.current].TabID
+		updated.Engagement = s.deck.Slides[s.current].Engagement
+		updated.EngagementResult = s.deck.Slides[s.current].EngagementResult
 		s.deck.Slides[s.current] = updated
 		changed = true
 	case "update-slide-notes":
@@ -1589,7 +1926,11 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		}
 		s.deck.EnsureDefaultMasters()
 		if action.Kind == "base" {
-			s.deck.Masters.Base.Slide = cloneSlide(*action.SlideData)
+			updated := cloneSlide(*action.SlideData)
+			if updated.Extra == nil {
+				updated.Extra = cloneJSONExtensions(s.deck.Masters.Base.Slide.Extra)
+			}
+			s.deck.Masters.Base.Slide = updated
 			if strings.TrimSpace(action.Name) != "" {
 				s.deck.Masters.Base.Name = strings.TrimSpace(action.Name)
 			}
@@ -1600,6 +1941,9 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 				return errInvalidEditorAction
 			}
 			updated := cloneSlide(*action.SlideData)
+			if updated.Extra == nil {
+				updated.Extra = cloneJSONExtensions(s.deck.Masters.Layouts[index].Slide.Extra)
+			}
 			if action.Kind == activityLayoutID {
 				for _, required := range s.deck.Masters.Layouts[index].Slide.Elements {
 					if protectedActivityElement(required) {
@@ -1638,34 +1982,41 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		}
 		changed = true
 	case "undo":
-		s.selected = -1
-		s.selection = map[int]bool{}
 		if len(s.undo) > 0 {
+			previous := s.historyElements()
 			s.redo = append(s.redo, cloneDeck(s.deck))
 			s.deck = s.undo[len(s.undo)-1]
 			s.undo = s.undo[:len(s.undo)-1]
 			s.current = min(s.current, len(s.deck.Slides)-1)
+			s.retainHistorySelection(previous, s.historyElements())
 			changed = true
 		}
 	case "redo":
-		s.selected = -1
-		s.selection = map[int]bool{}
 		if len(s.redo) > 0 {
+			previous := s.historyElements()
 			s.undo = append(s.undo, cloneDeck(s.deck))
 			s.deck = s.redo[len(s.redo)-1]
 			s.redo = s.redo[:len(s.redo)-1]
 			s.current = min(s.current, len(s.deck.Slides)-1)
+			s.retainHistorySelection(previous, s.historyElements())
 			changed = true
 		}
 	default:
 		s.mu.Unlock()
 		return errInvalidEditorAction
 	}
-	if changed {
+	// Appearance edits do not edit content. History restores complete snapshots;
+	// re-fitting or reordering them would make undo cease to be an exact restore.
+	if changed && s.current >= 0 && s.current < len(before.Slides) && s.current < len(s.deck.Slides) {
+		preserveInsertedStack(before.Slides[s.current], &s.deck.Slides[s.current], action)
+	}
+	normalizeMutation := changed && action.Action != "set-theme" && action.Action != "set-object-lock" && action.Action != "move-element" && action.Action != "move-object-layer" && action.Action != "set-scene-text" && action.Action != "set-scene-crop" && action.Action != "undo" && action.Action != "redo"
+	normalizeMutation = normalizeMutation && action.Action != "set-modern-text-style" && action.Action != "set-text-size" && action.Action != "set-text-width"
+	if normalizeMutation {
 		syncSlideTabs(&s.deck)
 		standardizeDeckText(&s.deck)
 	}
-	if changed && s.current >= 0 && s.current < len(s.deck.Slides) {
+	if normalizeMutation && s.current >= 0 && s.current < len(s.deck.Slides) {
 		fitSlideShapeLabels(&s.deck.Slides[s.current], authoredTerminalWidth, authoredTerminalHeight)
 		pruneSingletonGroups(&s.deck.Slides[s.current])
 		s.expandSelectedGroups(s.deck.Slides[s.current].Elements)
@@ -1678,93 +2029,35 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		}
 		s.redo = nil
 	}
+	if !changed {
+		s.retainSceneForViewAction(action.Action)
+	}
 	s.version++
-	deck := cloneDeck(s.deck)
-	registerDeckFonts(deck.Fonts)
 	current := s.current
 	companion := s.companion
+	deckPath := s.deckPath
+	var deck Deck
+	refreshScope, refreshSlide := nativeEditorRefreshPlan(action.Action, before, s.deck, current, action.Slide)
+	if changed && companion != nil && refreshScope != "" {
+		deck = cloneDeckForRender(s.deck)
+	}
 	s.mu.Unlock()
 	if companion != nil {
-		resolved := deck.ResolvedSlides()
 		if changed {
-			switch nativeEditorRefreshScope(action.Action) {
+			switch refreshScope {
 			case "slide":
-				companion.RefreshActiveSlideAsync(resolved, authoredTerminalWidth, authoredTerminalHeight)
+				companion.RefreshDeckSlideAsync(deckPath, deck, refreshSlide, authoredTerminalWidth, authoredTerminalHeight)
 			case "deck":
-				companion.RefreshAllAsync(s.deckPath, resolved, authoredTerminalWidth, authoredTerminalHeight)
+				companion.RefreshAllAsync(deckPath, deck.ResolvedSlides(), authoredTerminalWidth, authoredTerminalHeight)
 			}
 		}
 		presenting := companion.presentationEnabled()
-		if current >= 0 && current < len(deck.Slides) && deck.Slides[current].TabID != "" {
-			presenting = false
-		}
 		companion.Update(current, presenterPage, presenting, nil)
 		if action.Action == "start-timer" {
 			companion.StartTimer(time.Duration(action.Value) * time.Second)
 		} else if action.Action == "stop-timer" {
 			companion.StopTimer()
 		}
-	}
-	return nil
-}
-
-func (s *nativeEditorSession) applyFontAction(action nativeEditorAction) error {
-	s.mu.Lock()
-	before := cloneDeck(s.deck)
-	switch action.Action {
-	case "upsert-font":
-		if action.FontData == nil {
-			s.mu.Unlock()
-			return errInvalidEditorAction
-		}
-		font, err := normalizeDeckFont(*action.FontData)
-		if err != nil {
-			s.mu.Unlock()
-			return err
-		}
-		if s.deck.Fonts == nil {
-			s.deck.Fonts = map[string]DeckFont{}
-		}
-		s.deck.Fonts[font.ID] = font
-		_ = storeDeckFontInLibrary(font)
-	case "delete-font":
-		id := normalizeDeckFontID(action.Name)
-		if id == "" || s.deck.Fonts[id].ID == "" {
-			s.mu.Unlock()
-			return errInvalidEditorAction
-		}
-		delete(s.deck.Fonts, id)
-		removeDeckFontReferences(&s.deck, id)
-		_ = removeDeckFontFromLibrary(id)
-	case "delete-library-font":
-		id := normalizeDeckFontID(action.Name)
-		if id == "" {
-			s.mu.Unlock()
-			return errInvalidEditorAction
-		}
-		if err := removeDeckFontFromLibrary(id); err != nil {
-			s.mu.Unlock()
-			return err
-		}
-		s.version++
-		s.mu.Unlock()
-		return nil
-	default:
-		s.mu.Unlock()
-		return errInvalidEditorAction
-	}
-	s.undo = append(s.undo, before)
-	if len(s.undo) > 100 {
-		s.undo = s.undo[len(s.undo)-100:]
-	}
-	s.redo = nil
-	s.version++
-	registerDeckFonts(s.deck.Fonts)
-	deck := cloneDeck(s.deck)
-	companion := s.companion
-	s.mu.Unlock()
-	if companion != nil {
-		companion.RefreshAllAsync(s.deckPath, deck.ResolvedSlides(), authoredTerminalWidth, authoredTerminalHeight)
 	}
 	return nil
 }
@@ -1790,9 +2083,65 @@ func remapNativeEditorSelection(oldToNew []int, selected *int, selection *map[in
 
 func nativeEditorRefreshScope(action string) string {
 	switch action {
+	case "set-appearance-profile", "set-style-default", "set-element-style", "set-appearance-mode":
+		// Retired appearance commands are rejected by the unified editor and
+		// must never trigger a presenter rebuild as a side effect.
+		return ""
+	case "set-text-width", "set-text-size", "set-modern-text-style", "set-scene-text", "set-scene-crop", "set-object-lock", "move-object-layer", "group-elements", "ungroup-elements":
+		return "slide"
 	case "add-element", "toggle-page-number", "duplicate-element", "paste-elements", "update-element", "update-elements", "convert-text-kind", "convert-selected-text-kind", "delete-element", "delete-selection", "move-element", "update-slide", "set-layout", "set-engagement", "remove-engagement":
 		return "slide"
 	case "update-slide-notes":
+		return ""
+	default:
+		return "deck"
+	}
+}
+
+// Presenter refreshes follow the document change, not merely the command
+// label. Undo/Redo can restore a structural edit and must then rebuild the
+// deck, but the overwhelmingly common case restores one authored slide. Keep
+// every unaffected presenter page alive in that case.
+func nativeEditorRefreshPlan(action string, before, after Deck, current, requestedSlide int) (string, int) {
+	target := current
+	if action == "set-text-width" || action == "set-text-size" || action == "set-modern-text-style" || action == "set-scene-text" || action == "set-scene-crop" {
+		target = requestedSlide
+	}
+	scope := nativeEditorRefreshScope(action)
+	if action != "undo" && action != "redo" {
+		return scope, target
+	}
+	if !nativeEditorSharedDeckEqual(before, after) || len(before.Slides) != len(after.Slides) {
+		return "deck", target
+	}
+	changed := -1
+	for index := range after.Slides {
+		if reflect.DeepEqual(before.Slides[index], after.Slides[index]) {
+			continue
+		}
+		if changed >= 0 {
+			return "deck", target
+		}
+		changed = index
+	}
+	if changed >= 0 {
+		return "slide", changed
+	}
+	return "", target
+}
+
+func nativeEditorSharedDeckEqual(a, b Deck) bool {
+	a.Slides = nil
+	b.Slides = nil
+	return reflect.DeepEqual(a, b)
+}
+
+// Master-list housekeeping changes the editor chrome, not any resolved slide.
+// Keep the presenter alive for those operations; mutations to authored master
+// content and structural removals remain conservative full-deck refreshes.
+func nativeEditorMasterRefreshScope(action string) string {
+	switch action {
+	case "add-slide", "add-layout", "clone-slide", "rename-master", "reorder-master", "update-slide-notes":
 		return ""
 	default:
 		return "deck"
@@ -1818,20 +2167,94 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		s.mu.Unlock()
 		return errInvalidEditorAction
 	}
-	before := cloneDeck(s.deck)
+	before := Deck{}
+	if !nativeEditorViewAction(action.Action) {
+		before = cloneDeck(s.deck)
+	}
 	changed := false
 	masterCount := len(s.deck.Masters.Layouts) + 1
 	s.currentMaster = max(0, min(s.currentMaster, masterCount-1))
 	target := masterSlideAt(&s.deck, s.currentMaster)
+	if err := checkObjectLocks(*target, action, s.selection, s.editingGroup); err != nil {
+		s.mu.Unlock()
+		return err
+	}
 	activityMaster := s.currentMaster > 0 && s.deck.Masters.Layouts[s.currentMaster-1].ID == activityLayoutID
+	if action.Action == "set-text-width" || action.Action == "set-text-size" || action.Action == "set-modern-text-style" || action.Action == "set-scene-text" || action.Action == "set-scene-crop" {
+		if !action.SceneMaster || action.SceneRevision == nil || *action.SceneRevision != s.version || action.Slide != s.currentMaster {
+			s.mu.Unlock()
+			return fmt.Errorf("master changed; reopen the editor")
+		}
+		// Reuse validated mutations against an isolated authored master, not its
+		// inherited preview and not the normal slide at the same numeric index.
+		edit := s.deck
+		edit.Slides = []Slide{cloneSlide(*target)}
+		command := action
+		command.Slide = 0
+		var err error
+		if action.Action == "set-text-width" {
+			changed, err = applyTextWidthCommand(&edit, command, s.editingGroup)
+		} else if action.Action == "set-text-size" {
+			changed, err = applyTextSizeCommand(&edit, command, s.editingGroup)
+		} else if action.Action == "set-modern-text-style" {
+			changed, err = applyModernTextStyle(&edit, command, s.editingGroup)
+		} else if action.Action == "set-scene-text" {
+			changed, err = applySceneText(&edit, command)
+		} else {
+			changed, err = applySceneCrop(&edit, command)
+		}
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		if changed {
+			*target = edit.Slides[0]
+			s.undo = append(s.undo, before)
+			if len(s.undo) > 100 {
+				s.undo = s.undo[len(s.undo)-100:]
+			}
+			s.redo = nil
+			s.version++
+		}
+		updated, companion := cloneDeck(s.deck), s.companion
+		s.mu.Unlock()
+		if changed && companion != nil {
+			companion.RefreshAllAsync(s.deckPath, updated.ResolvedSlides(), authoredTerminalWidth, authoredTerminalHeight)
+		}
+		return nil
+	}
 	protectedIndex := func(index int) bool {
 		return activityMaster && index >= 0 && index < len(target.Elements) && protectedActivityElement(target.Elements[index])
 	}
+	if action.Action == "set-object-lock" {
+		changed = setObjectLocks(target, s.selection, s.selected, action.Value == 1)
+		if changed {
+			s.undo = append(s.undo, before)
+			if len(s.undo) > 100 {
+				s.undo = s.undo[len(s.undo)-100:]
+			}
+			s.redo = nil
+			s.version++
+		}
+		s.mu.Unlock()
+		return nil
+	}
 	switch action.Action {
-	case "select-slide", "previous-slide", "next-slide", "add-slide", "clone-slide", "delete-slide", "add-element", "undo", "redo":
+	case "select-slide", "previous-slide", "next-slide", "add-slide", "clone-slide", "delete-slide", "add-element":
 		s.editingGroup = ""
 	}
 	switch action.Action {
+	case "move-object-layer":
+		var err error
+		if action.Name != "" {
+			changed, err = moveObjectStack(target, action.ObjectID, action.Kind, s.editingGroup, action.Name)
+		} else {
+			changed, err = moveObjectLayer(target, action.ObjectID, action.Value, s.editingGroup)
+		}
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
 	case "group-elements", "ungroup-elements", "enter-group", "exit-group":
 		var err error
 		changed, err = s.applyGroupAction(target, action)
@@ -1967,6 +2390,20 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			return errInvalidEditorAction
 		}
 		element = standardTextElement(element)
+		if s.deck.usesConcreteAppearance() {
+			q, _ := url.ParseQuery(element.Query)
+			switch element.Kind {
+			case "heading", "text", "bullet", "code", "text-image", "page-number":
+				if !q.Has("modern-font") {
+					q.Set("modern-font", "c64")
+				}
+			case "image":
+				if !q.Has("image-style") {
+					q.Set("image-style", "modern")
+				}
+			}
+			element.Query = q.Encode()
+		}
 		s.selected = insertElementAfter(target, s.selected, element)
 		if element.AssetID != "" && action.AssetData != nil {
 			if s.deck.Assets == nil {
@@ -2013,7 +2450,7 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			updated.Kind, updated.Level, updated.Text = original.Kind, original.Level, original.Text
 			updated.ID, updated.SlotID, updated.PlaceholderRole = original.ID, original.SlotID, original.PlaceholderRole
 		}
-		target.Elements[elementIndex] = updated
+		target.Elements[elementIndex] = preserveRunStyles(target.Elements[elementIndex], updated)
 		if elementIndex != action.Element && s.selection[action.Element] {
 			delete(s.selection, action.Element)
 			s.selection[elementIndex] = true
@@ -2046,7 +2483,7 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 				s.mu.Unlock()
 				return errInvalidEditorAction
 			}
-			target.Elements[elementIndex] = updated
+			target.Elements[elementIndex] = preserveRunStyles(target.Elements[elementIndex], updated)
 		}
 		changed = true
 	case "convert-text-kind":
@@ -2136,18 +2573,13 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		layer := ""
-		if action.Kind == "back" || action.Kind == "backward" {
-			layer = "back"
-		} else if action.Kind == "front" || action.Kind == "forward" {
-			layer = "front"
-		}
-		if layer == "" {
+		var err error
+		changed, err = moveObjectStack(target, target.Elements[action.Element].ID, action.Kind, s.editingGroup)
+		if err != nil {
 			s.mu.Unlock()
-			return errInvalidEditorAction
+			return err
 		}
-		setElementLayer(&target.Elements[action.Element], layer)
-		s.selected, changed = action.Element, true
+		s.selected = action.Element
 	case "update-slide":
 		if action.SlideData == nil {
 			s.mu.Unlock()
@@ -2180,30 +2612,33 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		masterSlideAt(&s.deck, index).Notes = action.Notes
 		changed = true
 	case "undo":
-		s.selected = -1
-		s.selection = map[int]bool{}
 		if len(s.undo) > 0 {
+			previous := s.historyElements()
 			s.redo = append(s.redo, cloneDeck(s.deck))
 			s.deck = s.undo[len(s.undo)-1]
 			s.undo = s.undo[:len(s.undo)-1]
 			s.currentMaster = min(s.currentMaster, len(s.deck.Masters.Layouts))
+			s.retainHistorySelection(previous, s.historyElements())
 			changed = true
 		}
 	case "redo":
-		s.selected = -1
-		s.selection = map[int]bool{}
 		if len(s.redo) > 0 {
+			previous := s.historyElements()
 			s.undo = append(s.undo, cloneDeck(s.deck))
 			s.deck = s.redo[len(s.redo)-1]
 			s.redo = s.redo[:len(s.redo)-1]
 			s.currentMaster = min(s.currentMaster, len(s.deck.Masters.Layouts))
+			s.retainHistorySelection(previous, s.historyElements())
 			changed = true
 		}
 	default:
 		s.mu.Unlock()
 		return errInvalidEditorAction
 	}
-	if changed {
+	if changed && s.currentMaster >= 0 && s.currentMaster <= len(before.Masters.Layouts) && s.currentMaster <= len(s.deck.Masters.Layouts) {
+		preserveInsertedStack(*masterSlideAt(&before, s.currentMaster), masterSlideAt(&s.deck, s.currentMaster), action)
+	}
+	if changed && action.Action != "move-element" && action.Action != "move-object-layer" && action.Action != "undo" && action.Action != "redo" {
 		standardizeDeckText(&s.deck)
 		target = masterSlideAt(&s.deck, s.currentMaster)
 		fitSlideShapeLabels(target, authoredTerminalWidth, authoredTerminalHeight)
@@ -2218,13 +2653,21 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		}
 		s.redo = nil
 	}
-	s.deck.Masters.Normalize()
+	if changed && action.Action != "undo" && action.Action != "redo" {
+		s.deck.Masters.Normalize()
+	}
+	if !changed {
+		s.retainSceneForViewAction(action.Action)
+	}
 	s.version++
-	deck := cloneDeck(s.deck)
-	registerDeckFonts(deck.Fonts)
 	companion := s.companion
+	var deck Deck
+	refreshScope := nativeEditorMasterRefreshScope(action.Action)
+	if changed && companion != nil && refreshScope != "" {
+		deck = cloneDeckForRender(s.deck)
+	}
 	s.mu.Unlock()
-	if changed && companion != nil {
+	if changed && companion != nil && refreshScope == "deck" {
 		companion.RefreshAllAsync(s.deckPath, deck.ResolvedSlides(), authoredTerminalWidth, authoredTerminalHeight)
 	}
 	return nil

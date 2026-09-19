@@ -2,7 +2,7 @@ const fs=require('node:fs'),assert=require('node:assert/strict');
 const playwright=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const main=fs.readFileSync('main.go','utf8');
 const css=main.slice(main.indexOf('.keynope-tabs-overlay {'),main.indexOf('.keynope-tabs-dialog button:disabled {'))+'.keynope-tabs-dialog button:disabled { opacity:.4; }';
-const start=main.indexOf('  function openDeckTabsDialog() {');
+const start=main.indexOf('  function openDeckTabsDialog(launcher) {');
 const script=main.slice(start,main.indexOf('\n  exportButton.classList.add',start));
 (async()=>{
  for(const engine of ['chromium','webkit']){
@@ -12,7 +12,7 @@ const script=main.slice(start,main.indexOf('\n  exportButton.classList.add',star
    await page.setContent('<style>'+css+'</style><div id="stage" tabindex="0"></div>');
    await page.evaluate(()=>{
     window.editorState={hasActivities:true,tabs:[{id:'long',name:'N'.repeat(80),url:'https://example.com/'+ 'long-path/'.repeat(60)}],slides:[{}]};
-    window.closeCanvasLinkDialog=()=>{};window.activeCanvasLinkDialog=null;
+    window.closeCanvasLinkDialog=()=>{};window.activeCanvasLinkDialog=null;window.keynopeHandleDialogKey=()=>false;
     window.slideTitle=()=> 'Very long slide title '.repeat(40);
     window.canvasTool=(label,icon,action)=>{const b=document.createElement('button');b.type='button';b.textContent=label;b.onclick=action;return b;};
     window.settingsTitle=document.createElement('summary');window.stage=document.querySelector('#stage');

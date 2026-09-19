@@ -4,6 +4,11 @@ All notable changes to `keynope` are documented in this file.
 
 This project follows semantic versioning.
 
+## 0.1.7
+
+- Added modern mode
+- Overhaul of interface
+
 ## 0.1.6
 
 Added:
