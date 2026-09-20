@@ -3381,6 +3381,10 @@ html[data-keynope-timer-active="true"] .keynope-canvas-overlay { display: none; 
 .keynope-editor-topbar .keynope-text-size-stack button { display: grid; place-items: center; width: 30px; min-width: 0; height: 15px; min-height: 0; padding: 0; margin: 0; font-size: 14px; line-height: 1; border-radius: 0; }
 .keynope-text-size-stack button:first-child { border-radius: 4px 4px 0 0; }
 .keynope-text-size-stack button:last-child { border-radius: 0 0 4px 4px; }
+.keynope-text-metric-control { display:flex; height:42px; flex:none; align-items:flex-end; gap:4px; }
+.keynope-text-metric-control .keynope-ttf-width-control { display:flex; height:42px; flex-direction:column; justify-content:flex-end; gap:2px; color:#d8dee5; font-size:11px; line-height:10px; white-space:nowrap; }
+.keynope-text-metric-control input { width:82px; height:30px; min-width:82px; box-sizing:border-box; margin:0; padding:4px 7px; color:#eee; background:#111; border:1px solid #59616a; border-radius:5px; font:13px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.keynope-text-metric-control .keynope-text-size-stack { align-self:flex-end; }
 .keynope-svg-button svg { display: block; width: 19px; height: 19px; }
 .keynope-editor-topbar button.keynope-page-number-button { position: relative; }
 .keynope-page-number-button svg { transform: translateY(-2px); }
@@ -8028,7 +8032,11 @@ async function syncPresenterStateOnce() {
       slideRefreshed = await refreshPresenterSlide(Number.isInteger(state.deckSlide) ? state.deckSlide : -1, state.deckVersion || 0);
       if (!slideRefreshed) return;
     }
-    if (!initialSync && state.version === presenterVersion) return;
+    // A render-only deck revision does not advance the presenter navigation
+    // revision. It still has to repaint immediately: otherwise the editor
+    // keeps the previous scene geometry/typography until the next command,
+    // making every numerical control appear one change behind.
+    if (!initialSync && state.version === presenterVersion && !slideRefreshed) return;
     presenterVersion = state.version;
     const wasPresenting = presenterPresenting;
     presenterPresenting = !!state.presenting;
@@ -8048,6 +8056,7 @@ async function syncPresenterStateOnce() {
       frame = 0;
       render();
     }
+    if (slideRefreshed && keynopeAppSurface && editorState) renderEditorTopbar();
     refreshEditorPresenterControls();
   } catch (_err) {
   }
@@ -9318,7 +9327,7 @@ if (keynopeAppSurface) {
     await editorAction({action:'add-element',kind:'text',elementData:{kind:'text',text,query:'render=truetype&ttf-size='+size+'&ttf-width='+width+'&width='+bounds.width+'&height='+bounds.height+'&text-box=1&top=10&left_pct=0.1'}}).catch(()=>{});
   });
   insertTextDefaultControl('size','Text size',512,()=>KeynopeTrueType.presetSize(0));
-  insertTextDefaultControl('width','Font width (%)',200,()=>KeynopeTrueType.widthPercent({}));
+  insertTextDefaultControl('width','Font width',200,()=>KeynopeTrueType.widthPercent({}));
   addElementIconButton('Add bullet point', 'bullet', '<circle cx="4" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="4" cy="14" r="1" fill="currentColor" stroke="none"/><path d="M8 6h9M8 14h9"/>');
   addElementIconButton('Add code', 'code', '<path d="M7 5 3 10l4 5M13 5l4 5-4 5M11 3 9 17"/>');
   addElementIconButton('Add emoji', 'text', '<circle cx="10" cy="10" r="7"/><circle cx="7.5" cy="8" r=".8" fill="currentColor" stroke="none"/><circle cx="12.5" cy="8" r=".8" fill="currentColor" stroke="none"/><path d="M6.5 11.5c1.5 2.5 5.5 2.5 7 0"/>', 0, button => openEmojiPicker(button, -1, 'add'));
@@ -10647,13 +10656,13 @@ if (keynopeAppSurface) {
     const modernLabel=sceneLabel?.label||null;
     const labelTypography=values=>changeModernTextStyle(index,{kind:'label',...values}).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;});
     const sizeField=document.createElement('label');sizeField.className='keynope-ttf-width-control';sizeField.append('Shape text size');
-    const sizeInput=document.createElement('input');sizeInput.type='number';sizeInput.className='keynope-ttf-size';sizeInput.min=1;sizeInput.max=1024;sizeInput.step='any';sizeInput.value=modernLabel?modernLabel.size:KeynopeTrueType.size(label);sizeInput.setAttribute('aria-label','Shape text size');
+    const sizeInput=document.createElement('input');sizeInput.type='number';sizeInput.className='keynope-ttf-size';sizeInput.min=1;sizeInput.max=1024;sizeInput.step='any';sizeInput.value=modernLabel?canvasAuthoredTextMetric(label,'modern-size',modernLabel.size):KeynopeTrueType.size(label);sizeInput.setAttribute('aria-label','Shape text size');
     sizeInput.addEventListener('keydown',event=>event.stopPropagation());sizeInput.onchange=()=>{if(sizeInput.checkValidity())labelTypography({textSize:Number(sizeInput.value)});};sizeField.append(sizeInput);content.append(sizeField);
     const font=document.createElement('select');font.setAttribute('aria-label','Shape label font family');
     for(const [value,name] of [['c64','Keynope C64'],['sans','Go — proportional'],['mono','Go Mono — monospaced']])font.add(new Option(name,value));
     font.value=q.get('modern-font')||'c64';font.addEventListener('keydown',event=>event.stopPropagation());font.onchange=()=>labelTypography({modernFont:font.value});content.append(font);
-    const widthField=document.createElement('label');widthField.className='keynope-ttf-width-control';widthField.append('Shape text width (%)');
-    const widthInput=document.createElement('input');widthInput.type='number';widthInput.className='keynope-ttf-width';widthInput.min=1;widthInput.max=200;widthInput.step=1;widthInput.value=modernLabel?Number((modernLabel.widthScale*100).toFixed(6)):KeynopeTrueType.widthPercent(label);widthInput.setAttribute('aria-label','Shape text width (%)');
+    const widthField=document.createElement('label');widthField.className='keynope-ttf-width-control';widthField.append('Shape text width');
+    const widthInput=document.createElement('input');widthInput.type='number';widthInput.className='keynope-ttf-width';widthInput.min=1;widthInput.max=200;widthInput.step=1;widthInput.value=modernLabel?canvasAuthoredTextMetric(label,'modern-width',Number((modernLabel.widthScale*100).toFixed(6))):KeynopeTrueType.widthPercent(label);widthInput.setAttribute('aria-label','Shape text width');
     widthInput.addEventListener('keydown',event=>event.stopPropagation());widthInput.onchange=()=>{if(widthInput.checkValidity())labelTypography({textWidth:Number(widthInput.value)});};widthField.append(widthInput);content.append(widthField);
     const labelBold=canvasTextIsBold(label,sceneLabel?.label);
     const emphasisTools=document.createElement('span');emphasisTools.style.cssText='display:flex;gap:6px;flex-basis:100%';content.append(emphasisTools);
@@ -10662,7 +10671,7 @@ if (keynopeAppSurface) {
       const on=canvasTextHasEmphasis(label,property,sceneLabel?.label);
       const button=canvasTool(caption[0],on?'active':'',()=>labelTypography({[key]:!on}));button.title=caption+' shape text';button.setAttribute('aria-label',button.title);button.setAttribute('aria-pressed',String(on));button.style[property==='italic'?'fontStyle':'textDecoration']=property;emphasisTools.append(button);
     }
-    if(modernLabel)appendCanvasParagraphControls(content,[modernLabel],labelTypography);
+    if(modernLabel)appendCanvasParagraphControls(content,[canvasAuthoredParagraphMetrics(label,modernLabel)],labelTypography);
     const colour=(caption,key,fallback)=>{
       const shortLabel=key==='gradient-start'?'Start':key==='gradient-end'?'End':key==='shadow-color'?'Shadow':'A';
       const button=canvasTool(shortLabel,'keynope-colour-tool',()=>openKeynopeColourPicker(button,q.get(key)||fallback,value=>update(key,value)));
@@ -10683,7 +10692,7 @@ if (keynopeAppSurface) {
     choose('Text outline','outline',[['','Off'],['dark','Dark'],['light','Light']]);
     if(modernLabel){
       const field=document.createElement('label'),input=document.createElement('input');field.className='keynope-ttf-width-control';field.append('Text opacity (%)');
-      input.type='number';input.min='0';input.max='100';input.step='1';input.setAttribute('aria-label','Shape text opacity percent');input.value=String(Math.round((sceneLabel?.labelPaint?.opacity??1)*100));
+      input.type='number';input.min='0';input.max='100';input.step='1';input.setAttribute('aria-label','Shape text opacity percent');input.value=String(Math.round(canvasAuthoredTextMetric(label,'modern-opacity',sceneLabel?.labelPaint?.opacity??1)*100));
       input.addEventListener('keydown',event=>event.stopPropagation());input.onchange=()=>{if(input.value!==''&&input.checkValidity())update('modern-opacity',String(Number(input.value)/100));};field.append(input);style.append(field);
     }else{
       const transparent=canvasTool('See through',q.get('transparent')==='1'?'active':'',()=>update('transparent',q.get('transparent')==='1'?'':'1'));
@@ -11354,6 +11363,19 @@ if (keynopeAppSurface) {
     }
     container.append(section);
   }
+  function canvasAuthoredTextMetric(element,key,fallback) {
+    const query=new URLSearchParams(element?.query||'');
+    if(!query.has(key))return fallback;
+    const value=Number(query.get(key));
+    return Number.isFinite(value)?value:fallback;
+  }
+  function canvasAuthoredParagraphMetrics(element,text) {
+    return {...text,
+      lineHeight:canvasAuthoredTextMetric(element,'modern-line-height',text?.lineHeight??1.25),
+      paragraphBefore:canvasAuthoredTextMetric(element,'modern-paragraph-before',text?.paragraphBefore??0),
+      paragraphAfter:canvasAuthoredTextMetric(element,'modern-paragraph-after',text?.paragraphAfter??0)
+    };
+  }
   function canvasTextIsBold(element, text) {
     return canvasTextHasEmphasis(element,'bold',text);
   }
@@ -11374,7 +11396,12 @@ if (keynopeAppSurface) {
     const revision=editorState.version;
     if(!Number.isInteger(revision))throw Error('The editing target is not ready. Reselect the text.');
     const action=Object.hasOwn(values,'textWidth')||Object.hasOwn(values,'textWidthDelta')?'set-text-width':Object.hasOwn(values,'textSize')||Object.hasOwn(values,'textSizeDelta')?'set-text-size':'set-modern-text-style';
-    return editorAction({action,slide,sceneMaster:master,sceneRevision:revision,objectIds,...values});
+    const result=await editorAction({action,slide,sceneMaster:master,sceneRevision:revision,objectIds,...values});
+    // Relative controls do not retain a typed DOM value of their own. Rebuild
+    // just the toolbar after the committed state arrives so adjacent number
+    // inputs immediately reflect +/− changes, including in the native bridge.
+    if(Object.hasOwn(values,'textSizeDelta')||Object.hasOwn(values,'textWidthDelta'))renderEditorTopbar();
+    return result;
   }
   async function fitCanvasText(index) {
     const slide=editorState.current,master=!!editorState.masterMode,epoch=editorDocumentEpoch;
@@ -11392,7 +11419,12 @@ if (keynopeAppSurface) {
   }
   function canvasTextSize(element) {
     const modern=canvasModernText(element);
-    if(modern)return modern.size;
+    if(modern){
+      // The action response carries the committed authored value before the
+      // asynchronous scene projection arrives. Prefer it so the number field
+      // never falls back to the previous rendered size for one refresh.
+      return Math.max(1,canvasAuthoredTextMetric(element,'modern-size',modern.size));
+    }
     if (KeynopeTrueType.is(element)) return KeynopeTrueType.size(element);
     const query = new URLSearchParams(element.query || '');
     const explicit = Number.parseInt(query.get('text-size'), 10);
@@ -12293,15 +12325,6 @@ if (keynopeAppSurface) {
       }
       appendCanvasTextKindTools(content, textIndex, textElement);
       if (selectedElements.length === 1 && !KeynopeTrueType.is(textElement)) content.appendChild(canvasEmojiTool(textIndex));
-      const sizeStack = document.createElement('span');
-      sizeStack.className = 'keynope-text-size-stack';
-      for (const [label, delta, title] of [['+',1,'Increase font size'],['−',-1,'Decrease font size']]) {
-        const button = canvasTool(label, '', () => changeCanvasTextSize(textIndex, delta));
-        button.title = title;
-        button.setAttribute('aria-label', title);
-        sizeStack.appendChild(button);
-      }
-      content.appendChild(sizeStack);
       const fitObject=deck.pages?.[pageIndex]?.scene?.objects?.find(object=>object.id===textElement.id);
       if(selectedElements.length===1&&fitObject?.text&&!fitObject.retroText&&!fitObject.retroLines){
         const fit=canvasTool('Fit text','',async()=>{
@@ -12324,9 +12347,14 @@ if (keynopeAppSurface) {
           if(size.value===''||!size.checkValidity())return;
           changeModernTextStyle(textIndex,{textSize:Number(size.value)}).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;});
         });
-        const sizeLabel=document.createElement('label');sizeLabel.className='keynope-ttf-width-control';sizeLabel.append('Font size',size);content.append(sizeLabel);
+        const sizeStack=document.createElement('span');sizeStack.className='keynope-text-size-stack';
+        for(const [label,delta,title] of [['+',1,'Increase font size'],['−',-1,'Decrease font size']]){
+          const button=canvasTool(label,'',()=>changeCanvasTextSize(textIndex,delta));button.title=title;button.setAttribute('aria-label',title);sizeStack.append(button);
+        }
+        const sizeLabel=document.createElement('label');sizeLabel.className='keynope-ttf-width-control';sizeLabel.append('Font size',size);
+        const sizeControl=document.createElement('span');sizeControl.className='keynope-text-metric-control';sizeControl.append(sizeLabel,sizeStack);content.append(sizeControl);
         const widthStack=document.createElement('span');widthStack.className='keynope-text-size-stack';
-        const widthLabel=document.createElement('label');widthLabel.className='keynope-ttf-width-control';widthLabel.append('Font width (%)');
+        const widthLabel=document.createElement('label');widthLabel.className='keynope-ttf-width-control';widthLabel.append('Font width');
         const width=document.createElement('input');width.type='number';width.min='1';width.max='200';width.step='1';
         const authoredWidth=e=>{const q=new URLSearchParams(e.query||''),value=Number(q.get('modern-width')||100);return Number.isFinite(value)?value:100};
         width.value=String(modernText?authoredWidth(textElement):KeynopeTrueType.widthPercent(textElement));width.className='keynope-ttf-width';
@@ -12343,7 +12371,8 @@ if (keynopeAppSurface) {
           const button=canvasTool(label,'',()=>changeModernTextStyle(textIndex,{textWidthDelta:delta}).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;}));
           button.title=title;button.setAttribute('aria-label',title);widthStack.append(button);
         }
-        widthLabel.append(width);content.append(widthStack,widthLabel);
+        widthLabel.append(width);
+        const widthControl=document.createElement('span');widthControl.className='keynope-text-metric-control';widthControl.append(widthLabel,widthStack);content.append(widthControl);
         const boldItems=selectedElements.filter(e=>canvasSupportsTextCapability(e,'emphasis'));
         const boldOn=boldItems.length>0&&boldItems.every(e=>canvasTextIsBold(e));
         const boldMixed=!boldOn&&boldItems.some(e=>canvasTextIsBold(e));
@@ -12354,7 +12383,9 @@ if (keynopeAppSurface) {
           const button=canvasTool(caption[0],on?'active':'',()=>changeModernTextStyle(textIndex,{[key]:!on}).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;}));button.title=caption+' text';button.setAttribute('aria-label',button.title);button.setAttribute('aria-pressed',mixed?'mixed':String(on));button.style[property==='italic'?'fontStyle':'textDecoration']=property;emphasisTools.append(button);
         }
       }
-      const paragraphTexts=selectedElements.filter(e=>canvasSupportsTextCapability(e,'paragraph')).map(canvasModernText).filter(Boolean);
+      const paragraphTexts=selectedElements.filter(e=>canvasSupportsTextCapability(e,'paragraph')).map(e=>{
+        const text=canvasModernText(e);return text?canvasAuthoredParagraphMetrics(e,text):null;
+      }).filter(Boolean);
       const modernItems=selectedElements.filter(e=>canvasSupportsTextCapability(e,'font')&&canvasModernText(e));
       if(modernItems.length){
         const fontLabel=document.createElement('label'),font=document.createElement('select');fontLabel.className='keynope-ttf-width-control';fontLabel.append('Font'+(selectedElements.length>1?' · '+modernItems.length+' of '+selectedElements.length+' objects':''),font);font.setAttribute('aria-label','Font family');
@@ -12460,7 +12491,7 @@ if (keynopeAppSurface) {
       const object=deck.pages?.[pageIndex]?.scene?.objects?.find(candidate=>candidate.id===element.id);
       if(object&&['text','image','shape'].includes(object.kind)&&!object.retroText&&!(object.kind==='text'&&object.retroLines)){
         const field=document.createElement('label');field.className='keynope-ttf-width-control';field.append('Rotation (°)');
-        const input=document.createElement('input');input.type='number';input.min='-360';input.max='360';input.step='any';input.value=String(object.rotation||0);input.setAttribute('aria-label','Object rotation degrees');
+        const input=document.createElement('input');input.type='number';input.min='-360';input.max='360';input.step='any';input.value=String(canvasAuthoredTextMetric(element,'object-rotation',object.rotation||0));input.setAttribute('aria-label','Object rotation degrees');
         input.addEventListener('keydown',event=>event.stopPropagation());
         input.onchange=async()=>{if(input.value===''||!input.checkValidity())return;const changed={...element},q=new URLSearchParams(element.query||'');q.delete('orientation');q.set('object-rotation',String(Number(input.value)));changed.query=q.toString();await editorAction({action:'update-elements',elementIndices:[index],elementsData:[changed]});};
         field.append(input);arrange.append(field);
@@ -13193,7 +13224,7 @@ if (keynopeAppSurface) {
     const defaults=deck.pages.find(page=>page.slide===index)||{};
     const sizeDefault=editorNumber(slideContextMenu,'Font size (TTF)',slide.ttfSize||'',{min:1,max:512,step:1},value=>{if(value!==''&&(!Number.isInteger(Number(value))||Number(value)<1||Number(value)>512))return;slide.ttfSize=Number(value)||0;updateSlide();});
     sizeDefault.placeholder=String(defaults.ttfSize||97);
-    const widthDefault=editorNumber(slideContextMenu,'Font width (%)',slide.ttfWidth||'',{min:1,max:200,step:1},value=>{if(value!==''&&(!Number.isFinite(Number(value))||Number(value)<1||Number(value)>200))return;slide.ttfWidth=Number(value)||0;updateSlide();});
+    const widthDefault=editorNumber(slideContextMenu,'Font width',slide.ttfWidth||'',{min:1,max:200,step:1},value=>{if(value!==''&&(!Number.isFinite(Number(value))||Number(value)<1||Number(value)>200))return;slide.ttfWidth=Number(value)||0;updateSlide();});
     widthDefault.placeholder=String(defaults.ttfWidth||100);
     if (!editorState.masterMode) {
       const reset = document.createElement('button');
