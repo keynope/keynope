@@ -36,6 +36,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"keynope/internal/pptx"
+
 	xdraw "golang.org/x/image/draw"
 
 	"golang.org/x/image/webp"
@@ -57,31 +59,58 @@ type Element struct {
 	Extra           *jsonExtensions `json:"-"`
 }
 
+// slideBackgroundMedia describes a source image painted below the slide's
+// canvas. `Fit` is cover, contain or stretch; it never changes the image's
+// authored pixels and remains independent from ordinary image objects.
+type slideBackgroundMedia struct {
+	AssetID string  `json:"assetId"`
+	Fit     string  `json:"fit,omitempty"`
+	Opacity float64 `json:"opacity,omitempty"`
+	// Query keeps the image treatment independent from placement. It uses the
+	// same bounded, allowlisted image query vocabulary as an ordinary image:
+	// brightness, tint, sharpness and Retro sampling therefore survive when an
+	// image is promoted into a slide background.
+	Query string `json:"query,omitempty"`
+}
+
+func cloneSlideBackgroundMedia(value *slideBackgroundMedia) *slideBackgroundMedia {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
 type Slide struct {
-	DefaultStyle     string                `json:"defaultStyle,omitempty"`
-	ThemeColors      *themeColors          `json:"-"` // Derived theme defaults; never persisted as slide overrides.
-	ModernScene      *slideScene           `json:"-"` // Derived render projection; never authored metadata.
-	HideActivityQR   bool                  `json:"-"` // Derived from the deck when resolving slides.
-	TabID            string                `json:"tabId,omitempty"`
-	Elements         []Element             `json:"elements,omitempty"`
-	Effect           string                `json:"effect,omitempty"`
-	Background       string                `json:"background,omitempty"`
-	FG               string                `json:"fg,omitempty"`
-	BG               string                `json:"bg,omitempty"`
-	HeaderFG         string                `json:"headerFg,omitempty"`
-	TTFSize          int                   `json:"ttfSize,omitempty"`
-	TTFWidth         float64               `json:"ttfWidth,omitempty"`
-	Notes            string                `json:"notes,omitempty"`
-	LayoutID         string                `json:"layoutId,omitempty"`
-	EffectSet        bool                  `json:"effectSet,omitempty"`
-	BackgroundSet    bool                  `json:"backgroundSet,omitempty"`
-	FGSet            bool                  `json:"fgSet,omitempty"`
-	BGSet            bool                  `json:"bgSet,omitempty"`
-	HeaderFGSet      bool                  `json:"headerFgSet,omitempty"`
-	PageNumber       string                `json:"pageNumber,omitempty"`
-	Engagement       *EngagementDefinition `json:"engagement,omitempty"`
-	EngagementResult *EngagementResult     `json:"engagementResult,omitempty"`
-	Extra            *jsonExtensions       `json:"-"`
+	DefaultStyle   string       `json:"defaultStyle,omitempty"`
+	ThemeColors    *themeColors `json:"-"` // Derived theme defaults; never persisted as slide overrides.
+	ModernScene    *slideScene  `json:"-"` // Derived render projection; never authored metadata.
+	HideActivityQR bool         `json:"-"` // Derived from the deck when resolving slides.
+	TabID          string       `json:"tabId,omitempty"`
+	Elements       []Element    `json:"elements,omitempty"`
+	Effect         string       `json:"effect,omitempty"`
+	Background     string       `json:"background,omitempty"`
+	// BackgroundMedia is an inheritable, non-selectable slide layer. It is
+	// deliberately separate from ordinary images, which remain editable
+	// canvas objects even when placed at the back of a slide.
+	BackgroundMedia    *slideBackgroundMedia `json:"backgroundMedia,omitempty"`
+	BackgroundMediaSet bool                  `json:"backgroundMediaSet,omitempty"`
+	FG                 string                `json:"fg,omitempty"`
+	BG                 string                `json:"bg,omitempty"`
+	HeaderFG           string                `json:"headerFg,omitempty"`
+	TTFSize            int                   `json:"ttfSize,omitempty"`
+	TTFWidth           float64               `json:"ttfWidth,omitempty"`
+	Notes              string                `json:"notes,omitempty"`
+	LayoutID           string                `json:"layoutId,omitempty"`
+	EffectSet          bool                  `json:"effectSet,omitempty"`
+	BackgroundSet      bool                  `json:"backgroundSet,omitempty"`
+	FGSet              bool                  `json:"fgSet,omitempty"`
+	BGSet              bool                  `json:"bgSet,omitempty"`
+	HeaderFGSet        bool                  `json:"headerFgSet,omitempty"`
+	PageNumber         string                `json:"pageNumber,omitempty"`
+	Engagement         *EngagementDefinition `json:"engagement,omitempty"`
+	EngagementResult   *EngagementResult     `json:"engagementResult,omitempty"`
+	Extra              *jsonExtensions       `json:"-"`
 }
 
 func (e Element) MarshalJSON() ([]byte, error) {
@@ -115,7 +144,7 @@ func (s *Slide) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
-	extra, err := decodeJSONExtensions(data, "defaultStyle", "tabId", "elements", "effect", "background", "fg", "bg", "headerFg", "ttfSize", "ttfWidth", "notes", "layoutId", "effectSet", "backgroundSet", "fgSet", "bgSet", "headerFgSet", "pageNumber", "engagement", "engagementResult")
+	extra, err := decodeJSONExtensions(data, "defaultStyle", "tabId", "elements", "effect", "background", "backgroundMedia", "backgroundMediaSet", "fg", "bg", "headerFg", "ttfSize", "ttfWidth", "notes", "layoutId", "effectSet", "backgroundSet", "fgSet", "bgSet", "headerFgSet", "pageNumber", "engagement", "engagementResult")
 	if err != nil {
 		return err
 	}
@@ -254,9 +283,10 @@ type exportPart struct {
 }
 
 type appArgs struct {
-	AppMode  bool
-	Untitled bool
-	DeckPath string
+	AppMode    bool
+	Untitled   bool
+	ImportPPTX bool
+	DeckPath   string
 }
 
 type presenterState struct {
@@ -621,7 +651,22 @@ func appEngineMain() {
 		os.Exit(1)
 	}
 	defer stopSandboxAccess()
-	deck, err := parseDeck(args.DeckPath)
+	var deck Deck
+	var err error
+	if args.ImportPPTX {
+		data, readErr := os.ReadFile(args.DeckPath)
+		if readErr != nil {
+			fmt.Fprintln(os.Stderr, readErr)
+			os.Exit(1)
+		}
+		var report pptx.Report
+		deck, report, err = importPPTXDocument(data, args.DeckPath)
+		for _, warning := range report.Warnings {
+			deck.Diagnostics = append(deck.Diagnostics, documentDiagnostic{Code: warning.Code, Message: warning.Message})
+		}
+	} else {
+		deck, err = parseDeck(args.DeckPath)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -633,7 +678,11 @@ func appEngineMain() {
 	}
 	nativeAppModeActive, presenterModeActive = true, true
 	closed := startNativeInputReader(os.Stdin)
-	editor := newNativeEditorSession(args.DeckPath, deck, args.Untitled, parsedDeckElementOrderChanged)
+	editorPath := args.DeckPath
+	if args.ImportPPTX {
+		editorPath = pptxSuggestedName(args.DeckPath)
+	}
+	editor := newNativeEditorSession(editorPath, deck, args.Untitled || args.ImportPPTX, parsedDeckElementOrderChanged || args.ImportPPTX)
 	activeNativeEditor = editor
 	defer func() { activeNativeEditor = nil }()
 	slides := editor.deck.ResolvedSlides()
@@ -660,6 +709,8 @@ func parseArgs(raw []string) (appArgs, bool) {
 			args.AppMode = true
 		case "--untitled":
 			args.Untitled = true
+		case "--import-pptx":
+			args.ImportPPTX = true
 		default:
 			if strings.HasPrefix(value, "-") || args.DeckPath != "" {
 				return appArgs{}, false
@@ -667,7 +718,7 @@ func parseArgs(raw []string) (appArgs, bool) {
 			args.DeckPath = value
 		}
 	}
-	return args, args.AppMode && args.DeckPath != ""
+	return args, args.AppMode && args.DeckPath != "" && (!args.ImportPPTX || args.Untitled)
 }
 
 var errStartupCancelled = errors.New("startup cancelled")
@@ -767,7 +818,10 @@ func embeddedImageAsset(data []byte) (string, DeckAsset, string, error) {
 			frameImage := frame.image
 			if targetW != width || targetH != height {
 				resized := image.NewNRGBA(image.Rect(0, 0, targetW, targetH))
-				xdraw.CatmullRom.Scale(resized, resized.Bounds(), frame.image, frame.image.Bounds(), draw.Src, nil)
+				// This is a compact derivative for retro sampling, not the image
+				// shown in modern mode. ApproxBiLinear makes large deck imports
+				// responsive while retaining the original frame below.
+				xdraw.ApproxBiLinear.Scale(resized, resized.Bounds(), frame.image, frame.image.Bounds(), draw.Src, nil)
 				frameImage = resized
 			}
 			var output bytes.Buffer
@@ -794,7 +848,7 @@ func embeddedImageAsset(data []byte) (string, DeckAsset, string, error) {
 		}
 		return makeAnimatedDeckAsset(asset)
 	}
-	decoded, _, err := image.Decode(bytes.NewReader(data))
+	decoded, format, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return "", DeckAsset{}, "", fmt.Errorf("decode image: %w", err)
 	}
@@ -803,7 +857,9 @@ func embeddedImageAsset(data []byte) (string, DeckAsset, string, error) {
 	outputImage := image.Image(decoded)
 	if targetW != width || targetH != height {
 		resized := image.NewNRGBA(image.Rect(0, 0, targetW, targetH))
-		xdraw.CatmullRom.Scale(resized, resized.Bounds(), decoded, decoded.Bounds(), draw.Src, nil)
+		// The original is retained exactly for modern rendering. Spend the
+		// smaller amount of work needed for its 384px retro derivative here.
+		xdraw.ApproxBiLinear.Scale(resized, resized.Bounds(), decoded, decoded.Bounds(), draw.Src, nil)
 		outputImage = resized
 	}
 	var output bytes.Buffer
@@ -812,16 +868,28 @@ func embeddedImageAsset(data []byte) (string, DeckAsset, string, error) {
 	}
 	var source *DeckAssetSource
 	if targetW != width || targetH != height {
-		var original bytes.Buffer
-		if err := png.Encode(&original, decoded); err != nil {
-			return "", DeckAsset{}, "", err
-		}
-		if original.Len() > 50<<20 {
+		if len(data) > 50<<20 {
 			return "", DeckAsset{}, "", errors.New("full-resolution image exceeds the 50 MiB storage limit")
 		}
-		source = &DeckAssetSource{MIME: "image/png", Width: width, Height: height, Data: original.Bytes()}
+		source = &DeckAssetSource{MIME: imageMIMEForFormat(format), Width: width, Height: height, Data: append([]byte(nil), data...)}
 	}
 	return makeDeckAssetWithSource(output.Bytes(), "image/png", targetW, targetH, source)
+}
+
+func imageMIMEForFormat(format string) string {
+	switch strings.ToLower(format) {
+	case "jpeg", "jpg":
+		return "image/jpeg"
+	case "gif":
+		return "image/gif"
+	case "png":
+		return "image/png"
+	default:
+		// image.Decode only reaches this point for a registered image format;
+		// PNG is the safe fallback for the compact derivative, while the
+		// original source is used only for browser-supported image formats.
+		return "image/png"
+	}
 }
 
 func makeAnimatedDeckAsset(asset DeckAsset) (string, DeckAsset, string, error) {
@@ -949,10 +1017,28 @@ func pruneUnusedDeckAssets(deck *Deck) {
 			used[element.AssetID] = true
 		}
 	})
+	visitDeckBackgroundMedia(deck, func(media *slideBackgroundMedia) {
+		if media != nil && media.AssetID != "" {
+			used[media.AssetID] = true
+		}
+	})
 	for id := range deck.Assets {
 		if !used[id] {
 			delete(deck.Assets, id)
 		}
+	}
+}
+
+func visitDeckBackgroundMedia(deck *Deck, visit func(*slideBackgroundMedia)) {
+	if deck == nil || visit == nil {
+		return
+	}
+	for index := range deck.Slides {
+		visit(deck.Slides[index].BackgroundMedia)
+	}
+	visit(deck.Masters.Base.Slide.BackgroundMedia)
+	for index := range deck.Masters.Layouts {
+		visit(deck.Masters.Layouts[index].Slide.BackgroundMedia)
 	}
 }
 
@@ -1025,7 +1111,7 @@ func parseDeckData(path string, data []byte) (Deck, error) {
 	var slides []Slide
 	for _, part := range splitSlides(text) {
 		slide := parseSlide(part, base)
-		if slide.TabID != "" || len(slide.Elements) > 0 || slide.TTFSize > 0 || slide.TTFWidth > 0 || slide.EffectSet || slide.BackgroundSet || slide.FGSet || slide.BGSet || slide.HeaderFGSet || slide.Effect != "" || slide.Background != "" || slide.FG != "" || slide.BG != "" || slide.HeaderFG != "" || slide.Notes != "" || slide.LayoutID != "" || slide.PageNumber != "" || slide.Engagement != nil {
+		if slide.TabID != "" || len(slide.Elements) > 0 || slide.TTFSize > 0 || slide.TTFWidth > 0 || slide.EffectSet || slide.BackgroundSet || slide.BackgroundMediaSet || slide.FGSet || slide.BGSet || slide.HeaderFGSet || slide.Effect != "" || slide.Background != "" || slide.BackgroundMedia != nil || slide.FG != "" || slide.BG != "" || slide.HeaderFG != "" || slide.Notes != "" || slide.LayoutID != "" || slide.PageNumber != "" || slide.Engagement != nil {
 			parsedDeckElementOrderChanged = elementOrderMappingChanged(canonicalizeSlideElementOrder(&slide, authoredTerminalWidth, authoredTerminalHeight)) || parsedDeckElementOrderChanged
 			slides = append(slides, slide)
 		}
@@ -1153,6 +1239,13 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 			}
 			fmt.Fprintf(&out, "<!-- background=%s -->\n", value)
 		}
+		if slide.BackgroundMediaSet {
+			metadata, err := json.Marshal(slide.BackgroundMedia)
+			if err != nil {
+				return nil, err
+			}
+			fmt.Fprintf(&out, "<!-- keynope-background-media version=1 base64:%s -->\n", base64.StdEncoding.EncodeToString(metadata))
+		}
 		if slide.Notes != "" {
 			fmt.Fprintf(&out, "<!-- notes=base64:%s -->\n", base64.StdEncoding.EncodeToString([]byte(slide.Notes)))
 		}
@@ -1161,7 +1254,7 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 			out.WriteString(style)
 			out.WriteByte('\n')
 		}
-		if (slide.LayoutID != "" || slide.PageNumber != "" || slide.Engagement != nil || slide.EffectSet || slide.Effect != "" || slide.BackgroundSet || slide.Background != "" || slide.Notes != "" || style != "") && len(slide.Elements) > 0 {
+		if (slide.LayoutID != "" || slide.PageNumber != "" || slide.Engagement != nil || slide.EffectSet || slide.Effect != "" || slide.BackgroundSet || slide.Background != "" || slide.BackgroundMediaSet || slide.Notes != "" || style != "") && len(slide.Elements) > 0 {
 			out.WriteByte('\n')
 		}
 		for elementIndex, element := range slide.Elements {
@@ -1630,6 +1723,8 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 		mux.HandleFunc("/api/editor/document", activeNativeEditor.handleDocument)
 		mux.HandleFunc("/api/editor/participant-page", activeNativeEditor.handleParticipantPage)
 		mux.HandleFunc("/api/editor/export-document", activeNativeEditor.handleExportDocument)
+		mux.HandleFunc("/api/editor/export-pptx", activeNativeEditor.handleExportPPTX)
+		mux.HandleFunc("/api/editor/import-pptx", activeNativeEditor.handleImportPPTX)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -11966,6 +12061,63 @@ if (keynopeAppSurface) {
     }
   }
 
+  function updateSlideBackgroundQuery(slide, updateSlide, mutate) {
+    if (!slide?.backgroundMedia?.assetId) return;
+    const query = new URLSearchParams(slide.backgroundMedia.query || '');
+    mutate(query);
+    slide.backgroundMedia.query = query.toString();
+    slide.backgroundMediaSet = true;
+    updateSlide();
+  }
+  function backgroundVisualQueryControl(panel, slide, updateSlide, labelText, key, value, options) {
+    const label = document.createElement('label');
+    label.textContent = labelText;
+    let input;
+    if (options.values) {
+      input = document.createElement('select');
+      for (const [optionValue, optionLabel] of options.values) input.add(new Option(optionLabel, optionValue, false, optionValue === value));
+    } else {
+      input = document.createElement('input');
+      input.type = 'range'; input.min = String(options.min); input.max = String(options.max); input.step = String(options.step);
+      input.value = value || String(options.fallback); input.title = labelText + ': ' + input.value;
+      input.addEventListener('input', () => { input.title = labelText + ': ' + input.value; });
+    }
+    input.setAttribute('aria-label', labelText);
+    input.addEventListener('pointerdown', event => event.stopPropagation());
+    input.addEventListener('change', () => updateSlideBackgroundQuery(slide, updateSlide, query => {
+      if (input.value === '' || input.value === String(options.fallback)) query.delete(key); else query.set(key, input.value);
+    }));
+    panel.append(label, input);
+  }
+  function appendSlideBackgroundVisualControls(panel, slide, updateSlide) {
+    if (!slide?.backgroundMedia?.assetId) return;
+    const query = new URLSearchParams(slide.backgroundMedia.query || '');
+    const section = document.createElement('div');
+    section.className = 'keynope-context-visual';
+    const heading = document.createElement('h4'); heading.textContent = 'Adjust Background Image'; section.appendChild(heading);
+    backgroundVisualQueryControl(section, slide, updateSlide, 'Image style', 'image-style', query.get('image-style') || 'modern', {values: [['modern','Modern — source image'],['retro','Retro — ASCII conversion']]});
+    if ((query.get('image-style') || 'modern') === 'retro') {
+      backgroundVisualQueryControl(section, slide, updateSlide, 'Glyph', 'glyph', query.get('glyph') || 'blocks', {values: [['blocks','Blocks'],['braille','Braille'],['ascii','ASCII'],['dense','Dense']]});
+      backgroundVisualQueryControl(section, slide, updateSlide, 'Sampling', 'shape', query.get('shape') || 'subject', {values: [['subject','Subject'],['contrast','Contrast'],['saturation','Saturation'],['luma','Luma'],['alpha','Alpha']]});
+    }
+    backgroundVisualQueryControl(section, slide, updateSlide, 'Brightness', 'brightness', query.get('brightness'), {min:.2,max:2,step:.1,fallback:1});
+    backgroundVisualQueryControl(section, slide, updateSlide, 'Contrast', 'contrast', query.get('contrast'), {min:.2,max:2,step:.1,fallback:1});
+    backgroundVisualQueryControl(section, slide, updateSlide, 'Saturation', 'saturation', query.get('saturation'), {min:0,max:2,step:.1,fallback:1});
+    editorColor(section, 'Monochrome tint', query.get('tint') || '', '#ffffff', value => updateSlideBackgroundQuery(slide, updateSlide, values => values.set('tint', value)));
+    if (query.has('tint')) {
+      const clearTint = document.createElement('button'); clearTint.type = 'button'; clearTint.textContent = 'Clear monochrome tint';
+      clearTint.addEventListener('click', () => updateSlideBackgroundQuery(slide, updateSlide, values => values.delete('tint')));
+      section.appendChild(clearTint);
+    }
+    backgroundVisualQueryControl(section, slide, updateSlide, 'Sharpness', 'sharpness', query.get('sharpness'), {min:.2,max:2,step:.1,fallback:1});
+    if ((query.get('image-style') || 'modern') === 'retro') backgroundVisualQueryControl(section, slide, updateSlide, 'Alpha', 'alpha', query.get('alpha'), {min:0,max:255,step:16,fallback:96});
+    const opacity = document.createElement('label'); opacity.textContent = 'Opacity';
+    const opacityInput = document.createElement('input'); opacityInput.type = 'range'; opacityInput.min = '0.05'; opacityInput.max = '1'; opacityInput.step = '.05'; opacityInput.value = String(slide.backgroundMedia.opacity || 1); opacityInput.title = 'Opacity: ' + opacityInput.value;
+    opacityInput.addEventListener('input', () => { opacityInput.title = 'Opacity: ' + opacityInput.value; });
+    opacityInput.addEventListener('change', () => { slide.backgroundMedia.opacity = Number(opacityInput.value); slide.backgroundMediaSet = true; updateSlide(); });
+    section.append(opacity, opacityInput); panel.appendChild(section);
+  }
+
   function canvasImageStyleTool(index,element){
     const field=document.createElement('label'),select=document.createElement('select'),query=new URLSearchParams(element.query||'');
     field.className='keynope-ttf-width-control';field.append('Image style');select.setAttribute('aria-label','Image style');
@@ -13220,6 +13372,15 @@ if (keynopeAppSurface) {
     editorSelect(slideContextMenu, 'Background', slide.background || '', ['none','soft-plasma','aurora','topography','waves','mesh','constellation','ribbons','diagonal-flow','blueprint'], value => { slide.background = value; slide.backgroundSet = true; updateSlide(); });
     editorColor(slideContextMenu, 'Foreground', slide.fg || '', '#f3efe0', value => { slide.fg = value; slide.fgSet = true; updateSlide(); });
     editorColor(slideContextMenu, 'Background colour', slide.bg || '', '#000000', value => { slide.bg = value; slide.bgSet = true; updateSlide(); });
+    if (slide.backgroundMedia && slide.backgroundMedia.assetId) {
+      editorSelect(slideContextMenu, 'Background image fit', slide.backgroundMedia.fit || 'cover', ['cover','contain','stretch'], value => { slide.backgroundMedia.fit = value; slide.backgroundMediaSet = true; updateSlide(); });
+      const removeBackgroundImage = document.createElement('button');
+      removeBackgroundImage.type = 'button';
+      removeBackgroundImage.textContent = 'Remove background image';
+      removeBackgroundImage.addEventListener('click', () => { slide.backgroundMedia = null; slide.backgroundMediaSet = true; updateSlide(); });
+      slideContextMenu.appendChild(removeBackgroundImage);
+      appendSlideBackgroundVisualControls(slideContextMenu, slide, updateSlide);
+    }
     editorColor(slideContextMenu, 'Header colour', slide.headerFg || '', '#ffffff', value => { slide.headerFg = value; slide.headerFgSet = true; updateSlide(); });
     const defaults=deck.pages.find(page=>page.slide===index)||{};
     const sizeDefault=editorNumber(slideContextMenu,'Font size (TTF)',slide.ttfSize||'',{min:1,max:512,step:1},value=>{if(value!==''&&(!Number.isInteger(Number(value))||Number(value)<1||Number(value)>512))return;slide.ttfSize=Number(value)||0;updateSlide();});
@@ -13233,6 +13394,7 @@ if (keynopeAppSurface) {
       reset.addEventListener('click', () => {
         slide.effect = ''; slide.effectSet = false;
         slide.background = ''; slide.backgroundSet = false;
+        slide.backgroundMedia = null; slide.backgroundMediaSet = false;
         slide.fg = ''; slide.fgSet = false;
         slide.bg = ''; slide.bgSet = false;
         slide.headerFg = ''; slide.headerFgSet = false;
@@ -13304,6 +13466,31 @@ if (keynopeAppSurface) {
     if (canvasTextEffectCompatible(element)) appendCanvasTypographyEffectTools(actions,index,element);
     if (selectedText) actions.appendChild(canvasLinkTool(index, query));
     if (element.kind === 'shape') appendCanvasShapeKindTools(actions, index, query);
+    if (element.kind === 'image' && element.assetId) {
+      actions.appendChild(canvasTool('Set as background', '', () => {
+        // Promote rather than duplicate it. The image stays in the element
+        // list (so it can be restored from Objects), but no longer paints as
+        // an ordinary selectable object over its new slide layer.
+        const promoted = JSON.parse(JSON.stringify(element));
+        const promotedQuery = new URLSearchParams(promoted.query || '');
+        const authoredOpacity = Number(promotedQuery.get('modern-opacity'));
+        // Opacity is carried by the background layer; keeping this canvas-only
+        // key as well would apply it twice in the shared scene renderer.
+        promotedQuery.delete('modern-opacity');
+        slide.backgroundMedia = {
+          assetId: element.assetId,
+          fit: 'cover',
+          opacity: Number.isFinite(authoredOpacity) && authoredOpacity > 0 && authoredOpacity <= 1 ? authoredOpacity : 1,
+          query: promotedQuery.toString()
+        };
+        slide.backgroundMediaSet = true;
+        promotedQuery.set('object-hidden', '1');
+        promoted.query = promotedQuery.toString();
+        editorAction({action: 'update-element', element: index, elementData: promoted})
+          .then(() => editorAction({action: 'update-slide', slideData: slide}))
+          .catch(() => {});
+      }));
+    }
     if(element.kind!=='connector'){
       actions.appendChild(canvasOutlineTool(index, element, query));
       actions.appendChild(canvasDuplicateTool(index));
@@ -13604,6 +13791,15 @@ if (keynopeAppSurface) {
     editorSelect(slideSection, 'Background', slide.background || '', ['none','soft-plasma','aurora','topography','waves','mesh','constellation','ribbons','diagonal-flow','blueprint'], value => { slide.background = value; slide.backgroundSet = true; updateSlide(); });
     editorColor(slideSection, 'Foreground', slide.fg || '', '#f3efe0', value => { slide.fg = value; slide.fgSet = true; updateSlide(); });
     editorColor(slideSection, 'Background colour', slide.bg || '', '#000000', value => { slide.bg = value; slide.bgSet = true; updateSlide(); });
+    if (slide.backgroundMedia && slide.backgroundMedia.assetId) {
+      editorSelect(slideSection, 'Background image fit', slide.backgroundMedia.fit || 'cover', ['cover','contain','stretch'], value => { slide.backgroundMedia.fit = value; slide.backgroundMediaSet = true; updateSlide(); });
+      const removeBackgroundImage = document.createElement('button');
+      removeBackgroundImage.type = 'button';
+      removeBackgroundImage.textContent = 'Remove background image';
+      removeBackgroundImage.addEventListener('click', () => { slide.backgroundMedia = null; slide.backgroundMediaSet = true; updateSlide(); });
+      slideSection.appendChild(removeBackgroundImage);
+      appendSlideBackgroundVisualControls(slideSection, slide, updateSlide);
+    }
     editorColor(slideSection, 'Header colour', slide.headerFg || '', '#ffffff', value => { slide.headerFg = value; slide.headerFgSet = true; updateSlide(); });
     const elementsSection = document.createElement('section');
     elementsSection.className = 'keynope-editor-section';
@@ -14449,6 +14645,7 @@ func splitSlides(text string) []string {
 
 var effectRE = regexp.MustCompile(`<!--\s*effect=([a-zA-Z0-9_-]+)\s*-->`)
 var backgroundRE = regexp.MustCompile(`<!--\s*background=([a-zA-Z0-9_-]+)\s*-->`)
+var backgroundMediaRE = regexp.MustCompile(`<!--\s*keynope-background-media\s+version=1\s+base64:([A-Za-z0-9+/=]+)\s*-->`)
 var notesRE = regexp.MustCompile(`<!--\s*notes=base64:([A-Za-z0-9+/=]+)\s*-->`)
 var trueTypeTextRE = regexp.MustCompile(`<!--\s*truetype-text=base64:([A-Za-z0-9+/=]*)(?:\s+kind=(text|bullet|code|heading|text-image))?(?:\s+level=([12]))?\s*-->`)
 var layoutRE = regexp.MustCompile(`<!--\s*layout=([a-zA-Z0-9_-]+)\s*-->`)
@@ -14528,6 +14725,16 @@ func parseSlide(text, base string) Slide {
 			slide.BackgroundSet = true
 			if match[1] != "none" {
 				slide.Background = match[1]
+			}
+			continue
+		}
+		if match := backgroundMediaRE.FindStringSubmatch(trimmed); match != nil {
+			if decoded, err := base64.StdEncoding.DecodeString(match[1]); err == nil {
+				var media *slideBackgroundMedia
+				if json.Unmarshal(decoded, &media) == nil {
+					slide.BackgroundMedia = media
+					slide.BackgroundMediaSet = true
+				}
 			}
 			continue
 		}

@@ -59,6 +59,17 @@
   height: 23px;
   transform: translateY(-2px);
 }
+.keynope-web-pptx-mark {
+  display: grid;
+  width: 21px;
+  height: 21px;
+  place-items: center;
+  border: 1px solid #f1f4f6;
+  color: #f1f4f6;
+  background: #c43c24;
+  font: 800 15px/1 -apple-system, BlinkMacSystemFont, sans-serif;
+  transform: translateY(-2px);
+}
 .keynope-web-icon-tag {
   position: absolute;
   left: 50%;

@@ -130,7 +130,7 @@ globalThis.KeynopeScene = (() => {
   }
   function mount(parent,scene) {
     if(scene.version!==1||!(scene.width>0)||!(scene.height>0)||!Array.isArray(scene.objects))throw new Error('Unsupported slide scene');
-    const root=document.createElement('div'),surfaces=[],textBoxes=[],media=[],readingNodes=[],retroReady=[],retroTracks=[],diagnostics=[...(scene.diagnostics||[])];
+    const root=document.createElement('div'),surfaces=[],textBoxes=[],media=[],readingNodes=[],retroReady=[],retroTracks=[],diagnostics=[...(scene.diagnostics||[])],backgroundReady=[];
     const activeIDs=new Set(scene.objects.map(object=>object.id));
     const initialPausedTime=pausedTime();
     root.className='keynope-modern-scene';root.setAttribute('role','region');root.setAttribute('aria-label','Slide preview');
@@ -238,6 +238,10 @@ globalThis.KeynopeScene = (() => {
     function frameImage(entry,object){
       const {image,frame,outlineFilter}=entry,box=object.bounds,crop=object.media.crop;
       Object.assign(image.style,{position:'',width:'100%',height:'100%',maxWidth:'',left:'',top:'',objectFit:'fill'});
+      if(object.media.fit&&!crop){
+        const fit=['cover','contain','stretch'].includes(object.media.fit)?object.media.fit:'cover';
+        Object.assign(image.style,{position:'absolute',inset:'0',width:'100%',height:'100%',maxWidth:'none',left:'',top:'',objectFit:fit==='stretch'?'fill':fit});
+      }
       frame.style.clipPath=object.media.mask==='ellipse'?'ellipse(50% 50% at 50% 50%)':object.media.mask==='rounded'?'inset(0 round '+Math.min(box.width,box.height)*.12+'px)':'';
       if(crop){
         const w=object.media.width,h=object.media.height,cw=1-crop.left-crop.right,ch=1-crop.top-crop.bottom;
@@ -423,6 +427,14 @@ globalThis.KeynopeScene = (() => {
         frame.append(image,fallback);node.append(frame);media.push({image,media:object.media,current:source,id:object.id,failed});
       }
     }
+    // Reuse the normal image/Retro painters for the background layer. This is
+    // intentionally not included in scene.objects: it has no canvas selection
+    // or z-order affordance, yet brightness, tint, sharpness, animation and
+    // ASCII/Braille treatment remain identical to an ordinary image.
+    if(scene.backgroundMedia?.source||scene.backgroundMedia?.retroLines){
+      const background=scene.backgroundMedia;
+      mountObject({id:'keynope-background-media',kind:'image',bounds:{x:0,y:0,width:scene.width,height:scene.height},paint:background.paint||{color:'#ffffff',opacity:Number(background.opacity)||1},media:{...background,fit:background.fit||'cover',decorative:true},retroLines:background.retroLines||null});
+    }
     for(const object of scene.objects)mountObject(object);
     // Routes are above shape bodies, as are terminating heads. Geometry comes
     // from the shared route solver rather than a separate modern routing pass.
@@ -462,7 +474,7 @@ globalThis.KeynopeScene = (() => {
       }
       return diagnostics;
     }
-    let ready=Promise.all([...retroReady.splice(0),...surfaces.map(s=>s.surface.ready()),...media.map(item=>item.image.decode().catch(item.failed))]).then(()=>checkOverflow());
+    let ready=Promise.all([...backgroundReady,...retroReady.splice(0),...surfaces.map(s=>s.surface.ready()),...media.map(item=>item.image.decode().catch(item.failed))]).then(()=>checkOverflow());
     const animationTrack=item=>{
       let duration=0;const ends=item.media.frames.map(frame=>(duration+=Math.max(1,Number(frame.delayMs)||100)));
       return {item,ends,duration};

@@ -4,6 +4,23 @@ All notable changes to `keynope` are documented in this file.
 
 This project follows semantic versioning.
 
+## 1.8.0
+
+Added:
+
+- Editable PowerPoint (`.pptx`) export from the Mac and web editors, plus PowerPoint import that converts slides into an editable Keynope deck.
+- Portable embedded C64 font instances in PowerPoint exports. Each C64 width used by a deck is embedded as its own editable face, preserving its authored height and horizontal proportions on other machines.
+- Slide background media: promote an image to a slide-owned background layer while retaining its image treatment, including brightness, colour scale, Retro conversion, effects, opacity, and fit mode.
+
+Changed:
+
+- PowerPoint exports use the same 16:9 slide geometry as Keynope and preserve editable text boxes, shapes, images, links, notes, and basic styling wherever PresentationML supports them.
+- PowerPoint text now preserves horizontal and vertical alignment within its Keynope bounding box, including justified text.
+
+Fixed:
+
+- PowerPoint-exported C64 text no longer relies on point-size reduction to compensate for Keynope’s independent width setting, which could make letters too short or clip them inside a text box.
+
 ## 1.7.1
 
 Changed:

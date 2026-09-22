@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1133,6 +1135,20 @@ type nativeEditorExportRequest struct {
 	Existing string `json:"existing,omitempty"`
 }
 
+// nativeEditorPPTXExport is deliberately base64 JSON. The editor transport is
+// JSON in both the local HTTP shell and WASM; the browser decodes this payload
+// directly into a Blob, so ZIP bytes are never coerced through a UTF-8 string.
+type nativeEditorPPTXExport struct {
+	Content string      `json:"content"`
+	Report  interface{} `json:"report,omitempty"`
+}
+
+type nativeEditorPPTXImport struct {
+	Content string      `json:"content"`
+	Name    string      `json:"name"`
+	Report  interface{} `json:"report,omitempty"`
+}
+
 func (s *nativeEditorSession) handleDocument(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1176,6 +1192,59 @@ func (s *nativeEditorSession) handleExportDocument(w http.ResponseWriter, r *htt
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"content": content})
+}
+
+func (s *nativeEditorSession) handleExportPPTX(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.RLock()
+	deck := cloneDeckForRender(s.deck)
+	s.mu.RUnlock()
+	content, report, err := exportPPTXDocument(deck)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(nativeEditorPPTXExport{Content: base64.StdEncoding.EncodeToString(content), Report: report})
+}
+
+// handleImportPPTX only prepares a candidate document. It intentionally does
+// not alter this session: callers must complete their usual dirty-document
+// guard before replacing the active deck with the returned Markdown.
+func (s *nativeEditorSession) handleImportPPTX(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 100<<20)
+	content, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "could not read PowerPoint presentation", http.StatusBadRequest)
+		return
+	}
+	name := r.Header.Get("X-Keynope-Filename")
+	if name == "" {
+		name = "Imported.pptx"
+	}
+	deck, report, err := importPPTXDocument(content, name)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	markdown, err := serializeDeck(pptxSuggestedName(name), deck)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if len(markdown) == 0 || bytes.Equal(markdown, []byte("\n")) {
+		http.Error(w, "PowerPoint import produced an empty presentation", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(nativeEditorPPTXImport{Content: string(markdown), Name: pptxSuggestedName(name), Report: report})
 }
 
 func (s *nativeEditorSession) confirmSaved(path string, version int64) bool {

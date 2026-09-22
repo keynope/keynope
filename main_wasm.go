@@ -115,6 +115,10 @@ func wasmEditorHandler(path string) http.HandlerFunc {
 		return activeNativeEditor.handleParticipantPage
 	case "/api/editor/export-document":
 		return activeNativeEditor.handleExportDocument
+	case "/api/editor/export-pptx":
+		return activeNativeEditor.handleExportPPTX
+	case "/api/editor/import-pptx":
+		return activeNativeEditor.handleImportPPTX
 	default:
 		return nil
 	}
@@ -178,6 +182,27 @@ func wasmEditorUpload(_ js.Value, args []js.Value) any {
 	return wasmJSON(wasmResponse{Status: recorder.Code, ContentType: recorder.Header().Get("Content-Type"), Body: recorder.Body.String()})
 }
 
+// wasmEditorPPTXImport deliberately transfers raw ArrayBuffer bytes. PPTX is
+// a ZIP and must never be routed through JavaScript strings or JSON base64 on
+// the import path.
+func wasmEditorPPTXImport(_ js.Value, args []js.Value) any {
+	if activeNativeEditor == nil || len(args) == 0 {
+		return wasmJSON(wasmResponse{Status: http.StatusBadRequest, Body: "editor is not initialized"})
+	}
+	data := make([]byte, args[0].Get("byteLength").Int())
+	js.CopyBytesToGo(data, args[0])
+	name := "Imported.pptx"
+	if len(args) > 1 && strings.TrimSpace(args[1].String()) != "" {
+		name = args[1].String()
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/editor/import-pptx", bytes.NewReader(data))
+	request.Header.Set("Content-Type", "application/vnd.openxmlformats-officedocument.presentationml.presentation")
+	request.Header.Set("X-Keynope-Filename", name)
+	recorder := httptest.NewRecorder()
+	activeNativeEditor.handleImportPPTX(recorder, request)
+	return wasmJSON(wasmResponse{Status: recorder.Code, ContentType: recorder.Header().Get("Content-Type"), Body: recorder.Body.String()})
+}
+
 func currentWASMWorkspace() (wasmWorkspace, error) {
 	if activeNativeEditor == nil {
 		return wasmWorkspace{}, fmt.Errorf("editor is not initialized")
@@ -237,6 +262,7 @@ func main() {
 	registerWASMFunction("keynopeWasmInit", wasmEditorInit)
 	registerWASMFunction("keynopeWasmRequest", wasmEditorRequest)
 	registerWASMFunction("keynopeWasmUpload", wasmEditorUpload)
+	registerWASMFunction("keynopeWasmPPTXImport", wasmEditorPPTXImport)
 	registerWASMFunction("keynopeWasmWorkspace", wasmEditorWorkspace)
 	js.Global().Set("keynopeWasmReady", true)
 	select {}
