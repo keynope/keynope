@@ -16,6 +16,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var presenterURL: URL
     private let appMode: Bool
     private let openDeckHandler: ((String) -> URL?)?
+    private let importDeckHandler: ((String) -> URL?)?
     private let selectedDeckURLHandler: ((URL) throws -> Void)?
     private let newDeckHandler: (() -> URL?)?
     private let activeDeckURLHandler: (() -> URL?)?
@@ -82,6 +83,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         url: URL,
         appMode: Bool = false,
         openDeckHandler: ((String) -> URL?)? = nil,
+        importDeckHandler: ((String) -> URL?)? = nil,
         selectedDeckURLHandler: ((URL) throws -> Void)? = nil,
         newDeckHandler: (() -> URL?)? = nil,
         activeDeckURLHandler: (() -> URL?)? = nil,
@@ -92,6 +94,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         self.presenterURL = url
         self.appMode = appMode
         self.openDeckHandler = openDeckHandler
+        self.importDeckHandler = importDeckHandler
         self.selectedDeckURLHandler = selectedDeckURLHandler
         self.newDeckHandler = newDeckHandler
         self.activeDeckURLHandler = activeDeckURLHandler
@@ -262,6 +265,8 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         pdfItem.target = self
         let pngItem = fileMenu.addItem(withTitle: "Export Slide as PNG…", action: #selector(exportPNG), keyEquivalent: "")
         pngItem.target = self
+        let pptxItem = fileMenu.addItem(withTitle: "Export Presentation as PowerPoint…", action: #selector(exportPPTX), keyEquivalent: "")
+        pptxItem.target = self
         let recentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
         let recentMenu = NSMenu(title: "Open Recent")
         recentMenu.delegate = self
@@ -674,9 +679,9 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     @objc private func openDeck() {
         let panel = NSOpenPanel()
-        panel.title = "Open a Keynope Deck"
+        panel.title = "Open a Keynope or PowerPoint Presentation"
         panel.prompt = "Open"
-        panel.allowedContentTypes = ["md", "markdown"].compactMap { UTType(filenameExtension: $0) }
+        panel.allowedContentTypes = ["md", "markdown", "pptx"].compactMap { UTType(filenameExtension: $0) }
         panel.allowsMultipleSelection = false
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -699,7 +704,19 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private func openSelectedDeck(_ url: URL) {
         do {
             try selectedDeckURLHandler?(url)
-            replaceDeck(path: url.path)
+            if url.pathExtension.caseInsensitiveCompare("pptx") == .orderedSame {
+                guard let importedURL = importDeckHandler?(url.path) else { return }
+                noPresentation()
+                presenterURL = importedURL
+                editorWebView?.load(URLRequest(url: editorURL()))
+                participantTabsMenuItem?.isEnabled = false
+                activityQRMenuItem?.isEnabled = false
+                documentDirty = true
+                saveMenuItem?.isEnabled = true
+                updateEditorWindowTitle()
+            } else {
+                replaceDeck(path: url.path)
+            }
         } catch {
             let alert = NSAlert(error: error)
             alert.messageText = "Could Not Open Presentation"
@@ -823,6 +840,40 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     @objc private func exportPDF() { exportSlides(pdf: true) }
     @objc private func exportPNG() { exportSlides(pdf: false) }
+    @objc private func exportPPTX() {
+        let panel = NSSavePanel()
+        panel.title = "Export Keynope Presentation as PowerPoint"
+        panel.prompt = "Export"
+        panel.allowedContentTypes = [UTType(filenameExtension: "pptx")].compactMap { $0 }
+        panel.canCreateDirectories = true
+        configureDocumentDestinationPanel(panel, extension: "pptx")
+        guard runDocumentPanel(panel) == .OK,
+              let destination = panel.url?.standardizedFileURL,
+              let endpoint = editorEndpoint("/api/editor/export-pptx") else { return }
+        Task {
+            do {
+                _ = try await editorWebView?.callAsyncJavaScript("await window.keynopePrepareDocumentSave?.();", arguments: [:], in: nil, contentWorld: .page)
+                var request = URLRequest(url: endpoint)
+                request.httpMethod = "POST"
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                    throw NSError(domain: "sh.keynope.app", code: 31, userInfo: [NSLocalizedDescriptionKey: String(data: data, encoding: .utf8) ?? "The PowerPoint presentation could not be exported."])
+                }
+                let document = try JSONDecoder().decode(ExportDocumentResponse.self, from: data)
+                guard let bytes = Data(base64Encoded: document.content) else {
+                    throw NSError(domain: "sh.keynope.app", code: 32, userInfo: [NSLocalizedDescriptionKey: "Keynope produced an invalid PowerPoint file."])
+                }
+                try bytes.write(to: destination, options: .atomic)
+                await MainActor.run { self.editorWebView?.evaluateJavaScript("window.keynopeDidExport && window.keynopeDidExport()") }
+            } catch {
+                await MainActor.run {
+                    let alert = NSAlert(error: error)
+                    alert.messageText = "Could Not Export PowerPoint Presentation"
+                    alert.runModal()
+                }
+            }
+        }
+    }
 
     private func configureDocumentDestinationPanel(
         _ panel: NSSavePanel,
@@ -2156,6 +2207,7 @@ struct KeynopePresenterMain {
             url: url,
             appMode: appMode,
             openDeckHandler: appMode ? { path in startEngine(deckPath: path) } : nil,
+            importDeckHandler: appMode ? { path in startEngine(deckPath: path, untitled: true, importPPTX: true) } : nil,
             selectedDeckURLHandler: appMode ? { url in
                 try rememberUserSelectedDeckAccess(url)
             } : nil,
@@ -2244,7 +2296,7 @@ struct KeynopePresenterMain {
         Bundle.main.url(forResource: "Welcome", withExtension: "md")?.path
     }
 
-    private static func startEngine(deckPath: String, untitled: Bool = false, restoring: Bool = false) -> URL? {
+    private static func startEngine(deckPath: String, untitled: Bool = false, importPPTX: Bool = false, restoring: Bool = false) -> URL? {
         let authorization: DeckAuthorization
         do {
             authorization = try authorizeDeck(for: deckPath, allowPrompt: !restoring)
@@ -2263,6 +2315,7 @@ struct KeynopePresenterMain {
         process.executableURL = engineURL
         process.arguments = ["--app", authorization.path]
             + (untitled ? ["--untitled"] : [])
+            + (importPPTX ? ["--import-pptx"] : [])
         var environment = ProcessInfo.processInfo.environment
         environment["COLUMNS"] = String(engineViewportColumns)
         environment["LINES"] = String(engineViewportRows)
@@ -2296,8 +2349,8 @@ struct KeynopePresenterMain {
                 if line.hasPrefix("KEYNOPE_URL="), let url = URL(string: String(line.dropFirst(12))) {
                     engineProcess = process
                     engineInput = input
-                    activeDeckPath = untitled ? nil : authorization.path
-                    if !untitled { recordRecentDeck(authorization.path) }
+                    activeDeckPath = untitled || importPPTX ? nil : authorization.path
+                    if !untitled && !importPPTX { recordRecentDeck(authorization.path) }
                     if let previousProcess, previousProcess.isRunning {
                         try? previousInput?.fileHandleForWriting.close()
                         previousProcess.terminate()

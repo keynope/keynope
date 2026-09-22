@@ -248,17 +248,29 @@ type sceneDiagnostic struct {
 }
 
 type slideScene struct {
-	DefaultStyle string                 `json:"defaultStyle,omitempty"`
-	Master       bool                   `json:"master,omitempty"`     // Editor target scope, never audience state.
-	Conversion   *sceneConversionReport `json:"conversion,omitempty"` // Editor-only, on explicit request.
-	Revision     *int64                 `json:"revision,omitempty"`   // Editor endpoint only; not audience render data.
-	SlideIndex   int                    `json:"slideIndex,omitempty"`
-	Version      int                    `json:"version"`
-	Width        float64                `json:"width"`
-	Height       float64                `json:"height"`
-	Background   string                 `json:"background"`
-	Objects      []sceneObject          `json:"objects"`
-	Diagnostics  []sceneDiagnostic      `json:"diagnostics"`
+	DefaultStyle    string                 `json:"defaultStyle,omitempty"`
+	Master          bool                   `json:"master,omitempty"`     // Editor target scope, never audience state.
+	Conversion      *sceneConversionReport `json:"conversion,omitempty"` // Editor-only, on explicit request.
+	Revision        *int64                 `json:"revision,omitempty"`   // Editor endpoint only; not audience render data.
+	SlideIndex      int                    `json:"slideIndex,omitempty"`
+	Version         int                    `json:"version"`
+	Width           float64                `json:"width"`
+	Height          float64                `json:"height"`
+	Background      string                 `json:"background"`
+	BackgroundMedia *sceneBackgroundMedia  `json:"backgroundMedia,omitempty"`
+	Objects         []sceneObject          `json:"objects"`
+	Diagnostics     []sceneDiagnostic      `json:"diagnostics"`
+}
+
+// sceneBackgroundMedia is a slide-owned image painted below scene objects.
+// It deliberately has no object ID or editing affordances: use a normal image
+// for artwork that should participate in selection and z-order.
+type sceneBackgroundMedia struct {
+	sceneMedia
+	Fit        string           `json:"fit,omitempty"`
+	Opacity    float64          `json:"opacity,omitempty"`
+	Paint      *scenePaint      `json:"paint,omitempty"`
+	RetroLines *sceneRetroLines `json:"retroLines,omitempty"`
 }
 
 type sceneConversionIssue struct {
@@ -558,6 +570,46 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 	slide.ThemeColors = deck.themeColors(defaultStyle)
 	scene.DefaultStyle = defaultStyle
 	scene.Background = sceneColor(slideBG(slide))
+	if slide.BackgroundMedia != nil && slide.BackgroundMedia.AssetID != "" {
+		if asset, ok := deck.Assets[slide.BackgroundMedia.AssetID]; ok {
+			source := sceneMediaSource(asset)
+			if source.Source != "" {
+				fit := slide.BackgroundMedia.Fit
+				if fit != "contain" && fit != "stretch" {
+					fit = "cover"
+				}
+				opacity := slide.BackgroundMedia.Opacity
+				if opacity <= 0 || opacity > 1 {
+					opacity = 1
+				}
+				source.Decorative = true
+				source.ColourMatrices = sceneImageColourMatrices(slide.BackgroundMedia.Query)
+				options := parseImageASCIIOptions(slide.BackgroundMedia.Query)
+				if options.sharpness != 1 {
+					source.Sharpness = options.sharpness
+					if options.brightness != 1 || options.contrast != 1 || options.saturation != 1 {
+						source.SharpnessAfter = 1
+					}
+				}
+				query, _ := url.ParseQuery(slide.BackgroundMedia.Query)
+				// A promoted image must retain its paint treatment too: gradients,
+				// outlines and shadows are all valid image effects in the normal
+				// canvas renderer. Opacity lives on the background layer so it is
+				// never applied twice when the original image is promoted.
+				paint := scenePaintFromValues(Element{Kind: "image", Query: slide.BackgroundMedia.Query}, slide, scene.Width/float64(cols), scene.Height/float64(rows), query, nil)
+				paint.Opacity = &opacity
+				background := &sceneBackgroundMedia{sceneMedia: source, Fit: fit, Opacity: opacity, Paint: &paint}
+				if query.Get("image-style") == "retro" {
+					background.RetroLines = sceneBackgroundRetroLines(deck, slide, slide.BackgroundMedia.AssetID, asset, slide.BackgroundMedia.Query, cols, rows)
+				}
+				scene.BackgroundMedia = background
+			} else {
+				scene.Diagnostics = append(scene.Diagnostics, sceneDiagnostic{Code: "background-media-unavailable", Message: "The slide background image source is unavailable."})
+			}
+		} else {
+			scene.Diagnostics = append(scene.Diagnostics, sceneDiagnostic{Code: "background-media-unavailable", Message: "The slide background image asset is unavailable."})
+		}
+	}
 	if slide.Effect != "" && slide.Effect != "none" || slide.Background != "" && slide.Background != "none" {
 		scene.Diagnostics = append(scene.Diagnostics, sceneDiagnostic{Code: "background-counterpart", Message: "This preview uses the slide base colour. Its animated Retro background/effect is retained, not converted yet."})
 	}
@@ -923,6 +975,50 @@ func sceneMediaSource(asset DeckAsset) sceneMedia {
 		media.Frames = append(media.Frames, sceneMediaFrame{uri("image/png", frame.Data), delay})
 	}
 	return media
+}
+
+// sceneBackgroundRetroLines samples a background using the same renderer as
+// an ordinary Retro image. A background has no authored placement of its own,
+// so it deliberately fills the complete slide while retaining all treatment
+// keys (glyph, sampling, brightness, tint, sharpness and alpha threshold).
+func sceneBackgroundRetroLines(deck Deck, slide Slide, assetID string, asset DeckAsset, query string, cols, rows int) *sceneRetroLines {
+	if assetID == "" || cols <= 0 || rows <= 0 {
+		return nil
+	}
+	values, err := url.ParseQuery(query)
+	if err != nil {
+		values = url.Values{}
+	}
+	values.Set("image-style", "retro")
+	values.Set("left", "0")
+	values.Set("top", "0")
+	values.Set("width", strconv.Itoa(cols))
+	values.Set("height", strconv.Itoa(rows))
+	values.Set("stretch", "1")
+	for _, key := range []string{"right", "right_pct", "left_pct", "bottom", "row_delta", "align", "valign", "object-hidden"} {
+		values.Del(key)
+	}
+	// Parsed documents materialize these assets already. Registering here also
+	// makes a newly constructed in-memory deck render consistently in tests and
+	// preview before its first save/load cycle.
+	if len(asset.Frames) > 0 {
+		registerEmbeddedAnimatedAsset(assetID, asset)
+	} else {
+		registerEmbeddedStillAsset(assetID, asset)
+	}
+	isolate := slide
+	isolate.ThemeColors = deck.themeColors("retro")
+	isolate.Elements = []Element{{Kind: "image", AssetID: assetID, Path: embeddedAssetPath(assetID, asset), Query: values.Encode()}}
+	lines := exportLines(layout(isolate, cols, rows), isolate, cols, rows, len(deck.Slides))
+	retro := &sceneRetroLines{Cols: cols, Rows: rows, Lines: lines, Decorative: true}
+	if len(asset.Frames) > 1 {
+		retro.Frames = retroObjectFrames(isolate, asset.Frames, cols, rows, len(deck.Slides))
+		retro.LoopCount = asset.LoopCount
+		if len(retro.Frames) > 0 {
+			retro.Lines = retro.Frames[0].Lines
+		}
+	}
+	return retro
 }
 
 func (s *nativeEditorSession) handleScene(w http.ResponseWriter, r *http.Request) {

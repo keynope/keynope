@@ -51,8 +51,9 @@ type DeckAsset struct {
 	LoopCount int              `json:"loopCount,omitempty"`
 }
 
-// Source retains full-resolution image pixels independently of the
-// existing retro derivative. Re-encoding on import removes ancillary metadata.
+// Source retains the original full-resolution media independently of the
+// compact derivative used for retro sampling. Keeping its encoded bytes avoids
+// turning a compact JPEG into an enormous lossless PNG on deck import.
 type DeckAssetSource struct {
 	MIME   string           `json:"mime"`
 	Width  int              `json:"width"`
@@ -750,6 +751,10 @@ func inheritedSlideStyle(masters MasterDeck, layoutID string) Slide {
 			resolved.Background = layer.Background
 			resolved.BackgroundSet = true
 		}
+		if layer.BackgroundMediaSet {
+			resolved.BackgroundMedia = cloneSlideBackgroundMedia(layer.BackgroundMedia)
+			resolved.BackgroundMediaSet = true
+		}
 		if layer.FGSet || layer.FG != "" {
 			resolved.FG = layer.FG
 			resolved.FGSet = true
@@ -790,6 +795,10 @@ func applySourceStyle(resolved *Slide, source Slide) {
 	if source.BackgroundSet {
 		resolved.Background = source.Background
 		resolved.BackgroundSet = true
+	}
+	if source.BackgroundMediaSet {
+		resolved.BackgroundMedia = cloneSlideBackgroundMedia(source.BackgroundMedia)
+		resolved.BackgroundMediaSet = true
 	}
 	if source.FGSet {
 		resolved.FG = source.FG
@@ -886,11 +895,13 @@ func setStyleOverrides(target *Slide, inherited, effective Slide) {
 	}
 	target.EffectSet = effective.Effect != inherited.Effect
 	target.BackgroundSet = effective.Background != inherited.Background
+	target.BackgroundMediaSet = !sameSlideBackgroundMedia(effective.BackgroundMedia, inherited.BackgroundMedia)
 	target.FGSet = effective.FG != inherited.FG
 	target.BGSet = effective.BG != inherited.BG
 	target.HeaderFGSet = effective.HeaderFG != inherited.HeaderFG
 	target.Effect = ""
 	target.Background = ""
+	target.BackgroundMedia = nil
 	target.FG = ""
 	target.BG = ""
 	target.HeaderFG = ""
@@ -899,6 +910,9 @@ func setStyleOverrides(target *Slide, inherited, effective Slide) {
 	}
 	if target.BackgroundSet {
 		target.Background = effective.Background
+	}
+	if target.BackgroundMediaSet {
+		target.BackgroundMedia = cloneSlideBackgroundMedia(effective.BackgroundMedia)
 	}
 	if target.FGSet {
 		target.FG = effective.FG
@@ -909,6 +923,13 @@ func setStyleOverrides(target *Slide, inherited, effective Slide) {
 	if target.HeaderFGSet {
 		target.HeaderFG = effective.HeaderFG
 	}
+}
+
+func sameSlideBackgroundMedia(a, b *slideBackgroundMedia) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.AssetID == b.AssetID && a.Fit == b.Fit && a.Opacity == b.Opacity
 }
 
 func (deck Deck) masterSlotMap(layoutID string) map[string]Element {
@@ -1049,6 +1070,7 @@ func (deck *Deck) DetachSlide(index int) bool {
 	}
 	effective.EffectSet = effective.Effect != ""
 	effective.BackgroundSet = effective.Background != ""
+	effective.BackgroundMediaSet = effective.BackgroundMedia != nil
 	effective.FGSet = effective.FG != ""
 	effective.BGSet = effective.BG != ""
 	effective.HeaderFGSet = effective.HeaderFG != ""

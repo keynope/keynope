@@ -30,6 +30,7 @@ PRESENTER_ICON := assets/KeynopeMenuTemplate.png
 PRESENTER_SRC := presenter/KeynopePresenter.swift presenter/ScreenShare.swift presenter/EmbeddedIcon.swift presenter/SlideExport.swift
 PRESENTER_FRAMEWORKS := -framework Cocoa -framework WebKit -framework AVFoundation -framework ScreenCaptureKit -framework PDFKit
 GO_SRC := $(filter-out %_test.go,$(wildcard *.go))
+GO_SRC += $(shell find internal -type f -name '*.go')
 GO_SRC += web/activity-games.js
 GO_SRC += web/activity-design.js
 GO_SRC += web/truetype.js assets/keynope-c64.ttf.base64

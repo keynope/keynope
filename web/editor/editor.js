@@ -345,6 +345,47 @@
     window.showEngagementToast?.('Copy saved');
   }
 
+  function base64Bytes(value) {
+    const source = atob(String(value || ''));
+    const bytes = new Uint8Array(source.length);
+    for (let index = 0; index < source.length; index++) bytes[index] = source.charCodeAt(index);
+    return bytes;
+  }
+
+  function conversionNotice(report, verb) {
+    const warnings = Array.isArray(report && report.warnings) ? report.warnings : [];
+    const suffix = warnings.length ? ' · ' + warnings.length + ' item' + (warnings.length === 1 ? '' : 's') + ' approximated' : '';
+    window.showEngagementToast?.(verb + suffix);
+  }
+
+  async function exportPPTX() {
+    await runtimeReady;
+    await window.keynopePrepareDocumentSave?.();
+    const baseName = (currentName || 'Untitled.md').replace(/\.[^.]+$/, '') || 'Keynope';
+    const response = await window.fetch('/api/editor/export-pptx', {method: 'POST'});
+    if (!response.ok) throw new Error((await response.text()).trim() || 'Could not export PowerPoint presentation');
+    const payload = await response.json();
+    await saveBlob(new Blob([base64Bytes(payload.content)], {
+      type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+    }), baseName + '.pptx', [{
+      description: 'PowerPoint presentation',
+      accept: {'application/vnd.openxmlformats-officedocument.presentationml.presentation':['.pptx']}
+    }]);
+    conversionNotice(payload.report, 'PowerPoint exported');
+  }
+
+  async function importPPTX(file) {
+    await runtimeReady;
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const envelope = JSON.parse(window.keynopeWasmPPTXImport(bytes, file.name));
+    if (envelope.status < 200 || envelope.status >= 300) throw new Error(envelope.body || 'Could not import PowerPoint presentation');
+    const payload = JSON.parse(envelope.body);
+    await loadDocument(payload.content, payload.name || 'Imported.md', true);
+    dirty = true;
+    document.title = 'Keynope — ' + currentName + ' *';
+    conversionNotice(payload.report, 'PowerPoint imported');
+  }
+
   async function exportHTML(openAfterExport = false, presentationWindow = null) {
     await runtimeReady;
     await window.keynopePrepareDocumentSave?.();
@@ -410,15 +451,19 @@
     if (dirty && !confirm('Discard the unsaved changes and open another presentation?')) return;
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.md,text/markdown,text/plain';
+    input.accept = '.md,.markdown,.pptx,text/markdown,text/plain,application/vnd.openxmlformats-officedocument.presentationml.presentation';
     input.onchange = async () => {
       const file = input.files && input.files[0];
       if (!file) return;
       try {
-        await loadDocument(await file.text(), file.name, false);
-        dirty = false;
-        draftRevision++;
-        await clearDraft();
+        if (/\.pptx$/i.test(file.name)) {
+          await importPPTX(file);
+        } else {
+          await loadDocument(await file.text(), file.name, false);
+          dirty = false;
+          draftRevision++;
+          await clearDraft();
+        }
       } catch (error) {
         alert('Could not open presentation\n\n' + (error.message || error));
       }
@@ -462,10 +507,17 @@
           fill="none" stroke="#ffffff" stroke-width="36" stroke-linejoin="round"/>
       </svg>
       <span class="keynope-web-icon-tag">OPEN</span>`;
-    openButton.title = 'Open a Markdown presentation';
+    openButton.title = 'Open a Keynope or PowerPoint presentation';
     openButton.setAttribute('aria-label', openButton.title);
     openButton.onclick = openPresentation;
-    controls.append(newButton, openButton);
+    const pptxButton = document.createElement('button');
+    pptxButton.type = 'button';
+    pptxButton.className = 'keynope-web-icon-button keynope-web-pptx-button';
+    pptxButton.innerHTML = '<span class="keynope-web-pptx-mark" aria-hidden="true">P</span><span class="keynope-web-icon-tag">PPTX</span>';
+    pptxButton.title = 'Export PowerPoint presentation';
+    pptxButton.setAttribute('aria-label', pptxButton.title);
+    pptxButton.onclick = () => exportPPTX().catch(error => reportFailure('Could not export PowerPoint presentation', error));
+    controls.append(newButton, openButton, pptxButton);
     (topbar.querySelector('.keynope-ribbon-quick') || topbar.querySelector('[data-ribbon="insert"]')).prepend(controls);
     return true;
   }
