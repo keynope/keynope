@@ -4,6 +4,12 @@ All notable changes to `keynope` are documented in this file.
 
 This project follows semantic versioning.
 
+## 1.8.1
+
+Fixed:
+
+- Participant slide tabs backed by an authored Keynope page no longer display their compressed transfer payload as literal text. Reference and cheat-sheet tabs now render as slides again.
+
 ## 1.8.0
 
 Added:
