@@ -4,6 +4,13 @@ All notable changes to `keynope` are documented in this file.
 
 This project follows semantic versioning.
 
+## 1.8.2
+
+Fixed:
+
+- Activities now prepare and display their join code and QR code while Ready, but only open participant collection after the presenter presses Start. Starting an activity no longer silently closes its participant room when no external presentation window is open.
+- Public participant presentation views no longer go blank while checking for editor-only font resources.
+
 ## 1.8.1
 
 Fixed:

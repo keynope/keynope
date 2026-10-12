@@ -4544,7 +4544,7 @@ function receiveHostedEngagement(event,runtime,epoch) {
 }
 function startHostedEngagement(runtime = keynopeEngagementRuntime) {
   if (keynopeRunningActivity && keynopeRunningActivity !== runtime) return;
-  if (!runtime || runtime.phase === 0 || runtime.localPreview || !engagementPresentationActive() || runtime.readOnly || !keynopeHostedEngagementControllerSurface || runtime.hostingConnection || runtime.activityChannel) return;
+  if (!runtime || runtime.phase === 0 || runtime.localPreview || runtime.readOnly || !keynopeHostedEngagementControllerSurface || runtime.hostingConnection || runtime.activityChannel) return;
   runtime.hostingConnection = true;
   const epoch = runtime.connectionEpoch = ++keynopeEngagementSessionEpoch;
   // Non-onboarding activities deliberately have no authored code of their
@@ -4580,7 +4580,11 @@ function startHostedEngagement(runtime = keynopeEngagementRuntime) {
     onDepartures:members=>removeTrainingParticipants(runtime.sessionCode,members),
     onError:error => { if (engagementRuntimeAlive(runtime)) { runtime.participationUnavailable = true; runtime.participationError = String(error && error.message || error || 'Connection failed'); renderEngagementRuntime(runtime); } }
   })).then(channel => {
-    if (!engagementRuntimeAlive(runtime) || epoch !== runtime.connectionEpoch || runtime.localPreview || !engagementPresentationActive()) { channel.close(); return; }
+    // An explicit Start hosts the activity independently of whether the
+    // presenter has opened a separate presentation window. The old
+    // presentation-mode check closed this just-created channel, leaving the
+    // public join page with an access code but no open activity.
+    if (!engagementRuntimeAlive(runtime) || epoch !== runtime.connectionEpoch || runtime.localPreview) { channel.close(); return; }
     runtime.activityChannel = channel;
     publishLobbyPresentation(true);
     runtime.roomReady = true;
@@ -4874,7 +4878,9 @@ function reopenEngagementRuntime() {
   const timed = resume.timed || runtime.definition.timerSeconds > 0 || ['pair','cards','impostor'].includes(kind);
   runtime.deadlineMs = timed ? Date.now() + Math.max(0,Number(resume.remainingMs)||0) + 60000 : 0;
   runtime.pausedRemainingMs = 0;
-  runtime.localPreview = !engagementPresentationActive();
+  // Opening an activity is local. Explicitly starting it opens the participant
+  // room, even when the editor is not presenting to a second screen.
+  runtime.localPreview = false;
   keynopeRunningActivity = runtime;
   const session = engagementSessionFor(runtime.definition);
   session.runtime = runtime; session.deadlineMs = runtime.deadlineMs;
@@ -5004,7 +5010,9 @@ function startEngagementRuntime() {
   engagementSessionFor(runtime.definition).runtime = runtime;
   runtime.phase = 1;
   runtime.startedAt = Date.now();
-  runtime.localPreview = !engagementPresentationActive();
+  // Opening an activity is local. Explicitly starting it opens the participant
+  // room, even when the editor is not presenting to a second screen.
+  runtime.localPreview = false;
   const seconds = ['pair','cards','impostor'].includes(runtime.definition.kind)
     ? Number(runtime.definition.joinSeconds) || 120 : Number(runtime.definition.timerSeconds) || 0;
   runtime.deadlineMs = seconds > 0 ? runtime.startedAt + seconds * 1000 : 0;
@@ -5656,6 +5664,13 @@ function activityJoinText(runtime) {
   const code=document.createElement('div');code.textContent='Code: '+runtime.sessionCode;
   area.append(link,code);return area;
 }
+function activityReadyText(runtime) {
+  const area=document.createElement('div');area.className='keynope-engagement-join-text';
+  const link=document.createElement('div');link.textContent='https://keynope.sh/join/';
+  const code=document.createElement('div');code.textContent='Code: '+runtime.sessionCode;
+  const note=document.createElement('small');note.textContent='Share this access code now. Participants can join after you press Start.';
+  area.append(link,code,note);return area;
+}
 function activityAppearanceMode(runtime) {
   if(runtime?.readOnly)return runtime.appearanceMode==='modern'?'modern':'retro';
   const activityPage=runtime?.definition?.id?(deck.pages||[]).find(page=>page.engagement?.id===runtime.definition.id):null;
@@ -5708,6 +5723,7 @@ function renderEngagementRuntime(runtime = keynopeEngagementRuntime) {
   }
   const revealed = phase === 'REVEAL' || phase === 'DISCUSS';
   const hideQR = activityQRHidden(runtime);
+  const ready = runtime.phase === 0 && !runtime.readOnly && !!runtime.sessionCode;
   let join = null;
   if (!revealed && (runtime.roomReady || runtime.participationUnavailable || (!runtime.readOnly && keynopeHostedEngagementControllerSurface))) {
     join = document.createElement('div'); join.className = 'keynope-engagement-join';
@@ -5720,6 +5736,13 @@ function renderEngagementRuntime(runtime = keynopeEngagementRuntime) {
       const grouping = runtime.definition.kind === 'chosen' || runtime.definition.kind === 'onboarding' || runtime.definition.kind === 'pair' || runtime.definition.kind === 'cards' || runtime.definition.kind === 'impostor';
       participants.textContent = (Number(runtime.participants) || 0) + (grouping ? ' joined' : ' submitted');
       if(hideQR)join.append(copy,participants);else join.append(instruction,code,link,copy,participants);
+    } else if (ready) {
+      const instruction = document.createElement('span'); instruction.textContent = 'Access code ready — press Start to open it';
+      const code = document.createElement('strong'); code.textContent = runtime.sessionCode;
+      const copy = engagementButton('Copy','keynope-engagement-copy',() => copyEngagementJoinURL(runtime.joinUrl));
+      // Do not expose a live link yet: Start is deliberately the point at
+      // which the room opens and activity collection begins.
+      join.append(instruction,code,copy);
     } else {
       join.textContent = runtime.phase === 0 ? 'Ready — press Start to begin.' : runtime.localPreview ? 'Local preview — start presenting and reopen this activity to share it.' : runtime.participationUnavailable ? 'Could not open participant room — retrying…' + (runtime.participationError ? ' (' + runtime.participationError + ')' : '') : 'Opening participant room…';
     }
@@ -5730,9 +5753,9 @@ function renderEngagementRuntime(runtime = keynopeEngagementRuntime) {
     const imported=document.createElement('p');
     imported.textContent=runtime.phase===0?'Voting cards will be imported from the previous text-producing activity when you press Start.':(definition.options||[]).length+' voting cards imported'+(runtime.importedFrom?' from '+runtime.importedFrom:'')+'.';content.appendChild(imported);
   }
-  if (!revealed && runtime.roomReady && hideQR) {
-    content.appendChild(activityJoinText(runtime));
-  } else if (!revealed && runtime.roomReady && runtime.qrCode) {
+  if (!revealed && (runtime.roomReady || ready) && hideQR) {
+    content.appendChild(ready ? activityReadyText(runtime) : activityJoinText(runtime));
+  } else if (!revealed && (runtime.roomReady || ready) && runtime.qrCode) {
     const qr = document.createElement('pre');
     qr.className = 'keynope-engagement-qr';
     qr.setAttribute('aria-label','Activity QR code');
@@ -5994,6 +6017,10 @@ function openEngagementRuntime(showOverlay = true, launcher = null) {
     runtime.assignments = (definition.cards || []).map(() => -1);
   }
   renderEngagementRuntime();
+  // Generating a code is independent of opening its participant room. Show
+  // it straight away in Ready so facilitators can prepare the link before
+  // starting the timer or activity collection.
+  loadEngagementQRCode(runtime);
   publishEngagementRuntime();
   runEngagementCountdown(runtime);
   startHostedEngagement();
