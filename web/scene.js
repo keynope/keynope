@@ -41,6 +41,11 @@ globalThis.KeynopeScene = (() => {
   }
   function ensureFonts(url='/api/editor/scene-fonts') {
     if(fonts)return fonts;
+    // The public participant viewer renders an audience-safe scene but does
+    // not have a native-editor font endpoint. Its own page loads the shared
+    // C64 font and browser fallbacks for modern text, so do not turn an
+    // otherwise valid live slide into a blank page while checking local faces.
+    if(globalThis.KEYNOPE_SCENE_SKIP_FONT_CHECK)return fonts=Promise.resolve([]);
     let ownedStyle;
     const loaded=document.querySelector('[data-keynope-modern-fonts]')?Promise.resolve():fetch(url).then(async response=>{
       if(!response.ok)throw new Error('Bundled Modern fonts could not be loaded');

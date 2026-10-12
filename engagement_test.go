@@ -351,6 +351,9 @@ func TestWebEditorCanHostActivityRoom(t *testing.T) {
 	if strings.Contains(script, "keynopeHostedEngagementControllerSurface = keynopeEngagementControllerSurface || (!window.KEYNOPE_PRESENTER && !window.KEYNOPE_WEB_EDITOR)") {
 		t.Fatal("web editor is explicitly excluded from hosting activity rooms")
 	}
+	if strings.Contains(script, "runtime.localPreview || !engagementPresentationActive()) { channel.close(); return; }") {
+		t.Fatal("an explicit activity Start still closes its room outside presentation mode")
+	}
 	for _, required := range []string{"keynopeEngagementSessions = new Map()", "renderActivityMarker()", "loadEngagementQRCode(runtime)", "canvasLinkAtPointer(e)"} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("presentation runtime is missing %q", required)
@@ -358,6 +361,20 @@ func TestWebEditorCanHostActivityRoom(t *testing.T) {
 	}
 	if strings.Contains(script, "autoOpenEngagementForCurrentPage") {
 		t.Fatal("activities still auto-open instead of waiting for their slide marker")
+	}
+}
+
+func TestReadyActivityPreparesAccessCodeBeforeStart(t *testing.T) {
+	script := exportHTMLSuffix()
+	for _, required := range []string{
+		"function activityReadyText(runtime)",
+		"Access code ready — press Start to open it",
+		"Share this access code now. Participants can join after you press Start.",
+		"loadEngagementQRCode(runtime);",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("ready activity no longer exposes access details: missing %q", required)
+		}
 	}
 }
 
