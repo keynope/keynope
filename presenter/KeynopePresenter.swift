@@ -6,9 +6,9 @@ import UniformTypeIdentifiers
 import WebKit
 import PDFKit
 
-// WebKit added actor/sendability annotations to this callback in the Xcode 26
+// WebKit added actor/sendability annotations to this callback in the Xcode 16
 // SDK. Match the SDK signature on both the release runners and newer Xcodes.
-#if compiler(>=6.2)
+#if compiler(>=6.0)
 typealias KeynopeScriptReplyHandler = @MainActor @Sendable (Any?, String?) -> Void
 #else
 typealias KeynopeScriptReplyHandler = (Any?, String?) -> Void
