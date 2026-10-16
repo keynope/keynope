@@ -126,7 +126,7 @@ func (snapshot *ObjectStyleSnapshot) Validate() error {
 			}
 			continue
 		}
-		if field.Fallback != "" && (key != "text.font" || field.Value != "theme" && !wordRole || !validBundledFont(field.Fallback)) {
+		if field.Fallback != "" && (key != "text.font" || field.Value != "theme" && !wordRole || !validTextFont(field.Fallback)) {
 			return fmt.Errorf("invalid style font fallback")
 		}
 		if key == "text.font" && (field.Value == "theme" || wordRole) && field.Fallback == "" {
@@ -154,7 +154,7 @@ func (snapshot *ObjectStyleSnapshot) Validate() error {
 		case "paint.shadow":
 			valid = v == "soft" || v == "solid" || v == "none"
 		case "text.font":
-			valid = validBundledFont(v) || v == "theme" || wordRole
+			valid = validTextFont(v) || v == "theme" || wordRole
 		case "text.bold", "text.italic", "text.underline":
 			valid = v == "true" || v == "false"
 		case "text.align":

@@ -135,6 +135,25 @@ html[data-keynope-workspace="inspector"] :is(.keynope-workspace-inspector,.keyno
 html[data-keynope-workspace="inspector"] :is(.keynope-workspace-inspector,.keynope-insert-popover) button:where(:not(.keynope-slide-presets button)) svg :is([fill="#fff"],[fill="#ffffff"]) { fill:currentColor; }
 html[data-keynope-workspace="inspector"] :is(.keynope-workspace-inspector,.keynope-insert-popover,.keynope-ribbon-quick,.keynope-ribbon-trailing,.keynope-app-toolbar) button svg:is([stroke="#fff"],[stroke="#ffffff"]) { stroke:currentColor; }
 .keynope-workspace-inspector .keynope-style-transfer { margin-top:12px; }
+.keynope-font-dropdown { position:fixed;z-index:10001;box-sizing:border-box;padding:12px;border:1px solid var(--ui-border,#60636c);border-radius:8px;overflow:auto;background:var(--ui-panel,#202124);color:var(--ui-text,#edf1f3);font:13px/1.4 system-ui;box-shadow:0 8px 30px #0005; }
+.keynope-font-dropdown > input[type="search"] { width:100%;box-sizing:border-box; }
+.keynope-font-dropdown :is(button,input) { color:var(--ui-text);font:inherit;background:var(--ui-control);border:1px solid var(--ui-border);border-radius:5px;min-height:28px;padding:5px 8px; }
+.keynope-font-dropdown button:hover { background:var(--ui-hover); }
+.keynope-font-dropdown :focus-visible { outline:2px solid var(--ui-focus);outline-offset:1px; }
+.keynope-font-status,.keynope-font-preview-name { font-size:12px;color:var(--ui-secondary);margin:8px 0; }
+.keynope-font-export-dialog { width:min(620px,calc(100vw - 32px));max-height:calc(100dvh - 32px);box-sizing:border-box;padding:20px;border:1px solid var(--ui-border,#60636c);border-radius:10px;overflow:auto; }
+.keynope-font-export-dialog::backdrop { background:#0008; }
+.keynope-font-export-dialog > div > label { display:flex;align-items:center;justify-content:space-between;gap:16px;margin:10px 0; }
+.keynope-font-list { display:grid;gap:3px;max-height:32vh;overflow:auto;padding:3px;border:1px solid var(--ui-divider);border-radius:6px; }
+.keynope-font-list button { text-align:left;padding:7px 10px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+html[data-keynope-workspace="inspector"] .keynope-font-list button:is([aria-selected="true"],.previewing) { color:var(--ui-accent);border-color:var(--ui-accent);background:var(--ui-selected); }
+.keynope-font-preview { min-height:90px;margin-top:14px;white-space:pre-wrap;overflow:hidden;font-size:28px;line-height:1.3;padding:12px;background:var(--ui-field);border:1px solid var(--ui-divider);border-radius:6px; }
+.keynope-font-detail { font-size:12px;color:var(--ui-secondary); }
+.keynope-font-choice { display:flex;align-items:center;gap:8px;margin:8px 0; }
+.keynope-font-dropdown [hidden],.keynope-font-export-dialog [hidden] { display:none!important; }
+.keynope-font-actions { display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;margin-top:16px; }
+.keynope-font-actions > button:first-child { margin-right:auto; }
+.keynope-missing-typeface { position:fixed;z-index:200;bottom:62px;left:50%;transform:translateX(-50%);max-width:min(650px,calc(100vw - 32px));box-sizing:border-box;padding:10px 16px;border:1px solid #b47b30;border-radius:6px;background:var(--ui-panel,#29251c);color:var(--ui-text,#fff);font:13px/1.4 system-ui;box-shadow:0 3px 15px #0003; }
 /* Insertion is a catalogue, not a compressed copy of the formatting toolbar. */
 html[data-keynope-workspace="inspector"] .keynope-insert-popover { display:block; width:min(720px,calc(100vw - var(--keynope-navigator-space,210px) - 30px)); }
 html[data-keynope-workspace="inspector"] .keynope-insert-popover [hidden] { display:none!important; }

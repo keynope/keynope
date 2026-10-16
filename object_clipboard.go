@@ -32,15 +32,16 @@ type ObjectClipboard struct {
 	Elements            []Element                              `json:"elements"`
 	Objects             *DeckObjects                           `json:"objects,omitempty"`
 	Assets              map[string]DeckAsset                   `json:"assets,omitempty"`
+	Typefaces           map[string]DeckTypeface                `json:"typefaces,omitempty"`
 	Warnings            []string                               `json:"warnings,omitempty"`
 }
 
 func (bundle *ObjectClipboard) UnmarshalJSON(data []byte) error {
-	fields, err := decodeMetadataJSONObject(data, "version", "elements", "objects", "assets", "warnings", "themeSignature", "themeFallbacks", "labelThemeFallbacks", "tableThemeFallbacks", "chartThemeFallbacks", "slideLinks", "geometry")
+	fields, err := decodeMetadataJSONObject(data, "version", "elements", "objects", "assets", "typefaces", "warnings", "themeSignature", "themeFallbacks", "labelThemeFallbacks", "tableThemeFallbacks", "chartThemeFallbacks", "slideLinks", "geometry")
 	if err != nil {
 		return err
 	}
-	for _, namespace := range []string{"assets", "themeFallbacks", "labelThemeFallbacks", "tableThemeFallbacks", "chartThemeFallbacks", "slideLinks"} {
+	for _, namespace := range []string{"assets", "typefaces", "themeFallbacks", "labelThemeFallbacks", "tableThemeFallbacks", "chartThemeFallbacks", "slideLinks"} {
 		if raw, ok := fields[namespace]; ok {
 			if _, err := decodeMetadataJSONObject(raw); err != nil {
 				return fmt.Errorf("clipboard %s: %w", namespace, err)
@@ -88,6 +89,18 @@ func (bundle ObjectClipboard) validateContext(ctx context.Context) error {
 	}
 	if bundle.Objects != nil && len(bundle.Objects.Builds) != 0 {
 		return fmt.Errorf("object clipboard cannot contain a slide timeline")
+	}
+	if len(bundle.Typefaces) > 128 {
+		return fmt.Errorf("too many clipboard typefaces")
+	}
+	for id, face := range bundle.Typefaces {
+		prepared, err := prepareTypeface(face)
+		if err != nil {
+			return err
+		}
+		if !typefaceIDRE.MatchString(id) || id != prepared.ID() {
+			return fmt.Errorf("invalid clipboard typeface identity")
+		}
 	}
 	seen := map[string]bool{}
 	elementsByID := make(map[string]Element, len(bundle.Elements))
@@ -435,6 +448,18 @@ func snapshotObjectClipboard(deck Deck, elements []Element) (ObjectClipboard, er
 	// Asset bytes must outlive the source document and never alias its history.
 	bundle.SlideLinks = captureClipboardSlideLinks(deck, bundle.Elements)
 	bundle.Assets = cloneDeck(Deck{Assets: bundle.Assets}).Assets
+	if len(deck.Typefaces) > 0 {
+		// Copy only dependencies of the selected objects, including linked word,
+		// label, table and chart styles; never the rest of the source deck.
+		selection := deck
+		selection.Slides = []Slide{{Elements: bundle.Elements}}
+		selection.Masters = MasterDeck{}
+		scene, err := buildDocumentSlideScene(selection, 0, 245, 56)
+		if err != nil {
+			return bundle, err
+		}
+		bundle.Typefaces = cloneTypefaces(scene.Typefaces, true)
+	}
 	return bundle, nil
 }
 
@@ -587,6 +612,7 @@ type objectClipboardPasteDraft struct {
 	elements   []Element
 	assets     map[string]DeckAsset
 	objects    *DeckObjects
+	typefaces  map[string]DeckTypeface
 }
 
 // Capture only the registry/media dependencies, not unrelated slides or notes.
@@ -621,7 +647,7 @@ func (s *nativeEditorSession) captureObjectClipboardPaste(ctx context.Context, a
 	draft.slideID = target.ID
 	// Palette/font roles are destination dependencies too. Omitting them makes
 	// asynchronous paste flatten linked styles as if a themed deck were legacy.
-	snapshot := cloneDeck(Deck{PageSize: s.deck.PageSize, Assets: s.deck.Assets, Objects: s.deck.Objects, Theme: s.deck.Theme, Appearance: s.deck.Appearance})
+	snapshot := cloneDeck(Deck{PageSize: s.deck.PageSize, Assets: s.deck.Assets, Objects: s.deck.Objects, Theme: s.deck.Theme, Typefaces: s.deck.Typefaces, Appearance: s.deck.Appearance})
 	if action.Clipboard != nil && clipboardHasSlideLinks(*action.Clipboard) {
 		snapshot.Slides = make([]Slide, len(s.deck.Slides))
 		for index, slide := range s.deck.Slides {
@@ -646,6 +672,20 @@ func (s *nativeEditorSession) prepareAndApplyObjectClipboardResult(ctx context.C
 	}
 	if err = action.Clipboard.validateContext(ctx); err != nil {
 		return nil, err
+	}
+	draft.typefaces = cloneTypefaces(snapshot.Typefaces, false)
+	if draft.typefaces == nil {
+		draft.typefaces = map[string]DeckTypeface{}
+	}
+	for id, face := range action.Clipboard.Typefaces {
+		prepared, err := prepareTypeface(face)
+		if err != nil {
+			return nil, err
+		}
+		draft.typefaces[id] = prepared
+	}
+	if len(draft.typefaces) > 128 {
+		return nil, fmt.Errorf("too many typefaces in destination deck")
 	}
 	draft.elements, draft.assets, draft.objects, err = prepareValidatedOwnedClipboardPaste(ctx, snapshot, *action.Clipboard, [2]int{draft.cols, draft.rows})
 	if err != nil {
@@ -695,6 +735,7 @@ func (s *nativeEditorSession) commitObjectClipboard(target *Slide, draft *object
 	start := len(target.Elements)
 	target.Elements = append(target.Elements, draft.elements...)
 	s.deck.Assets, s.deck.Objects = draft.assets, draft.objects
+	s.deck.Typefaces = mergeTypefaces(draft.typefaces, s.fontLibrary)
 	s.selected, s.selection, s.editingGroup = start, map[int]bool{}, ""
 	for i := range draft.elements {
 		s.selection[start+i] = true

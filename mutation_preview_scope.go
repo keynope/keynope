@@ -15,7 +15,7 @@ func captureMutationPreviewDeck(source Deck, index int, master bool, draft *Elem
 	if master && index > 0 && source.Masters.Layouts[index-1].Extra != nil {
 		return compatibility()
 	}
-	out := Deck{Theme: source.Theme.Clone(), Appearance: source.Appearance.Clone(), HideActivityQR: source.HideActivityQR, Slides: make([]Slide, len(source.Slides)), Masters: MasterDeck{Version: source.Masters.Version, Base: MasterLayout{ID: source.Masters.Base.ID, Name: source.Masters.Base.Name}, Layouts: make([]MasterLayout, len(source.Masters.Layouts))}}
+	out := Deck{Typefaces: cloneTypefaces(source.Typefaces, false), Theme: source.Theme.Clone(), Appearance: source.Appearance.Clone(), HideActivityQR: source.HideActivityQR, Slides: make([]Slide, len(source.Slides)), Masters: MasterDeck{Version: source.Masters.Version, Base: MasterLayout{ID: source.Masters.Base.ID, Name: source.Masters.Base.Name}, Layouts: make([]MasterLayout, len(source.Masters.Layouts))}}
 	out.PageSize = source.PageSize.Clone()
 	// Headers are immutable strings. Preserve first-match layout lookup,
 	// including compatible duplicate IDs and a nonzero selected master index.

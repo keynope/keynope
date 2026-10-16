@@ -38,25 +38,27 @@ type sceneRun struct {
 }
 
 type sceneText struct {
-	FontRoles       map[string]string `json:"fontRoles,omitempty"`   // Resolved used word font roles; never authored.
-	ColorTokens     map[string]string `json:"colorTokens,omitempty"` // Resolved, used word roles only; never authored.
-	SeeThrough      bool              `json:"seeThrough,omitempty"`
-	EmojiTint       string            `json:"emojiTint,omitempty"`
-	EmojiWidthScale float64           `json:"emojiWidthScale,omitempty"`
-	EmojiFonts      map[string]string `json:"emojiFonts,omitempty"`
-	ParagraphBefore float64           `json:"paragraphBefore"`
-	ParagraphAfter  float64           `json:"paragraphAfter"`
-	LineHeight      float64           `json:"lineHeight"`
-	FontID          string            `json:"fontId,omitempty"`
-	WidthScale      float64           `json:"widthScale"`
-	Runs            []sceneRun        `json:"runs,omitempty"`
-	Role            string            `json:"role"`
-	Level           int               `json:"level,omitempty"`
-	Size            float64           `json:"size"`
-	Family          string            `json:"family"`
-	Align           string            `json:"align"`
-	Vertical        string            `json:"vertical"`
-	Paragraphs      []sceneParagraph  `json:"paragraphs,omitempty"`
+	ReadOnly        bool                    `json:"readOnly,omitempty"`
+	TypefaceMetrics map[string]DeckTypeface `json:"-"`
+	FontRoles       map[string]string       `json:"fontRoles,omitempty"`   // Resolved used word font roles; never authored.
+	ColorTokens     map[string]string       `json:"colorTokens,omitempty"` // Resolved, used word roles only; never authored.
+	SeeThrough      bool                    `json:"seeThrough,omitempty"`
+	EmojiTint       string                  `json:"emojiTint,omitempty"`
+	EmojiWidthScale float64                 `json:"emojiWidthScale,omitempty"`
+	EmojiFonts      map[string]string       `json:"emojiFonts,omitempty"`
+	ParagraphBefore float64                 `json:"paragraphBefore"`
+	ParagraphAfter  float64                 `json:"paragraphAfter"`
+	LineHeight      float64                 `json:"lineHeight"`
+	FontID          string                  `json:"fontId,omitempty"`
+	WidthScale      float64                 `json:"widthScale"`
+	Runs            []sceneRun              `json:"runs,omitempty"`
+	Role            string                  `json:"role"`
+	Level           int                     `json:"level,omitempty"`
+	Size            float64                 `json:"size"`
+	Family          string                  `json:"family"`
+	Align           string                  `json:"align"`
+	Vertical        string                  `json:"vertical"`
+	Paragraphs      []sceneParagraph        `json:"paragraphs,omitempty"`
 }
 
 type sceneParagraph struct {
@@ -281,20 +283,21 @@ type sceneDiagnostic struct {
 }
 
 type slideScene struct {
-	SlideID         string                 `json:"slideId,omitempty"`
-	Build           *SlideBuild            `json:"build,omitempty"`
-	DefaultStyle    string                 `json:"defaultStyle,omitempty"`
-	Master          bool                   `json:"master,omitempty"`     // Editor target scope, never audience state.
-	Conversion      *sceneConversionReport `json:"conversion,omitempty"` // Editor-only, on explicit request.
-	Revision        *int64                 `json:"revision,omitempty"`   // Editor endpoint only; not audience render data.
-	SlideIndex      int                    `json:"slideIndex,omitempty"`
-	Version         int                    `json:"version"`
-	Width           float64                `json:"width"`
-	Height          float64                `json:"height"`
-	Background      string                 `json:"background"`
-	BackgroundMedia *sceneBackgroundMedia  `json:"backgroundMedia,omitempty"`
-	Objects         []sceneObject          `json:"objects"`
-	Diagnostics     []sceneDiagnostic      `json:"diagnostics"`
+	Typefaces       map[string]DeckTypeface `json:"typefaces,omitempty"`
+	SlideID         string                  `json:"slideId,omitempty"`
+	Build           *SlideBuild             `json:"build,omitempty"`
+	DefaultStyle    string                  `json:"defaultStyle,omitempty"`
+	Master          bool                    `json:"master,omitempty"`     // Editor target scope, never audience state.
+	Conversion      *sceneConversionReport  `json:"conversion,omitempty"` // Editor-only, on explicit request.
+	Revision        *int64                  `json:"revision,omitempty"`   // Editor endpoint only; not audience render data.
+	SlideIndex      int                     `json:"slideIndex,omitempty"`
+	Version         int                     `json:"version"`
+	Width           float64                 `json:"width"`
+	Height          float64                 `json:"height"`
+	Background      string                  `json:"background"`
+	BackgroundMedia *sceneBackgroundMedia   `json:"backgroundMedia,omitempty"`
+	Objects         []sceneObject           `json:"objects"`
+	Diagnostics     []sceneDiagnostic       `json:"diagnostics"`
 }
 
 // sceneBackgroundMedia is a slide-owned image painted below scene objects.
@@ -441,6 +444,9 @@ func sceneTextFromValues(e Element, q url.Values) *sceneText {
 		result.FontID, result.Family = "mono", "KeynopeModernMono, monospace"
 	case "c64":
 		result.FontID, result.Family = "c64", "KeynopeC64, monospace"
+	}
+	if font := q.Get("modern-font"); typefaceIDRE.MatchString(font) {
+		result.FontID, result.Family = font, typefaceFamily(font)+", KeynopeModern, sans-serif"
 	}
 	switch textBoxAlignmentFromValues(q) {
 	case "center":
@@ -1261,6 +1267,8 @@ func buildStyledSceneProjection(deck Deck, resolved Slide, index, cols, rows int
 	}
 	scene.SlideID = resolved.ID
 	scene.Build = sceneSlideBuild(deck, resolved.ID, scene.Objects)
+	scene.Typefaces = sceneTypefaceResources(scene, deck.Typefaces)
+	markPreviewOnlyText(&scene)
 	return scene, nil
 }
 
@@ -1577,7 +1585,7 @@ func applySceneText(deck *Deck, action nativeEditorAction) (bool, error) {
 	if action.ModernLineHeight != nil && (math.IsNaN(*action.ModernLineHeight) || math.IsInf(*action.ModernLineHeight, 0) || *action.ModernLineHeight < .5 || *action.ModernLineHeight > 4) {
 		return false, fmt.Errorf("line spacing must be between 0.5 and 4")
 	}
-	if action.ModernFont != nil && *action.ModernFont != "" && *action.ModernFont != "sans" && *action.ModernFont != "mono" && *action.ModernFont != "c64" && *action.ModernFont != "theme" {
+	if action.ModernFont != nil && *action.ModernFont != "" && !validTextFont(*action.ModernFont) && *action.ModernFont != "theme" {
 		return false, fmt.Errorf("unsupported Modern font")
 	}
 	if action.Slide < 0 || action.Slide >= len(deck.Slides) || action.ObjectID == "" || len(action.TextRuns) > 10000 {

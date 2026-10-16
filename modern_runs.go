@@ -25,10 +25,10 @@ func validSceneRun(run sceneRun) bool {
 	if run.Bold && run.BoldOff {
 		return false
 	}
-	if run.FontRole != "" && (!validThemeFontRole(run.FontRole) || !validBundledFont(run.FontID)) {
+	if run.FontRole != "" && (!validThemeFontRole(run.FontRole) || !validTextFont(run.FontID)) {
 		return false
 	}
-	if !utf8.ValidString(run.Text) || run.ColorToken != "" && (!validThemeColorToken(run.ColorToken) || len(run.Color) != 7) || run.FontID != "" && run.FontID != "sans" && run.FontID != "mono" && run.FontID != "c64" || math.IsNaN(run.FontSize) || math.IsInf(run.FontSize, 0) || run.FontSize < 0 || run.FontSize > 1024 {
+	if !utf8.ValidString(run.Text) || run.ColorToken != "" && (!validThemeColorToken(run.ColorToken) || len(run.Color) != 7) || run.FontID != "" && !validTextFont(run.FontID) || math.IsNaN(run.FontSize) || math.IsInf(run.FontSize, 0) || run.FontSize < 0 || run.FontSize > 1024 {
 		return false
 	}
 	if run.Color != "" {

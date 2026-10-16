@@ -120,6 +120,8 @@ func expandedDocumentCommentBytes(comment string, remaining int64, inflater **gz
 	switch name {
 	case "keynope-assets":
 		individual = maxDeckAssetArchiveBytes
+	case "keynope-typefaces":
+		individual = maxTypefaceArchiveBytes
 	case "keynope-objects":
 		individual = maxStructuredObjectBytes
 	case "keynope-engagement-results":

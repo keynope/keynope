@@ -38,6 +38,7 @@ GO_SRC += web/participant-transfer.js
 GO_SRC += web/workspace.js web/workspace.css web/interface.css
 GO_SRC += web/templates.js $(wildcard assets/templates/*.md)
 GO_SRC += web/text-layout.js
+GO_SRC += web/fonts.js
 GO_SRC += web/scene.js
 GO_SRC += web/tables.js web/charts.js web/builds.js
 GO_SRC += web/print.js

@@ -7,8 +7,11 @@ func cloneEditorHistoryDeck(deck Deck, history []Deck) Deck {
 	// immutable history store may share equal payloads with another snapshot;
 	// no entry ever borrows mutable values from the active deck.
 	registry := deck.Objects
+	typefaces := deck.Typefaces
+	deck.Typefaces = nil
 	deck.Objects = nil
 	snapshot := cloneDeck(deck)
+	snapshot.Typefaces = cloneTypefaces(typefaces, false)
 	if registry == nil {
 		return snapshot
 	}

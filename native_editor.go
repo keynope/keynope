@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +28,8 @@ type nativeEditorSession struct {
 	masterPreviewUse uint64
 	mu               sync.RWMutex
 	deck             Deck
+	fontLibrary      map[string]DeckTypeface
+	fontExport       *fontExportApproval
 	savedDeck        Deck
 	deckPath         string
 	untitled         bool
@@ -85,6 +88,7 @@ func (s *nativeEditorSession) handleUpload(w http.ResponseWriter, r *http.Reques
 }
 
 type nativeEditorState struct {
+	RegisteredTypefaceID   string                    `json:"registeredTypefaceId,omitempty"`
 	PageSize               *DeckPageSize             `json:"pageSize,omitempty"`
 	ClipboardWarnings      []string                  `json:"clipboardWarnings,omitempty"` // One paste response only; never authored/session state.
 	PresentationCursor     *PresentationBuildCursor  `json:"presentationCursor,omitempty"`
@@ -94,6 +98,7 @@ type nativeEditorState struct {
 	StyleClipboard         *ObjectStyleSnapshot      `json:"styleClipboard,omitempty"`
 	SelectionCapabilities  *selectionCapabilityState `json:"selectionCapabilities"`
 	Theme                  *DeckTheme                `json:"theme,omitempty"`
+	Typefaces              map[string]DeckTypeface   `json:"typefaces,omitempty"`
 	HasDeckTheme           bool                      `json:"hasDeckTheme"`
 	ThemePresets           []*DeckTheme              `json:"themePresets,omitempty"`
 	Appearance             *DeckAppearance           `json:"appearance,omitempty"`
@@ -183,6 +188,8 @@ type nativeEditorAction struct {
 	TextRange             *textStyleRange       `json:"textRange,omitempty"`
 	TableWord             *tableWordContext     `json:"tableWord,omitempty"` // Bounded anchor in a local table text draft.
 	ModernFont            *string               `json:"modernFont,omitempty"`
+	TypefaceData          *DeckTypeface         `json:"typefaceData,omitempty"`
+	TypefaceReplacements  map[string]string     `json:"typefaceReplacements,omitempty"`
 	ModernLineHeight      *float64              `json:"modernLineHeight,omitempty"`
 	ModernParagraphBefore *float64              `json:"modernParagraphBefore,omitempty"`
 	ModernParagraphAfter  *float64              `json:"modernParagraphAfter,omitempty"`
@@ -915,7 +922,7 @@ func writeNativeEditorPreview(w http.ResponseWriter, action nativeEditorAction, 
 	response := nativeEditorInlinePreview{Pages: pages, Caret: caret}
 	if action.ElementData.Kind == "shape" {
 		fitted := *action.ElementData
-		fitShapeLabel(&fitted, cols, rows, preview.physicalCanvas())
+		sharedShapeLabelFits.fitWithFonts(&fitted, cols, rows, preview.typefaces, preview.physicalCanvas())
 		response.ElementData = &fitted
 	}
 	if action.SelectionStart != action.SelectionEnd {
@@ -1292,6 +1299,7 @@ func (s *nativeEditorSession) stateForClient(currentOnly, currentSlideOnly bool,
 		}
 	}
 	return nativeEditorState{
+		Typefaces:             typefaceDescriptions(mergeTypefaces(s.deck.Typefaces, s.fontLibrary)),
 		PageSize:              s.deck.PageSize.Clone(),
 		PresentationCursor:    s.companion.BuildSnapshot(),
 		SlideBuild:            selectedSlideBuild(s.deck, slidesForBuildState(s, current)),
@@ -1314,7 +1322,8 @@ func (s *nativeEditorSession) stateForClient(currentOnly, currentSlideOnly bool,
 }
 
 type nativeEditorDocumentRequest struct {
-	Path string `json:"path"`
+	Draft bool   `json:"draft,omitempty"`
+	Path  string `json:"path"`
 }
 
 type nativeEditorDocument struct {
@@ -1352,8 +1361,16 @@ func (s *nativeEditorSession) handleDocument(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	s.mu.RLock()
-	deck, version := cloneDeck(s.deck), s.version
+	version, owner, deck := s.version, s.notesSessionID, cloneDeckForRender(s.deck)
 	s.mu.RUnlock()
+	if !request.Draft {
+		var err error
+		deck, _, err = s.deckForFontExport("save", &pptxCaptureRequest{Owner: owner, Version: version})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusPreconditionRequired)
+			return
+		}
+	}
 	data, err := serializeDeck(request.Path, deck)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1373,9 +1390,15 @@ func (s *nativeEditorSession) handleExportDocument(w http.ResponseWriter, r *htt
 		http.Error(w, "invalid export destination", http.StatusBadRequest)
 		return
 	}
-	s.mu.RLock()
-	deck, sourcePath := cloneDeck(s.deck), s.deckPath
-	s.mu.RUnlock()
+	format := "html"
+	if r.URL.Query().Get("format") == "png" {
+		format = "png"
+	}
+	deck, sourcePath, err := s.deckForFontExport(format)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusPreconditionRequired)
+		return
+	}
 	width, height := authoredRenderSize(80, 25)
 	content, err := exportHTMLDocument(sourcePath, deck.ResolvedSlides(), width, height, preservedExportHeadFromHTML(request.Existing), false)
 	if err != nil {
@@ -1410,14 +1433,15 @@ func (s *nativeEditorSession) handleExportPPTX(w http.ResponseWriter, r *http.Re
 			}
 		}
 	}
-	s.mu.RLock()
-	if captureRequest != nil && (captureRequest.Owner != s.notesSessionID || captureRequest.Version != s.version) {
-		s.mu.RUnlock()
-		http.Error(w, "The deck changed while capturing artwork; export again.", 409)
+	deck, _, err := s.deckForFontExport("pptx", captureRequest)
+	if err != nil {
+		status := http.StatusPreconditionRequired
+		if errors.Is(err, errFontExportStale) {
+			status = http.StatusConflict
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
-	deck := cloneDeckForRender(s.deck)
-	s.mu.RUnlock()
 	work := newPPTXExportWork(r.Context())
 	if captureRequest != nil {
 		work.captures = map[string]pptxRenderedCapture{}
@@ -1520,19 +1544,29 @@ func (s *nativeEditorSession) handleAction(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var action nativeEditorAction
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&action); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 24<<20)).Decode(&action); err != nil {
 		writeEditorFailure(w, r, nativeEditorAction{}, errInvalidEditorAction, http.StatusBadRequest)
 		return
 	}
 	if action.Action == "detach-deck-theme" {
 		action.commandContext = r.Context()
 	}
+	if action.Action == "register-typeface" && action.TypefaceData != nil {
+		prepared, err := prepareTypeface(*action.TypefaceData)
+		if err != nil {
+			writeEditorFailure(w, r, action, err, http.StatusBadRequest)
+			return
+		}
+		action.TypefaceData = &prepared
+	}
 	if err := s.apply(action); err != nil {
 		writeEditorFailure(w, r, action, err, http.StatusBadRequest)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(s.actionTransportState(action.Action))
+	state := s.actionTransportState(action.Action)
+	state.RegisteredTypefaceID = registeredTypefaceID(action)
+	_ = json.NewEncoder(w).Encode(state)
 }
 
 // These commands change session/view state only. Unknown commands deliberately
@@ -1546,6 +1580,12 @@ func nativeEditorViewAction(action string) bool {
 }
 
 func (s *nativeEditorSession) apply(action nativeEditorAction) (resultErr error) {
+	if action.Action == "replace-typefaces" {
+		return s.replaceDocumentTypefaces(action)
+	}
+	if action.Action == "register-typeface" {
+		return s.registerTypeface(action)
+	}
 	// Also cover specialized paths (copy, save confirmation, build navigation,
 	// result updates and off-lock preparation). The runtime owner is immutable
 	// for a session; ordinary mutations recheck it under their write lock below.
@@ -1640,6 +1680,9 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) (resultErr error)
 	}
 	transaction := beginEditorCommand(s, !nativeEditorViewAction(action.Action))
 	defer transaction.finish(&resultErr)
+	if !nativeEditorViewAction(action.Action) {
+		s.deck.Typefaces = mergeTypefaces(s.deck.Typefaces, s.fontLibrary)
+	}
 	if action.Action == "update-elements" && action.SceneRevision != nil && (*action.SceneRevision != s.version || action.SceneMaster || action.Slide != s.current) {
 		return editorFailure("stale-target", "", "", fmt.Errorf("the document or slide changed; retry the edit against the current selection"))
 	}
@@ -2468,12 +2511,15 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) (resultErr error)
 		standardizeDeckText(&s.deck)
 	}
 	if normalizeMutation && s.current >= 0 && s.current < len(s.deck.Slides) {
-		fitSlideShapeLabels(&s.deck.Slides[s.current], authoredTerminalWidth, authoredTerminalHeight, s.deck.physicalCanvas())
+		fitSlideShapeLabelsWithFonts(&s.deck.Slides[s.current], authoredTerminalWidth, authoredTerminalHeight, s.deck.Typefaces, s.deck.physicalCanvas())
 		pruneSingletonGroups(&s.deck.Slides[s.current])
 		s.expandSelectedGroups(s.deck.Slides[s.current].Elements)
 		remapNativeEditorSelection(canonicalizeSlideElementOrder(&s.deck.Slides[s.current], authoredTerminalWidth, authoredTerminalHeight), &s.selected, &s.selection)
 	}
 	if changed && action.Action != "undo" && action.Action != "redo" {
+		if err := checkPreviewOnlyTextChanges(before, s.deck, action, s.current, false); err != nil {
+			return err
+		}
 		previousElements := s.historyElements()
 		if err := reconcileEditorObjectReferences(&s.deck, before, action, s.current, false); err != nil {
 			return err
@@ -2662,6 +2708,9 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) (resultErr 
 	}
 	transaction := beginEditorCommand(s, !nativeEditorViewAction(action.Action) || !deckHasMasterData(s.deck.Masters))
 	defer transaction.finish(&resultErr)
+	if !nativeEditorViewAction(action.Action) {
+		s.deck.Typefaces = mergeTypefaces(s.deck.Typefaces, s.fontLibrary)
+	}
 	if action.Action == "update-elements" && action.SceneRevision != nil && (*action.SceneRevision != s.version || !action.SceneMaster || action.Slide != s.currentMaster) {
 		return editorFailure("stale-target", "", "", fmt.Errorf("the master changed; retry the edit against the current selection"))
 	}
@@ -2770,6 +2819,9 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) (resultErr 
 			}
 			if action.Action == "restore-background-image" {
 				s.retainHistorySelection(masterSlideAt(&before, s.currentMaster).Elements, target.Elements)
+			}
+			if err := checkPreviewOnlyTextChanges(before, s.deck, action, s.currentMaster, true); err != nil {
+				return err
 			}
 			if err := s.acceptStructuredBudget(before, action, true, s.currentMaster); err != nil {
 				return err
@@ -3224,7 +3276,7 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) (resultErr 
 	if changed && action.Action != "set-page-size" && action.Action != "detach-deck-theme" && action.Action != "set-theme" && action.Action != "set-deck-theme" && action.Action != "set-slide-build" && action.Action != "move-element" && action.Action != "move-object-layer" && action.Action != "undo" && action.Action != "redo" {
 		standardizeDeckText(&s.deck)
 		target = masterSlideAt(&s.deck, s.currentMaster)
-		fitSlideShapeLabels(target, authoredTerminalWidth, authoredTerminalHeight, s.deck.physicalCanvas())
+		fitSlideShapeLabelsWithFonts(target, authoredTerminalWidth, authoredTerminalHeight, s.deck.Typefaces, s.deck.physicalCanvas())
 		pruneSingletonGroups(target)
 		s.expandSelectedGroups(target.Elements)
 		remapNativeEditorSelection(canonicalizeSlideElementOrder(target, authoredTerminalWidth, authoredTerminalHeight), &s.selected, &s.selection)
@@ -3232,6 +3284,9 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) (resultErr 
 	if changed && action.Action != "undo" && action.Action != "redo" {
 		previousElements := s.historyElements()
 		if err := reconcileEditorObjectReferences(&s.deck, before, action, s.currentMaster, true); err != nil {
+			return err
+		}
+		if err := checkPreviewOnlyTextChanges(before, s.deck, action, s.currentMaster, true); err != nil {
 			return err
 		}
 		if editorActionChangesObjectReferences(action.Action) {

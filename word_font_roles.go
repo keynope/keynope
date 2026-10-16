@@ -110,6 +110,7 @@ func (deck Deck) resolveWordFonts(text *sceneText) {
 	for i := range text.Paragraphs {
 		resolve(text.Paragraphs[i].Runs)
 	}
+	text.TypefaceMetrics = textTypefaceResources(text, deck.Typefaces)
 }
 
 // Selecting an already linked family is a no-op in a themed deck. Do not

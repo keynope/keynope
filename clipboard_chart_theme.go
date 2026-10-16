@@ -84,7 +84,7 @@ func captureClipboardChartTheme(deck Deck, owner Element, data ChartData) clipbo
 }
 
 func (fallback clipboardChartThemeFallback) validate(data ChartData) error {
-	if !validBundledFont(fallback.FontID) {
+	if !validTextFont(fallback.FontID) {
 		return fmt.Errorf("invalid clipboard chart font")
 	}
 	if err := (TableCellStyle{FontWidth: &fallback.FontWidth}).Validate(); err != nil {

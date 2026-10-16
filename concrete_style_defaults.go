@@ -20,7 +20,7 @@ func concreteDefaultKey(key string) bool {
 func validConcreteDefault(key, value string) bool {
 	switch key {
 	case "default-font":
-		return validBundledFont(value)
+		return validTextFont(value)
 	case "default-color", "default-fill", "default-stroke":
 		return key == "default-fill" && value == "inherit" || (key != "default-color" && value == "none") || len(value) == 7 && validObjectColor(value)
 	case "default-size", "default-width", "default-line-height", "default-stroke-width":

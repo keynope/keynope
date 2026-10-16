@@ -461,10 +461,10 @@ func (table TableData) Validate() error {
 				if run.ColorToken != "" && (!validThemeColorToken(run.ColorToken) || len(run.Color) != 7 || !strings.HasPrefix(run.Color, "#")) {
 					return fmt.Errorf("invalid text run colour role or RGB fallback")
 				}
-				if run.FontID != "" && run.FontID != "c64" && run.FontID != "sans" && run.FontID != "mono" {
+				if run.FontID != "" && !validTextFont(run.FontID) {
 					return fmt.Errorf("invalid text run font")
 				}
-				if run.FontRole != "" && (!validThemeFontRole(run.FontRole) || !validBundledFont(run.FontID)) {
+				if run.FontRole != "" && (!validThemeFontRole(run.FontRole) || !validTextFont(run.FontID)) {
 					return fmt.Errorf("invalid text run font role or fallback")
 				}
 				if run.FontSize < 0 || run.FontSize > 1024 || math.IsNaN(run.FontSize) || math.IsInf(run.FontSize, 0) {
@@ -554,13 +554,13 @@ func (chart ChartData) Validate() error {
 	if chart.Options.ValueFormat != "" && chart.Options.ValueFormat != "number" && chart.Options.ValueFormat != "percent" {
 		return fmt.Errorf("unsupported chart number format")
 	}
-	if chart.Options.FontID != "" && !validBundledFont(chart.Options.FontID) {
+	if chart.Options.FontID != "" && !validTextFont(chart.Options.FontID) {
 		return fmt.Errorf("invalid chart font")
 	}
-	if chart.Options.FontRole != "" && (!validThemeFontRole(chart.Options.FontRole) || !validBundledFont(chart.Options.FontID)) {
+	if chart.Options.FontRole != "" && (!validThemeFontRole(chart.Options.FontRole) || !validTextFont(chart.Options.FontID)) {
 		return fmt.Errorf("invalid chart font role or fallback")
 	}
-	if chart.Options.DefaultFontID != "" && !validBundledFont(chart.Options.DefaultFontID) {
+	if chart.Options.DefaultFontID != "" && !validTextFont(chart.Options.DefaultFontID) {
 		return fmt.Errorf("invalid chart default font")
 	}
 	if chart.Options.DefaultColor != "" && (len(chart.Options.DefaultColor) != 7 || !validObjectColor(chart.Options.DefaultColor)) {

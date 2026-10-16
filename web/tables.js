@@ -163,6 +163,7 @@ globalThis.KeynopeTables=(()=>{
       if(colour){input.type='button';input.className='keynope-colour-field-button';input.innerHTML='<span class="keynope-colour-field-swatch"></span><span>Pick color</span>';input.onclick=()=>options.pickColor(input,input.value||'#ffffff',value=>change(value));}
       else if(choices){for(const[value,title]of choices){const option=document.createElement('option');option.value=value;option.textContent=title;option.disabled=value==='custom'||value==='mixed';input.append(option);}if(!choices.some(([value])=>value==='mixed')){const option=document.createElement('option');option.value='mixed';option.textContent='Mixed';option.disabled=true;input.append(option);}}
       else{input.type=type;if(type==='number'){[input.min,input.max]=tableMetricLimits(key);input.step='any';}}
+      if(choices)globalThis.KeynopeFonts?.enhance(input);
       input.onchange=()=>{if(type==='number'&&input.value!==''&&!input.checkValidity()){input.reportValidity();return;}change(type==='checkbox'?input.checked:input.value);};
       const row=document.createElement('div');row.append(input);const steppers=[];
       if(type==='number'){const stepper=document.createElement('div');stepper.className='keynope-table-canvas-number-stepper';for(const [symbol,delta,verb]of [['+',1,'Increase'],['−',-1,'Decrease']]){const step=button(symbol,()=>transfer.stepDefaultProperty(key,delta*tableMetricStep(key)));step.setAttribute('aria-label',verb+' '+label.toLowerCase());steppers.push(step);stepper.append(step);}row.append(stepper);}
@@ -396,6 +397,11 @@ globalThis.KeynopeTables=(()=>{
     const rect=()=>({r0:Math.min(selected.r,end.r),r1:Math.max(selected.r,end.r),c0:Math.min(selected.c,end.c),c1:Math.max(selected.c,end.c)});
     const intersects=(r,c,cell,b)=>r<=b.r1&&r+(cell.rowSpan||1)>b.r0&&c<=b.c1&&c+(cell.colSpan||1)>b.c0;
     const cells=()=>{const b=rect(),a=[];data.cells.forEach((row,r)=>row.forEach((cell,c)=>{if(!cell.hidden&&intersects(r,c,cell,b))a.push(cell);}));return a;};
+    const cellReadOnly=cell=>{
+      const theme=options.theme?.(),resolve=id=>id?.startsWith('theme:')?theme?.fonts?.[id.slice(6)]?.fontId||'sans':!id||id==='theme'?theme?.fonts?.body?.fontId||'sans':id;
+      const base=resolve(cell.style?.fontId||data.style?.cell?.fontId);
+      return [base,...(cell.runs||[]).map(run=>resolve(run.fontRole?'theme:'+run.fontRole:run.fontId||base))].some(id=>globalThis.KeynopeFonts?.previewOnly(id));
+    };
     const change=action=>{trackGesture?.cancel();const before=clone(data);try{action();}catch(e){data=before;error.textContent=e.message;return;}history.record(before,data);render();error.textContent='';};
     const restore=redo=>{if(trackGesture){trackGesture.cancel();return;}const next=history.peek(redo);if(!next)return;history.advance(data,redo);data=next;render();};
     const undo=()=>restore(false),redo=()=>restore(true);
@@ -410,6 +416,7 @@ globalThis.KeynopeTables=(()=>{
       const l=document.createElement('label');l.textContent=label;const colour=type==='color'&&typeof options.pickColor==='function',input=document.createElement(colour?'button':choices?'select':'input');input.setAttribute('aria-label','Cell '+label.toLowerCase());
       if(colour){input.type='button';input.className='keynope-colour-field-button';input.innerHTML='<span class="keynope-colour-field-swatch"></span><span>Pick color</span>';input.onclick=()=>{const range={...rect()};options.pickColor(input,tableColour(input.value,options)||'#ffffff',value=>{if(refreshStyleTransfer.setProperty){refreshStyleTransfer.setProperty(key,value,false,range);return;}input.value=value;input.onchange();});};}
       else if(choices){for(const [value,text]of choices){const o=document.createElement('option');o.value=value;o.textContent=text;input.append(o);}if(!choices.some(([value])=>value==='mixed')){const option=document.createElement('option');option.value='mixed';option.textContent='Mixed';option.disabled=true;input.append(option);}}else{input.type=type;input.value=type==='color'?'#ffffff':'';if(type==='number'){[input.min,input.max]=tableMetricLimits(key);input.step='any';}}
+      if(choices)globalThis.KeynopeFonts?.enhance(input);
       input.onchange=()=>{if(type==='number'&&input.value&&!input.checkValidity()){input.reportValidity();return;}if(refreshStyleTransfer.setProperty){refreshStyleTransfer.setProperty(key,input.value===''?'':type==='number'?Number(input.value):input.value,type==='theme');return;}change(()=>{for(const cell of cells())setCellStyle(cell,key,input.value===''?null:type==='number'?Number(input.value):input.value);});};
       const reset=button('↶',()=>{if(refreshStyleTransfer.setProperty){refreshStyleTransfer.setProperty(key,'',type==='theme');return;}change(()=>{for(const cell of cells())setCellStyle(cell,key,null);});});reset.setAttribute('aria-label','Inherit cell '+label.toLowerCase());l.append(input,reset);targetHost.append(l);
       if(type==='theme')for(const option of input.options)if(['custom','mixed'].includes(option.value))option.disabled=true;
@@ -468,12 +475,13 @@ globalThis.KeynopeTables=(()=>{
       data.cells.forEach((row,r)=>{const tr=document.createElement('tr');tr.dataset.row=r;const th=document.createElement('th');th.scope='row';const b=button(String(r+1),()=>{selected={r,c:0};end={r,c:data.columns.length-1};refreshSelection();});b.setAttribute('aria-label','Select row '+(r+1));th.append(b);if(r<data.rows.length-1)th.append(resizeHandle('rows',r));tr.append(th);row.forEach((cell,c)=>{
         if(cell.hidden)return;const td=document.createElement('td');td.rowSpan=cell.rowSpan||1;td.colSpan=cell.colSpan||1;td.dataset.cell=r+':'+c;
         const input=document.createElement('textarea');input.setAttribute('aria-label','Cell '+(r+1)+', '+(c+1));input.value=cell.runs?.length?cell.runs.map(r=>r.text).join(''):cell.text||'';
+        input.readOnly=cellReadOnly(cell);if(input.readOnly)input.title='Preview & Print font — choose another font to edit this text';
         input.onpointerdown=e=>{select(r,c,e.shiftKey);if(e.shiftKey||refreshStyleTransfer.isPainting?.())e.preventDefault();refreshStyleTransfer.paint?.();};input.onfocus=()=>{if(selected.r!==r||selected.c!==c)select(r,c,false);};
         input.oninput=()=>{const before=clone(data);cell.text=input.value;delete cell.runs;history.record(before,data);cachedDirty=null;options.onDirty?.();};
         input.onkeydown=event=>{
           if(event.key==='Tab'&&!event.metaKey&&!event.ctrlKey&&!event.altKey){event.preventDefault();const list=[...gridHost.querySelectorAll('textarea')],index=list.indexOf(input),next=list[(index+(event.shiftKey?-1:1)+list.length)%list.length];next.focus();next.select();}
         };
-        input.onpaste=event=>{const value=event.clipboardData?.getData('text/plain')||'';if(!value.includes('\t')&&!value.includes('\n'))return;event.preventDefault();change(()=>{
+        input.onpaste=event=>{if(input.readOnly){event.preventDefault();return;}const value=event.clipboardData?.getData('text/plain')||'';if(!value.includes('\t')&&!value.includes('\n'))return;event.preventDefault();change(()=>{
           const matrix=parseDelimited(value,value.includes('\t')?'\t':',');end=pasteData(data,r,c,matrix);selected={r,c};
         });};
         td.append(input);tr.append(td);
@@ -640,6 +648,7 @@ globalThis.KeynopeTables=(()=>{
     }
     function selectCell(cell,extend=false){if(pending||projectionPending||cancelTrack)return;try{stopCaret();if(!extend)selected={r:cell.row,c:cell.column};end={r:cell.row,c:cell.column};refresh();views.get(key(cell.row,cell.column)).focus({preventScroll:true});}catch(e){error.textContent=e.message;}}
     function editCell(cell){if(pending||projectionPending||cancelTrack||options.styleAvailable?.()===false)return;selectCell(cell);if(caret)return;
+      if(cell.text?.readOnly){error.textContent='This cell uses a Preview & Print font. Choose another font to edit its text.';return;}
       refreshStyleTransfer.cancelPainter?.();
       const id=key(cell.row,cell.column),node=cellNodes.get(id),host=contentHost(cell);surfaces.get(id)?.dispose();surfaces.delete(id);node.querySelector('[data-cell-draft]')?.remove();for(const child of [...node.children])child.style.visibility='hidden';node.append(host);
       const resolveEmojiFonts=options.resolveEmojiFonts?async text=>{const fonts=await options.resolveEmojiFonts(text);Object.assign(emojiFonts,fonts);return fonts;}:null;
@@ -696,6 +705,7 @@ globalThis.KeynopeTables=(()=>{
       function property(label,key,type,effective,choices,targetHost=style){const l=document.createElement('label'),heading=document.createElement('span');heading.textContent=label;l.append(heading);const colour=type==='color'&&typeof options.pickColor==='function',input=document.createElement(colour?'button':choices?'select':'input');input.setAttribute('aria-label','Canvas cell '+label.toLowerCase());
         if(colour){input.type='button';input.className='keynope-colour-field-button';input.innerHTML='<span class="keynope-colour-field-swatch"></span><span>Pick color</span>';input.onclick=()=>{if(projectionPending)return;try{rememberCaretRange();if(caret&&key!=='color')stopCaret();const range={...rect()},text=caret&&key==='color',run=text?caretRuns()[0]:null,value=text?(run?.colorToken?'theme:'+run.colorToken:run?.color||effective(caret.cell)):(input.value||effective(chosen()[0]));options.pickColor(input,tableColour(value,options)||'#ffffff',value=>{if(!text&&refreshStyleTransfer.setProperty){refreshStyleTransfer.setProperty(key,value,false,range);return;}apply(value);});}catch(e){error.textContent=e.message;}};}
         else if(choices){for(const[value,text]of choices){const option=document.createElement('option');option.value=value;option.textContent=text;input.append(option);}if(!choices.some(([value])=>value==='mixed')){const option=document.createElement('option');option.value='mixed';option.textContent='Mixed';option.disabled=true;input.append(option);}}else{input.type=type;if(type==='number'){[input.min,input.max]=tableMetricLimits(key);input.step='any';}}
+        if(choices)globalThis.KeynopeFonts?.enhance(input);
         const apply=value=>{if(type==='number'&&value!==''&&!input.checkValidity()){input.reportValidity();refresh();return;}if(caret&&['fontId','fontSize','color'].includes(key)){
           if(caret.wordStyles){const property=key==='fontId'?'text.font':key==='fontSize'?'text.size':type==='theme'?'paint.colorToken':'paint.color';caret.wordStyles.setProperty(property,value===''?'':type==='number'?Number(value):type==='theme'?String(value).replace(/^theme:/,''):value);return;}
           if(type==='theme'){if(value&&(!value.startsWith('theme:')||!themeRoles.some(([role])=>'theme:'+role===value)))return;formatCaret({color:value?tableColour(value,options):null,colorToken:value?value.slice(6):null});}

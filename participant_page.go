@@ -87,6 +87,7 @@ func participantSlideMarkdown(deck Deck, index int) ([]byte, error) {
 		Assets:         participantMediaAssets(deck.Assets),
 		Objects:        participantSlideObjects(deck.Objects, slide),
 		Theme:          participantTheme(deck.Theme),
+		Typefaces:      cloneTypefaces(deck.Typefaces, false),
 		HideActivityQR: deck.HideActivityQR,
 	})
 }

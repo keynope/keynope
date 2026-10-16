@@ -193,7 +193,7 @@ func TestNativeProjectionDependencyDeckFieldReview(t *testing.T) {
 	// New document fields need an explicit candidate-filter decision. Scene
 	// comparison presently excludes tab configuration and editor diagnostics;
 	// authored tab membership itself remains part of the local Slide input.
-	want := []string{"PageSize", "Theme", "Objects", "Appearance", "Diagnostics", "HideActivityQR", "Tabs", "Slides", "Masters", "Assets", "Extra"}
+	want := []string{"PageSize", "Theme", "Typefaces", "Objects", "Appearance", "Diagnostics", "HideActivityQR", "Tabs", "Slides", "Masters", "Assets", "Extra"}
 	typeOf := reflect.TypeOf(Deck{})
 	var actual []string
 	for index := 0; index < typeOf.NumField(); index++ {

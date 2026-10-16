@@ -13,6 +13,7 @@ type shapeStrokeDefaults struct {
 }
 
 func (deck Deck) applyShapeStrokeDefaults(slide Slide) Slide {
+	slide.typefaces = deck.Typefaces
 	// This render-only context travels with resolved slides and master previews,
 	// so legacy layout, attachment projection and modern scenes share axes.
 	slide.canvasWidth, slide.canvasHeight = 0, 0

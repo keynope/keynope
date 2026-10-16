@@ -31,6 +31,7 @@ const (
 type Deck struct {
 	PageSize       *DeckPageSize
 	Theme          *DeckTheme
+	Typefaces      map[string]DeckTypeface
 	Objects        *DeckObjects
 	Appearance     *DeckAppearance
 	Diagnostics    []documentDiagnostic `json:"-"`
@@ -457,8 +458,11 @@ func (masters MasterDeck) Clone() MasterDeck {
 // History and persistence snapshots still use cloneDeck's deep ownership.
 func cloneDeckForRender(deck Deck) Deck {
 	assets := deck.Assets
+	typefaces := deck.Typefaces
+	deck.Typefaces = nil
 	deck.Assets = nil
 	out := cloneDeck(deck)
+	out.Typefaces = cloneTypefaces(typefaces, false)
 	if len(assets) > 0 {
 		out.Assets = make(map[string]DeckAsset, len(assets))
 		for id, asset := range assets {
@@ -537,6 +541,7 @@ func cloneDeck(deck Deck) Deck {
 	out.PageSize = deck.PageSize.Clone()
 	out.Objects = deck.Objects.Clone()
 	out.Theme = deck.Theme.Clone()
+	out.Typefaces = cloneTypefaces(deck.Typefaces, true)
 	out.Appearance = deck.Appearance.Clone()
 	out.Diagnostics = append([]documentDiagnostic(nil), deck.Diagnostics...)
 	out.HideActivityQR = deck.HideActivityQR

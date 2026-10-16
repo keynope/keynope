@@ -76,8 +76,8 @@ func (theme *DeckTheme) Validate() error {
 		return fmt.Errorf("theme needs six accent colors")
 	}
 	for _, font := range []ThemeFont{theme.Fonts.Heading, theme.Fonts.Body, theme.Fonts.Mono} {
-		if font.FontID != "c64" && font.FontID != "sans" && font.FontID != "mono" {
-			return fmt.Errorf("theme font must be a bundled Keynope font")
+		if !validTextFont(font.FontID) {
+			return fmt.Errorf("invalid theme font")
 		}
 		if !finitePositive(font.Size) || font.Size > 1024 || !finitePositive(font.Width) || font.Width > 200 || !finitePositive(font.LineHeight) || font.LineHeight < .5 || font.LineHeight > 4 {
 			return fmt.Errorf("invalid theme typography")

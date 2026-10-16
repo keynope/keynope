@@ -14,7 +14,19 @@ import (
 // baseline as C64. Mono is mathematically stable across the embedded faces;
 // proportional is an inspected presentation-oriented compromise because its
 // width necessarily varies with the selected text.
-func normalizedFontWidthFactor(font string) float64 {
+func normalizedFontWidthFactor(font string, resources ...map[string]DeckTypeface) float64 {
+	if typefaceIDRE.MatchString(font) {
+		if len(resources) > 0 {
+			const sample = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+			style := &sceneText{FontID: font, Size: 100, WidthScale: 1, TypefaceMetrics: resources[0]}
+			customWidth := chartTextWidth(sample, style)
+			style.FontID = "sans"
+			if customWidth > 0 {
+				return .49 * chartTextWidth(sample, style) / customWidth
+			}
+		}
+		return .49
+	}
 	switch font {
 	case "mono":
 		return .5556
@@ -36,7 +48,7 @@ func textPropertyCanInherit(property string) bool {
 }
 
 func resolvedModernFont(deck Deck, element Element, query url.Values) string {
-	if font := query.Get("modern-font"); font == "c64" || font == "mono" || font == "sans" {
+	if font := query.Get("modern-font"); validTextFont(font) {
 		return font
 	}
 	if !query.Has("modern-font") && validConcreteDefault("default-font", query.Get("default-font")) {
@@ -69,7 +81,7 @@ func fontBindingFromValues(query url.Values) string {
 	return "concrete"
 }
 
-func normalizeWidthForFontSwitch(query url.Values, oldFont, newFont string, source url.Values) {
+func normalizeWidthForFontSwitch(query url.Values, oldFont, newFont string, source url.Values, resources ...map[string]DeckTypeface) {
 	if oldFont == newFont || newFont == "" {
 		return
 	}
@@ -81,8 +93,8 @@ func normalizeWidthForFontSwitch(query url.Values, oldFont, newFont string, sour
 	if parsed, err := strconv.ParseFloat(raw, 64); err == nil && parsed >= 1 && parsed <= 200 {
 		width = parsed
 	}
-	conceptual := width / normalizedFontWidthFactor(oldFont)
-	next := math.Max(1, math.Min(200, conceptual*normalizedFontWidthFactor(newFont)))
+	conceptual := width / normalizedFontWidthFactor(oldFont, resources...)
+	next := math.Max(1, math.Min(200, conceptual*normalizedFontWidthFactor(newFont, resources...)))
 	query.Set("modern-width", strconv.FormatFloat(next, 'f', -1, 64))
 }
 
@@ -124,7 +136,7 @@ func applyModernTextStyle(deck *Deck, action nativeEditorAction, editingGroup st
 	if size := action.ModernSize; size != nil && (math.IsNaN(*size) || math.IsInf(*size, 0) || *size < 0 || (*size > 0 && *size < 1) || *size > 1024) {
 		return false, fmt.Errorf("Modern size must be 1–1024, or zero to inherit")
 	}
-	if font := action.ModernFont; font != nil && *font != "" && *font != "sans" && *font != "mono" && *font != "c64" && *font != "theme" {
+	if font := action.ModernFont; font != nil && *font != "" && !validTextFont(*font) && *font != "theme" {
 		return false, fmt.Errorf("unsupported Modern font")
 	}
 	slide := &deck.Slides[action.Slide]
@@ -229,7 +241,7 @@ func applyModernTextStyle(deck *Deck, action nativeEditorAction, editingGroup st
 				query.Del("modern-font")
 			} else {
 				query.Set("modern-font", *action.ModernFont)
-				normalizeWidthForFontSwitch(query, oldFont, resolvedModernFont(*deck, source, query), oldTypography)
+				normalizeWidthForFontSwitch(query, oldFont, resolvedModernFont(*deck, source, query), oldTypography, deck.Typefaces)
 			}
 		}
 		if action.ModernSize != nil && modern {

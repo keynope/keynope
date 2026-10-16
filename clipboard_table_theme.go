@@ -79,7 +79,7 @@ func (fallback clipboardTableThemeFallback) validate(table TableData) error {
 	if err := style.Validate(); err != nil {
 		return err
 	}
-	if !validBundledFont(fallback.FontID) {
+	if !validTextFont(fallback.FontID) {
 		return fmt.Errorf("invalid clipboard table font")
 	}
 	if _, ok := normalizeHexColour(fallback.BorderColor); !ok {

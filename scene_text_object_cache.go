@@ -12,6 +12,7 @@ type sceneTextObjectKey struct {
 	element      Element
 	style, theme string
 	wordFonts    string
+	typefaces    string
 	scale        float64
 }
 
@@ -55,7 +56,7 @@ func sceneTextDependencyKey(deck Deck, element Element, style string, values url
 	}
 	return sceneTextObjectKey{
 		element: Element{Kind: element.Kind, Level: element.Level, Text: element.Text, Query: q.Encode()},
-		style:   style, theme: profile, wordFonts: wordFonts.Encode(), scale: deck.appearanceTextScale("modern"),
+		style:   style, theme: profile, wordFonts: wordFonts.Encode(), typefaces: typefaceAvailabilityKey(deck.Typefaces), scale: deck.appearanceTextScale("modern"),
 	}
 }
 
@@ -170,7 +171,10 @@ func (c *sceneTextObjectCache) put(key sceneTextObjectKey, o sceneObject, diagno
 	if o.Kind != "text" || o.Text == nil || o.RetroText != nil || o.RetroLines != nil {
 		return
 	}
-	cost := len(key.element.Text) + len(key.element.Query) + len(key.wordFonts) + 2048
+	cost := len(key.element.Text) + len(key.element.Query) + len(key.wordFonts) + len(key.typefaces) + 2048
+	for _, face := range o.Text.TypefaceMetrics {
+		cost += len(face.Data) + 512
+	}
 	for _, value := range []string{key.element.Kind, key.element.Path, key.element.AssetID, key.element.ID, key.element.SlotID, key.element.PlaceholderRole, key.element.MasterSlotID, key.style, key.theme} {
 		cost += len(value)
 	}

@@ -75,10 +75,11 @@ func deckToPPTXWithWork(deck Deck, work *pptxExportWork) (pptx.Presentation, ppt
 	width, height := deck.pageDimensions()
 	presentation := pptx.Presentation{Width: int64(math.Round(width * 6350)), Height: int64(math.Round(height * 6350))}
 	c64Widths := map[string]float64{}
+	usedTypefaces := map[string]DeckTypeface{}
 	if err := deck.Theme.Validate(); err != nil {
 		return pptx.Presentation{}, pptx.Report{}, err
 	}
-	presentation.Theme = nativePPTXTheme(deck.Theme, c64Widths)
+	presentation.Theme = nativePPTXTheme(deck.Theme, c64Widths, deck.Typefaces)
 	colourCache := &pptxImageColourCache{}
 	var report pptx.Report
 	for index := range deck.Slides {
@@ -223,6 +224,9 @@ func deckToPPTXWithWork(deck Deck, work *pptxExportWork) (pptx.Presentation, ppt
 		if err := work.check(); err != nil {
 			return presentation, report, err
 		}
+		for id, face := range scene.Typefaces {
+			usedTypefaces[id] = face
+		}
 		presentation.Slides = append(presentation.Slides, slide)
 	}
 	if len(presentation.Slides) == 0 {
@@ -253,6 +257,22 @@ func deckToPPTXWithWork(deck Deck, work *pptxExportWork) (pptx.Presentation, ppt
 			// wrapper gives it a Keynope-owned family name, avoiding collisions
 			// with a locally installed Yolomancer face.
 			presentation.EmbeddedFonts = append(presentation.EmbeddedFonts, pptx.EmbeddedFont{Family: family, Data: instance, ForceEditable: true})
+		}
+	}
+	ids := make([]string, 0, len(usedTypefaces))
+	for id := range usedTypefaces {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		face := usedTypefaces[id]
+		if face.LocalOnly || face.referenceOnly() || len(sfntTable(face.Data, "glyf")) == 0 {
+			report.Warnings = append(report.Warnings, pptx.Warning{Code: "font-not-embedded", Message: face.Name + " is referenced by name, but cannot be embedded in editable PowerPoint output. Install it on the destination computer."})
+			continue
+		}
+		presentation.EmbeddedFonts = append(presentation.EmbeddedFonts, pptx.EmbeddedFont{Family: face.PostScriptName, Data: face.Data})
+		if !editableTypefaceEmbedding(face.Data) {
+			report.Warnings = append(report.Warnings, pptx.Warning{Code: "font-embedding-restricted", Message: face.Name + " was embedded with its original permission flags. PowerPoint or other readers may restrict editing or substitute this font."})
 		}
 	}
 	return presentation, report.Normalized(), nil
@@ -648,6 +668,9 @@ func sceneTextPlain(text *sceneText) string {
 func pptxFontFace(text *sceneText) string {
 	if text == nil {
 		return "Arial"
+	}
+	if face, ok := text.TypefaceMetrics[text.FontID]; ok {
+		return face.PostScriptName
 	}
 	switch text.FontID {
 	case "c64":

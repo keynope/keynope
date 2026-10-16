@@ -15,7 +15,7 @@ func (d Deck) usesConcreteAppearance() bool {
 }
 
 func concreteTextFont(kind, style string, q url.Values) string {
-	if font := q.Get("modern-font"); font == "c64" || font == "sans" || font == "mono" || font == "theme" {
+	if font := q.Get("modern-font"); validTextFont(font) || font == "theme" {
 		return font
 	}
 	if style == "modern" {

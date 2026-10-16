@@ -28,7 +28,7 @@ func TestSceneTableEqualityFieldCoverage(t *testing.T) {
 	check(sceneRun{}, []string{"Text", "Bold", "BoldOff", "Italic", "Underline", "Color", "ColorToken", "FontID", "FontRole", "FontSize"})
 	check(sceneParagraph{}, []string{"Runs", "Bullet"})
 	check(sceneTableBorder{}, []string{"Axis", "Track", "From", "To", "Color", "Width"})
-	want := []string{"FontRoles", "ColorTokens", "EmojiFonts", "Runs", "Paragraphs"}
+	want := []string{"TypefaceMetrics", "FontRoles", "ColorTokens", "EmojiFonts", "Runs", "Paragraphs"}
 	typ := reflect.TypeOf(sceneTextScalarValues{})
 	for i := 0; i < typ.NumField(); i++ {
 		want = append(want, typ.Field(i).Name)

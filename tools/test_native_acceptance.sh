@@ -2,7 +2,7 @@
 # Explicit opt-in cases using the shared isolated Mac acceptance harness.
 set -euo pipefail
 repo="${0:A:h:h}"
-cases=(activity-builds builds image-first-paint pptx-timing presentation-tools shapes stroke-routes svg table-tokens theme-colours transitions)
+cases=(activity-builds builds image-first-paint pptx-timing presentation-tools shapes stroke-routes svg system-fonts table-tokens theme-colours transitions)
 if [[ "$#" == 1 && ( "$1" == --list || "$1" == --help ) ]]; then
   print -l -- "Usage: zsh tools/test_native_acceptance.sh CASE [--dry-run]" "Cases:" "${cases[@]}"
   exit 0
@@ -20,6 +20,7 @@ case "$1" in
   shapes) flag=KEYNOPE_NATIVE_SHAPE_ACCEPTANCE ;;
   stroke-routes) flag=KEYNOPE_NATIVE_STROKE_ROUTE_ACCEPTANCE ;;
   svg) flag=KEYNOPE_NATIVE_SVG_ACCEPTANCE ;;
+  system-fonts) flag=KEYNOPE_NATIVE_SYSTEM_FONTS_ACCEPTANCE ;;
   table-tokens) flag=KEYNOPE_NATIVE_TABLE_TOKEN_ACCEPTANCE ;;
   theme-colours) flag=KEYNOPE_NATIVE_THEME_COLOUR_ACCEPTANCE ;;
   transitions) flag=KEYNOPE_NATIVE_TRANSITION_ACCEPTANCE ;;

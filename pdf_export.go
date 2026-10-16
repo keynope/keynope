@@ -44,6 +44,12 @@ func pdfPageFallbackReasons(p exportPage) []string {
 	if p.Scene == nil {
 		return []string{"Legacy canvas artwork"}
 	}
+	for _, face := range p.Scene.Typefaces {
+		if face.referenceOnly() {
+			reasons = append(reasons, "Installed-only font requiring raster output without font embedding")
+			break
+		}
+	}
 	if p.Effect != "" && p.Effect != "none" || p.Background != "" && p.Background != "none" {
 		reasons = append(reasons, "Animated slide background or effect")
 	}
@@ -136,7 +142,7 @@ func makePDFExportDocument(deckPath string, deck Deck, cols, rows int) (pdfExpor
 	content := `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>` + html.EscapeString(manifest.Title) + `</title><style data-keynope-modern-fonts>` + modernFontsCSS() + `
 html,body{margin:0;padding:0;background:#111;color:#fff;font:16px system-ui}#keynope-print-pages{margin:0;padding:0}.keynope-print-page{position:relative;overflow:hidden;break-after:page;page-break-after:always}.keynope-print-page:last-child{break-after:auto;page-break-after:auto}.keynope-chart-data-access,dialog{display:none!important}#keynope-print-status{position:fixed;inset:0;display:grid;place-content:center;background:#111;z-index:1000;text-align:center}#keynope-print-status button{padding:10px;margin:8px}#keynope-print-status[hidden]{display:none}@media print{html,body{background:transparent;-webkit-print-color-adjust:exact;print-color-adjust:exact}#keynope-print-status{display:none!important}}
 </style></head><body><div id="keynope-print-status" role="status">Preparing PDF…</div><div id="keynope-print-pages"></div><script id="keynope-print-data" type="application/json">` + string(payload) + `</script><script>const keynopeTTFFontData='` + strings.TrimSpace(trueTypeFontBase64) + `';
-` + trueTypeJS + shapedTextJS + sceneJS + printRendererJS + `</script></body></html>`
+` + trueTypeJS + fontCatalogJS + shapedTextJS + sceneJS + printRendererJS + `</script></body></html>`
 	return pdfExportDocument{Content: content, FallbackContent: fallback, Manifest: manifest}, nil
 }
 func (s *nativeEditorSession) handleExportPDF(w http.ResponseWriter, r *http.Request) {
@@ -144,9 +150,11 @@ func (s *nativeEditorSession) handleExportPDF(w http.ResponseWriter, r *http.Req
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	s.mu.RLock()
-	deck, path := cloneDeckForRender(s.deck), s.deckPath
-	s.mu.RUnlock()
+	deck, path, err := s.deckForFontExport("pdf")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusPreconditionRequired)
+		return
+	}
 	cols, rows := authoredRenderSize(245, 56)
 	document, err := makePDFExportDocument(path, deck, cols, rows)
 	if err != nil {

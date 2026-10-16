@@ -30,7 +30,7 @@ func validateClipboardThemeFallback(query string) error {
 			_, valid = normalizeHexColour(value)
 			valid = valid || key == "shape-stroke" && value == "none"
 		case "modern-font":
-			valid = validBundledFont(value)
+			valid = validTextFont(value)
 		case "modern-size", "ttf-size", "modern-width", "ttf-width", "modern-line-height", "shape-stroke-width":
 			n, err := strconv.ParseFloat(value, 64)
 			low, high := 1.0, 1024.0

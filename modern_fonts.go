@@ -24,6 +24,9 @@ import (
 //go:embed assets/fonts/GO-FONT-LICENSE.txt
 var modernFontLicense string
 
+//go:embed web/fonts.js
+var fontCatalogJS string
+
 var modernFontsCSS = sync.OnceValue(func() string {
 	var css strings.Builder
 	fmt.Fprintf(&css, "@font-face{font-family:KeynopeC64;font-weight:400;font-style:normal;font-display:block;src:url(data:font/ttf;base64,%s) format('truetype')}\n", strings.TrimSpace(trueTypeFontBase64))

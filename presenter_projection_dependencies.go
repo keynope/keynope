@@ -113,6 +113,7 @@ func nativeProjectionCandidateSlides(before, after Deck, dependencies *nativePro
 		before.HideActivityQR != after.HideActivityQR ||
 		before.usesElementStyles() != after.usesElementStyles() ||
 		!reflect.DeepEqual(before.Appearance, after.Appearance) ||
+		!reflect.DeepEqual(before.Typefaces, after.Typefaces) ||
 		!sceneObjectHeadersEqual(before.Objects, after.Objects) ||
 		!reflect.DeepEqual(before.Extra, after.Extra) ||
 		!reflect.DeepEqual(before.Theme, after.Theme)

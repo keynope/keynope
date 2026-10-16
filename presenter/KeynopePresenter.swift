@@ -4,6 +4,7 @@ import Darwin
 @preconcurrency import ScreenCaptureKit
 import UniformTypeIdentifiers
 import WebKit
+import CoreText
 import PDFKit
 
 // WebKit added actor/sendability annotations to this callback in the Xcode 16
@@ -415,6 +416,76 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         presenterURLForSurface("app")
     }
 
+    private func installedFontCatalogue() -> [[String: String]] {
+        NSFontManager.shared.availableFontFamilies.sorted { $0.localizedStandardCompare($1) == .orderedAscending }.flatMap { family in
+            (NSFontManager.shared.availableMembers(ofFontFamily: family) ?? []).compactMap { member in
+                guard member.count >= 2, let postscript = member[0] as? String, let style = member[1] as? String else { return nil }
+                return ["family": family, "name": family + " — " + style, "postScriptName": postscript]
+            }
+        }
+    }
+
+    private func installedTypeface(_ name: String) throws -> [String: Any] {
+        guard let entry = installedFontCatalogue().first(where: { $0["postScriptName"] == name }) else {
+            throw NSError(domain: "KeynopeFonts", code: 1, userInfo: [NSLocalizedDescriptionKey: "This font is no longer installed."])
+        }
+        let font = CTFontCreateWithName(name as CFString, 32, nil)
+        var result: [String: Any] = ["name": entry["name"] ?? name, "postScriptName": name]
+        // Restricted outlines must stay on this device. Use an installed-font
+        // reference even for the picker preview; never send their bytes to JS.
+        var permissions: UInt16 = 2
+        if let os2 = CTFontCopyTable(font, CTFontTableTag(0x4f532f32), []) as Data?, os2.count >= 10 {
+            permissions = UInt16(os2[8]) << 8 | UInt16(os2[9])
+            if (UInt16(os2[0]) << 8 | UInt16(os2[1])) < 2 { permissions &= 15 }
+        }
+        let restricted = permissions & 8 == 0 && permissions & 4 == 0 && permissions & 2 != 0
+        if restricted || permissions & 0x200 != 0 {
+            result["localOnly"] = true
+            result["embeddingFlags"] = permissions
+            return result
+        }
+        guard let available = CTFontCopyAvailableTables(font, []) else {
+            throw NSError(domain: "KeynopeFonts", code: 2, userInfo: [NSLocalizedDescriptionKey: "The selected font has no readable OpenType tables."])
+        }
+        // Reconstitute this face, not the entire TTC collection. CoreText table
+        // access also works for fonts activated outside the usual font folders.
+        var tables: [(UInt32, Data)] = []
+        var total = 0
+        // CoreText returns raw table tags in a CFArray with no retaining
+        // callbacks, NOT CFNumber objects. Bridging to NSArray/NSNumber crashes.
+        let tags = (0..<CFArrayGetCount(available)).map { UInt32(truncatingIfNeeded: UInt(bitPattern: CFArrayGetValueAtIndex(available, $0))) }.sorted()
+        for tag in tags {
+            if tag == 0x44534947 { continue } // Repacking invalidates DSIG.
+            guard var data = CTFontCopyTable(font, CTFontTableTag(tag), []) as Data? else { continue }
+            if tag == 0x68656164, data.count >= 12 { data.replaceSubrange(8..<12, with: [0, 0, 0, 0]) }
+            total += data.count
+            guard total <= 16 * 1024 * 1024 else { throw NSError(domain: "KeynopeFonts", code: 3, userInfo: [NSLocalizedDescriptionKey: "This font exceeds the 16 MB font limit."]) }
+            tables.append((tag, data))
+        }
+        guard !tables.isEmpty, tables.count <= 256 else { throw NSError(domain: "KeynopeFonts", code: 4, userInfo: [NSLocalizedDescriptionKey: "Invalid font table directory."]) }
+        func append16(_ value: UInt16, to data: inout Data) { data.append(UInt8(value >> 8)); data.append(UInt8(value & 255)) }
+        func append32(_ value: UInt32, to data: inout Data) { data.append(UInt8(value >> 24)); data.append(UInt8((value >> 16) & 255)); data.append(UInt8((value >> 8) & 255)); data.append(UInt8(value & 255)) }
+        func checksum(_ data: Data) -> UInt32 {
+            var value: UInt32 = 0
+            for start in stride(from: 0, to: data.count, by: 4) { var word: UInt32 = 0; for i in 0..<4 { word = word << 8 | (start+i < data.count ? UInt32(data[start+i]) : 0) }; value = value &+ word }
+            return value
+        }
+        var output = Data(), payload = Data(), headOffset: Int?
+        let count = tables.count, power = Int(floor(log2(Double(count)))), search = (1 << power) * 16
+        append32(tables.contains(where: { $0.0 == 0x43464620 || $0.0 == 0x43464632 }) ? 0x4f54544f : 0x00010000, to: &output)
+        append16(UInt16(count), to: &output); append16(UInt16(search), to: &output); append16(UInt16(power), to: &output); append16(UInt16(count*16-search), to: &output)
+        for (tag, data) in tables {
+            let offset = 12 + count*16 + payload.count
+            append32(tag, to: &output); append32(checksum(data), to: &output); append32(UInt32(offset), to: &output); append32(UInt32(data.count), to: &output)
+            if tag == 0x68656164 { headOffset = offset }
+            payload.append(data); while payload.count % 4 != 0 { payload.append(0) }
+        }
+        output.append(payload)
+        if let headOffset, output.count >= headOffset+12 { var adjustment = Data(); append32(0xb1b0afba &- checksum(output), to: &adjustment); output.replaceSubrange((headOffset+8)..<(headOffset+12), with: adjustment) }
+        result["data"] = output.base64EncodedString()
+        return result
+    }
+
     private var savedInterfaceAppearance: String {
         let mode = UserDefaults.standard.string(forKey: interfaceAppearanceKey) ?? "system"
         return ["system", "light", "dark"].contains(mode) ? mode : "system"
@@ -565,6 +636,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         config.userContentController.add(self, name: "keynopeInput")
         config.userContentController.add(self, name: "keynopePresenter")
         config.userContentController.addScriptMessageHandler(self, contentWorld: .page, name: "keynopeClipboard")
+        config.userContentController.addScriptMessageHandler(self, contentWorld: .page, name: "keynopeFonts")
         installAppearanceBootstrap(config.userContentController)
         if ProcessInfo.processInfo.environment["KEYNOPE_PERFORMANCE"] == "1" {
             config.userContentController.addUserScript(WKUserScript(
@@ -1114,7 +1186,9 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     private func editorEndpoint(_ path: String) -> URL? {
         var components = URLComponents(url: presenterURL, resolvingAgainstBaseURL: false)
-        components?.path = path
+        let relative = URLComponents(string: path)
+        components?.path = relative?.path ?? path
+        components?.percentEncodedQuery = relative?.percentEncodedQuery
         return components?.url
     }
 
@@ -1158,6 +1232,9 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 slideExportTask = nil
             }
             do {
+                progress.hide()
+                guard try await editorWebView?.callAsyncJavaScript("return await window.keynopeConfirmFontExport('pptx');", arguments: [:], in: nil, contentWorld: .page) as? Bool == true else { return }
+                progress.show()
                 let writer = try SlideExportWriter(destination: destination)
                 defer { writer.discard() }
                 guard let artwork = try await editorWebView?.callAsyncJavaScript("return await window.keynopePreparePPTXExport();", arguments: [:], in: nil, contentWorld: .page) as? String else {
@@ -1280,7 +1357,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     private func exportSlides(pdf: Bool) {
         guard !exportingSlides,
-            let endpoint = editorEndpoint(pdf ? "/api/editor/export-pdf" : "/api/editor/export-document")
+            let endpoint = editorEndpoint(pdf ? "/api/editor/export-pdf" : "/api/editor/export-document?format=png")
         else { return }
         exportingSlides = true
         slideExportTask = Task {
@@ -1298,6 +1375,11 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 slideExportTask = nil
             }
             do {
+                if pdf {
+                    progress.hide()
+                    guard try await editorWebView?.callAsyncJavaScript("return await window.keynopeConfirmFontExport('pdf');", arguments: [:], in: nil, contentWorld: .page) as? Bool == true else { return }
+                    progress.show()
+                }
                 _ = try await editorWebView?.callAsyncJavaScript(
                     "await window.keynopePrepareDocumentSave?.();", arguments: [:], in: nil, contentWorld: .page)
                 var request = URLRequest(url: endpoint)
@@ -1478,6 +1560,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         Task {
             do {
                 let existing = (try? String(contentsOf: destination, encoding: .utf8)) ?? ""
+                guard try await editorWebView?.callAsyncJavaScript("return await window.keynopeConfirmFontExport('html');", arguments: [:], in: nil, contentWorld: .page) as? Bool == true else { return }
                 _ = try await editorWebView?.callAsyncJavaScript("await window.keynopePrepareDocumentSave?.();", arguments: [:], in: nil, contentWorld: .page)
                 var request = URLRequest(url: endpoint)
                 request.httpMethod = "POST"
@@ -1543,6 +1626,13 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                     // deck itself, including when an older page is still open.
                     let flushed = try await webView.callAsyncJavaScript("try { return (await window.keynopeFlushActivityResults?.()) !== false; } catch (error) { console.warn('Activity results pending:', error); return false; }", arguments: [:], in: nil, contentWorld: .page)
                     activityResultsPending = (flushed as? Bool) == false
+                    let approved = try await webView.callAsyncJavaScript("return await window.keynopeConfirmFontExport?.('save') ?? true;", arguments: [:], in: nil, contentWorld: .page)
+                    if (approved as? Bool) == false {
+                        self.savingDocument = false
+                        self.saveMenuItem?.isEnabled = self.documentDirty
+                        self.cancelDeferredSaveContinuation()
+                        return
+                    }
                 } else {
                     activityResultsPending = false
                 }
@@ -2175,12 +2265,20 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     ) {
         MainActor.assumeIsolated {
             let expected = editorURL()
-            guard appMode, message.name == "keynopeClipboard", message.webView === editorWebView,
+            guard appMode, ["keynopeClipboard", "keynopeFonts"].contains(message.name), message.webView === editorWebView,
                   message.frameInfo.isMainFrame, let source = message.frameInfo.request.url,
                   source.scheme == expected.scheme, source.host == expected.host,
                   source.port == expected.port, source.path == expected.path,
                   let body = message.body as? [String: Any], let action = body["action"] as? String else {
                 replyHandler(nil, "Clipboard access is restricted to the Keynope editor.")
+                return
+            }
+            if message.name == "keynopeFonts" {
+                do {
+                    if action == "catalogue" { replyHandler(installedFontCatalogue(), nil) }
+                    else if action == "read", let name = body["postScriptName"] as? String { replyHandler(try installedTypeface(name), nil) }
+                    else { replyHandler(nil, "Unsupported font request.") }
+                } catch { replyHandler(nil, error.localizedDescription) }
                 return
             }
             if action == "style-read" {
@@ -3736,6 +3834,42 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         try requireNativeAcceptance(clean==true,"native transition navigation and capture do not dirty the document",checks:&checks)
     }
 
+    private func verifyNativeSystemFonts(root: URL, checks: inout [String]) async throws {
+        guard let view = editorWebView else { throw NativeAcceptanceError(message: "Missing native font editor") }
+        try await waitForNativeJavaScript("system font editor", in: view, expression: "typeof window.keynopeImportTypeface==='function' && typeof editorAction==='function' && !!document.querySelector('#stage .keynope-modern-scene')")
+        let outcome = try await view.callAsyncJavaScript("""
+        try {
+        const catalogue=await webkit.messageHandlers.keynopeFonts.postMessage({action:'catalogue'});
+        if(catalogue.length<10)throw Error('Installed font catalogue is empty');
+        const selected=['ArialMT','Menlo-Regular','Helvetica'].map(name=>catalogue.find(font=>font.postScriptName===name)).find(Boolean);
+        if(!selected)throw Error('No installed test face');
+        const face=await webkit.messageHandlers.keynopeFonts.postMessage({action:'read',postScriptName:selected.postScriptName});
+        if(!face.data||face.localOnly)throw Error('Test face unexpectedly refuses embedding');
+        const state=await fetch('/api/editor/state').then(r=>r.json()),element=state.slides[state.current].elements.find(e=>e.kind==='heading'||e.kind==='text');
+        await editorAction({action:'select-element',elementData:{id:element.id}});
+        const version=(await fetch('/api/editor/state').then(r=>r.json())).version;
+        const id=await keynopeImportTypeface(face,keynopeFontOwner());
+        if((await fetch('/api/editor/state').then(r=>r.json())).version!==version)throw Error('Import invalidated text draft');
+        await editorAction({action:'set-modern-text-style',objectIds:[element.id],modernFont:id,sceneRevision:version,sceneMaster:false});
+        await modernPageView.ready;
+        const after=await fetch('/api/editor/state').then(r=>r.json());
+        if(!after.slides[after.current].elements.find(e=>e.id===element.id).query.includes(id))throw Error('Font was not applied');
+        if(!after.typefaces[id]||after.typefaces[id].localOnly)throw Error('Font was not retained');
+        if(!document.fonts.check('24px KeynopeFont_'+id.slice(5)))throw Error('Font did not load');
+        if(KeynopeFonts.missing().length)throw Error('Native face used a substitute');
+        return selected.name+'; '+catalogue.length+' faces; '+id;
+        } catch(error) { return 'ERROR: '+(error.message||String(error)); }
+        """, arguments: [:], in: nil, contentWorld: .page) as? String
+        try requireNativeAcceptance(outcome != nil && outcome?.hasPrefix("ERROR:") != true, "native catalogue, CoreText SFNT extraction, permission checks, draft ownership, embedding and WK font loading: " + (outcome ?? ""), checks: &checks)
+        _ = try await view.callAsyncJavaScript("const select=document.querySelector('[aria-label=\"Font family\"]');select.value='__more_fonts__';select.dispatchEvent(new Event('change',{bubbles:true}));return true;", arguments: [:], in: nil, contentWorld: .page)
+        try await waitForNativeJavaScript("full installed font dropdown", in: view, expression: "document.querySelectorAll('.keynope-font-dropdown [role=option]').length>160 && !!document.querySelector('.keynope-font-dropdown [data-font=ArialMT]')")
+        _ = try await view.callAsyncJavaScript("document.querySelector('.keynope-font-dropdown [data-font=ArialMT]').focus();return true;", arguments: [:], in: nil, contentWorld: .page)
+        try await waitForNativeJavaScript("native live font preview", in: view, expression: "(()=>{const p=document.querySelector('.keynope-font-preview');return p?.style.fontFamily.startsWith('KeynopeFontPreview_')&&getComputedStyle(p).fontFamily===p.style.fontFamily&&document.fonts.check('28px '+p.style.fontFamily)})()")
+        try requireNativeAcceptance(true, "all installed fonts share one expandable dropdown with an actual font-file preview and no Use Font confirmation", checks: &checks)
+        let snapshot = try await view.takeSnapshot(configuration: nil)
+        if let tiff = snapshot.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) { try png.write(to: root.appendingPathComponent("system-font-native.png")) }
+    }
+
     private func verifyNativeImageFirstPaint(root: URL, checks: inout [String]) async throws {
         guard let view=editorWebView else {throw NativeAcceptanceError(message:"Missing native image editor")}
         try requireNativeAcceptance(workspaceMenu?.title == "View" && workspaceMenu?.items.contains(where: { $0.identifier?.rawValue == "format" && $0.action == #selector(performWorkspaceCommand(_:)) }) == true, "native View menu exposes the shared Format inspector command", checks: &checks)
@@ -4127,6 +4261,11 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 return
             }
             if ProcessInfo.processInfo.environment["KEYNOPE_NATIVE_PDF_ACCEPTANCE"] == "1" {
+                if ProcessInfo.processInfo.environment["KEYNOPE_NATIVE_SYSTEM_FONTS_ACCEPTANCE"] == "1" {
+                    try await verifyNativeSystemFonts(root: root, checks: &checks)
+                    finishNativePanelAcceptance(root: root, checks: checks, failure: nil)
+                    return
+                }
                 if ProcessInfo.processInfo.environment["KEYNOPE_NATIVE_IMAGE_FIRST_PAINT_ACCEPTANCE"] == "1" {
                     try await verifyNativeImageFirstPaint(root:root,checks:&checks)
                     finishNativePanelAcceptance(root:root,checks:checks,failure:nil)

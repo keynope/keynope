@@ -58,6 +58,9 @@ var chartMetricFonts = sync.OnceValue(func() map[string]*sfnt.Font {
 // These same font files and width factors are used by the shared text painter.
 func chartTextWidth(text string, style *sceneText) float64 {
 	f := chartMetricFonts()[style.FontID]
+	if face, ok := style.TypefaceMetrics[style.FontID]; ok && face.metric != nil {
+		f = face.metric
+	}
 	if f == nil {
 		f = chartMetricFonts()["sans"]
 	}
@@ -158,6 +161,7 @@ func (deck Deck) chartInputs(data ChartData, width, height float64, color, fontI
 		q.Set("modern-width", strconv.FormatFloat(*data.Options.FontWidth, 'f', -1, 64))
 	}
 	base := deck.modernSceneTextFromValues(Element{Kind: "text"}, q)
+	deck.resolveWordFonts(base)
 	base.Size = size // Compact chart size is geometry-owned; family/width inherit.
 	base.LineHeight = 1.1
 	base.ParagraphBefore, base.ParagraphAfter = 0, 0

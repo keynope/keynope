@@ -4,6 +4,7 @@ import "sync"
 
 type shapeLabelFitKey struct {
 	query                     string
+	typefaces                 string
 	cols, rows                int
 	canvasWidth, canvasHeight float64
 }
@@ -19,11 +20,15 @@ var sharedShapeLabelFits shapeLabelFitCache
 // and changes only Query. Cache strings, never authored elements or pointers.
 // A complete query key deliberately includes unknown extensions and paint.
 func (cache *shapeLabelFitCache) fit(element *Element, cols, rows int, canvas ...sceneRect) bool {
+	return cache.fitWithFonts(element, cols, rows, nil, canvas...)
+}
+
+func (cache *shapeLabelFitCache) fitWithFonts(element *Element, cols, rows int, fonts map[string]DeckTypeface, canvas ...sceneRect) bool {
 	if element.Kind != "shape" {
 		return false
 	}
 	width, height := pptxCanvasDimensions(canvas)
-	key := shapeLabelFitKey{query: element.Query, cols: cols, rows: rows, canvasWidth: width, canvasHeight: height}
+	key := shapeLabelFitKey{query: element.Query, typefaces: typefaceAvailabilityKey(fonts), cols: cols, rows: rows, canvasWidth: width, canvasHeight: height}
 	cache.mu.Lock()
 	query, found := cache.queries[key]
 	cache.mu.Unlock()
@@ -31,8 +36,8 @@ func (cache *shapeLabelFitCache) fit(element *Element, cols, rows int, canvas ..
 		element.Query = query
 		return true
 	}
-	fitShapeLabelUncached(element, cols, rows, canvas...)
-	cost := len(key.query) + len(element.Query) + 96
+	fitShapeLabelWithFontsUncached(element, cols, rows, fonts, canvas...)
+	cost := len(key.query) + len(key.typefaces) + len(element.Query) + 96
 	const limit = 4 << 20
 	if cost > limit {
 		return false

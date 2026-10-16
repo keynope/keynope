@@ -14,6 +14,7 @@ func sceneProjectionInputsEqual(before, after Deck, key sceneResponseKey) bool {
 		before.HideActivityQR != after.HideActivityQR ||
 		before.usesElementStyles() != after.usesElementStyles() ||
 		!reflect.DeepEqual(before.Appearance, after.Appearance) ||
+		!reflect.DeepEqual(before.Typefaces, after.Typefaces) ||
 		before.Masters.Version != after.Masters.Version ||
 		!reflect.DeepEqual(before.Masters.Extra, after.Masters.Extra) ||
 		!sceneObjectHeadersEqual(before.Objects, after.Objects) ||

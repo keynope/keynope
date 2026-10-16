@@ -432,6 +432,7 @@ globalThis.KeynopeWorkspace = (() => {
         control.onclick=()=>{const state=selectionCapabilities?.()?.properties?.[property],target=selectionPaintTarget?.();if(!state?.editable||savingPaint)return;pickColor?.(control,state.state==='value'&&String(state.value).startsWith('#')?state.value:'#ffffff',value=>commitPaint(property,value,target));};
       }else if(type==='select'){
         for(const [value,title]of choices)control.add(new Option(title,value));
+        globalThis.KeynopeFonts?.enhance(control);
         const mixed=new Option('Mixed','mixed');mixed.disabled=true;control.add(mixed);
         control.onchange=()=>commitPaint(property,['label.bold','label.italic','label.underline'].includes(property)?control.value==='true':control.value);
       }else{
@@ -685,7 +686,7 @@ globalThis.KeynopeWorkspace = (() => {
       const fonts=document.createElement('fieldset'),fontLegend=document.createElement('legend');fontLegend.textContent='Typography';fonts.append(fontLegend);
       for(const [role,label]of [['heading','Heading'],['body','Body'],['mono','Code']]){
         const group=document.createElement('div');group.className='keynope-theme-font';const title=document.createElement('h3');title.textContent=label;group.append(title);
-        const select=document.createElement('select');for(const [id,name] of [['c64','Keynope C64'],['sans','Go — proportional'],['mono','Go Mono — monospaced']])select.add(new Option(name,id));select.value=themeDraft.fonts[role].fontId;select.setAttribute('aria-label',label+' theme font');select.onchange=()=>themeDraft.fonts[role].fontId=select.value;row('Font',select,group);
+        const select=document.createElement('select');for(const [id,name] of [['c64','Keynope C64'],['sans','Go — proportional'],['mono','Go Mono — monospaced']])select.add(new Option(name,id));globalThis.KeynopeFonts?.enhance(select);select.value=themeDraft.fonts[role].fontId;select.setAttribute('aria-label',label+' theme font');select.onchange=()=>themeDraft.fonts[role].fontId=select.value;row('Font',select,group);
         for(const [key,title,min,max,step]of [['size','Size',1,1024,1],['width','Width',1,200,1],['lineHeight','Line height',.5,4,.05]]){
           const input=document.createElement('input');input.type='number';input.min=String(min);input.max=String(max);input.step=String(step);input.required=true;input.value=String(themeDraft.fonts[role][key]);input.setAttribute('aria-label',label+' theme '+title.toLowerCase());input.oninput=()=>{if(input.value!==''&&input.checkValidity())themeDraft.fonts[role][key]=Number(input.value);};row(title,input,group);
         }
@@ -996,6 +997,7 @@ globalThis.KeynopeWorkspace = (() => {
           if(field.control.getAttribute('aria-description')!==description)field.control.setAttribute('aria-description',description);
         }else if(document.activeElement!==field.control||savingPaint||field.control.disabled){
           const value=field.property==='label.font'&&state?.state==='value'&&state.fontBinding==='theme'?'theme':state?.state==='mixed'?(field.type==='select'?'mixed':''):state?.state==='value'?String(state.value):'';
+          if(field.type==='select')globalThis.KeynopeFonts?.enhance(field.control);
           setChromeProperty(field.control,'value',value);
           if(field.type==='number')setChromeProperty(field.control,'placeholder',state?.state==='mixed'?'Mixed':'');
         }

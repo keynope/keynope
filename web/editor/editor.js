@@ -227,6 +227,7 @@
   }
 
   const stateOnlyEditorActions = new Set([
+    'register-typeface',
 	'copy-object-style',
     'set-engagement-result',
     'select-element',
@@ -290,10 +291,11 @@
   async function documentPayload(name = currentName, prepare = true) {
     if(prepare)await window.keynopePrepareDocumentSave?.();
     await window.keynopeFlushActivityResults?.();
+    if(prepare&&await window.keynopeConfirmFontExport?.('save')===false)throw new DOMException('Save cancelled','AbortError');
     const response = await window.fetch('/api/editor/document', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({path: name || 'Untitled.md'})
+      body: JSON.stringify({path: name || 'Untitled.md',draft:!prepare})
     });
     if (!response.ok) throw new Error((await response.text()).trim() || 'Could not create document');
     return response.json();
@@ -367,6 +369,7 @@
 
   async function exportPPTX() {
     await runtimeReady;
+    if(!await window.keynopeConfirmFontExport('pptx'))return;
     const artwork = await window.keynopePreparePPTXExport();
     const baseName = (currentName || 'Untitled.md').replace(/\.[^.]+$/, '') || 'Keynope';
     const response = await window.fetch('/api/editor/export-pptx', {method: 'POST',headers:{'Content-Type':'application/json'},body:artwork});
@@ -395,6 +398,7 @@
 
   async function exportHTML(openAfterExport = false, presentationWindow = null) {
     await runtimeReady;
+    if(!await window.keynopeConfirmFontExport('html')){presentationWindow?.close();return;}
     await window.keynopePrepareDocumentSave?.();
     const baseName = (currentName || 'Untitled.md').replace(/\.[^.]+$/, '') || 'Keynope';
     const response = await window.fetch('/api/editor/export-document', {
@@ -421,6 +425,7 @@
     try {
       if (!printWindow) throw new Error('Allow pop-up windows to open the PDF print view.');
       await runtimeReady;
+      if(!await window.keynopeConfirmFontExport('pdf')){printWindow.close();return;}
       await window.keynopePrepareDocumentSave?.();
       const response=await window.fetch('/api/editor/export-pdf',{method:'POST'});
       if(!response.ok)throw new Error((await response.text()).trim()||'Could not prepare PDF export');

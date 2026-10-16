@@ -60,7 +60,8 @@ func (cache *sceneTableCache) project(deck Deck, table TableData, bounds sceneRe
 		TextScale     float64
 		Width, Height float64
 		Color         string
-	}{table, deck.usesConcreteAppearance(), deck.themeID(), deck.appearanceTextScale("modern"), bounds.Width, bounds.Height, color})
+		Typefaces     string
+	}{table, deck.usesConcreteAppearance(), deck.themeID(), deck.appearanceTextScale("modern"), bounds.Width, bounds.Height, color, typefaceAvailabilityKey(deck.Typefaces)})
 	key := sha256.Sum256(input)
 	theme := sceneTableThemeInputs(deck.Theme)
 	if keyErr == nil {
@@ -96,6 +97,13 @@ func (cache *sceneTableCache) project(deck Deck, table TableData, bounds sceneRe
 	// Encoded authored input/output plus fixed bookkeeping estimate, bounded
 	// by both bytes and entry count. Do not retain document or runtime state.
 	cost := len(input) + len(encoded) + 256
+	for _, cell := range projected.Cells {
+		if cell.Text != nil {
+			for _, face := range cell.Text.TypefaceMetrics {
+				cost += len(face.Data) + 512
+			}
+		}
+	}
 	const limit = 8 << 20
 	if cost > limit {
 		return projected, nil, false

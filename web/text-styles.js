@@ -32,7 +32,7 @@ globalThis.KeynopeTextStyles=(()=>{
     const roles=[['','Inherit text-box colour'],['custom','Custom colour'],...['background','surface','text','heading','muted','line'].map(role=>[role,role[0].toUpperCase()+role.slice(1)]),...Array.from({length:6},(_,i)=>['accent-'+(i+1),'Accent '+(i+1)]),['mixed','Mixed']];
     for(const [key,label,options]of propertyControls?[['text.font','Word font',[['','Inherit text-box font'],['c64','Keynope C64'],['sans','Go — proportional'],['mono','Go Mono — monospaced'],['theme:heading','Theme Heading'],['theme:body','Theme Body'],['theme:mono','Theme Mono'],['mixed','Mixed']]],['text.size','Word font size',null],['paint.colorToken','Word colour role',roles]]:[]){
       const l=document.createElement('label'),input=document.createElement(options?'select':'input');l.textContent=label+' ';input.setAttribute('aria-label',label);input.style.cssText='font:inherit;width:150px;padding:6px;box-sizing:border-box';
-      if(options){for(const [value,text]of options){const o=document.createElement('option');o.value=value;o.textContent=text;o.disabled=value==='mixed'||value==='custom';input.append(o);}}
+      if(options){for(const [value,text]of options){const o=document.createElement('option');o.value=value;o.textContent=text;o.disabled=value==='mixed'||value==='custom';input.append(o);}globalThis.KeynopeFonts?.enhance(input);}
       else{input.type='number';input.min='1';input.max='1024';input.step='1';input.placeholder='Inherit';input.style.width='100px';}
       input.onchange=()=>{if(!options&&!input.checkValidity()){input.reportValidity();return;}perform('property',{property:key,propertyValue:options?input.value:input.value===''?'':Number(input.value)});};
       l.append(input);section.append(l);fields.push({key,input});

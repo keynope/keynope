@@ -165,6 +165,7 @@ globalThis.KeynopeScene = (() => {
   }
   function mount(parent,scene) {
     if(scene.version!==1||!(scene.width>0)||!(scene.height>0)||!Array.isArray(scene.objects))throw new Error('Unsupported slide scene');
+    const typefacesReady=globalThis.KeynopeFonts?.install(scene.typefaces);
     const root=document.createElement('div'),surfaces=[],textBoxes=[],media=[],readingNodes=[],retroReady=[],retroTracks=[],diagnostics=[...(scene.diagnostics||[])],backgroundReady=[];
     const activeIDs=new Set(scene.objects.map(object=>object.id));
     const renderCounters={objectMounts:0,textMounts:0,updates:0,textRebuilds:0,textContentUpdates:0,textWidthUpdates:0,textPaintUpdates:0,structuredUpdates:0,tableCellPaintUpdates:0,chartMarkUpdates:0,imageFrameUpdates:0,imageTreatmentUpdates:0,imagePaintUpdates:0,backgroundUpdates:0,backgroundReplacements:0};
@@ -744,7 +745,7 @@ globalThis.KeynopeScene = (() => {
     // mount(). Do not settle text metrics against fallback fonts before that
     // shared batch has registered and loaded (a first-resize jump in WebKit).
     const initialRetroReady=retroReady.splice(0);
-    let ready=Promise.resolve().then(()=>fonts).then(()=>Promise.all([...backgroundReady,...initialRetroReady,...surfaces.map(s=>s.surface.ready()),...media.flatMap(item=>[item.image.decode().catch(item.failed),item.paintReady])])).then(()=>checkOverflow());
+    let ready=Promise.all([Promise.resolve().then(()=>fonts),typefacesReady]).then(()=>Promise.all([...backgroundReady,...initialRetroReady,...surfaces.map(s=>s.surface.ready()),...media.flatMap(item=>[item.image.decode().catch(item.failed),item.paintReady])])).then(()=>checkOverflow());
     const animationTrack=item=>{
       let duration=0;const ends=item.media.frames.map(frame=>(duration+=Math.max(1,Number(frame.delayMs)||100)));
       return {item,ends,duration};
@@ -966,6 +967,7 @@ globalThis.KeynopeScene = (() => {
       return true;
     }
     function updateTransforms(next,replaceIncompatible=false){
+      globalThis.KeynopeFonts?.install(next.typefaces);
       if(disposed||next.version!==1||!Array.isArray(next.objects)||sceneEnvelope(next)!==retainedEnvelope)return false;
       let nextBackgroundID=backgroundObjectID;while(next.objects.some(object=>object.id===nextBackgroundID))nextBackgroundID+='-background';
       const nextBackgroundObject=backgroundObjectFor(next,nextBackgroundID),nextObjects=[...next.objects,...(nextBackgroundObject?[nextBackgroundObject]:[])];
@@ -1352,6 +1354,7 @@ globalThis.KeynopeScene = (() => {
     resetPreviewClock();
   }
   async function editText(object,commit,{canvasScene=null,inspectorHost=null,onOutsideCommit=null,renderShapeDraft=null,styleClipboard=null,styleTransfer=null,painterScope=null,styleAvailable=()=>true}={}) {
+    if(object.text?.readOnly||object.label?.readOnly)throw Error('This text uses a Preview & Print font. Choose another font to edit it.');
     const previous=document.activeElement;
     // Text uses the shared shaped surface and object transform; list markers
     // decorate editable paragraphs without becoming authored characters.
@@ -1375,6 +1378,7 @@ globalThis.KeynopeScene = (() => {
     apply.style.background='#245c91';
     const fontLabel=document.createElement('label'),font=document.createElement('select');fontLabel.textContent='Font ';font.setAttribute('aria-label','Modern font');
     for(const [value,title]of [['','Default for text type'],['sans','Go — proportional'],['mono','Go Mono — monospaced'],['c64','Keynope C64']]){const option=document.createElement('option');option.value=value;option.textContent=title;font.append(option);}
+    globalThis.KeynopeFonts?.enhance(font);
     Object.assign(font.style,{font:'inherit',padding:'6px',marginBottom:'12px'});font.value=object.text.fontId||'';fontLabel.append(font);
     const spacingLabel=document.createElement('label'),spacing=document.createElement('input');spacingLabel.textContent='Line spacing ';spacing.type='number';spacing.min='.5';spacing.max='4';spacing.step='.05';spacing.value=object.text.lineHeight||1.25;spacing.setAttribute('aria-label','Line spacing');spacing.title='Multiple of font size; default 1.25';Object.assign(spacing.style,{width:'80px',font:'inherit',padding:'6px'});spacingLabel.append(spacing);
     const sizeLabel=document.createElement('label'),size=document.createElement('input');sizeLabel.textContent='Font size ';size.type='number';size.min='1';size.max='1024';size.step='any';size.required=true;size.value=object.text.size;size.setAttribute('aria-label','Font size');size.title='Scene pixels; changes font size, not its text box';Object.assign(size.style,{width:'90px',font:'inherit',padding:'6px'});sizeLabel.append(size);
@@ -1552,7 +1556,7 @@ globalThis.KeynopeScene = (() => {
     for(const [key,label]of [['bold','Bold selection'],['italic','Italic selection'],['underline','Underline selection']]){const button=document.createElement('button');button.type='button';button.textContent=key==='bold'?'B':key==='italic'?'I':'U';button.setAttribute('aria-label',label);Object.assign(button.style,{font:'inherit',fontWeight:key==='bold'?'700':'400',fontStyle:key==='italic'?'italic':'normal',padding:'6px 12px'});button.onmousedown=e=>e.preventDefault();button.onclick=()=>toggleRunStyle(key);button.setAttribute('aria-pressed','false');emphasisButtons.set(key,button);emphasisGroup.append(button);formatButtons.push(button);}
     const colour=document.createElement('input');colour.type='color';colour.value=/^#[0-9a-f]{6}$/i.test(object.paint.color)?object.paint.color:'#ffffff';colour.setAttribute('aria-label','Selection colour');colour.addEventListener('pointerdown',rememberSelection);typography.append(colour);formatButtons.push(colour);
     for(const [label,value]of [['Apply colour',()=>colour.value],['Inherit colour',()=>null]]){const button=document.createElement('button');button.type='button';button.textContent=label;Object.assign(button.style,{font:'inherit',padding:'6px 10px'});button.onmousedown=event=>{rememberSelection();event.preventDefault();};button.onclick=()=>applyRunStyle({color:value()});typography.append(button);formatButtons.push(button);}
-    font.onchange=()=>{const id=font.value;editor.setFont(id,id==='c64'?'KeynopeC64, monospace':id==='mono'||(!id&&object.text.role==='code')?'KeynopeModernMono, monospace':'KeynopeModern, sans-serif');font.value=editor.value().fontId;};
+    font.onchange=()=>{const id=font.value;editor.setFont(id,globalThis.KeynopeFonts?.family(id|| (object.text.role==='code'?'mono':'sans'))||(id==='c64'?'KeynopeC64, monospace':id==='mono'||(!id&&object.text.role==='code')?'KeynopeModernMono, monospace':'KeynopeModern, sans-serif'));font.value=editor.value().fontId;};
     spacing.onchange=()=>{if(spacing.value==='')spacing.value='1.25';if(!spacing.checkValidity()){spacing.reportValidity();return;}editor.setLineHeight(Number(spacing.value));spacing.value=editor.value().lineHeight;};
     size.onchange=()=>{if(!size.checkValidity()){size.reportValidity();return;}editor.setSize(Number(size.value));};
     width.onchange=()=>{if(!width.checkValidity()){width.reportValidity();return;}editor.setWidthScale(Number(width.value)*widthBaseline/100);};

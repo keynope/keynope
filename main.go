@@ -92,6 +92,7 @@ func cloneSlideBackgroundMedia(value *slideBackgroundMedia) *slideBackgroundMedi
 type Slide struct {
 	// Derived physical render context; never authored or serialized.
 	canvasWidth, canvasHeight float64
+	typefaces                 map[string]DeckTypeface  // Immutable render-only font context.
 	notesOwnerID              string                   // Runtime identity for legacy slides without an authored ID; never serialized.
 	previewGeometry           *sceneAttachmentGeometry // Request-owned projection sidecar; never authored or serialized.
 	ID                        string                   `json:"id,omitempty"`
@@ -1115,6 +1116,10 @@ func parseDeckDataWithAssetPublication(path string, data []byte, publishAssets b
 	if err != nil {
 		return Deck{}, err
 	}
+	typefaces, text, err := decodeTypefaces(text)
+	if err != nil {
+		return Deck{}, err
+	}
 	hideActivityQR := false
 	qrSetting, remainingQR, err := activityQRMetadata.read(text)
 	if err != nil {
@@ -1177,6 +1182,8 @@ func parseDeckDataWithAssetPublication(path string, data []byte, publishAssets b
 	}
 	deck := Deck{Objects: objects, Appearance: appearance, Diagnostics: diagnostics, Slides: slides, Masters: masters, Assets: assets, Tabs: tabs, HideActivityQR: hideActivityQR, Extra: documentExtra}
 	deck.Theme = theme
+	deck.Typefaces = typefaces
+	normalizeTypefaceReferences(&deck)
 	deck.PageSize = pageSize
 	if deckUsesRetiredTextMetadata(deck) && !hadRetiredFonts {
 		deck.Diagnostics = append(deck.Diagnostics, documentDiagnostic{Code: "retired-text-data", Message: "Converted retired bitmap text settings to supported TrueType text; obsolete settings will be removed when saved."})
@@ -1234,6 +1241,7 @@ func serializeDeckWithCommentLimits(path string, deck Deck, commentLimits docume
 		return nil, err
 	}
 	deck = cloneDeck(deck)
+	normalizeTypefaceReferences(&deck)
 	syncSlideTabs(&deck)
 	pruneUnusedDeckAssets(&deck)
 	pruneUnusedDeckObjects(&deck)
@@ -1275,6 +1283,11 @@ func serializeDeckWithCommentLimits(path string, deck Deck, commentLimits docume
 		out.WriteString(metadata + "\n\n")
 	}
 	if metadata, err := encodeDeckTheme(deck.Theme); err != nil {
+		return nil, err
+	} else if metadata != "" {
+		out.WriteString(metadata + "\n\n")
+	}
+	if metadata, err := encodeTypefaces(deck.Typefaces); err != nil {
 		return nil, err
 	} else if metadata != "" {
 		out.WriteString(metadata + "\n\n")
@@ -1849,6 +1862,8 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 		mux.HandleFunc("/api/editor/paste-clipboard", activeNativeEditor.handlePasteObjectClipboard)
 		mux.HandleFunc("/api/editor/scene", activeNativeEditor.handleScene)
 		mux.HandleFunc("/api/editor/scene-fonts", activeNativeEditor.handleSceneFonts)
+		mux.HandleFunc("/api/editor/typeface", activeNativeEditor.handleTypeface)
+		mux.HandleFunc("/api/editor/font-export", activeNativeEditor.handleFontExport)
 		mux.HandleFunc("/api/editor/action", activeNativeEditor.handleAction)
 		mux.HandleFunc("/api/editor/preview", activeNativeEditor.handlePreview)
 		mux.HandleFunc("/api/editor/connector-preview", activeNativeEditor.handleConnectorPreview)
@@ -3820,7 +3835,7 @@ func exportHTMLSuffix() string {
 	return `<script>
 const keynopeIntroductionAssets = ` + introductionAssetsJSON + `;
 ` + activityGamesJS + activityDesignJS + "\nconst keynopeTTFFontData = '" + strings.TrimSpace(trueTypeFontBase64) + "';\n" + trueTypeJS + `
-` + participantTransferJS + workspaceJS + conversionReportJS + shapedTextJS + textStyleToolsJS + sceneJS + templatesJS + tablesJS + chartsJS + buildsJS + presentationToolsJS + `
+` + fontCatalogJS + participantTransferJS + workspaceJS + conversionReportJS + shapedTextJS + textStyleToolsJS + sceneJS + templatesJS + tablesJS + chartsJS + buildsJS + presentationToolsJS + `
 const keynopeShapeCatalog = ` + shapeCatalogJSON() + `;
 const deck = JSON.parse(document.getElementById('keynope-data').textContent);
 let pageIndex = Math.max(0, deck.pages.findIndex(page => !page.tabOnly));
@@ -8955,7 +8970,7 @@ if (keynopeAppSurface) {
     const performanceStarted=window.KEYNOPE_PERFORMANCE&&!action.skipOuterPerformance?performance.now():0;
     const documentEpoch = editorDocumentEpoch;
     const selectionOnly = ['select-element','select-elements'].includes(action.action);
-    if (!['select-element','select-elements','enter-group','exit-group','update-slide-notes','confirm-save','start-timer','stop-timer'].includes(action.action)) {
+    if (!['select-element','select-elements','enter-group','exit-group','update-slide-notes','confirm-save','start-timer','stop-timer','register-typeface'].includes(action.action)) {
       editorMutationPreviewController?.abort();editorMutationPreviewController=null;
       editorMutationPreviewSequence++;
     }
@@ -8987,6 +9002,7 @@ if (keynopeAppSurface) {
     // A poll may already have observed a later command. Preserve that state,
     // but still finish this command's timer/dirty/workspace bookkeeping.
     if(nextState.version>=editorStateVersion)editorState = nextState;
+    if(action.action==='register-typeface'){KeynopeFonts.setDeck(editorState.typefaces);return responseState.registeredTypefaceId;}
     keynopeEditorMasterMode = !!editorState.masterMode;
     editorStateVersion = editorState.version;
     publishEditorDiagnostics();
@@ -9973,6 +9989,16 @@ if (keynopeAppSurface) {
     actions.append(reset,remove,edit,cancel,open);dialog.append(title,prompt,actions);document.body.append(dialog);
     dialog.addEventListener('keydown',event=>event.stopPropagation());dialog.addEventListener('close',()=>{dialog.remove();if(launcher?.isConnected&&!document.querySelector('dialog[open],[aria-modal="true"],.keynope-engagement-overlay'))launcher.focus({preventScroll:true});});
     dialog.showModal();open.focus();
+  };
+  window.keynopeFontOwner=()=>JSON.stringify([editorState?.notesSessionId,editorState?.current,!!editorState?.masterMode,editorState?.editingGroup,editorState?.selected,editorState?.selection]);
+  window.keynopeReplaceTypefaces=(replacements,context)=>editorAction({action:'replace-typefaces',notesSessionId:context.owner,sceneRevision:context.version,typefaceReplacements:replacements});
+  window.keynopeImportTypeface=async(value,owner)=>{
+    if(owner&&owner!==window.keynopeFontOwner())throw Error('The selection changed. Reopen the font picker.');
+    const id=await editorAction({action:'register-typeface',typefaceData:value});
+    if(!id)throw Error('The font could not be registered.');
+    const response=await fetch('/api/editor/typeface?id='+id);if(!response.ok)throw Error('The font could not be loaded.');
+    await KeynopeFonts.install({[id]:await response.json()});
+    return id;
   };
   const topbar = document.createElement('div');
   topbar.className = 'keynope-editor-topbar';
@@ -11088,6 +11114,7 @@ if (keynopeAppSurface) {
       const response=await fetch('/api/editor/scene?slide='+requestedSlide);if(!editRequestCurrent())return;if(!response.ok)throw new Error(await response.text());
       const scene=await response.json();if(!editRequestCurrent())return;
       const object=scene.objects.find(o=>o.id===original.id);
+      if(object?.text?.readOnly||object?.label?.readOnly){showEngagementToast('This text uses a Preview & Print font. Choose another font to edit it.');return;}
       if(object?.editable&&object.kind==='image'&&object.media&&canvasSelectionCommandAllows('image.crop',original.id)){KeynopeScene.editImage(object,(crop,modernMask)=>editorAction({action:'set-scene-crop',performanceKind:'crop',sceneMaster:!!scene.master,slide:scene.slideIndex,sceneRevision:scene.revision,objectId:object.id,crop,modernMask}),{renderDraft:async(crop,modernMask,signal)=>{const response=await fetch('/api/editor/media-draft',{method:'POST',headers:{'Content-Type':'application/json'},signal,body:JSON.stringify({sceneMaster:!!scene.master,slide:scene.slideIndex,sceneRevision:scene.revision,objectId:object.id,crop,modernMask})});if(!response.ok)throw new Error(await response.text());return response.json();}});return;}
       if((object?.kind==='shape'?(object.labelStyle||object.style):object?.style)!=='retro'||(object?.kind==='text'&&object.text&&!object.retroText&&!object.retroLines)||(object?.kind==='shape'&&object.label&&!object.retroLabel)){
         if(object?.editable){await KeynopeScene.ensureFonts();if(!editRequestCurrent())return;await KeynopeScene.editText(object,(runs,modernFont,modernLineHeight,modernSize,modernParagraphBefore,modernParagraphAfter,modernWidth,shapeTextBounds)=>{
@@ -11631,6 +11658,7 @@ if (keynopeAppSurface) {
     sizeInput.title='Clear to restore inherited shape text size.';sizeInput.addEventListener('keydown',event=>event.stopPropagation());sizeInput.onchange=()=>{if(sizeInput.checkValidity())labelTypography({textSize:sizeInput.value===''?'':Number(sizeInput.value)});};sizeField.append(sizeInput);content.append(sizeField);
     const font=document.createElement('select');font.setAttribute('aria-label','Shape label font family');
     for(const [value,name] of [['theme','Use theme font'],['c64','Keynope C64'],['sans','Go — proportional'],['mono','Go Mono — monospaced']])font.add(new Option(name,value));
+    KeynopeFonts.enhance(font);
     font.value=q.get('modern-font')||'c64';font.addEventListener('keydown',event=>event.stopPropagation());font.onchange=()=>labelTypography({modernFont:font.value});content.append(font);
     const widthField=document.createElement('label');widthField.className='keynope-ttf-width-control';widthField.append('Shape text width');
     const widthInput=document.createElement('input');widthInput.type='number';widthInput.className='keynope-ttf-width';widthInput.min=1;widthInput.max=200;widthInput.step=1;widthInput.value=modernLabel?canvasAuthoredTextMetric(label,'modern-width',Number((modernLabel.widthScale*100).toFixed(6))):KeynopeTrueType.widthPercent(label);widthInput.setAttribute('aria-label','Shape text width');
@@ -13742,7 +13770,7 @@ if (keynopeAppSurface) {
     const sceneObjects=(deck.pages?.[pageIndex]?.scene?.objects||[]).filter(object=>selectedIDs.has(object.id)).map(object=>({
       id:object.id,kind:object.kind,bounds:object.bounds,rotation:object.rotation||0,
       shape:object.shape,shapeAdjustments:object.shapeGeometry?.handles?.map(handle=>({key:handle.key,value:handle.value})),
-      text:!!object.text,retroText:!!object.retroText,retroLines:!!object.retroLines
+      text:!!object.text,readOnlyText:!!(object.text?.readOnly||object.label?.readOnly),retroText:!!object.retroText,retroLines:!!object.retroLines
     }));
     const panelSignature=JSON.stringify({
       context:panelContext,contextual,inline:!!activeInlineEditor,suppress:!!suppressSelectionTopbar,
@@ -13834,6 +13862,8 @@ if (keynopeAppSurface) {
         const edit = canvasTool('✎', '', () => beginInlineEdit(textIndex));
         edit.title = 'Edit text';
         edit.setAttribute('aria-label', 'Edit text');
+        const projected=deck.pages?.[pageIndex]?.scene?.objects?.find(o=>o.id===textElement.id);
+        if(projected?.text?.readOnly||projected?.label?.readOnly){edit.disabled=true;edit.title='Preview & Print font — choose another font to edit this text';const notice=document.createElement('p');notice.textContent='Read-only text · Preview & Print font. Choose another font to edit.';notice.setAttribute('role','status');content.append(notice);}
         content.appendChild(edit);
       }
       appendCanvasTextKindTools(content, textIndex, textElement);
@@ -13918,6 +13948,7 @@ if (keynopeAppSurface) {
       if(modernItems.length){
         const fontLabel=document.createElement('label'),font=document.createElement('select');fontLabel.className='keynope-ttf-width-control';fontLabel.append('Font'+(selectedElements.length>1?' · '+modernItems.length+' of '+selectedElements.length+' objects':''),font);font.setAttribute('aria-label','Font family');
         for(const [value,label]of [['mixed','Mixed'],['theme','Use theme font'],['c64','Keynope C64'],['sans','Go — proportional'],['mono','Go Mono — monospaced']])font.add(new Option(label,value));font.options[0].disabled=true;
+        KeynopeFonts.enhance(font);
         const values=modernItems.map(e=>new URLSearchParams(e.query||'').get('modern-font')||'');font.value=values.every(v=>v===values[0])?values[0]:'mixed';
         const fontState=canvasSelectionProperty('text.font');
         if(fontState){font.value=fontState.state==='mixed'?'mixed':(fontState.fontBinding?fontState.fontBinding==='theme':fontState.provenance==='inherited')?'theme':fontState.value;}
@@ -15127,6 +15158,7 @@ if (keynopeAppSurface) {
   window.keynopeScheduleThumbnailRefresh=scheduleSlideThumbnailRefresh;
   let slideNavigatorSignature='';
   function renderEditorPanels() {
+    KeynopeFonts.setDeck(editorState?.typefaces);
     refreshWordPainterNotice();
     const hideQR = !!editorState?.hideActivityQR;
     if(window.keynopeHideActivityQR!==hideQR){
@@ -16977,7 +17009,7 @@ func addPlacementValue(values url.Values, key, value string) {
 			values.Set(key, value)
 		}
 	case "modern-font":
-		if value == "sans" || value == "mono" || value == "c64" || value == "theme" {
+		if validTextFont(value) || value == "theme" {
 			values.Set(key, value)
 		}
 	case "element-style":

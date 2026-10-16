@@ -25,7 +25,7 @@ Choose widescreen, standard, portrait, ultrawide or a custom page size. Your sli
 
 ### Text
 
-Choose the bundled Keynope C64, Go or Go Mono font. Add headings, body text, bullet lists and code blocks, with independent font size and width controls.
+Choose the bundled Keynope C64, Go or Go Mono font, browse installed fonts on your Mac, or load a TTF/OTF file from disk. Fonts are embedded when their permissions allow it. Restricted fonts are saved as installed-font references, with a warning on save or export and a default-font fallback on other devices. Text using an embedded Preview & Print font is read-only; other content stays editable, and you can choose another font to unlock that text. Add headings, body text, bullet lists and code blocks, with independent font size and width controls.
 
 Dragging a text box changes its available space and wrapping, not its font size. Align or justify text inside the box, and apply colour, gradients, outlines, shadows, rotation and opacity.
 

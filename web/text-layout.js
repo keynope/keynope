@@ -23,9 +23,10 @@ globalThis.KeynopeTextLayout = (() => {
   const finite = (value, fallback, min, max) => Number.isFinite(value) ? Math.max(min,Math.min(max,value)) : fallback;
   const colorRoles=['background','surface','text','heading','muted','line',...Array.from({length:6},(_,i)=>'accent-'+(i+1))];
   const fontRoles=['heading','body','mono'],fontIDs=['c64','mono','sans'];
+  const validFont=id=>fontIDs.includes(id)||/^font-[a-f0-9]{64}$/.test(id||'');
   const headingMetrics=new Map();let metricContext;
   const runFontID=(model,run)=>run.fontRole?model.fontRoles?.[run.fontRole]||run.fontId:run.fontId;
-  const runFamily=(model,run)=>{const id=runFontID(model,run);return id?(id==='c64'?'KeynopeC64, monospace':id==='mono'?'KeynopeModernMono, monospace':'KeynopeModern, sans-serif'):model.family;};
+  const runFamily=(model,run)=>{const id=runFontID(model,run);return id?(/^font-[a-f0-9]{64}$/.test(id)?'KeynopeFont_'+id.slice(5)+', sans-serif':id==='c64'?'KeynopeC64, monospace':id==='mono'?'KeynopeModernMono, monospace':'KeynopeModern, sans-serif'):model.family;};
   function normalize(input) {
     if (!input || !Array.isArray(input.runs)) throw new Error('Text requires an array of styled runs');
     if (input.runs.length > 10000) throw new Error('Too many text runs');
@@ -33,17 +34,17 @@ globalThis.KeynopeTextLayout = (() => {
       if (typeof run.text !== 'string') throw new Error('Text run content must be a string');
       if(run.colorToken&&(!colorRoles.includes(run.colorToken)||!/^#[0-9a-f]{6}$/i.test(run.color||'')))throw new Error('Invalid word colour role or RGB fallback');
       if(run.bold&&run.boldOff)throw new Error('Conflicting word bold overrides');
-      if(run.fontRole&&(!fontRoles.includes(run.fontRole)||!fontIDs.includes(run.fontId)))throw new Error('Invalid word font role or fallback');
+      if(run.fontRole&&(!fontRoles.includes(run.fontRole)||!validFont(run.fontId)))throw new Error('Invalid word font role or fallback');
       return {text:run.text, bold:!!run.bold, italic:!!run.italic, underline:!!run.underline,
         ...(run.boldOff?{boldOff:true}:{}),
         color:/^#[0-9a-f]{6}$/i.test(run.color||'') ? run.color : null,
         ...(run.colorToken?{colorToken:run.colorToken}:{}),
-        ...(['c64','mono','sans'].includes(run.fontId)?{fontId:run.fontId}:{}),
+        ...(validFont(run.fontId)?{fontId:run.fontId}:{}),
         ...(run.fontRole?{fontRole:run.fontRole}:{}),
         ...(Number.isFinite(run.fontSize)&&run.fontSize>0&&run.fontSize<=1024?{fontSize:run.fontSize}:{})};
     });
     if (runs.reduce((n,run)=>n+run.text.length,0)>100000) throw new Error('Text exceeds layout limit');
-    return {runs, ...(input.fontRoles?{fontRoles:Object.fromEntries(Object.entries(input.fontRoles).filter(([role,id])=>fontRoles.includes(role)&&fontIDs.includes(id)))}:{}), ...(input.colorTokens?{colorTokens:Object.fromEntries(Object.entries(input.colorTokens).filter(([key,value])=>colorRoles.includes(key)&&/^#[0-9a-f]{6}$/i.test(value)))}:{}), emojiFonts:input.emojiFonts&&typeof input.emojiFonts==='object'?input.emojiFonts:{}, bullet:!!input.bullet, width:finite(input.width,640,1,20000), size:finite(input.size,32,1,1024),
+    return {runs, ...(input.fontRoles?{fontRoles:Object.fromEntries(Object.entries(input.fontRoles).filter(([role,id])=>fontRoles.includes(role)&&validFont(id)))}:{}), ...(input.colorTokens?{colorTokens:Object.fromEntries(Object.entries(input.colorTokens).filter(([key,value])=>colorRoles.includes(key)&&/^#[0-9a-f]{6}$/i.test(value)))}:{}), emojiFonts:input.emojiFonts&&typeof input.emojiFonts==='object'?input.emojiFonts:{}, bullet:!!input.bullet, width:finite(input.width,640,1,20000), size:finite(input.size,32,1,1024),
       widthScale:finite(input.widthScale,1,.004167,2),
       emojiWidthScale:finite(input.emojiWidthScale,1,.01,240),
       emojiTint:/^#[0-9a-f]{6}$/i.test(input.emojiTint||'')?input.emojiTint:'',
@@ -387,6 +388,7 @@ globalThis.KeynopeTextLayout = (() => {
       root.style.top=-trim+'px';
     }
     async function ready() {
+      await globalThis.KeynopeFonts?.readyFor(model);
       // Font loading may be asynchronous. A stale readiness callback must not
       // commit measurements for a different document revision.
       const requested=revision;

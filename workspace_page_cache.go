@@ -90,6 +90,7 @@ func (c *workspacePageCache) renderOwnedCompared(deck Deck, master bool, current
 		!reflect.DeepEqual(c.previous.PageSize, deck.PageSize) ||
 		c.previous.HideActivityQR != deck.HideActivityQR ||
 		!reflect.DeepEqual(c.previous.Appearance, deck.Appearance) ||
+		!reflect.DeepEqual(c.previous.Typefaces, deck.Typefaces) ||
 		!sceneObjectHeadersEqual(c.previous.Objects, deck.Objects) ||
 		unknownMaster || !reflect.DeepEqual(c.previous.Extra, deck.Extra) ||
 		!reflect.DeepEqual(c.previous.Tabs, deck.Tabs)

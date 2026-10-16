@@ -99,12 +99,16 @@ func shapeLabel(e Element) (Element, bool) {
 }
 
 func shapeLabelSize(label Element, cols, rows int, canvas ...sceneRect) (int, int) {
+	return shapeLabelSizeWithFonts(label, cols, rows, nil, canvas...)
+}
+
+func shapeLabelSizeWithFonts(label Element, cols, rows int, fonts map[string]DeckTypeface, canvas ...sceneRect) (int, int) {
 	canvasWidth, canvasHeight := pptxCanvasDimensions(canvas)
 	q, _ := url.ParseQuery(label.Query)
 	// Use the same semantic runs and physical font advances as ordinary text.
 	// Stripping markup and counting base-font characters misses inline sizes,
 	// mixed fonts, tab stops, trailing lines and paragraph spacing.
-	text := (Deck{Appearance: &DeckAppearance{Version: 3}}).modernSceneTextFromValues(label, q)
+	text := (Deck{Appearance: &DeckAppearance{Version: 3}, Typefaces: fonts}).modernSceneTextFromValues(label, q)
 	physicalWidth, physicalHeight := sceneTextNaturalSize(text)
 	size := text.Size
 	w := int(math.Ceil(physicalWidth * float64(cols) / canvasWidth))
@@ -185,6 +189,10 @@ func fitShapeLabel(e *Element, cols, rows int, canvas ...sceneRect) {
 }
 
 func fitShapeLabelUncached(e *Element, cols, rows int, canvas ...sceneRect) {
+	fitShapeLabelWithFontsUncached(e, cols, rows, nil, canvas...)
+}
+
+func fitShapeLabelWithFontsUncached(e *Element, cols, rows int, fonts map[string]DeckTypeface, canvas ...sceneRect) {
 	if cols <= 0 || rows <= 0 {
 		return
 	}
@@ -195,7 +203,7 @@ func fitShapeLabelUncached(e *Element, cols, rows int, canvas ...sceneRect) {
 	q, _ := url.ParseQuery(e.Query)
 	w, h := shapeHalfCells(q, "width", 12), shapeHalfCells(q, "height", 6)
 	canvasWidth, canvasHeight := pptxCanvasDimensions(canvas)
-	tw, th := shapeLabelSize(label, cols, rows, canvas...)
+	tw, th := shapeLabelSizeWithFonts(label, cols, rows, fonts, canvas...)
 	nw, nh := w, h
 	if name := shapeName(*e); name == "square" || name == "circle" || name == "triangle" || name == "diamond" {
 		if shapeLabelFits(name, w, h, tw*2, th*2) {
@@ -272,12 +280,16 @@ func fitShapeLabelUncached(e *Element, cols, rows int, canvas ...sceneRect) {
 }
 
 func fitSlideShapeLabels(slide *Slide, cols, rows int, canvas ...sceneRect) {
+	fitSlideShapeLabelsWithFonts(slide, cols, rows, slide.typefaces, canvas...)
+}
+
+func fitSlideShapeLabelsWithFonts(slide *Slide, cols, rows int, fonts map[string]DeckTypeface, canvas ...sceneRect) {
 	physical := slide.physicalCanvas()
 	if len(canvas) > 0 {
 		physical = canvas[0]
 	}
 	for i := range slide.Elements {
-		fitShapeLabel(&slide.Elements[i], cols, rows, physical)
+		sharedShapeLabelFits.fitWithFonts(&slide.Elements[i], cols, rows, fonts, physical)
 	}
 }
 

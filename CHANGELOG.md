@@ -4,6 +4,15 @@ All notable changes to `keynope` are documented in this file.
 
 This project follows semantic versioning.
 
+## 1.8.5
+
+Added:
+
+- Browse installed Mac fonts with search, live previews and direct selection in the font dropdown, or load TrueType and OpenType fonts from disk.
+- Custom fonts across text, rich-text selections, shape labels, tables, charts and deck themes.
+- Portable font embedding in Markdown decks, browser presentations and supported exports.
+- Font-permission-aware saving and exporting, with replacement options and installed-font fallbacks for restricted fonts. Embedded Preview & Print fonts make only the affected text read-only; the rest of the deck stays editable.
+
 ## 1.8.4
 
 Added:

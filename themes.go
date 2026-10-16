@@ -93,6 +93,7 @@ func (d Deck) sceneTextForStyleFromValues(element Element, style string, q url.V
 		return d.modernSceneTextFromValues(element, q)
 	}
 	text := sceneTextFromValues(element, q)
+	text.TypefaceMetrics = textTypefaceResources(text, d.Typefaces)
 	d.resolveWordColors(text)
 	text.FontID, text.Family = "c64", "KeynopeC64, monospace"
 	text.Size = float64(trueTypeSizeWithValues(element, q))
@@ -120,6 +121,7 @@ func (d Deck) modernSceneTextFromValues(element Element, q url.Values) *sceneTex
 	}
 	text := sceneTextFromValues(element, q)
 	d.resolveWordColors(text)
+	d.resolveWordFonts(text)
 	// An explicit Modern fitting adjustment is independent of Retro typography.
 	defer func() {
 		if size, err := strconv.ParseFloat(q.Get("modern-size"), 64); err == nil && size >= 1 && size <= 1024 {

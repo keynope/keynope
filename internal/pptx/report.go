@@ -61,7 +61,7 @@ func warningFeature(code string) string {
 // New/foreign codes remain honestly unclassified until their mapping is added.
 func warningFallback(code string) string {
 	switch code {
-	case "text-gradient-reader-dependent", "page-size-rounded":
+	case "text-gradient-reader-dependent", "page-size-rounded", "font-not-embedded", "font-embedding-restricted":
 		return "partial-conversion"
 	case "image-animation-embedded", "retro-image-animation-embedded":
 		return "animated-gif"

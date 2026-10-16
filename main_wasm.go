@@ -100,6 +100,10 @@ func wasmEditorHandler(path string) http.HandlerFunc {
 		return activeNativeEditor.handleScene
 	case "/api/editor/scene-fonts":
 		return activeNativeEditor.handleSceneFonts
+	case "/api/editor/typeface":
+		return activeNativeEditor.handleTypeface
+	case "/api/editor/font-export":
+		return activeNativeEditor.handleFontExport
 	case "/api/editor/action":
 		return activeNativeEditor.handleAction
 	case "/api/editor/preview":
