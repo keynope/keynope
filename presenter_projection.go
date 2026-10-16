@@ -71,7 +71,12 @@ func (p *presenterCompanion) RefreshDeckSlideAsync(path string, deck Deck, index
 		return
 	}
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
 	p.seq++
+	p.invalidateNativeProjectionLocked()
 	p.refreshPath = path
 	if p.slidePending && p.pendingSlide != index {
 		p.fullPending = true
@@ -79,6 +84,9 @@ func (p *presenterCompanion) RefreshDeckSlideAsync(path string, deck Deck, index
 	}
 	seq, full := p.seq, p.fullPending
 	p.slidePending, p.pendingSlide = !full, index
+	if full || index == p.state.Slide {
+		p.freezeBuildForRefreshLocked()
+	}
 	p.mu.Unlock()
 	go func() {
 		time.Sleep(80 * time.Millisecond)
@@ -104,7 +112,9 @@ func (p *presenterCompanion) RefreshDeckSlideAsync(path string, deck Deck, index
 		p.pages[index] = pages
 		p.slidePending = false
 		p.state.DeckVersion++
+		p.recordPageChangeLocked(false, []int{index})
 		p.state.DeckSlide = index
+		p.maintainBuildCursorLocked()
 		p.state.Version++
 	}()
 }
@@ -112,8 +122,13 @@ func (p *presenterCompanion) RefreshDeckSlideAsync(path string, deck Deck, index
 func (p *presenterCompanion) beginFullRefresh(path string) int64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.closed {
+		return -1
+	}
 	p.seq++
+	p.invalidateNativeProjectionLocked()
 	p.fullPending = true
+	p.freezeBuildForRefreshLocked()
 	p.slidePending = false
 	p.refreshPath = path
 	return p.seq
@@ -122,14 +137,16 @@ func (p *presenterCompanion) beginFullRefresh(path string) int64 {
 func (p *presenterCompanion) publishFullRefresh(seq int64, html string, pages map[int][]exportPage) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if seq != p.seq {
+	if p.closed || seq != p.seq {
 		return false
 	}
 	p.html, p.pages = html, pages
 	p.fullPending = false
 	p.slidePending = false
 	p.state.DeckVersion++
+	p.recordPageChangeLocked(true, nil)
 	p.state.DeckSlide = -1
+	p.maintainBuildCursorLocked()
 	p.state.Version++
 	return true
 }

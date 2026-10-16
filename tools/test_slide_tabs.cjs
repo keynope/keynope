@@ -1,7 +1,8 @@
+const {waitForAsync}=require("./wait_for_async.cjs");
 // Build first: make web-editor. Tests the shared editor UI in Chromium/WebKit.
 const fs=require('node:fs'),path=require('node:path'),http=require('node:http'),assert=require('node:assert/strict');
 const pw=require(process.env.PLAYWRIGHT_MODULE||'playwright');
-const root=path.resolve(process.env.TEST_SITE||'terraform/site');
+const root=path.resolve(process.env.TEST_SITE||'/tmp/keynope-site');
 const server=http.createServer((req,res)=>{
  let name=new URL(req.url,'http://localhost').pathname;if(name.endsWith('/'))name+='index.html';
  const file=path.resolve(root,'.'+name);if(!file.startsWith(root+'/')||!fs.existsSync(file)){res.writeHead(404);res.end();return;}
@@ -27,7 +28,7 @@ const server=http.createServer((req,res)=>{
    const state=()=>page.evaluate(()=>fetch('/api/editor/state').then(r=>r.json()));
    for(const i of [1,3]){
     await item(i).click();await b('Tab').click();
-    await page.waitForFunction(async i=>(await fetch('/api/editor/state').then(r=>r.json())).slides[i].tabId,i);
+    await waitForAsync(page,async i=>(await fetch('/api/editor/state').then(r=>r.json())).slides[i].tabId,i);
    }
    assert.equal(await page.locator('[data-slide-section="tabs"]').count(),2);
    assert.equal(await page.locator('[data-slide-section="slides"]').count(),3);
@@ -46,14 +47,14 @@ const server=http.createServer((req,res)=>{
     },{source,target,bottom});
    };
    await drag(3,1,false);
-   await page.waitForFunction(async()=>(await fetch('/api/editor/state').then(r=>r.json())).tabs[0].page===4);
+   await waitForAsync(page,async()=>(await fetch('/api/editor/state').then(r=>r.json())).tabs[0].page===4);
    await page.waitForFunction(()=>document.querySelector('[data-slide-section="tabs"]').dataset.masterIndex==='3');
    await drag(3,1,true);
-   await page.waitForFunction(async()=>(await fetch('/api/editor/state').then(r=>r.json())).tabs[0].page===2);
+   await waitForAsync(page,async()=>(await fetch('/api/editor/state').then(r=>r.json())).tabs[0].page===2);
    await item(0).click();await b('Next').click();
-   await page.waitForFunction(async()=>(await fetch('/api/editor/state').then(r=>r.json())).current===2);
+   await waitForAsync(page,async()=>(await fetch('/api/editor/state').then(r=>r.json())).current===2);
    await b('Previous').click();
-   await page.waitForFunction(async()=>(await fetch('/api/editor/state').then(r=>r.json())).current===0);
+   await waitForAsync(page,async()=>(await fetch('/api/editor/state').then(r=>r.json())).current===0);
    // Exported presentation skips the tab slides with arrows, Home and End.
    const html=await page.evaluate(async()=>{
     const response=await fetch('/api/editor/export-document',{method:'POST',body:JSON.stringify({path:'Tabs.html'})});return (await response.json()).content;
@@ -68,10 +69,10 @@ const server=http.createServer((req,res)=>{
    await show.keyboard.press('End');assert.equal(await show.evaluate(()=>window.keynopePresentationPosition().slide),4);
    await show.close();
    await item(1).click();await b('Tab').click();
-   await page.waitForFunction(async()=>(await fetch('/api/editor/state').then(r=>r.json())).tabs.length===1);
+   await waitForAsync(page,async()=>(await fetch('/api/editor/state').then(r=>r.json())).tabs.length===1);
    assert.deepEqual((await state()).slides.map(s=>s.elements[0].text),['First','Reference','Third','Resources','Last']);
-   await b('Undo').click();await page.waitForFunction(async()=>(await fetch('/api/editor/state').then(r=>r.json())).tabs.length===2);
-   await b('Redo').click();await page.waitForFunction(async()=>(await fetch('/api/editor/state').then(r=>r.json())).tabs.length===1);
+   await b('Undo').click();await waitForAsync(page,async()=>(await fetch('/api/editor/state').then(r=>r.json())).tabs.length===2);
+   await b('Redo').click();await waitForAsync(page,async()=>(await fetch('/api/editor/state').then(r=>r.json())).tabs.length===1);
    await page.getByRole('button',{name:'Master slides',exact:true}).click();await b('Tab').waitFor({state:'hidden'});
    await page.getByRole('button',{name:'Exit master slides',exact:true}).click();
    await b('Tab').waitFor({state:'visible'});
@@ -79,11 +80,11 @@ const server=http.createServer((req,res)=>{
    // Reorder regular slides across a parked tab: the sections stay separate,
    // and its participant destination follows the same underlying slide.
    await drag(4,0,false);
-   await page.waitForFunction(async()=>(await fetch('/api/editor/state').then(r=>r.json())).slides[0].elements[0].text==='Last');
+   await waitForAsync(page,async()=>(await fetch('/api/editor/state').then(r=>r.json())).slides[0].elements[0].text==='Last');
    assert.deepEqual((await state()).slides.map(s=>s.elements[0].text),['Last','First','Reference','Third','Resources']);
    assert.equal((await state()).tabs[0].page,5);
    await drag(0,3,true);
-   await page.waitForFunction(async()=>(await fetch('/api/editor/state').then(r=>r.json())).slides[3].elements[0].text==='Last');
+   await waitForAsync(page,async()=>(await fetch('/api/editor/state').then(r=>r.json())).slides[3].elements[0].text==='Last');
    assert.equal((await state()).tabs[0].page,5);
    assert.deepEqual(errors,[]);console.log('PASS '+engine+': Tab toggle, sidebar sections, drag both directions, navigation/export skip, restore, undo/redo, master exclusion');
   }finally{await browser.close();}

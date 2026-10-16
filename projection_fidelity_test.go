@@ -94,7 +94,7 @@ func TestRepresentativeDeckProjectionFidelityAndPrivacy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(participant.Pages) != 1 || participant.Pages[0].Scene == nil || !reflect.DeepEqual(*participant.Pages[0].Scene, local) {
+	if len(participant.Pages) != 1 || participant.Pages[0].Scene == nil || !reflect.DeepEqual(publicParityScene(*participant.Pages[0].Scene), publicParityScene(local)) {
 		t.Fatal("participant projection diverged from the resolved local scene")
 	}
 

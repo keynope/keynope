@@ -1,0 +1,45 @@
+// Real shared renderer, owned background fixtures. No working-app activation.
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),http=require('node:http');
+const playwright=require(process.env.PLAYWRIGHT_MODULE||'playwright'),root=path.resolve(process.env.TEST_SITE||'/tmp/keynope-background-patch-site'),output=process.env.KEYNOPE_BACKGROUND_PATCH_EVIDENCE||'/tmp/keynope-background-patch-proof';
+const server=http.createServer((req,res)=>{let name=new URL(req.url,'http://localhost').pathname;if(name.endsWith('/'))name+='index.html';const file=path.resolve(root,'.'+name);if(!file.startsWith(root+'/')||!fs.existsSync(file)){res.writeHead(404);return res.end();}res.setHeader('Content-Type',({'.js':'text/javascript','.css':'text/css','.html':'text/html','.wasm':'application/wasm'})[path.extname(file)]||'application/octet-stream');res.end(fs.readFileSync(file));});
+(async()=>{fs.mkdirSync(output,{recursive:true});await new Promise(r=>server.listen(0,'127.0.0.1',r));const browser=await playwright.chromium.launch({headless:true,executablePath:process.env.CHROME_PATH});try{
+  const context=await browser.newContext({viewport:{width:1000,height:700},reducedMotion:'no-preference'});await context.route(/https?:\/\/(?!127\.0\.0\.1).*/,r=>r.abort());const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto('http://127.0.0.1:'+server.address().port+'/editor/');await page.locator('.keynope-web-loading').waitFor({state:'detached',timeout:90000});
+  await page.evaluate(async()=>{
+    const png=colour=>{const c=document.createElement('canvas');c.width=120;c.height=80;const x=c.getContext('2d');x.fillStyle=colour;x.fillRect(0,0,120,80);x.fillStyle='#ffff55';x.fillRect(20,20,30,25);return c.toDataURL();};
+    window.__backgroundSources=[png('#334155'),png('#166534')];window.__foregroundSources=[png('#ff0055'),png('#0055ff')];
+    const host=document.createElement('div');host.id='background-proof';Object.assign(host.style,{position:'fixed',left:0,top:0,width:'900px',height:'560px',zIndex:999999});document.body.append(host);
+    window.__backgroundScene={version:1,width:900,height:560,background:'#112233',objects:[{id:'shape',kind:'shape',shape:'circle',bounds:{x:700,y:50,width:120,height:120},paint:{color:'#ff55aa'}},{id:'animated',kind:'image',bounds:{x:80,y:80,width:300,height:240},paint:{color:'#ffffff'},media:{source:window.__foregroundSources[0],width:120,height:80,frames:window.__foregroundSources.map(source=>({source,delayMs:100}))}}]};
+    window.__backgroundView=KeynopeScene.mount(host,window.__backgroundScene);await window.__backgroundView.snapshotAt(150);window.__backgroundForeground=[...host.querySelectorAll('[data-object-id]')];window.__backgroundAnimated=host.querySelector('[data-object-id="animated"] img');
+  });
+  const records=[],mutations=[
+    ['add',false,s=>s.backgroundMedia={source:window.__backgroundSources[0],width:120,height:80,fit:'cover'}],
+    ['opacity',true,s=>s.backgroundMedia.opacity=.65],
+    ['correction',true,s=>s.backgroundMedia.colourMatrices=[[.5,0,0,0,.1,0,.8,0,0,0,0,0,.6,0,0,0,0,0,1,0]]],
+    ['mask/crop',true,s=>Object.assign(s.backgroundMedia,{mask:'rounded',crop:{left:.1,right:.15,top:.08,bottom:.12}})],
+    ['fit',true,s=>{delete s.backgroundMedia.crop;s.backgroundMedia.fit='contain';}],
+    ['paint',true,s=>s.backgroundMedia.paint={color:'#ffffff',opacity:.7,gradientStart:'#00ff55',gradientEnd:'#5555ff',gradientDirection:'horizontal',stroke:'#ffffff',strokeWidth:3}],
+    ['source',false,s=>s.backgroundMedia.source=window.__backgroundSources[1]],
+    ['animation',false,s=>{s.backgroundMedia.frames=window.__backgroundSources.map(source=>({source,delayMs:100}));}],
+    ['animated treatment',true,s=>s.backgroundMedia.sharpness=.6],
+    ['zero opacity',true,s=>{delete s.backgroundMedia.paint;s.backgroundMedia.opacity=0;}],
+    ['Retro',false,s=>s.backgroundMedia={retroLines:{cols:10,rows:5,lines:Array.from({length:5},(_,row)=>({row,parts:[{col:0,text:'█▀▄▌▐█▀▄▌▐',color:row%2?'#0055ff':'#55ffaa'}]}))}}],
+    ['Retro resample',false,s=>s.backgroundMedia.retroLines.lines[0].parts[0].color='#ff0055'],
+    ['remove',false,s=>delete s.backgroundMedia],
+    ['SVG',false,s=>s.backgroundMedia={source:'data:image/svg+xml;base64,'+btoa('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80"><rect width="120" height="80" fill="#334155"/><circle cx="60" cy="40" r="30" fill="#ffaa00"/></svg>'),width:120,height:80,fit:'cover'}],
+    ['SVG correction',true,s=>s.backgroundMedia.colourMatrices=[[.7,0,0,0,0,0,.8,0,0,0,0,0,.6,0,0,0,0,0,1,0]]]
+  ];
+  for(const [name,retained,fn]of mutations){
+    const result=await page.evaluate(async({name,retained,fn})=>{const view=window.__backgroundView,host=document.getElementById('background-proof'),previous=host.querySelector('.keynope-scene-background-media'),image=previous?.querySelector('img'),before=view.renderStats(),next=structuredClone(window.__backgroundScene);(0,eval)('('+fn+')')(next);if(!view.update(next))throw Error(name+' refused background-scoped update');await view.ready;await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      for(const node of window.__backgroundForeground)if(node!==host.querySelector('[data-object-id="'+node.dataset.objectId+'"]'))throw Error(name+' remounted foreground');if(window.__backgroundAnimated!==host.querySelector('[data-object-id="animated"] img')||window.__backgroundAnimated.src!==window.__foregroundSources[1])throw Error(name+' reset foreground playback');
+      if(retained&&(previous!==host.querySelector('.keynope-scene-background-media')||image!==host.querySelector('.keynope-scene-background-media img')))throw Error(name+' remounted compatible background');
+      const after=view.renderStats();if(after.lastChangedObjectIDs.length)throw Error(name+' invalidated foreground '+JSON.stringify(after.lastChangedObjectIDs));if(after.backgroundUpdates-before.backgroundUpdates!==1)throw Error(name+' missing background counter');if(after.backgroundReplacements-before.backgroundReplacements!==(retained?0:1))throw Error(name+' replacement counter mismatch');
+      if(name==='zero opacity'&&host.querySelector('.keynope-scene-background-media').style.opacity!=='0')throw Error('Zero opacity became opaque');
+      window.__backgroundScene=next;return {stats:after,resources:view.resourceCounts()};
+    },{name,retained,fn:String(fn)});
+    const painted=await page.locator('#background-proof').screenshot();
+    await page.evaluate(async()=>{const host=document.createElement('div');host.id='background-fresh-proof';Object.assign(host.style,{position:'fixed',left:0,top:0,width:'900px',height:'560px',zIndex:1000000});document.body.append(host);window.__backgroundFresh=KeynopeScene.mount(host,structuredClone(window.__backgroundScene));await window.__backgroundFresh.snapshotAt(150);await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));});
+    const fresh=await page.locator('#background-fresh-proof').screenshot();const parity=await page.evaluate(async({a,b})=>{const decode=async value=>{const image=new Image();image.src='data:image/png;base64,'+value;await image.decode();const c=document.createElement('canvas');c.width=image.width;c.height=image.height;const x=c.getContext('2d');x.drawImage(image,0,0);return x.getImageData(0,0,c.width,c.height).data;};const [x,y]=await Promise.all([decode(a),decode(b)]);let sum=0,large=0;for(let i=0;i<x.length;i++){const d=Math.abs(x[i]-y[i]);sum+=d;if(d>20)large++;}return {mean:sum/x.length,largeFraction:large/x.length};},{a:painted.toString('base64'),b:fresh.toString('base64')});assert(parity.mean<.2&&parity.largeFraction<.001,name+' differs from cold pixels: '+JSON.stringify(parity));records.push({name,retained,...parity,...result});if(['paint','Retro','SVG'].includes(name))fs.writeFileSync(path.join(output,name+'.png'),painted);await page.evaluate(()=>{window.__backgroundFresh.dispose();document.getElementById('background-fresh-proof').remove();});
+  }
+  const invalid=await page.evaluate(()=>{const host=document.getElementById('background-proof'),html=host.innerHTML,stats=JSON.stringify(window.__backgroundView.renderStats()),next=structuredClone(window.__backgroundScene);next.objects[0].paint.color='#ff0000';next.backgroundMedia.crop={left:.6,right:.6,top:0,bottom:0};if(window.__backgroundView.update(next)!==false||host.innerHTML!==html||JSON.stringify(window.__backgroundView.renderStats())!==stats)throw Error('Invalid background partially mutated foreground');return true;});assert.equal(invalid,true);
+  assert.deepEqual(errors,[]);fs.writeFileSync(path.join(output,'report.json'),JSON.stringify(records,null,2));console.log('PASS: background-only add/remove/source/style/animation/Retro/SVG updates retain foreground and playback, zero opacity, atomic rejection and cold pixel parity. '+output);
+}finally{await browser.close();server.close();}})().catch(e=>{console.error(e);process.exitCode=1;server.close();});

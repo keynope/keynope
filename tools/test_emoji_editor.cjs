@@ -1,8 +1,9 @@
+const {waitForAsync}=require("./wait_for_async.cjs");
 // Test the real picker/insert/edit/export flow. A URL tests the native HTTP
 // engine; otherwise serve TEST_SITE to exercise the Go/WASM editor.
 const fs=require('node:fs'),path=require('node:path'),http=require('node:http'),assert=require('node:assert/strict');
 const playwright=require(process.env.PLAYWRIGHT_MODULE||'playwright');
-const root=path.resolve(process.env.TEST_SITE||'terraform/site');
+const root=path.resolve(process.env.TEST_SITE||'/tmp/keynope-site');
 const server=http.createServer((req,res)=>{
  let name=new URL(req.url,'http://localhost').pathname;if(name.endsWith('/'))name+='index.html';
  const file=path.resolve(root,'.'+name);if(!file.startsWith(root+'/')||!fs.existsSync(file)){res.writeHead(404);res.end();return;}
@@ -32,7 +33,7 @@ const server=http.createServer((req,res)=>{
    const selected=()=>page.evaluate(async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.slides[s.current].elements[s.selected];});
    assert.equal((await selected()).text,'😍');assert.equal(new URLSearchParams((await selected()).query).get('render'),'truetype');
    await size.fill('137');await size.press('Tab');
-   await page.waitForFunction(async()=>{const s=await fetch('/api/editor/state').then(r=>r.json()),e=s.slides[s.current].elements[s.selected];return new URLSearchParams(e.query||'').get('ttf-size')==='137';});
+   await waitForAsync(page,async()=>{const s=await fetch('/api/editor/state').then(r=>r.json()),e=s.slides[s.current].elements[s.selected];return new URLSearchParams(e.query||'').get('ttf-size')==='137';});
    await syncNative();
    await page.getByRole('tab',{name:'Style',exact:true}).click();
    const tint=page.getByRole('checkbox',{name:'Enable emoji tint',exact:true});await tint.check();

@@ -123,17 +123,29 @@ func masterSlideAt(deck *Deck, selected int) *Slide {
 }
 
 func cloneMasterLayoutFresh(source MasterLayout) MasterLayout {
+	clone := cloneMasterLayoutShell(source)
+	freshPastedGroups(clone.Slide.Elements)
+	freshPastedConnectorIDs(clone.Slide.Elements)
+	refreshMasterPlaceholderSlots(&clone.Slide)
+	return clone
+}
+
+// Metadata/contents ownership without reidentification. The structured clone
+// pipeline must rewrite element IDs, endpoints and build targets exactly once.
+func cloneMasterLayoutShell(source MasterLayout) MasterLayout {
 	clone := source
 	clone.Extra = cloneJSONExtensions(source.Extra)
 	clone.ID = newStableID("layout")
 	clone.Name = source.Name + " Copy"
 	clone.Slide = cloneSlide(source.Slide)
-	for index := range clone.Slide.Elements {
-		element := &clone.Slide.Elements[index]
-		element.ID = newStableID(clone.ID + "-element")
+	return clone
+}
+
+func refreshMasterPlaceholderSlots(slide *Slide) {
+	for index := range slide.Elements {
+		element := &slide.Elements[index]
 		if element.PlaceholderRole != "" {
 			element.SlotID = element.ID
 		}
 	}
-	return clone
 }

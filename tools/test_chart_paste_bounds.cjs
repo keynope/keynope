@@ -1,0 +1,13 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const context=vm.createContext({});vm.runInContext(fs.readFileSync(path.join(__dirname,'../web/charts.js'),'utf8'),context);
+const api=context.KeynopeCharts,limit=1<<20;
+assert.throws(()=>api.parsePaste('Category\tS\n'+'😀'.repeat(limit/4)+'\t1'),/1 MiB/);
+assert.throws(()=>api.parsePaste('Category\tS\n'+'中'.repeat(Math.ceil(limit/3))+'\t1'),/1 MiB/);
+const chart={version:1,type:'column',title:'x'.repeat(limit-2),categories:['C'],series:[{name:'S',values:[1]}],options:{}};
+assert.equal(api.validate(chart).title.length,limit-2);
+assert.throws(()=>api.validate({...chart,title:chart.title+'x'}),/1 MiB/);
+assert.throws(()=>api.validate({...chart,options:{xTitle:'😀'}}),/1 MiB/);
+const data=api.parsePaste('Category\t"Quoted\tseries"\r\n"Line 1\nLine 2"\t1.5\r\n');
+assert.equal(data.categories[0],'Line 1\nLine 2');assert.equal(data.series[0].name,'Quoted\tseries');assert.equal(data.series[0].values[0],1.5);
+assert.throws(()=>api.parsePaste('Category\tS\nC\tnan'),/finite number/);
+console.log('PASS: chart UTF-8 clipboard and total-label budgets, exact boundaries, quoted/multiline TSV and finite values.');

@@ -11,8 +11,7 @@ import (
 )
 
 const engagementVersion = 1
-
-var engagementMetaRE = regexp.MustCompile(`<!--\s*keynope-engagement\s+version=1\s+base64:([A-Za-z0-9+/=]+)\s*-->`)
+const maxEngagementMetadataBytes = 1 << 20
 
 // Eight symbols from a 62-character alphabet carry about 47.6 bits of entropy. The
 // channel code is shared by trusted workshop participants.
@@ -683,6 +682,9 @@ func normalizeEngagement(definition EngagementDefinition) (EngagementDefinition,
 	if definition.Kind != "truefalse" {
 		definition.Correct = 0
 	}
+	if data, err := json.Marshal(definition); err != nil || len(data) > maxEngagementMetadataBytes {
+		return EngagementDefinition{}, fmt.Errorf("activity definition is invalid or exceeds 1 MiB")
+	}
 	return definition, nil
 }
 
@@ -770,13 +772,12 @@ func encodeEngagementMetadata(definition *EngagementDefinition) (string, error) 
 }
 
 func decodeEngagementMetadata(comment string) (*EngagementDefinition, error) {
-	match := engagementMetaRE.FindStringSubmatch(strings.TrimSpace(comment))
-	if match == nil {
-		return nil, nil
-	}
-	payload, err := base64.StdEncoding.DecodeString(match[1])
+	payload, err := engagementMetadataEnvelope.decodeComment(strings.TrimSpace(comment))
 	if err != nil {
 		return nil, fmt.Errorf("decode engagement: %w", err)
+	}
+	if strings.TrimSpace(string(payload)) == "null" {
+		return nil, fmt.Errorf("activity definition needs a JSON object")
 	}
 	var definition EngagementDefinition
 	if err := json.Unmarshal(payload, &definition); err != nil {

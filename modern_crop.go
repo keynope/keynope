@@ -52,24 +52,34 @@ func (c sceneCrop) queryValue() string {
 	return strings.Join(parts, ",")
 }
 
-// Mask the source samples before glyph classification. Sample pixels have a
-// 1:1 design-space aspect (two across/four down per terminal-style cell).
+// Legacy callers use square sample pixels. Scene frames additionally supply
+// their displayed aspect, which can differ from the 2-by-4 sampling lattice.
 func applySampledImageMask(pixels []rgba8, width, height int, mask string) {
-	if mask == "" || width <= 0 || height <= 0 {
+	applySampledImageMaskAspect(pixels, width, height, float64(width)/float64(height), mask)
+}
+
+func applySampledImageMaskAspect(pixels []rgba8, width, height int, aspect float64, mask string) {
+	if mask == "" || width <= 0 || height <= 0 || width > len(pixels)/height {
 		return
 	}
-	radius := .12 * float64(min(width, height))
+	if aspect <= 0 || math.IsNaN(aspect) || math.IsInf(aspect, 0) {
+		aspect = float64(width) / float64(height)
+	}
+	// Measure both axes in units of displayed frame height. Rounded corners
+	// use the same physical radius as the Modern renderer, not separate radii
+	// stretched by the sample grid's pixel aspect.
+	radius := .12 * math.Min(aspect, 1)
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
-			px, py := float64(x)+.5, float64(y)+.5
+			px, py := (float64(x)+.5)/float64(width)*aspect, (float64(y)+.5)/float64(height)
 			inside := true
 			switch mask {
 			case "ellipse":
-				dx, dy := px/float64(width)*2-1, py/float64(height)*2-1
+				dx, dy := px/aspect*2-1, py*2-1
 				inside = dx*dx+dy*dy <= 1
 			case "rounded":
-				dx := math.Max(radius-px, math.Max(px-(float64(width)-radius), 0))
-				dy := math.Max(radius-py, math.Max(py-(float64(height)-radius), 0))
+				dx := math.Max(radius-px, math.Max(px-(aspect-radius), 0))
+				dy := math.Max(radius-py, math.Max(py-(1-radius), 0))
 				inside = dx*dx+dy*dy <= radius*radius
 			}
 			if !inside {
@@ -80,10 +90,19 @@ func applySampledImageMask(pixels []rgba8, width, height int, mask string) {
 }
 
 func applySceneCrop(deck *Deck, action nativeEditorAction) (bool, error) {
+	if action.Slide < 0 || action.Slide >= len(deck.Slides) {
+		return false, errInvalidEditorAction
+	}
+	return applySceneCropResolved(deck, action, *deck, deck.ResolveSlide(action.Slide, false), action.Slide)
+}
+
+// Draft and master adapters supply the original resolved owner, so frame
+// capture retains theme, page size, flow context and inherited image treatment.
+func applySceneCropResolved(deck *Deck, action nativeEditorAction, frameDeck Deck, resolved Slide, index int) (bool, error) {
 	if action.ModernMask != nil && *action.ModernMask != "" && *action.ModernMask != "rounded" && *action.ModernMask != "ellipse" {
 		return false, fmt.Errorf("unsupported image mask")
 	}
-	if action.Crop == nil || !action.Crop.valid() || action.ObjectID == "" || action.Slide < 0 || action.Slide >= len(deck.Slides) {
+	if action.Crop == nil && action.ModernMask == nil || action.Crop != nil && !action.Crop.valid() || action.ObjectID == "" || action.Slide < 0 || action.Slide >= len(deck.Slides) {
 		return false, errInvalidEditorAction
 	}
 	if _, err := editableObjectIndices(deck.Slides[action.Slide], []string{action.ObjectID}); err != nil {
@@ -100,24 +119,61 @@ func applySceneCrop(deck *Deck, action nativeEditorAction) (bool, error) {
 			return false, fmt.Errorf("image source is unavailable")
 		}
 		q, _ := url.ParseQuery(e.Query)
-		old := parseModernCrop(q.Get("modern-crop"))
-		maskChanged := action.ModernMask != nil && q.Get("modern-mask") != *action.ModernMask
-		if !maskChanged && (old != nil && *old == *action.Crop || old == nil && *action.Crop == (sceneCrop{})) {
-			return false, nil
+		before := q.Encode()
+		if action.Crop != nil {
+			if *action.Crop == (sceneCrop{}) {
+				q.Del("modern-crop")
+			} else {
+				q.Set("modern-crop", action.Crop.queryValue())
+			}
 		}
-		if *action.Crop == (sceneCrop{}) {
-			q.Del("modern-crop")
-		} else {
-			q.Set("modern-crop", action.Crop.queryValue())
-		}
-		if maskChanged {
+		if action.ModernMask != nil {
 			if *action.ModernMask == "" {
 				q.Del("modern-mask")
 			} else {
 				q.Set("modern-mask", *action.ModernMask)
 			}
 		}
-		deck.Slides[action.Slide].Elements[i].Query = q.Encode()
+		// A reset means the full source/rectangular mask, not the master's
+		// crop or mask. Own only fields supplied by this command.
+		if e.MasterSlotID != "" {
+			var owned []string
+			var cleared []string
+			if action.Crop != nil {
+				owned = append(owned, "modern-crop")
+				if *action.Crop == (sceneCrop{}) {
+					cleared = append(cleared, "modern-crop")
+				}
+			}
+			if action.ModernMask != nil {
+				owned = append(owned, "modern-mask")
+				if *action.ModernMask == "" {
+					cleared = append(cleared, "modern-mask")
+				}
+			}
+			setMasterQueryClears(q, owned, cleared)
+		}
+		if q.Encode() == before {
+			return false, nil
+		}
+		candidate := cloneSlide(deck.Slides[action.Slide])
+		candidate.Elements[i].Query = q.Encode()
+		for _, effective := range resolved.Elements {
+			if action.Crop == nil || effective.ID != e.ID {
+				continue
+			}
+			old := sceneCrop{}
+			if crop := parseModernCrop(mustQuery(effective.Query).Get("modern-crop")); crop != nil {
+				old = *crop
+			}
+			if old != *action.Crop {
+				if err := freezeNaturalImageFrames(frameDeck, resolved, &candidate, index, []string{e.ID}); err != nil {
+					return false, err
+				}
+			}
+			break
+		}
+		deck.Slides[action.Slide] = candidate
 		return true, nil
 	}
 	return false, fmt.Errorf("the image no longer exists")

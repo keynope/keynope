@@ -1,5 +1,6 @@
+const {waitForAsync}=require("./wait_for_async.cjs");
 const fs=require('node:fs'),path=require('node:path'),http=require('node:http'),assert=require('node:assert/strict');
-const pw=require(process.env.PLAYWRIGHT_MODULE||'playwright'),root=path.resolve('terraform/site');
+const pw=require(process.env.PLAYWRIGHT_MODULE||'playwright'),root=path.resolve(process.env.TEST_SITE||'/tmp/keynope-site');
 const server=http.createServer((req,res)=>{let name=new URL(req.url,'http://localhost').pathname;if(name.endsWith('/'))name+='index.html';const file=path.resolve(root,'.'+name);if(!file.startsWith(root+'/')||!fs.existsSync(file)){res.writeHead(404);res.end();return;}res.setHeader('Content-Type',({'.js':'text/javascript','.css':'text/css','.html':'text/html','.wasm':'application/wasm'})[path.extname(file)]||'application/octet-stream');fs.createReadStream(file).pipe(res);});
 (async()=>{
  await new Promise(r=>server.listen(0,'127.0.0.1',r));
@@ -18,7 +19,7 @@ const server=http.createServer((req,res)=>{let name=new URL(req.url,'http://loca
    assert.equal(await page.getByLabel('Arrow width',{exact:true}).inputValue(),'6');assert.equal(await page.getByLabel('Arrowheads',{exact:true}).inputValue(),'none');
    await page.screenshot({path:'/tmp/keynope-connectors-ports-'+engine+'.png'});
    await port(shapes[0].id,'right').click();await port(shapes[1].id,'left').click();
-   await page.waitForFunction(async()=> (await fetch('/api/editor/state').then(r=>r.json())).slides[0].elements.some(e=>e.kind==='connector'));
+   await waitForAsync(page,async()=> (await fetch('/api/editor/state').then(r=>r.json())).slides[0].elements.some(e=>e.kind==='connector'));
    await page.locator('.keynope-connector-hit').waitFor();
    assert.equal((await state()).slides[0].elements.filter(e=>e.kind==='connector').length,1);
    await page.getByRole('button',{name:'Undo',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('.keynope-connector-hit'));
@@ -45,11 +46,11 @@ const server=http.createServer((req,res)=>{let name=new URL(req.url,'http://loca
    await page.locator('.keynope-connector-segment').first().waitFor();
    const handles=page.locator('.keynope-connector-segment'),n=await handles.count(),handle=handles.nth(Math.min(1,n-1)),hb=await handle.boundingBox(),horizontal=(await handle.getAttribute('aria-label')).includes('horizontal');
    await page.mouse.move(hb.x+hb.width/2,hb.y+hb.height/2);await page.mouse.down();await page.mouse.move(hb.x+hb.width/2+(horizontal?0:35),hb.y+hb.height/2+(horizontal?35:0),{steps:8});await page.mouse.up();
-   await page.waitForFunction(async()=>new URLSearchParams((await fetch('/api/editor/state').then(r=>r.json())).slides[0].elements.find(e=>e.kind==='connector').query).has('connector-route'));
+   await waitForAsync(page,async()=>new URLSearchParams((await fetch('/api/editor/state').then(r=>r.json())).slides[0].elements.find(e=>e.kind==='connector').query).has('connector-route'));
    await page.screenshot({path:'/tmp/keynope-elbow-'+engine+'.png'});
    await page.getByRole('button',{name:'Line color',exact:true}).click();
    await page.getByLabel('HTML color',{exact:true}).fill('#ff0055');await page.getByRole('button',{name:'Apply',exact:true}).click();
-   await page.waitForFunction(async()=>{const e=(await fetch('/api/editor/state').then(r=>r.json())).slides[0].elements.find(e=>e.kind==='connector');return new URLSearchParams(e.query).get('fg')==='#ff0055';});
+   await waitForAsync(page,async()=>{const e=(await fetch('/api/editor/state').then(r=>r.json())).slides[0].elements.find(e=>e.kind==='connector');return new URLSearchParams(e.query).get('fg')==='#ff0055';});
    assert.equal(await page.locator('.keynope-connector-selection').count(),0,'yellow line overlay must not exist');
    await page.locator('.keynope-connector-hit').dispatchEvent('contextmenu');assert.equal(await page.locator('.keynope-slide-context.open').count(),0);
    await page.keyboard.press('Backspace');await page.waitForFunction(()=>!document.querySelector('.keynope-connector-hit'));

@@ -1,0 +1,664 @@
+{
+  "version": 1,
+  "sources": "5011d4d720da79e8215984a42572793df77e596ad8aff23368d116e39919e9a4",
+  "templates": [
+    {
+      "id": "blank",
+      "name": "Blank",
+      "description": "An empty canvas with clean typography.",
+      "scene": {
+        "defaultStyle": "modern",
+        "version": 1,
+        "width": 1920,
+        "height": 1080,
+        "background": "#ffffff",
+        "objects": [],
+        "diagnostics": []
+      }
+    },
+    {
+      "id": "clean-light",
+      "name": "Clean light",
+      "description": "Clear ideas on a crisp, light canvas.",
+      "scene": {
+        "defaultStyle": "modern",
+        "version": 1,
+        "width": 1920,
+        "height": 1080,
+        "background": "#ffffff",
+        "objects": [
+          {
+            "textCapabilities": [
+              "size",
+              "width",
+              "emphasis",
+              "alignment",
+              "font",
+              "paragraph"
+            ],
+            "style": "modern",
+            "id": "legacy-0-0",
+            "kind": "text",
+            "bounds": {
+              "x": 156.73469387755102,
+              "y": 231.42857142857142,
+              "width": 1606.5306122448978,
+              "height": 231.42857142857142
+            },
+            "paint": {
+              "color": "#155e75",
+              "strokeWidth": 0
+            },
+            "text": {
+              "paragraphBefore": 0,
+              "paragraphAfter": 0,
+              "lineHeight": 1.1,
+              "fontId": "sans",
+              "widthScale": 1,
+              "runs": [
+                {
+                  "text": "Your presentation"
+                }
+              ],
+              "role": "heading",
+              "level": 1,
+              "size": 160,
+              "family": "KeynopeModern, sans-serif",
+              "align": "start",
+              "vertical": "top"
+            }
+          },
+          {
+            "textCapabilities": [
+              "size",
+              "width",
+              "emphasis",
+              "alignment",
+              "font",
+              "paragraph"
+            ],
+            "style": "modern",
+            "id": "legacy-0-1",
+            "kind": "text",
+            "bounds": {
+              "x": 156.73469387755102,
+              "y": 540,
+              "width": 1528.1632653061224,
+              "height": 115.71428571428571
+            },
+            "paint": {
+              "color": "#64748b",
+              "strokeWidth": 0
+            },
+            "text": {
+              "paragraphBefore": 0,
+              "paragraphAfter": 0,
+              "lineHeight": 1.25,
+              "fontId": "sans",
+              "widthScale": 1,
+              "runs": [
+                {
+                  "text": "A story worth sharing."
+                }
+              ],
+              "role": "text",
+              "size": 64,
+              "family": "KeynopeModern, sans-serif",
+              "align": "start",
+              "vertical": "top"
+            }
+          }
+        ],
+        "diagnostics": [
+          {
+            "objectId": "legacy-0-0",
+            "code": "unstable-id",
+            "message": "Legacy object needs a persistent ID before semantic editing."
+          },
+          {
+            "objectId": "legacy-0-1",
+            "code": "unstable-id",
+            "message": "Legacy object needs a persistent ID before semantic editing."
+          }
+        ]
+      }
+    },
+    {
+      "id": "clean-dark",
+      "name": "Clean dark",
+      "description": "Calm contrast for focused stories.",
+      "scene": {
+        "defaultStyle": "modern",
+        "version": 1,
+        "width": 1920,
+        "height": 1080,
+        "background": "#111827",
+        "objects": [
+          {
+            "textCapabilities": [
+              "size",
+              "width",
+              "emphasis",
+              "alignment",
+              "font",
+              "paragraph"
+            ],
+            "style": "modern",
+            "id": "legacy-0-0",
+            "kind": "text",
+            "bounds": {
+              "x": 156.73469387755102,
+              "y": 231.42857142857142,
+              "width": 1606.5306122448978,
+              "height": 231.42857142857142
+            },
+            "paint": {
+              "color": "#93c5fd",
+              "strokeWidth": 0
+            },
+            "text": {
+              "paragraphBefore": 0,
+              "paragraphAfter": 0,
+              "lineHeight": 1.1,
+              "fontId": "sans",
+              "widthScale": 1,
+              "runs": [
+                {
+                  "text": "Your presentation"
+                }
+              ],
+              "role": "heading",
+              "level": 1,
+              "size": 160,
+              "family": "KeynopeModern, sans-serif",
+              "align": "start",
+              "vertical": "top"
+            }
+          },
+          {
+            "textCapabilities": [
+              "size",
+              "width",
+              "emphasis",
+              "alignment",
+              "font",
+              "paragraph"
+            ],
+            "style": "modern",
+            "id": "legacy-0-1",
+            "kind": "text",
+            "bounds": {
+              "x": 156.73469387755102,
+              "y": 540,
+              "width": 1528.1632653061224,
+              "height": 115.71428571428571
+            },
+            "paint": {
+              "color": "#9ca3af",
+              "strokeWidth": 0
+            },
+            "text": {
+              "paragraphBefore": 0,
+              "paragraphAfter": 0,
+              "lineHeight": 1.25,
+              "fontId": "sans",
+              "widthScale": 1,
+              "runs": [
+                {
+                  "text": "A story worth sharing."
+                }
+              ],
+              "role": "text",
+              "size": 64,
+              "family": "KeynopeModern, sans-serif",
+              "align": "start",
+              "vertical": "top"
+            }
+          }
+        ],
+        "diagnostics": [
+          {
+            "objectId": "legacy-0-0",
+            "code": "unstable-id",
+            "message": "Legacy object needs a persistent ID before semantic editing."
+          },
+          {
+            "objectId": "legacy-0-1",
+            "code": "unstable-id",
+            "message": "Legacy object needs a persistent ID before semantic editing."
+          }
+        ]
+      }
+    },
+    {
+      "id": "editorial",
+      "name": "Editorial",
+      "description": "Warm paper tones and considered typography.",
+      "scene": {
+        "defaultStyle": "modern",
+        "version": 1,
+        "width": 1920,
+        "height": 1080,
+        "background": "#fffaf0",
+        "objects": [
+          {
+            "textCapabilities": [
+              "size",
+              "width",
+              "emphasis",
+              "alignment",
+              "font",
+              "paragraph"
+            ],
+            "style": "modern",
+            "id": "legacy-0-0",
+            "kind": "text",
+            "bounds": {
+              "x": 156.73469387755102,
+              "y": 231.42857142857142,
+              "width": 1606.5306122448978,
+              "height": 231.42857142857142
+            },
+            "paint": {
+              "color": "#9a3412",
+              "strokeWidth": 0
+            },
+            "text": {
+              "paragraphBefore": 0,
+              "paragraphAfter": 0,
+              "lineHeight": 1.1,
+              "fontId": "sans",
+              "widthScale": 1,
+              "runs": [
+                {
+                  "text": "Your presentation"
+                }
+              ],
+              "role": "heading",
+              "level": 1,
+              "size": 160,
+              "family": "KeynopeModern, sans-serif",
+              "align": "start",
+              "vertical": "top"
+            }
+          },
+          {
+            "textCapabilities": [
+              "size",
+              "width",
+              "emphasis",
+              "alignment",
+              "font",
+              "paragraph"
+            ],
+            "style": "modern",
+            "id": "legacy-0-1",
+            "kind": "text",
+            "bounds": {
+              "x": 156.73469387755102,
+              "y": 540,
+              "width": 1528.1632653061224,
+              "height": 115.71428571428571
+            },
+            "paint": {
+              "color": "#64748b",
+              "strokeWidth": 0
+            },
+            "text": {
+              "paragraphBefore": 0,
+              "paragraphAfter": 0,
+              "lineHeight": 1.25,
+              "fontId": "sans",
+              "widthScale": 1,
+              "runs": [
+                {
+                  "text": "A story worth sharing."
+                }
+              ],
+              "role": "text",
+              "size": 64,
+              "family": "KeynopeModern, sans-serif",
+              "align": "start",
+              "vertical": "top"
+            }
+          }
+        ],
+        "diagnostics": [
+          {
+            "objectId": "legacy-0-0",
+            "code": "unstable-id",
+            "message": "Legacy object needs a persistent ID before semantic editing."
+          },
+          {
+            "objectId": "legacy-0-1",
+            "code": "unstable-id",
+            "message": "Legacy object needs a persistent ID before semantic editing."
+          }
+        ]
+      }
+    },
+    {
+      "id": "bold",
+      "name": "Bold colour",
+      "description": "Confident colour for memorable talks.",
+      "scene": {
+        "defaultStyle": "modern",
+        "version": 1,
+        "width": 1920,
+        "height": 1080,
+        "background": "#312e81",
+        "objects": [
+          {
+            "textCapabilities": [
+              "size",
+              "width",
+              "emphasis",
+              "alignment",
+              "font",
+              "paragraph"
+            ],
+            "style": "modern",
+            "id": "legacy-0-0",
+            "kind": "text",
+            "bounds": {
+              "x": 156.73469387755102,
+              "y": 231.42857142857142,
+              "width": 1606.5306122448978,
+              "height": 231.42857142857142
+            },
+            "paint": {
+              "color": "#facc15",
+              "strokeWidth": 0
+            },
+            "text": {
+              "paragraphBefore": 0,
+              "paragraphAfter": 0,
+              "lineHeight": 1.1,
+              "fontId": "sans",
+              "widthScale": 1,
+              "runs": [
+                {
+                  "text": "Your presentation"
+                }
+              ],
+              "role": "heading",
+              "level": 1,
+              "size": 160,
+              "family": "KeynopeModern, sans-serif",
+              "align": "start",
+              "vertical": "top"
+            }
+          },
+          {
+            "textCapabilities": [
+              "size",
+              "width",
+              "emphasis",
+              "alignment",
+              "font",
+              "paragraph"
+            ],
+            "style": "modern",
+            "id": "legacy-0-1",
+            "kind": "text",
+            "bounds": {
+              "x": 156.73469387755102,
+              "y": 540,
+              "width": 1528.1632653061224,
+              "height": 115.71428571428571
+            },
+            "paint": {
+              "color": "#c4b5fd",
+              "strokeWidth": 0
+            },
+            "text": {
+              "paragraphBefore": 0,
+              "paragraphAfter": 0,
+              "lineHeight": 1.25,
+              "fontId": "sans",
+              "widthScale": 1,
+              "runs": [
+                {
+                  "text": "A story worth sharing."
+                }
+              ],
+              "role": "text",
+              "size": 64,
+              "family": "KeynopeModern, sans-serif",
+              "align": "start",
+              "vertical": "top"
+            }
+          }
+        ],
+        "diagnostics": [
+          {
+            "objectId": "legacy-0-0",
+            "code": "unstable-id",
+            "message": "Legacy object needs a persistent ID before semantic editing."
+          },
+          {
+            "objectId": "legacy-0-1",
+            "code": "unstable-id",
+            "message": "Legacy object needs a persistent ID before semantic editing."
+          }
+        ]
+      }
+    },
+    {
+      "id": "workshop",
+      "name": "Workshop",
+      "description": "A practical starting point for learning together.",
+      "scene": {
+        "defaultStyle": "modern",
+        "version": 1,
+        "width": 1920,
+        "height": 1080,
+        "background": "#f8fafc",
+        "objects": [
+          {
+            "textCapabilities": [
+              "size",
+              "width",
+              "emphasis",
+              "alignment",
+              "font",
+              "paragraph"
+            ],
+            "style": "modern",
+            "id": "legacy-0-0",
+            "kind": "text",
+            "bounds": {
+              "x": 156.73469387755102,
+              "y": 231.42857142857142,
+              "width": 1606.5306122448978,
+              "height": 231.42857142857142
+            },
+            "paint": {
+              "color": "#0369a1",
+              "strokeWidth": 0
+            },
+            "text": {
+              "paragraphBefore": 0,
+              "paragraphAfter": 0,
+              "lineHeight": 1.1,
+              "fontId": "sans",
+              "widthScale": 1,
+              "runs": [
+                {
+                  "text": "Your presentation"
+                }
+              ],
+              "role": "heading",
+              "level": 1,
+              "size": 160,
+              "family": "KeynopeModern, sans-serif",
+              "align": "start",
+              "vertical": "top"
+            }
+          },
+          {
+            "textCapabilities": [
+              "size",
+              "width",
+              "emphasis",
+              "alignment",
+              "font",
+              "paragraph"
+            ],
+            "style": "modern",
+            "id": "legacy-0-1",
+            "kind": "text",
+            "bounds": {
+              "x": 156.73469387755102,
+              "y": 540,
+              "width": 1528.1632653061224,
+              "height": 115.71428571428571
+            },
+            "paint": {
+              "color": "#64748b",
+              "strokeWidth": 0
+            },
+            "text": {
+              "paragraphBefore": 0,
+              "paragraphAfter": 0,
+              "lineHeight": 1.25,
+              "fontId": "sans",
+              "widthScale": 1,
+              "runs": [
+                {
+                  "text": "Learn, share, and build together."
+                }
+              ],
+              "role": "text",
+              "size": 64,
+              "family": "KeynopeModern, sans-serif",
+              "align": "start",
+              "vertical": "top"
+            }
+          }
+        ],
+        "diagnostics": [
+          {
+            "objectId": "legacy-0-0",
+            "code": "unstable-id",
+            "message": "Legacy object needs a persistent ID before semantic editing."
+          },
+          {
+            "objectId": "legacy-0-1",
+            "code": "unstable-id",
+            "message": "Legacy object needs a persistent ID before semantic editing."
+          }
+        ]
+      }
+    },
+    {
+      "id": "c64",
+      "name": "C64-inspired",
+      "description": "Classic computer character, modern editing.",
+      "scene": {
+        "defaultStyle": "modern",
+        "version": 1,
+        "width": 1920,
+        "height": 1080,
+        "background": "#101828",
+        "objects": [
+          {
+            "textCapabilities": [
+              "size",
+              "width",
+              "emphasis",
+              "alignment",
+              "font",
+              "paragraph"
+            ],
+            "style": "modern",
+            "id": "legacy-0-0",
+            "kind": "text",
+            "bounds": {
+              "x": 156.73469387755102,
+              "y": 231.42857142857142,
+              "width": 1606.5306122448978,
+              "height": 366.4285714285714
+            },
+            "paint": {
+              "color": "#55ffff",
+              "strokeWidth": 0
+            },
+            "text": {
+              "emojiWidthScale": 2.3998080153587713,
+              "paragraphBefore": 0,
+              "paragraphAfter": 0,
+              "lineHeight": 1.2,
+              "fontId": "c64",
+              "widthScale": 0.4167,
+              "runs": [
+                {
+                  "text": "Your story"
+                }
+              ],
+              "role": "heading",
+              "level": 1,
+              "size": 386,
+              "family": "KeynopeC64, monospace",
+              "align": "start",
+              "vertical": "top"
+            }
+          },
+          {
+            "textCapabilities": [
+              "size",
+              "width",
+              "emphasis",
+              "alignment",
+              "font",
+              "paragraph"
+            ],
+            "style": "modern",
+            "id": "legacy-0-1",
+            "kind": "text",
+            "bounds": {
+              "x": 156.73469387755102,
+              "y": 655.7142857142857,
+              "width": 1528.1632653061224,
+              "height": 135
+            },
+            "paint": {
+              "color": "#a0aec0",
+              "strokeWidth": 0
+            },
+            "text": {
+              "emojiWidthScale": 2.3998080153587713,
+              "paragraphBefore": 0,
+              "paragraphAfter": 0,
+              "lineHeight": 1.2,
+              "fontId": "c64",
+              "widthScale": 0.4167,
+              "runs": [
+                {
+                  "text": "A story worth sharing."
+                }
+              ],
+              "role": "text",
+              "size": 97,
+              "family": "KeynopeC64, monospace",
+              "align": "start",
+              "vertical": "top"
+            }
+          }
+        ],
+        "diagnostics": [
+          {
+            "objectId": "legacy-0-0",
+            "code": "unstable-id",
+            "message": "Legacy object needs a persistent ID before semantic editing."
+          },
+          {
+            "objectId": "legacy-0-1",
+            "code": "unstable-id",
+            "message": "Legacy object needs a persistent ID before semantic editing."
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -17,24 +18,32 @@ import (
 )
 
 type nativeEditorSession struct {
-	sceneResponse *sceneResponseCache
-	mu            sync.RWMutex
-	deck          Deck
-	savedDeck     Deck
-	deckPath      string
-	untitled      bool
-	dirtyOverride bool
-	current       int
-	selected      int
-	selection     map[int]bool
-	editingGroup  string
-	version       int64
-	undo          []Deck
-	redo          []Deck
-	companion     *presenterCompanion
-	timerDeadline time.Time
-	masterMode    bool
-	currentMaster int
+	diagnostics      []documentDiagnostic   // Immutable runtime notices, never authored/history/saved deck state.
+	structuredBudget *structuredBudgetIndex // Runtime-only immutable counts, not authored/history data.
+	structuredLimits structuredBudgetLimits // Zero uses the common admission policy.
+	styleClipboard   *ObjectStyleSnapshot
+	sceneResponse    *sceneResponseCache
+	masterPreviews   map[int]masterPreviewStamp // Runtime-only thumbnail dependency tokens.
+	masterPreviewUse uint64
+	mu               sync.RWMutex
+	deck             Deck
+	savedDeck        Deck
+	deckPath         string
+	untitled         bool
+	dirtyOverride    bool
+	current          int
+	selected         int
+	selection        map[int]bool
+	editingGroup     string
+	version          int64
+	mutationRevision int64  // Conservative geometry-relevant transactions, not selection/timer/private note/result traffic.
+	notesSessionID   string // Immutable for this session; document replacement creates a new owner.
+	undo             []Deck
+	redo             []Deck
+	companion        *presenterCompanion
+	timerDeadline    time.Time
+	masterMode       bool
+	currentMaster    int
 }
 
 func (s *nativeEditorSession) handleUpload(w http.ResponseWriter, r *http.Request) {
@@ -42,6 +51,12 @@ func (s *nativeEditorSession) handleUpload(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	s.mu.RLock()
+	revision, master, destination := s.version, s.masterMode, s.current
+	if master {
+		destination = s.currentMaster
+	}
+	s.mu.RUnlock()
 	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
 	file, header, err := r.FormFile("image")
 	if err != nil {
@@ -55,13 +70,13 @@ func (s *nativeEditorSession) handleUpload(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "could not read image", http.StatusBadRequest)
 		return
 	}
-	id, asset, path, err := embeddedImageAsset(data)
+	id, asset, path, err := embeddedImageAssetContext(r.Context(), data)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	element := Element{Kind: "image", Path: path, AssetID: id, Query: "image-style=modern"}
-	if err := s.apply(nativeEditorAction{Action: "add-element", Kind: "image", ElementData: &element, AssetData: &asset}); err != nil {
+	if err := s.apply(nativeEditorAction{Action: "add-element", Kind: "image", ElementData: &element, AssetData: &asset, SceneRevision: &revision, SceneMaster: master, Slide: destination, uploadContext: r.Context()}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -70,39 +85,103 @@ func (s *nativeEditorSession) handleUpload(w http.ResponseWriter, r *http.Reques
 }
 
 type nativeEditorState struct {
-	Appearance      *DeckAppearance      `json:"appearance,omitempty"`
-	Diagnostics     []documentDiagnostic `json:"diagnostics,omitempty"`
-	Tabs            []DeckTab            `json:"tabs"`
-	HasActivities   bool                 `json:"hasActivities"`
-	HideActivityQR  bool                 `json:"hideActivityQR"`
-	CanUndo         bool                 `json:"canUndo"`
-	CanRedo         bool                 `json:"canRedo"`
-	Version         int64                `json:"version"`
-	Path            string               `json:"path"`
-	Current         int                  `json:"current"`
-	Selected        int                  `json:"selected"`
-	EditingGroup    string               `json:"editingGroup,omitempty"`
-	Selection       []int                `json:"selection"`
-	Slides          []Slide              `json:"slides,omitempty"`
-	CurrentSlide    *Slide               `json:"currentSlide,omitempty"`
-	Resolved        []Slide              `json:"resolved,omitempty"`
-	ResolvedCurrent *Slide               `json:"resolvedCurrent,omitempty"`
-	Masters         MasterDeck           `json:"masters"`
-	MasterMode      bool                 `json:"masterMode,omitempty"`
-	Dirty           bool                 `json:"dirty"`
-	Untitled        bool                 `json:"untitled"`
-	TimerMode       string               `json:"timerMode,omitempty"`
-	TimerEndMS      int64                `json:"timerEndMs,omitempty"`
+	PageSize               *DeckPageSize             `json:"pageSize,omitempty"`
+	ClipboardWarnings      []string                  `json:"clipboardWarnings,omitempty"` // One paste response only; never authored/session state.
+	PresentationCursor     *PresentationBuildCursor  `json:"presentationCursor,omitempty"`
+	SlideBuild             *SlideBuild               `json:"slideBuild,omitempty"`
+	SelectedChart          *editorChartData          `json:"selectedChart,omitempty"`
+	SelectedTable          *editorTableData          `json:"selectedTable,omitempty"`
+	StyleClipboard         *ObjectStyleSnapshot      `json:"styleClipboard,omitempty"`
+	SelectionCapabilities  *selectionCapabilityState `json:"selectionCapabilities"`
+	Theme                  *DeckTheme                `json:"theme,omitempty"`
+	HasDeckTheme           bool                      `json:"hasDeckTheme"`
+	ThemePresets           []*DeckTheme              `json:"themePresets,omitempty"`
+	Appearance             *DeckAppearance           `json:"appearance,omitempty"`
+	Diagnostics            []documentDiagnostic      `json:"diagnostics,omitempty"`
+	DiagnosticsUnchanged   bool                      `json:"diagnosticsUnchanged,omitempty"` // Reuse only within the same notesSessionId.
+	Tabs                   []DeckTab                 `json:"tabs"`
+	HasActivities          bool                      `json:"hasActivities"`
+	HideActivityQR         bool                      `json:"hideActivityQR"`
+	CanUndo                bool                      `json:"canUndo"`
+	CanRedo                bool                      `json:"canRedo"`
+	Version                int64                     `json:"version"`
+	MutationRevision       int64                     `json:"mutationRevision"`
+	NotesOwnerID           string                    `json:"notesOwnerId"`
+	NotesSessionID         string                    `json:"notesSessionId"`
+	Path                   string                    `json:"path"`
+	Current                int                       `json:"current"`
+	Selected               int                       `json:"selected"`
+	EditingGroup           string                    `json:"editingGroup,omitempty"`
+	Selection              []int                     `json:"selection"`
+	Slides                 []Slide                   `json:"slides,omitempty"`
+	CurrentSlide           *Slide                    `json:"currentSlide,omitempty"`
+	Resolved               []Slide                   `json:"resolved,omitempty"`
+	ResolvedCurrent        *Slide                    `json:"resolvedCurrent,omitempty"`
+	Masters                MasterDeck                `json:"masters"`
+	MasterMode             bool                      `json:"masterMode,omitempty"`
+	MasterPreviewRevisions []int64                   `json:"masterPreviewRevisions,omitempty"`
+	Dirty                  bool                      `json:"dirty"`
+	Untitled               bool                      `json:"untitled"`
+	TimerMode              string                    `json:"timerMode,omitempty"`
+	TimerEndMS             int64                     `json:"timerEndMs,omitempty"`
+}
+
+// Conversion happens off-lock. Recheck its destination under the command lock
+// so a slow upload cannot land on another deck, slide, or master after navigation.
+func (s *nativeEditorSession) checkUploadDestinationLocked(action nativeEditorAction) error {
+	if action.uploadContext == nil {
+		return nil
+	}
+	if err := action.uploadContext.Err(); err != nil {
+		return err
+	}
+	index := s.current
+	if s.masterMode {
+		index = s.currentMaster
+	}
+	if action.Action != "add-element" || action.SceneRevision == nil || *action.SceneRevision != s.version ||
+		action.SceneMaster != s.masterMode || action.Slide != index {
+		return fmt.Errorf("the image destination changed during import; select the destination and import again")
+	}
+	return nil
 }
 
 type nativeEditorAction struct {
+	PageSize              *DeckPageSize        `json:"pageSize,omitempty"`
+	objectInputOwned      bool                 // Request-local ownership, never accepted from JSON.
+	BuildGeneration       *int64               `json:"buildGeneration,omitempty"`
+	BuildData             *SlideBuild          `json:"buildData,omitempty"`
+	uploadContext         context.Context      // Native upload preparation; never client-controlled.
+	commandContext        context.Context      // Request cancellation for off-lock document commands.
+	ChartData             *ChartData           `json:"chartData,omitempty"`
+	ChartOptions          *ChartOptions        `json:"chartOptions,omitempty"`
+	ChartSeriesIndex      *int                 `json:"chartSeriesIndex,omitempty"`
+	ChartSeriesColor      *string              `json:"chartSeriesColor,omitempty"`
+	ChartSeriesColorToken *string              `json:"chartSeriesColorToken,omitempty"`
+	TableData             *TableData           `json:"tableData,omitempty"`
+	StyleData             *ObjectStyleSnapshot `json:"styleData,omitempty"`
+	StyleContext          string               `json:"styleContext,omitempty"`
+	CellRange             *tableCellRange      `json:"cellRange,omitempty"`
+	Property              string               `json:"property,omitempty"`
+	PropertyValue         json.RawMessage      `json:"propertyValue,omitempty"`
+	PropertyDelta         *float64             `json:"propertyDelta,omitempty"`
+	Geometry              *sceneRect           `json:"geometry,omitempty"`
+	GeometryResize        bool                 `json:"geometryResize,omitempty"`
+	preparedClipboard     *objectClipboardPasteDraft
+	preparedThemeDetach   *themeDetachDraft
+	Clipboard             *ObjectClipboard      `json:"clipboard,omitempty"`
+	ThemeData             *DeckTheme            `json:"themeData,omitempty"`
+	ThemeDraft            *themeDraftContext    `json:"themeDraft,omitempty"`
 	Crop                  *sceneCrop            `json:"crop,omitempty"`
 	ModernMask            *string               `json:"modernMask,omitempty"`
 	SceneRevision         *int64                `json:"sceneRevision,omitempty"`
+	MutationRevision      *int64                `json:"mutationRevision,omitempty"`
 	SceneMaster           bool                  `json:"sceneMaster,omitempty"`
 	ObjectID              string                `json:"objectId,omitempty"`
 	ObjectIDs             []string              `json:"objectIds,omitempty"`
 	TextRuns              []sceneRun            `json:"textRuns,omitempty"`
+	TextRange             *textStyleRange       `json:"textRange,omitempty"`
+	TableWord             *tableWordContext     `json:"tableWord,omitempty"` // Bounded anchor in a local table text draft.
 	ModernFont            *string               `json:"modernFont,omitempty"`
 	ModernLineHeight      *float64              `json:"modernLineHeight,omitempty"`
 	ModernParagraphBefore *float64              `json:"modernParagraphBefore,omitempty"`
@@ -110,6 +189,7 @@ type nativeEditorAction struct {
 	ModernSize            *float64              `json:"modernSize,omitempty"`
 	ModernWidth           *float64              `json:"modernWidth,omitempty"`
 	ShapeTextBounds       *sceneRect            `json:"shapeTextBounds,omitempty"`
+	ShapeAdjustment       *shapeAdjustmentEdit  `json:"shapeAdjustment,omitempty"`
 	TextSize              *float64              `json:"textSize,omitempty"`
 	TextSizeDelta         *float64              `json:"textSizeDelta,omitempty"`
 	TextWidth             *float64              `json:"textWidth,omitempty"`
@@ -138,6 +218,9 @@ type nativeEditorAction struct {
 	Name                  string                `json:"name,omitempty"`
 	Path                  string                `json:"path,omitempty"`
 	Notes                 string                `json:"notes,omitempty"`
+	NotesOwnerID          string                `json:"notesOwnerId,omitempty"`
+	NotesSessionID        string                `json:"notesSessionId,omitempty"`
+	NotesBeforeHash       string                `json:"notesBeforeHash,omitempty"`
 	ElementData           *Element              `json:"elementData,omitempty"`
 	ElementIndices        []int                 `json:"elementIndices,omitempty"`
 	ElementsData          []Element             `json:"elementsData,omitempty"`
@@ -258,12 +341,10 @@ func (s *nativeEditorSession) handleActivityQR(w http.ResponseWriter, r *http.Re
 }
 
 func editorShapeName(name string) string {
-	switch name {
-	case "circle", "square", "triangle", "diamond":
-		return name
-	default:
-		return "circle"
+	if d, ok := shapeDefinitionFor(name); ok {
+		return d.ID
 	}
+	return "circle"
 }
 
 var activeNativeEditor *nativeEditorSession
@@ -709,10 +790,32 @@ func (s *nativeEditorSession) handlePreview(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.mu.RLock()
-	deck := cloneDeckForRender(s.deck)
+	if action.SceneRevision != nil && (*action.SceneRevision != s.version || action.SceneMaster != s.masterMode || (!s.masterMode && action.Slide != s.current) || (s.masterMode && action.Slide != s.currentMaster)) {
+		s.mu.RUnlock()
+		id := ""
+		if action.ElementData != nil {
+			id = action.ElementData.ID
+		}
+		writeEditorFailure(w, r, action, editorFailure("stale-target", "", id, fmt.Errorf("document changed; draft discarded")), http.StatusConflict)
+		return
+	}
 	current := s.current
 	masterMode, currentMaster := s.masterMode, s.currentMaster
+	index := current
+	if masterMode {
+		index = currentMaster
+	}
+	deck, scoped, captureErr := captureMutationPreviewDeck(s.deck, index, masterMode, action.ElementData)
 	s.mu.RUnlock()
+	if captureErr != nil {
+		http.Error(w, errInvalidEditorAction.Error(), http.StatusBadRequest)
+		return
+	}
+	if scoped {
+		w.Header().Set("X-Keynope-Preview-Scope", "slide")
+	} else {
+		w.Header().Set("X-Keynope-Preview-Scope", "compatibility")
+	}
 	if r.Context().Err() != nil {
 		return
 	}
@@ -812,7 +915,7 @@ func writeNativeEditorPreview(w http.ResponseWriter, action nativeEditorAction, 
 	response := nativeEditorInlinePreview{Pages: pages, Caret: caret}
 	if action.ElementData.Kind == "shape" {
 		fitted := *action.ElementData
-		fitShapeLabel(&fitted, cols, rows)
+		fitShapeLabel(&fitted, cols, rows, preview.physicalCanvas())
 		response.ElementData = &fitted
 	}
 	if action.SelectionStart != action.SelectionEnd {
@@ -927,14 +1030,13 @@ func (s *nativeEditorSession) handleWorkspace(w http.ResponseWriter, r *http.Req
 	if cols <= 0 || rows <= 0 {
 		cols, rows = authoredRenderSize(authoredTerminalWidth, authoredTerminalHeight)
 	}
-	s.mu.RLock()
-	deck := cloneDeckForRender(s.deck)
+	s.mu.Lock()
 	masterMode, currentMaster := s.masterMode, s.currentMaster
 	revision := s.version
-	s.mu.RUnlock()
 	if raw := r.URL.Query().Get("revision"); raw != "" {
 		requested, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || requested != revision {
+			s.mu.Unlock()
 			http.Error(w, "workspace changed", http.StatusConflict)
 			return
 		}
@@ -942,15 +1044,32 @@ func (s *nativeEditorSession) handleWorkspace(w http.ResponseWriter, r *http.Req
 	if raw := r.URL.Query().Get("master"); raw != "" {
 		requested, err := strconv.Atoi(raw)
 		if err != nil {
+			s.mu.Unlock()
 			http.Error(w, "invalid master", http.StatusBadRequest)
 			return
 		}
 		currentMaster = requested
 	}
-	if !masterMode || currentMaster < 0 || currentMaster > len(deck.Masters.Layouts) {
+	if !masterMode || currentMaster < 0 || currentMaster > len(s.deck.Masters.Layouts) {
+		s.mu.Unlock()
 		http.Error(w, errInvalidEditorAction.Error(), http.StatusBadRequest)
 		return
 	}
+	if raw := r.URL.Query().Get("previewRevision"); raw != "" {
+		requested, err := strconv.ParseInt(raw, 10, 64)
+		current := s.version
+		if stamp, exists := s.masterPreviews[currentMaster]; exists {
+			current = stamp.revision
+		}
+		if err != nil || requested != current || r.URL.Query().Get("owner") != s.notesSessionID {
+			s.mu.Unlock()
+			http.Error(w, "master preview changed", http.StatusConflict)
+			return
+		}
+	}
+	s.trackMasterPreviewLocked(currentMaster, cols, rows)
+	deck := cloneDeckForRender(s.deck)
+	s.mu.Unlock()
 	pages, err := editorWorkspacePages(deck, true, currentMaster, cols, rows)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -965,18 +1084,27 @@ func newNativeEditorSession(deckPath string, deck Deck, options ...bool) *native
 	isUntitled := len(options) > 0 && options[0]
 	dirtyOverride := len(options) > 1 && options[1]
 	deck = cloneDeck(deck)
+	// Include generated defaults in the same migration as authored masters,
+	// so their fonts are canonical in the very first saved session baseline.
+	deck.EnsureDefaultMasters()
 	// The editor has one object model. Resolve legacy deck/style inheritance
 	// once into concrete font and image properties before establishing the
 	// saved baseline; merely opening an older deck therefore stays clean.
 	canonicalizeConcreteAppearance(&deck)
 	dirtyOverride = ensureUniqueEngagementIDs(&deck) || dirtyOverride
 	syncSlideTabs(&deck)
-	deck.EnsureDefaultMasters()
 	standardizeDeckText(&deck)
+	for i := range deck.Slides {
+		deck.Slides[i].notesOwnerID = ""
+	}
 	ensureNativeEditorElementIDs(&deck)
+	diagnostics := deck.Diagnostics
+	deck.Diagnostics = nil
 	return &nativeEditorSession{
-		deck: deck, savedDeck: cloneDeck(deck), deckPath: deckPath, untitled: isUntitled, dirtyOverride: dirtyOverride,
-		selected: -1, selection: map[int]bool{}, version: 1,
+		diagnostics:      diagnostics,
+		structuredBudget: newStructuredBudgetIndex(deck.Objects),
+		deck:             deck, savedDeck: cloneDeck(deck), deckPath: deckPath, untitled: isUntitled, dirtyOverride: dirtyOverride,
+		selected: -1, selection: map[int]bool{}, version: 1, notesSessionID: newStableID("notes-session"),
 	}
 }
 
@@ -987,11 +1115,20 @@ func ensureNativeEditorElementIDs(deck *Deck) {
 	ensureSlide := func(slide *Slide) {
 		for index := range slide.Elements {
 			if slide.Elements[index].ID == "" {
+				e := &slide.Elements[index]
+				q, err := url.ParseQuery(e.Query)
+				preserved := err == nil && e.unresolvedConnectorReference != "" && e.unresolvedConnectorReference == connectorReferenceSignature(*e, q)
 				slide.Elements[index].ID = newStableID("slide-element")
+				if preserved {
+					e.unresolvedConnectorReference = connectorReferenceSignature(*e, q)
+				}
 			}
 		}
 	}
 	for index := range deck.Slides {
+		if deck.Slides[index].ID == "" && deck.Slides[index].notesOwnerID == "" {
+			deck.Slides[index].notesOwnerID = newStableID("notes-owner")
+		}
 		ensureSlide(&deck.Slides[index])
 	}
 	ensureSlide(&deck.Masters.Base.Slide)
@@ -1023,7 +1160,7 @@ func (s *nativeEditorSession) dirtyLocked() bool {
 }
 
 func (s *nativeEditorSession) state() nativeEditorState {
-	return s.stateForClient(false, false)
+	return s.stateForClient(false, false, "")
 }
 
 // transportState keeps the authored deck available to the editor while only
@@ -1032,14 +1169,14 @@ func (s *nativeEditorSession) state() nativeEditorState {
 // edit. state retains the complete resolved view for internal callers and
 // focused tests; browser/native-webview responses use this narrower contract.
 func (s *nativeEditorSession) transportState() nativeEditorState {
-	return s.stateForClient(true, false)
+	return s.stateForClient(true, false, "")
 }
 
 // actionTransportState sends a current-slide delta for commands that cannot
 // change the authored slide collection. Structural/history commands retain a
 // complete recovery response. Master editing always transports all masters.
 func (s *nativeEditorSession) actionTransportState(action string) nativeEditorState {
-	return s.stateForClient(true, !nativeEditorActionRequiresFullSlides(action))
+	return s.stateForClient(true, !nativeEditorActionRequiresFullSlides(action), s.notesSessionID)
 }
 
 func nativeEditorActionRequiresFullSlides(action string) bool {
@@ -1051,7 +1188,7 @@ func nativeEditorActionRequiresFullSlides(action string) bool {
 	return false
 }
 
-func (s *nativeEditorSession) stateForClient(currentOnly, currentSlideOnly bool) nativeEditorState {
+func (s *nativeEditorSession) stateForClient(currentOnly, currentSlideOnly bool, diagnosticsOwner string) nativeEditorState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	selection := make([]int, 0, len(s.selection))
@@ -1060,6 +1197,12 @@ func (s *nativeEditorSession) stateForClient(currentOnly, currentSlideOnly bool)
 	}
 	sort.Ints(selection)
 	var slides, resolved []Slide
+	diagnosticsUnchanged := diagnosticsOwner != "" && diagnosticsOwner == s.notesSessionID
+	var diagnostics []documentDiagnostic
+	if !diagnosticsUnchanged {
+		diagnostics = append([]documentDiagnostic(nil), s.diagnostics...)
+		diagnostics = append(diagnostics, s.deck.Diagnostics...)
+	}
 	var currentSlide *Slide
 	current := s.current
 	if s.masterMode {
@@ -1110,14 +1253,63 @@ func (s *nativeEditorSession) stateForClient(currentOnly, currentSlideOnly bool)
 	if !s.timerDeadline.IsZero() {
 		timerMode, timerEndMS = "running", s.timerDeadline.UnixMilli()
 	}
+	var themePresets []*DeckTheme
+	if !currentSlideOnly {
+		themePresets = builtinDeckThemes()
+	}
+	var capabilities *selectionCapabilityState
+	var authoredSelection, resolvedSelection Slide
+	if s.masterMode && current >= 0 && current < len(slides) {
+		authoredSelection = slides[current]
+		resolvedSelection = masterViewPreview(s.deck.Masters, current)
+	} else if !s.masterMode && current >= 0 && current < len(s.deck.Slides) {
+		authoredSelection = s.deck.Slides[current]
+		if resolvedCurrent != nil {
+			resolvedSelection = *resolvedCurrent
+		} else {
+			resolvedSelection = s.deck.ResolveSlide(current, false)
+		}
+	}
+	ids := selectionTargetIDs(authoredSelection, s.selection, s.selected, s.editingGroup)
+	if len(ids) > 0 {
+		value := buildSelectionCapabilities(s.deck, authoredSelection, resolvedSelection, ids, s.editingGroup, s.version)
+		capabilities = &value
+	}
+	var selectedTable *editorTableData
+	var selectedChart *editorChartData
+	if len(ids) == 1 && s.deck.Objects != nil {
+		for _, element := range authoredSelection.Elements {
+			if element.ID == ids[0] && element.Kind == "chart" {
+				if data, ok := s.deck.Objects.Charts[element.ObjectID]; ok {
+					selectedChart = &editorChartData{ObjectID: element.ID, Data: cloneChart(data)}
+				}
+			}
+			if element.ID == ids[0] && element.Kind == "table" {
+				if data, ok := s.deck.Objects.Tables[element.ObjectID]; ok {
+					selectedTable = &editorTableData{ObjectID: element.ID, Data: cloneTable(data)}
+				}
+			}
+		}
+	}
 	return nativeEditorState{
-		Appearance:  s.deck.Appearance.Clone(),
-		Diagnostics: append([]documentDiagnostic(nil), s.deck.Diagnostics...),
-		Tabs:        append([]DeckTab(nil), s.deck.Tabs...), HasActivities: deckHasActivities(s.deck), HideActivityQR: s.deck.HideActivityQR,
+		PageSize:              s.deck.PageSize.Clone(),
+		PresentationCursor:    s.companion.BuildSnapshot(),
+		SlideBuild:            selectedSlideBuild(s.deck, slidesForBuildState(s, current)),
+		SelectedChart:         selectedChart,
+		SelectedTable:         selectedTable,
+		StyleClipboard:        s.styleClipboard.Clone(),
+		SelectionCapabilities: capabilities,
+		Theme:                 s.deck.resolvedDeckTheme(),
+		HasDeckTheme:          s.deck.Theme != nil,
+		ThemePresets:          themePresets,
+		Appearance:            s.deck.Appearance.Clone(),
+		Diagnostics:           diagnostics, DiagnosticsUnchanged: diagnosticsUnchanged,
+		Tabs: append([]DeckTab(nil), s.deck.Tabs...), HasActivities: deckHasActivities(s.deck), HideActivityQR: s.deck.HideActivityQR,
 		CanUndo: len(s.undo) > 0, CanRedo: len(s.redo) > 0,
-		Version: s.version, Path: s.deckPath, Current: current, Selected: s.selected, MasterMode: s.masterMode,
+		Version: s.version, MutationRevision: s.mutationRevision, NotesOwnerID: speakerNotesOwnerAt(s.deck, s.masterMode, current), NotesSessionID: s.notesSessionID, Path: s.deckPath, Current: current, Selected: s.selected, MasterMode: s.masterMode,
 		Selection: selection, EditingGroup: s.editingGroup, Slides: slides, CurrentSlide: currentSlide, Resolved: resolved, ResolvedCurrent: resolvedCurrent, Masters: s.deck.Masters,
-		Dirty: s.dirtyLocked(), Untitled: s.untitled, TimerMode: timerMode, TimerEndMS: timerEndMS,
+		MasterPreviewRevisions: s.masterPreviewRevisionsLocked(),
+		Dirty:                  s.dirtyLocked(), Untitled: s.untitled, TimerMode: timerMode, TimerEndMS: timerEndMS,
 	}
 }
 
@@ -1199,10 +1391,46 @@ func (s *nativeEditorSession) handleExportPPTX(w http.ResponseWriter, r *http.Re
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if err := r.Context().Err(); err != nil {
+		http.Error(w, err.Error(), http.StatusRequestTimeout)
+		return
+	}
+	var captureRequest *pptxCaptureRequest
+	if r.Body != nil {
+		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 96<<20))
+		if err != nil {
+			http.Error(w, "PowerPoint capture request exceeds limits", 400)
+			return
+		}
+		if len(bytes.TrimSpace(data)) > 0 {
+			captureRequest = &pptxCaptureRequest{}
+			if err := decodePPTXCaptureRequest(data, captureRequest); err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+		}
+	}
 	s.mu.RLock()
+	if captureRequest != nil && (captureRequest.Owner != s.notesSessionID || captureRequest.Version != s.version) {
+		s.mu.RUnlock()
+		http.Error(w, "The deck changed while capturing artwork; export again.", 409)
+		return
+	}
 	deck := cloneDeckForRender(s.deck)
 	s.mu.RUnlock()
-	content, report, err := exportPPTXDocument(deck)
+	work := newPPTXExportWork(r.Context())
+	if captureRequest != nil {
+		work.captures = map[string]pptxRenderedCapture{}
+		for _, capture := range captureRequest.Captures {
+			key := pptxCaptureKey(capture.Slide, capture.ObjectID)
+			if _, exists := work.captures[key]; exists {
+				http.Error(w, "duplicate PowerPoint capture target", 400)
+				return
+			}
+			work.captures[key] = capture
+		}
+	}
+	content, report, err := exportPPTXDocumentWithWork(deck, work)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1257,6 +1485,7 @@ func (s *nativeEditorSession) confirmSaved(path string, version int64) bool {
 	s.savedDeck = cloneDeck(s.deck)
 	s.untitled = false
 	s.dirtyOverride = false
+	s.retainUnchangedSceneRevision()
 	s.version++
 	return true
 }
@@ -1270,28 +1499,36 @@ func (s *nativeEditorSession) handleState(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Cache-Control", "no-store")
 	if version, err := strconv.ParseInt(r.URL.Query().Get("version"), 10, 64); err == nil {
 		s.mu.RLock()
-		unchanged := version == s.version
+		owner, hasOwner := r.URL.Query()["diagnosticsOwner"]
+		knownOwner := ""
+		if len(owner) > 0 {
+			knownOwner = owner[0]
+		}
+		unchanged := version == s.version && (!hasOwner || knownOwner == s.notesSessionID)
 		s.mu.RUnlock()
 		if unchanged {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 	}
-	_ = json.NewEncoder(w).Encode(s.transportState())
+	_ = json.NewEncoder(w).Encode(s.stateForClient(true, false, r.URL.Query().Get("diagnosticsOwner")))
 }
 
 func (s *nativeEditorSession) handleAction(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeEditorFailure(w, r, nativeEditorAction{}, editorFailure("method-not-allowed", "", "", fmt.Errorf("method not allowed")), http.StatusMethodNotAllowed)
 		return
 	}
 	var action nativeEditorAction
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&action); err != nil {
-		http.Error(w, "invalid editor action", http.StatusBadRequest)
+		writeEditorFailure(w, r, nativeEditorAction{}, errInvalidEditorAction, http.StatusBadRequest)
 		return
 	}
+	if action.Action == "detach-deck-theme" {
+		action.commandContext = r.Context()
+	}
 	if err := s.apply(action); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeEditorFailure(w, r, action, err, http.StatusBadRequest)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1308,7 +1545,49 @@ func nativeEditorViewAction(action string) bool {
 	return false
 }
 
-func (s *nativeEditorSession) apply(action nativeEditorAction) error {
+func (s *nativeEditorSession) apply(action nativeEditorAction) (resultErr error) {
+	// Also cover specialized paths (copy, save confirmation, build navigation,
+	// result updates and off-lock preparation). The runtime owner is immutable
+	// for a session; ordinary mutations recheck it under their write lock below.
+	if action.NotesSessionID != "" {
+		s.mu.RLock()
+		err := s.checkCommandOwnerLocked(action)
+		s.mu.RUnlock()
+		if err != nil {
+			return err
+		}
+	}
+	if action.Action == "update-slide-notes" {
+		return s.applySpeakerNotes(action)
+	}
+	if action.Action == "navigate-build" {
+		return s.navigatePresentationBuild(action)
+	}
+	if action.AssetData != nil {
+		ctx := action.uploadContext
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		var pixels int64
+		if err := validateClipboardAssetBudgetContext(ctx, *action.AssetData, &pixels); err != nil {
+			return editorFailure("invalid-media", "assetData", action.ObjectID, err)
+		}
+	}
+	action = ownEditorObjectInput(action)
+	if action.Action == "detach-deck-theme" && action.preparedThemeDetach == nil {
+		return s.prepareAndApplyThemeDetach(action)
+	}
+	if action.Action == "copy-object-style" {
+		return s.copyObjectStyle(action)
+	}
+	if action.Action == "paste-objects" {
+		if action.preparedClipboard == nil {
+			return s.prepareAndApplyObjectClipboard(context.Background(), action)
+		}
+		if action.preparedClipboard.master {
+			return s.applyMaster(action)
+		}
+	}
 	if action.Action == "set-engagement-result" {
 		return s.applyEngagementResult(action)
 	}
@@ -1321,10 +1600,49 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 	if action.Action == "upsert-font" || action.Action == "delete-font" || action.Action == "delete-library-font" {
 		return errInvalidEditorAction
 	}
-	if action.Action == "toggle-master-mode" || s.masterMode {
+	if action.Action == "toggle-master-mode" || action.Action != "paste-objects" && s.masterMode {
 		return s.applyMaster(action)
 	}
+	if err := validateSpeakerNotesAction(action); err != nil {
+		return err
+	}
+	if err := validateSlideStyleAction(action); err != nil {
+		return err
+	}
 	s.mu.Lock()
+	if err := s.checkMutationRevisionLocked(action); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if err := s.checkUploadDestinationLocked(action); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if action.preparedClipboard != nil {
+		if err := s.checkPreparedClipboardLocked(action.preparedClipboard); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+	if err := s.checkThemeDraftLocked(action); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if action.Action == "detach-deck-theme" {
+		if err := s.checkThemeDetachLocked(action.preparedThemeDetach); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+	if err := s.checkLayerTargetLocked(action, false); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	transaction := beginEditorCommand(s, !nativeEditorViewAction(action.Action))
+	defer transaction.finish(&resultErr)
+	if action.Action == "update-elements" && action.SceneRevision != nil && (*action.SceneRevision != s.version || action.SceneMaster || action.Slide != s.current) {
+		return editorFailure("stale-target", "", "", fmt.Errorf("the document or slide changed; retry the edit against the current selection"))
+	}
 	changed := false
 	presenterPage := 0
 	if s.companion != nil {
@@ -1333,29 +1651,64 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			presenterPage = page
 		}
 	}
-	before := Deck{}
-	if !nativeEditorViewAction(action.Action) {
-		before = cloneDeck(s.deck)
-	}
+	before := transaction.beforeDeck
 	slideCount := len(s.deck.Slides)
 	if s.current >= 0 && s.current < slideCount {
 		if err := checkObjectLocks(s.deck.Slides[s.current], action, s.selection, s.editingGroup); err != nil {
-			s.mu.Unlock()
 			return err
 		}
 	}
 	switch action.Action {
-	case "select-slide", "previous-slide", "next-slide", "navigate-presentation", "add-slide", "clone-slide", "delete-slide", "add-element":
+	case "select-slide", "previous-slide", "next-slide", "navigate-presentation", "add-slide", "clone-slide", "delete-slide", "add-element", "paste-objects":
 		s.editingGroup = ""
 	}
 	switch action.Action {
-	case "set-text-width", "set-text-size", "set-modern-text-style":
-		if action.SceneMaster || action.SceneRevision == nil || *action.SceneRevision != s.version {
-			s.mu.Unlock()
-			return fmt.Errorf("the document changed; reselect text before formatting")
+	case "insert-chart", "set-chart-data", "set-chart-options", "set-chart-series-style":
+		if action.SceneMaster || action.SceneRevision == nil || *action.SceneRevision != s.version || action.Slide != s.current {
+			return editorFailure("stale-target", "", action.ObjectID, fmt.Errorf("the document changed; reopen the chart editor"))
 		}
 		var err error
-		if action.Action == "set-text-width" {
+		changed, err = applyChartCommand(&s.deck, action, s.editingGroup)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return nil
+		}
+		if action.Action == "insert-chart" {
+			s.selected = len(s.deck.Slides[s.current].Elements) - 1
+			s.selection = map[int]bool{s.selected: true}
+			s.editingGroup = ""
+		}
+	case "insert-table", "set-table":
+		if action.SceneMaster || action.SceneRevision == nil || *action.SceneRevision != s.version || action.Slide != s.current {
+			return editorFailure("stale-target", "", action.ObjectID, fmt.Errorf("the document changed; reopen the table editor"))
+		}
+		var err error
+		changed, err = applyTableCommand(&s.deck, action, s.editingGroup)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return nil
+		}
+		if action.Action == "insert-table" {
+			s.selected = len(s.deck.Slides[s.current].Elements) - 1
+			s.selection = map[int]bool{s.selected: true}
+			s.editingGroup = ""
+		}
+	case "paste-object-style", "reset-object-style", "set-selection-geometry", "set-selection-property", "set-text-width", "set-text-size", "set-modern-text-style":
+		if action.SceneMaster || action.SceneRevision == nil || *action.SceneRevision != s.version {
+			return editorFailure("stale-target", "", action.ObjectID, fmt.Errorf("the document changed; reselect text before formatting"))
+		}
+		var err error
+		if action.Action == "paste-object-style" || action.Action == "reset-object-style" {
+			changed, err = applyObjectStyle(&s.deck, action, s.editingGroup)
+		} else if action.Action == "set-selection-geometry" {
+			changed, err = applySelectionGeometry(&s.deck, action, s.editingGroup)
+		} else if action.Action == "set-selection-property" {
+			changed, err = applySelectionProperty(&s.deck, action, s.editingGroup)
+		} else if action.Action == "set-text-width" {
 			changed, err = applyTextWidthCommand(&s.deck, action, s.editingGroup)
 		} else if action.Action == "set-text-size" {
 			changed, err = applyTextSizeCommand(&s.deck, action, s.editingGroup)
@@ -1363,19 +1716,56 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			changed, err = applyModernTextStyle(&s.deck, action, s.editingGroup)
 		}
 		if err != nil {
-			s.mu.Unlock()
 			return err
 		}
+		if !changed {
+			return nil
+		}
+	case "set-shape-adjustment":
+		if action.SceneMaster || action.SceneRevision == nil || *action.SceneRevision != s.version || action.Slide != s.current || s.current < 0 || s.current >= len(s.deck.Slides) {
+			return editorFailure("stale-target", "", action.ObjectID, fmt.Errorf("the document changed; reselect the shape before adjusting"))
+		}
+		var err error
+		changed, err = applyShapeAdjustmentResolved(&s.deck.Slides[s.current], s.deck.ResolveSlide(s.current, false), action, s.editingGroup)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return nil
+		}
+	case "promote-image-background", "restore-background-image":
+		if action.SceneMaster || action.SceneRevision == nil || *action.SceneRevision != s.version || action.Slide != s.current {
+			return editorFailure("stale-target", "", action.ObjectID, fmt.Errorf("the document changed; reselect the image"))
+		}
+		var err error
+		if action.Action == "restore-background-image" {
+			changed, err = restoreBackgroundImage(&s.deck, action, s.editingGroup)
+		} else {
+			changed, err = promoteImageBackground(&s.deck, action, s.editingGroup)
+		}
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return nil
+		}
+		if action.Action == "restore-background-image" {
+			s.retainHistorySelection(before.Slides[s.current].Elements, s.deck.Slides[s.current].Elements)
+		}
 	case "set-scene-crop":
-		if action.SceneMaster || action.SceneRevision == nil || *action.SceneRevision != s.version {
-			s.mu.Unlock()
-			return fmt.Errorf("the document changed; reopen crop before applying")
+		if action.SceneMaster || action.SceneRevision == nil || *action.SceneRevision != s.version || action.Slide != s.current {
+			return editorFailure("stale-target", "", action.ObjectID, fmt.Errorf("the document changed; reopen crop before applying"))
+		}
+		if err := requireSelectionObjectCommand(s.deck, s.deck.Slides[s.current], action.ObjectID, s.editingGroup, "image.crop"); err != nil {
+			return err
 		}
 		var err error
 		changed, err = applySceneCrop(&s.deck, action)
 		if err != nil {
-			s.mu.Unlock()
 			return err
+		}
+		if !changed {
+			return nil
 		}
 	case "set-object-lock":
 		if s.current >= 0 && s.current < slideCount {
@@ -1383,26 +1773,57 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		}
 	case "set-scene-text":
 		if action.SceneMaster || action.SceneRevision == nil || *action.SceneRevision != s.version {
-			s.mu.Unlock()
-			return fmt.Errorf("the document changed while this preview was open; reopen it before editing")
+			return editorFailure("stale-target", "", action.ObjectID, fmt.Errorf("the document changed while this preview was open; reopen it before editing"))
 		}
 		var err error
 		changed, err = applySceneText(&s.deck, action)
 		if err != nil {
-			s.mu.Unlock()
 			return err
 		}
+		if !changed {
+			return nil
+		}
+	case "set-page-size":
+		if err := action.PageSize.Validate(); err != nil {
+			return err
+		}
+		changed = !reflect.DeepEqual(s.deck.PageSize, action.PageSize)
+		s.deck.PageSize = action.PageSize.Clone()
 	case "set-theme":
 		appearance, err := s.deck.withTheme(action.Name)
 		if err != nil {
-			s.mu.Unlock()
 			return err
 		}
-		changed = !reflect.DeepEqual(s.deck.Appearance, appearance)
+		changed = !reflect.DeepEqual(s.deck.Appearance, appearance) || s.deck.Theme != nil
 		s.deck.Appearance = appearance
+		s.deck.Theme = nil
+	case "detach-deck-theme":
+		s.deck = action.preparedThemeDetach.deck
+		s.structuredBudget = action.preparedThemeDetach.budget
+		changed = true
+	case "set-deck-theme":
+		if action.ThemeData == nil {
+			return errInvalidEditorAction
+		}
+		if err := action.ThemeData.Validate(); err != nil {
+			return err
+		}
+		changed = !reflect.DeepEqual(s.deck.Theme, action.ThemeData)
+		s.deck.Theme = action.ThemeData.Clone()
+	case "set-slide-build":
+		if s.current < 0 || s.current >= len(s.deck.Slides) {
+			return errInvalidEditorAction
+		}
+		var err error
+		changed, err = s.setSlideBuildLocked(action, &s.deck.Slides[s.current])
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return nil
+		}
 	case "move-object-layer":
 		if s.current < 0 || s.current >= len(s.deck.Slides) {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		var err error
@@ -1412,30 +1833,28 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			changed, err = moveObjectLayer(&s.deck.Slides[s.current], action.ObjectID, action.Value, s.editingGroup)
 		}
 		if err != nil {
-			s.mu.Unlock()
 			return err
+		}
+		if !changed {
+			return nil
 		}
 	case "group-elements", "ungroup-elements", "enter-group", "exit-group":
 		if s.current < 0 || s.current >= slideCount {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		var err error
 		changed, err = s.applyGroupAction(&s.deck.Slides[s.current], action)
 		if err != nil {
-			s.mu.Unlock()
 			return err
 		}
 	case "toggle-slide-tab":
 		if s.current < 0 || s.current >= slideCount {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		if s.deck.Slides[s.current].TabID != "" {
 			s.deck.Slides[s.current].TabID = ""
 		} else {
 			if len(s.deck.Tabs) >= 20 {
-				s.mu.Unlock()
 				return fmt.Errorf("use at most 20 participant tabs")
 			}
 			s.deck.Slides[s.current].TabID = newStableID("tab")
@@ -1443,7 +1862,6 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.selected, s.selection, presenterPage, changed = -1, map[int]bool{}, 0, true
 	case "reorder-slide-tab":
 		if action.Slide < 0 || action.Slide >= slideCount || s.deck.Slides[action.Slide].TabID == "" {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		var slots []int
@@ -1457,7 +1875,6 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			}
 		}
 		if from < 0 || action.Value < 0 || action.Value >= len(slots) {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		moved := s.deck.Tabs[slots[from]]
@@ -1471,7 +1888,6 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.current, s.selected, s.selection, changed = action.Slide, -1, map[int]bool{}, from != action.Value
 	case "set-activity-qr":
 		if s.masterMode || !deckHasActivities(s.deck) || (action.Value != 0 && action.Value != 1) {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		hide := action.Value == 0
@@ -1479,16 +1895,13 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.deck.HideActivityQR = hide
 	case "set-tabs":
 		if !deckHasActivities(s.deck) {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		if err := validateDeckTabs(action.Tabs); err != nil {
-			s.mu.Unlock()
 			return err
 		}
 		for _, tab := range action.Tabs {
 			if tab.Page > len(s.deck.Slides) {
-				s.mu.Unlock()
 				return errInvalidEditorAction
 			}
 		}
@@ -1523,7 +1936,6 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		changed = true
 	case "select-slide":
 		if action.Slide < 0 || action.Slide >= slideCount {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		s.current, s.selected = action.Slide, -1
@@ -1531,7 +1943,6 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.selection = map[int]bool{}
 	case "select-element":
 		if s.current < 0 || s.current >= slideCount {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		elementIndex := action.Element
@@ -1539,22 +1950,18 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			elementIndex = nativeEditorElementIndex(s.deck.Slides[s.current].Elements, action.Element, action.ElementData.ID)
 		}
 		if elementIndex < -1 || elementIndex >= len(s.deck.Slides[s.current].Elements) {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		s.selectGroupElement(s.deck.Slides[s.current].Elements, elementIndex, action.Name == "toggle")
 	case "select-elements":
 		if s.current < 0 || s.current >= slideCount {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		if err := s.selectGroupElements(s.deck.Slides[s.current].Elements, action); err != nil {
-			s.mu.Unlock()
 			return err
 		}
 	case "navigate-presentation":
 		if action.Slide < 0 || action.Slide >= slideCount || action.Page < 0 {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		s.current, s.selected = action.Slide, -1
@@ -1562,7 +1969,6 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		presenterPage = action.Page
 	case "start-timer":
 		if action.Value <= 0 || action.Value > 24*60*60 {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		s.timerDeadline = time.Now().Add(time.Duration(action.Value) * time.Second)
@@ -1582,11 +1988,10 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		cols, rows := authoredRenderSize(245, 56)
 		preset, err := slidePreset(action.Name, cols, rows)
 		if err != nil {
-			s.mu.Unlock()
 			return err
 		}
 		insert := min(slideCount, s.current+1)
-		remapTabPages(&s.deck, func(i int) int {
+		remapDeckNavigationReferences(&s.deck, func(i int) int {
 			if i >= insert {
 				return i + 1
 			}
@@ -1599,11 +2004,10 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.selection = map[int]bool{}
 	case "clone-slide":
 		if slideCount == 0 {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		insert := s.current + 1
-		remapTabPages(&s.deck, func(i int) int {
+		remapDeckNavigationReferences(&s.deck, func(i int) int {
 			if i >= insert {
 				return i + 1
 			}
@@ -1612,11 +2016,14 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.deck.Slides = append(s.deck.Slides, Slide{})
 		copy(s.deck.Slides[insert+1:], s.deck.Slides[insert:])
 		s.deck.Slides[insert] = cloneSlide(s.deck.Slides[s.current])
+		if err := cloneStructuredSlide(&s.deck, s.deck.Slides[s.current], &s.deck.Slides[insert]); err != nil {
+			s.deck = before
+			return err
+		}
 		if activity := s.deck.Slides[insert].Engagement; activity != nil {
 			activity.ID, activity.Code = "", ""
 			if err := ensureActivityID(activity); err != nil {
 				s.deck = before
-				s.mu.Unlock()
 				return err
 			}
 			s.deck.Slides[insert].EngagementResult = nil
@@ -1625,11 +2032,10 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.selection = map[int]bool{}
 	case "reorder-slide":
 		if action.Slide < 0 || action.Slide >= slideCount || action.Value < 0 || action.Value >= slideCount || s.deck.Slides[action.Slide].TabID != "" || s.deck.Slides[action.Value].TabID != "" {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		if action.Slide != action.Value {
-			remapTabPages(&s.deck, func(i int) int {
+			remapDeckNavigationReferences(&s.deck, func(i int) int {
 				if i == action.Slide {
 					return action.Value
 				}
@@ -1652,7 +2058,7 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.selection = map[int]bool{}
 		presenterPage = 0
 	case "delete-slide":
-		remapTabPages(&s.deck, func(i int) int {
+		remapDeckNavigationReferences(&s.deck, func(i int) int {
 			if i == s.current {
 				return -1
 			}
@@ -1672,12 +2078,10 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.selection = map[int]bool{}
 	case "set-engagement":
 		if s.current < 0 || s.current >= slideCount || action.EngagementData == nil {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		definition, err := normalizeEngagement(*action.EngagementData)
 		if err != nil {
-			s.mu.Unlock()
 			return err
 		}
 		if previous := s.deck.Slides[s.current].Engagement; previous != nil && previous.ID == definition.ID && previous.Kind == definition.Kind {
@@ -1713,7 +2117,6 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		changed = true
 	case "remove-engagement":
 		if s.current < 0 || s.current >= slideCount {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		if s.deck.Slides[s.current].Engagement != nil {
@@ -1723,7 +2126,6 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		}
 	case "add-element":
 		if s.current < 0 || s.current >= slideCount {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		element := Element{Kind: action.Kind, ID: newStableID(action.Kind)}
@@ -1747,7 +2149,6 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			element = newShapeElement(editorShapeName(action.Name))
 		case "connector":
 			if action.ElementData == nil || !validShapeConnector(*action.ElementData, s.deck.Slides[s.current]) {
-				s.mu.Unlock()
 				return errInvalidEditorAction
 			}
 			element = *action.ElementData
@@ -1760,7 +2161,6 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 				element.Path = "image.png"
 			}
 		default:
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		element = standardTextElement(element)
@@ -1769,7 +2169,11 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			switch element.Kind {
 			case "heading", "text", "bullet", "code", "text-image", "page-number":
 				if !q.Has("modern-font") {
-					q.Set("modern-font", "c64")
+					font := "c64"
+					if s.deck.Theme != nil {
+						font = "theme"
+					}
+					q.Set("modern-font", font)
 				}
 			case "image":
 				if !q.Has("image-style") {
@@ -1792,12 +2196,14 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.selection = map[int]bool{s.selected: true}
 	case "duplicate-element":
 		if s.current < 0 || s.current >= slideCount || action.Element < 0 || action.Element >= len(s.deck.Slides[s.current].Elements) {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		duplicate := s.deck.Slides[s.current].Elements[action.Element]
-		duplicate.Query = removeImageQueryKeys(duplicate.Query, "group")
-		duplicate.ID = newStableID(duplicate.Kind)
+		duplicate := duplicateEditorElement(s.deck.Slides[s.current].Elements[action.Element])
+		copied := []Element{duplicate}
+		if err := duplicateStructuredReferences(&s.deck, copied); err != nil {
+			return err
+		}
+		duplicate = copied[0]
 		insert := action.Element + 1
 		elements := s.deck.Slides[s.current].Elements
 		elements = append(elements, Element{})
@@ -1805,13 +2211,29 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		elements[insert] = duplicate
 		s.deck.Slides[s.current].Elements = elements
 		s.selected, s.selection, changed = insert, map[int]bool{insert: true}, true
+	case "paste-objects":
+		if s.current < 0 || s.current >= slideCount || action.preparedClipboard == nil {
+			return errInvalidEditorAction
+		}
+		changed = s.commitObjectClipboard(&s.deck.Slides[s.current], action.preparedClipboard)
+	case "delete-objects":
+		if s.current < 0 || s.current >= slideCount || action.SceneRevision == nil || *action.SceneRevision != s.version {
+			return editorFailure("stale-target", "", "", fmt.Errorf("the selection changed; cut the objects again"))
+		}
+		var err error
+		changed, err = s.deleteClipboardObjects(&s.deck.Slides[s.current], action.ObjectIDs)
+		if err != nil {
+			return err
+		}
 	case "paste-elements":
 		if s.current < 0 || s.current >= slideCount || len(action.ElementsData) == 0 {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		freshPastedGroups(action.ElementsData)
 		freshPastedConnectorIDs(action.ElementsData)
+		if err := duplicateStructuredReferences(&s.deck, action.ElementsData); err != nil {
+			return err
+		}
 		for _, source := range action.ElementsData {
 			element := source
 			element.Kind = strings.TrimSpace(element.Kind)
@@ -1823,19 +2245,16 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			changed = true
 		}
 		if !changed {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		s.selection = map[int]bool{s.selected: true}
 	case "update-element":
 		if action.ElementData == nil || s.current < 0 || s.current >= slideCount || action.Element < 0 || action.Element >= len(s.deck.Slides[s.current].Elements) {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		updated := *action.ElementData
 		elementIndex := nativeEditorElementIndex(s.deck.Slides[s.current].Elements, action.Element, updated.ID)
 		if elementIndex < 0 {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		original := s.deck.Slides[s.current].Elements[elementIndex]
@@ -1843,71 +2262,57 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 			updated.ID = original.ID
 		}
 		if original.ID != "" && updated.ID != original.ID {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		updated.Kind = strings.TrimSpace(updated.Kind)
 		if updated.Kind == "" {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		s.deck.Slides[s.current].Elements[elementIndex] = preserveRunStyles(original, updated)
+		if err := validateShapeAdjustments(updated); err != nil {
+			return err
+		}
+		updated = preserveRunStyles(original, updated)
+		if reflect.DeepEqual(original, updated) {
+			return nil
+		}
+		s.deck.Slides[s.current].Elements[elementIndex] = updated
 		if elementIndex != action.Element && s.selection[action.Element] {
 			delete(s.selection, action.Element)
 			s.selection[elementIndex] = true
 		}
 		s.selected, changed = elementIndex, true
 	case "update-elements":
-		if s.current < 0 || s.current >= slideCount || len(action.ElementIndices) == 0 || len(action.ElementIndices) != len(action.ElementsData) {
-			s.mu.Unlock()
+		if s.current < 0 || s.current >= slideCount {
 			return errInvalidEditorAction
 		}
-		if err := resolveEditorBatch(s.deck.Slides[s.current].Elements, &action); err != nil {
-			s.mu.Unlock()
+		elements, batchChanged, err := prepareEditorElementBatch(s.deck.Slides[s.current], action, nil)
+		if err != nil {
 			return err
 		}
-		for dataIndex, elementIndex := range action.ElementIndices {
-			if elementIndex < 0 || elementIndex >= len(s.deck.Slides[s.current].Elements) {
-				s.mu.Unlock()
-				return errInvalidEditorAction
-			}
-			updated := action.ElementsData[dataIndex]
-			if updated.ID == "" {
-				updated.ID = s.deck.Slides[s.current].Elements[elementIndex].ID
-			}
-			updated.Kind = strings.TrimSpace(updated.Kind)
-			if updated.Kind == "" {
-				s.mu.Unlock()
-				return errInvalidEditorAction
-			}
-			s.deck.Slides[s.current].Elements[elementIndex] = preserveRunStyles(s.deck.Slides[s.current].Elements[elementIndex], updated)
+		if !batchChanged {
+			return nil
 		}
-		changed = true
+		s.deck.Slides[s.current].Elements, changed = elements, true
 	case "convert-text-kind":
 		if s.current < 0 || s.current >= slideCount {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		selected, err := convertNativeEditorTextKind(&s.deck.Slides[s.current], action.Element, action.Kind, action.Level, action.Cols, action.Rows)
 		if err != nil {
-			s.mu.Unlock()
 			return err
 		}
 		s.selected, s.selection, changed = selected, map[int]bool{selected: true}, true
 	case "convert-selected-text-kind":
 		if s.current < 0 || s.current >= slideCount {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		selected, selection, err := convertNativeEditorTextSelection(&s.deck.Slides[s.current], s.selection, action.Kind, action.Level, action.Cols, action.Rows)
 		if err != nil {
-			s.mu.Unlock()
 			return err
 		}
 		s.selected, s.selection, changed = selected, selection, true
 	case "delete-element":
 		if s.current < 0 || s.current >= slideCount || action.Element < 0 || action.Element >= len(s.deck.Slides[s.current].Elements) {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		elements := s.deck.Slides[s.current].Elements
@@ -1916,7 +2321,6 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.selection = map[int]bool{}
 	case "delete-selection":
 		if s.current < 0 || s.current >= slideCount || len(s.selection) == 0 {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		indices := make([]int, 0, len(s.selection))
@@ -1933,49 +2337,26 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		s.selected, s.selection, changed = -1, map[int]bool{}, true
 	case "move-element":
 		if s.current < 0 || s.current >= slideCount || action.Element < 0 || action.Element >= len(s.deck.Slides[s.current].Elements) {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		var err error
 		changed, err = moveObjectStack(&s.deck.Slides[s.current], s.deck.Slides[s.current].Elements[action.Element].ID, action.Kind, s.editingGroup)
 		if err != nil {
-			s.mu.Unlock()
 			return err
 		}
 		s.selected = action.Element
 	case "update-slide":
 		if action.SlideData == nil || s.current < 0 || s.current >= slideCount {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		updated := *action.SlideData
-		updated.Extra = cloneJSONExtensions(s.deck.Slides[s.current].Extra)
-		updated.FG = nativeEditorColorCode(updated.FG, false)
-		updated.BG = nativeEditorColorCode(updated.BG, true)
-		updated.HeaderFG = nativeEditorColorCode(updated.HeaderFG, false)
-		updated.Elements = s.deck.Slides[s.current].Elements
-		updated.TabID = s.deck.Slides[s.current].TabID
-		updated.Engagement = s.deck.Slides[s.current].Engagement
-		updated.EngagementResult = s.deck.Slides[s.current].EngagementResult
-		s.deck.Slides[s.current] = updated
+		s.deck.Slides[s.current] = prepareSlideAppearanceUpdate(s.deck.Slides[s.current], *action.SlideData)
 		changed = true
-	case "update-slide-notes":
-		if action.Slide < 0 || action.Slide >= slideCount {
-			s.mu.Unlock()
-			return errInvalidEditorAction
-		}
-		if s.deck.Slides[action.Slide].Notes != action.Notes {
-			s.deck.Slides[action.Slide].Notes = action.Notes
-			changed = true
-		}
 	case "set-layout":
 		if s.current < 0 || s.current >= slideCount {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		s.deck.EnsureDefaultMasters()
 		if !s.deck.RebindSlideLayout(s.current, action.Kind) {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		s.selected, changed = -1, true
@@ -1990,12 +2371,12 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		changed = true
 	case "update-layout":
 		if action.SlideData == nil {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		s.deck.EnsureDefaultMasters()
 		if action.Kind == "base" {
 			updated := cloneSlide(*action.SlideData)
+			updated.ID = s.deck.Masters.Base.Slide.ID
 			if updated.Extra == nil {
 				updated.Extra = cloneJSONExtensions(s.deck.Masters.Base.Slide.Extra)
 			}
@@ -2006,10 +2387,10 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		} else {
 			index := s.deck.Masters.LayoutIndex(action.Kind)
 			if index < 0 {
-				s.mu.Unlock()
 				return errInvalidEditorAction
 			}
 			updated := cloneSlide(*action.SlideData)
+			updated.ID = s.deck.Masters.Layouts[index].Slide.ID
 			if updated.Extra == nil {
 				updated.Extra = cloneJSONExtensions(s.deck.Masters.Layouts[index].Slide.Extra)
 			}
@@ -2035,12 +2416,10 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 		changed = true
 	case "delete-layout":
 		if action.Kind == activityLayoutID {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		index := s.deck.Masters.LayoutIndex(action.Kind)
 		if index < 0 {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		s.deck.Masters.Layouts = append(s.deck.Masters.Layouts[:index], s.deck.Masters.Layouts[index+1:]...)
@@ -2053,8 +2432,8 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 	case "undo":
 		if len(s.undo) > 0 {
 			previous := s.historyElements()
-			s.redo = append(s.redo, cloneDeck(s.deck))
-			s.deck = s.undo[len(s.undo)-1]
+			s.redo = append(s.redo, before)
+			s.deck = restoreEditorHistoryDeck(s.undo[len(s.undo)-1])
 			s.undo = s.undo[:len(s.undo)-1]
 			s.current = min(s.current, len(s.deck.Slides)-1)
 			s.retainHistorySelection(previous, s.historyElements())
@@ -2063,15 +2442,14 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 	case "redo":
 		if len(s.redo) > 0 {
 			previous := s.historyElements()
-			s.undo = append(s.undo, cloneDeck(s.deck))
-			s.deck = s.redo[len(s.redo)-1]
+			s.undo = append(s.undo, before)
+			s.deck = restoreEditorHistoryDeck(s.redo[len(s.redo)-1])
 			s.redo = s.redo[:len(s.redo)-1]
 			s.current = min(s.current, len(s.deck.Slides)-1)
 			s.retainHistorySelection(previous, s.historyElements())
 			changed = true
 		}
 	default:
-		s.mu.Unlock()
 		return errInvalidEditorAction
 	}
 	// Appearance edits do not edit content. History restores complete snapshots;
@@ -2079,19 +2457,34 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 	if changed && s.current >= 0 && s.current < len(before.Slides) && s.current < len(s.deck.Slides) {
 		preserveInsertedStack(before.Slides[s.current], &s.deck.Slides[s.current], action)
 	}
-	normalizeMutation := changed && action.Action != "set-theme" && action.Action != "set-object-lock" && action.Action != "move-element" && action.Action != "move-object-layer" && action.Action != "set-scene-text" && action.Action != "set-scene-crop" && action.Action != "undo" && action.Action != "redo"
-	normalizeMutation = normalizeMutation && action.Action != "set-modern-text-style" && action.Action != "set-text-size" && action.Action != "set-text-width"
+	normalizeMutation := changed && action.Action != "set-page-size" && action.Action != "set-theme" && action.Action != "set-deck-theme" && action.Action != "set-object-lock" && action.Action != "move-element" && action.Action != "move-object-layer" && action.Action != "set-scene-text" && action.Action != "set-scene-crop" && action.Action != "undo" && action.Action != "redo"
+	normalizeMutation = normalizeMutation && action.Action != "detach-deck-theme"
+	normalizeMutation = normalizeMutation && action.Action != "set-selection-geometry" && action.Action != "set-selection-property" && action.Action != "set-modern-text-style" && action.Action != "set-text-size" && action.Action != "set-text-width"
+	normalizeMutation = normalizeMutation && action.Action != "paste-object-style" && action.Action != "reset-object-style"
+	normalizeMutation = normalizeMutation && action.Action != "set-shape-adjustment" && action.Action != "set-slide-build"
+	normalizeMutation = normalizeMutation && action.Action != "restore-background-image"
 	if normalizeMutation {
 		syncSlideTabs(&s.deck)
 		standardizeDeckText(&s.deck)
 	}
 	if normalizeMutation && s.current >= 0 && s.current < len(s.deck.Slides) {
-		fitSlideShapeLabels(&s.deck.Slides[s.current], authoredTerminalWidth, authoredTerminalHeight)
+		fitSlideShapeLabels(&s.deck.Slides[s.current], authoredTerminalWidth, authoredTerminalHeight, s.deck.physicalCanvas())
 		pruneSingletonGroups(&s.deck.Slides[s.current])
 		s.expandSelectedGroups(s.deck.Slides[s.current].Elements)
 		remapNativeEditorSelection(canonicalizeSlideElementOrder(&s.deck.Slides[s.current], authoredTerminalWidth, authoredTerminalHeight), &s.selected, &s.selection)
 	}
 	if changed && action.Action != "undo" && action.Action != "redo" {
+		previousElements := s.historyElements()
+		if err := reconcileEditorObjectReferences(&s.deck, before, action, s.current, false); err != nil {
+			return err
+		}
+		if editorActionChangesObjectReferences(action.Action) {
+			s.retainHistorySelection(previousElements, s.historyElements())
+		}
+		if err := s.acceptStructuredBudget(before, action, false, s.current); err != nil {
+			return err
+		}
+		registerPreparedClipboardAssets(action.preparedClipboard)
 		s.undo = append(s.undo, before)
 		if len(s.undo) > 100 {
 			s.undo = s.undo[len(s.undo)-100:]
@@ -2101,23 +2494,24 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) error {
 	if !changed {
 		s.retainSceneForViewAction(action.Action)
 	}
+	if changed && (action.Action == "undo" || action.Action == "redo") {
+		_ = s.acceptStructuredBudget(before, action, false, s.current)
+	}
 	s.version++
 	current := s.current
 	companion := s.companion
 	deckPath := s.deckPath
 	var deck Deck
-	refreshScope, refreshSlide := nativeEditorRefreshPlan(action.Action, before, s.deck, current, action.Slide)
+	refreshScope, _ := nativeEditorRefreshPlan(action.Action, before, s.deck, current, action.Slide)
 	if changed && companion != nil && refreshScope != "" {
-		deck = cloneDeckForRender(s.deck)
+		deck = cloneDeckForScene(s.deck)
 	}
-	s.mu.Unlock()
+	refreshRevision := s.version
+	transaction.release()
 	if companion != nil {
 		if changed {
-			switch refreshScope {
-			case "slide":
-				companion.RefreshDeckSlideAsync(deckPath, deck, refreshSlide, authoredTerminalWidth, authoredTerminalHeight)
-			case "deck":
-				companion.RefreshAllAsync(deckPath, deck.ResolvedSlides(), authoredTerminalWidth, authoredTerminalHeight)
+			if refreshScope != "" {
+				companion.RefreshEditorDeckAsync(s, deckPath, deck, refreshRevision, authoredTerminalWidth, authoredTerminalHeight)
 			}
 		}
 		presenting := companion.presentationEnabled()
@@ -2152,13 +2546,15 @@ func remapNativeEditorSelection(oldToNew []int, selected *int, selection *map[in
 
 func nativeEditorRefreshScope(action string) string {
 	switch action {
+	case "set-slide-build", "promote-image-background", "restore-background-image":
+		return "slide"
 	case "set-appearance-profile", "set-style-default", "set-element-style", "set-appearance-mode":
 		// Retired appearance commands are rejected by the unified editor and
 		// must never trigger a presenter rebuild as a side effect.
 		return ""
-	case "set-text-width", "set-text-size", "set-modern-text-style", "set-scene-text", "set-scene-crop", "set-object-lock", "move-object-layer", "group-elements", "ungroup-elements":
+	case "insert-chart", "set-chart-data", "set-chart-options", "set-chart-series-style", "insert-table", "set-table", "paste-object-style", "reset-object-style", "set-selection-geometry", "set-selection-property", "set-text-width", "set-text-size", "set-modern-text-style", "set-scene-text", "set-scene-crop", "set-object-lock", "move-object-layer", "group-elements", "ungroup-elements":
 		return "slide"
-	case "add-element", "toggle-page-number", "duplicate-element", "paste-elements", "update-element", "update-elements", "convert-text-kind", "convert-selected-text-kind", "delete-element", "delete-selection", "move-element", "update-slide", "set-layout", "set-engagement", "remove-engagement":
+	case "add-element", "toggle-page-number", "duplicate-element", "paste-elements", "paste-objects", "delete-objects", "update-element", "update-elements", "convert-text-kind", "convert-selected-text-kind", "delete-element", "delete-selection", "move-element", "update-slide", "set-layout", "set-engagement", "remove-engagement":
 		return "slide"
 	case "update-slide-notes":
 		return ""
@@ -2173,7 +2569,7 @@ func nativeEditorRefreshScope(action string) string {
 // every unaffected presenter page alive in that case.
 func nativeEditorRefreshPlan(action string, before, after Deck, current, requestedSlide int) (string, int) {
 	target := current
-	if action == "set-text-width" || action == "set-text-size" || action == "set-modern-text-style" || action == "set-scene-text" || action == "set-scene-crop" {
+	if isChartCommand(action) || action == "insert-table" || action == "set-table" || action == "paste-object-style" || action == "reset-object-style" || action == "set-selection-geometry" || action == "set-selection-property" || action == "set-text-width" || action == "set-text-size" || action == "set-modern-text-style" || action == "set-scene-text" || action == "set-scene-crop" {
 		target = requestedSlide
 	}
 	scope := nativeEditorRefreshScope(action)
@@ -2217,8 +2613,58 @@ func nativeEditorMasterRefreshScope(action string) string {
 	}
 }
 
-func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
+func (s *nativeEditorSession) applyMaster(action nativeEditorAction) (resultErr error) {
+	if action.Action == "detach-deck-theme" && action.preparedThemeDetach == nil {
+		return s.prepareAndApplyThemeDetach(ownEditorObjectInput(action))
+	}
+	if action.Action == "update-slide-notes" {
+		action.SceneMaster = true
+		return s.applySpeakerNotes(action)
+	}
+	if err := validateSpeakerNotesAction(action); err != nil {
+		return err
+	}
+	if err := validateSlideStyleAction(action); err != nil {
+		return err
+	}
+	action = ownEditorObjectInput(action)
+	if action.Action == "paste-objects" && action.preparedClipboard == nil {
+		return s.prepareAndApplyObjectClipboard(context.Background(), action)
+	}
 	s.mu.Lock()
+	if err := s.checkMutationRevisionLocked(action); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if err := s.checkUploadDestinationLocked(action); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if action.preparedClipboard != nil {
+		if err := s.checkPreparedClipboardLocked(action.preparedClipboard); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+	if err := s.checkThemeDraftLocked(action); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if action.Action == "detach-deck-theme" {
+		if err := s.checkThemeDetachLocked(action.preparedThemeDetach); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+	if err := s.checkLayerTargetLocked(action, true); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	transaction := beginEditorCommand(s, !nativeEditorViewAction(action.Action) || !deckHasMasterData(s.deck.Masters))
+	defer transaction.finish(&resultErr)
+	if action.Action == "update-elements" && action.SceneRevision != nil && (*action.SceneRevision != s.version || !action.SceneMaster || action.Slide != s.currentMaster) {
+		return editorFailure("stale-target", "", "", fmt.Errorf("the master changed; retry the edit against the current selection"))
+	}
 	s.deck.EnsureDefaultMasters()
 	if action.Action == "toggle-master-mode" {
 		s.editingGroup = ""
@@ -2229,30 +2675,23 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			s.currentMaster = min(s.currentMaster, len(s.deck.Masters.Layouts))
 		}
 		s.version++
-		s.mu.Unlock()
 		return nil
 	}
 	if !s.masterMode {
-		s.mu.Unlock()
 		return errInvalidEditorAction
 	}
-	before := Deck{}
-	if !nativeEditorViewAction(action.Action) {
-		before = cloneDeck(s.deck)
-	}
+	before := transaction.beforeDeck
 	changed := false
 	masterCount := len(s.deck.Masters.Layouts) + 1
 	s.currentMaster = max(0, min(s.currentMaster, masterCount-1))
 	target := masterSlideAt(&s.deck, s.currentMaster)
 	if err := checkObjectLocks(*target, action, s.selection, s.editingGroup); err != nil {
-		s.mu.Unlock()
 		return err
 	}
 	activityMaster := s.currentMaster > 0 && s.deck.Masters.Layouts[s.currentMaster-1].ID == activityLayoutID
-	if action.Action == "set-text-width" || action.Action == "set-text-size" || action.Action == "set-modern-text-style" || action.Action == "set-scene-text" || action.Action == "set-scene-crop" {
+	if isChartCommand(action.Action) || action.Action == "insert-table" || action.Action == "set-table" || action.Action == "paste-object-style" || action.Action == "reset-object-style" || action.Action == "set-selection-geometry" || action.Action == "set-selection-property" || action.Action == "set-text-width" || action.Action == "set-text-size" || action.Action == "set-modern-text-style" || action.Action == "set-scene-text" || action.Action == "set-scene-crop" || action.Action == "set-shape-adjustment" || action.Action == "promote-image-background" || action.Action == "restore-background-image" {
 		if !action.SceneMaster || action.SceneRevision == nil || *action.SceneRevision != s.version || action.Slide != s.currentMaster {
-			s.mu.Unlock()
-			return fmt.Errorf("master changed; reopen the editor")
+			return editorFailure("stale-target", "", action.ObjectID, fmt.Errorf("master changed; reopen the editor"))
 		}
 		// Reuse validated mutations against an isolated authored master, not its
 		// inherited preview and not the normal slide at the same numeric index.
@@ -2261,23 +2700,80 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		command := action
 		command.Slide = 0
 		var err error
-		if action.Action == "set-text-width" {
+		cellStyle := action.StyleContext == "table-cells" && (action.Action == "paste-object-style" || action.Action == "reset-object-style" || action.Action == "set-selection-property")
+		if isChartCommand(action.Action) || action.Action == "insert-table" || action.Action == "set-table" || cellStyle {
+			// Tables need the full authored reference graph for copy-on-write.
+			// Own the layout slice, then edit the selected master directly; the
+			// isolated-slide adapter would hide normal-slide consumers.
+			edit.Slides = s.deck.Slides
+			edit.Masters.Layouts = append([]MasterLayout(nil), s.deck.Masters.Layouts...)
+			if cellStyle && action.Action == "set-selection-property" {
+				changed, err = applyTableCellPropertyCommand(&edit, action, s.editingGroup)
+			} else if cellStyle {
+				changed, err = applyTableCellStyleCommand(&edit, action, s.editingGroup)
+			} else if isChartCommand(action.Action) {
+				changed, err = applyChartCommand(&edit, action, s.editingGroup)
+			} else {
+				changed, err = applyTableCommand(&edit, action, s.editingGroup)
+			}
+		} else if action.Action == "paste-object-style" || action.Action == "reset-object-style" {
+			changed, err = applyObjectStyle(&edit, command, s.editingGroup)
+		} else if action.Action == "set-selection-geometry" {
+			changed, err = applySelectionGeometry(&edit, command, s.editingGroup)
+		} else if action.Action == "set-selection-property" {
+			changed, err = applySelectionProperty(&edit, command, s.editingGroup)
+		} else if action.Action == "set-text-width" {
 			changed, err = applyTextWidthCommand(&edit, command, s.editingGroup)
 		} else if action.Action == "set-text-size" {
 			changed, err = applyTextSizeCommand(&edit, command, s.editingGroup)
 		} else if action.Action == "set-modern-text-style" {
 			changed, err = applyModernTextStyle(&edit, command, s.editingGroup)
+		} else if action.Action == "set-shape-adjustment" {
+			changed, err = applyShapeAdjustmentResolved(&edit.Slides[0], s.deck.applyShapeStrokeDefaults(masterViewPreview(s.deck.Masters, s.currentMaster)), command, s.editingGroup)
 		} else if action.Action == "set-scene-text" {
 			changed, err = applySceneText(&edit, command)
+		} else if action.Action == "promote-image-background" {
+			changed, err = promoteImageBackground(&edit, command, s.editingGroup)
+		} else if action.Action == "restore-background-image" {
+			if command.ObjectID == "" && !target.BackgroundMediaSet {
+				resolved := masterViewPreview(s.deck.Masters, s.currentMaster)
+				edit.Slides[0].BackgroundMedia = cloneSlideBackgroundMedia(resolved.BackgroundMedia)
+				edit.Slides[0].BackgroundMediaSet = true
+				if edit.Slides[0].BackgroundMedia != nil {
+					edit.Slides[0].BackgroundMedia.SourceObjectID = ""
+				}
+			}
+			changed, err = restoreBackgroundImage(&edit, command, s.editingGroup)
 		} else {
-			changed, err = applySceneCrop(&edit, command)
+			if err := requireSelectionObjectCommand(edit, edit.Slides[0], command.ObjectID, s.editingGroup, "image.crop"); err != nil {
+				return err
+			}
+			changed, err = applySceneCropResolved(&edit, command, s.deck, s.deck.applyShapeStrokeDefaults(masterViewPreview(s.deck.Masters, s.currentMaster)), s.currentMaster)
 		}
 		if err != nil {
-			s.mu.Unlock()
 			return err
 		}
+		if !changed {
+			return nil // No history/revision or full presenter snapshot for a no-op.
+		}
 		if changed {
-			*target = edit.Slides[0]
+			if isChartCommand(action.Action) || action.Action == "insert-table" || action.Action == "set-table" || cellStyle {
+				*target = *masterSlideAt(&edit, s.currentMaster)
+				s.deck.Objects = edit.Objects
+				if action.Action == "insert-table" || action.Action == "insert-chart" {
+					s.selected = len(target.Elements) - 1
+					s.selection = map[int]bool{s.selected: true}
+					s.editingGroup = ""
+				}
+			} else {
+				*target = edit.Slides[0]
+			}
+			if action.Action == "restore-background-image" {
+				s.retainHistorySelection(masterSlideAt(&before, s.currentMaster).Elements, target.Elements)
+			}
+			if err := s.acceptStructuredBudget(before, action, true, s.currentMaster); err != nil {
+				return err
+			}
 			s.undo = append(s.undo, before)
 			if len(s.undo) > 100 {
 				s.undo = s.undo[len(s.undo)-100:]
@@ -2285,10 +2781,11 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			s.redo = nil
 			s.version++
 		}
-		updated, companion := cloneDeck(s.deck), s.companion
-		s.mu.Unlock()
+		updated, companion := cloneDeckForScene(s.deck), s.companion
+		deckPath, refreshRevision := s.deckPath, s.version
+		transaction.release()
 		if changed && companion != nil {
-			companion.RefreshAllAsync(s.deckPath, updated.ResolvedSlides(), authoredTerminalWidth, authoredTerminalHeight)
+			companion.RefreshEditorDeckAsync(s, deckPath, updated, refreshRevision, authoredTerminalWidth, authoredTerminalHeight)
 		}
 		return nil
 	}
@@ -2305,7 +2802,6 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			s.redo = nil
 			s.version++
 		}
-		s.mu.Unlock()
 		return nil
 	}
 	switch action.Action {
@@ -2313,6 +2809,41 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		s.editingGroup = ""
 	}
 	switch action.Action {
+	case "detach-deck-theme":
+		s.deck = action.preparedThemeDetach.deck
+		s.structuredBudget = action.preparedThemeDetach.budget
+		changed = true
+	case "set-deck-theme":
+		if action.ThemeData == nil {
+			return errInvalidEditorAction
+		}
+		if err := action.ThemeData.Validate(); err != nil {
+			return err
+		}
+		changed = !reflect.DeepEqual(s.deck.Theme, action.ThemeData)
+		s.deck.Theme = action.ThemeData.Clone()
+	case "set-page-size":
+		if err := action.PageSize.Validate(); err != nil {
+			return err
+		}
+		changed = !reflect.DeepEqual(s.deck.PageSize, action.PageSize)
+		s.deck.PageSize = action.PageSize.Clone()
+	case "set-theme":
+		appearance, err := s.deck.withTheme(action.Name)
+		if err != nil {
+			return err
+		}
+		changed = !reflect.DeepEqual(s.deck.Appearance, appearance) || s.deck.Theme != nil
+		s.deck.Appearance, s.deck.Theme = appearance, nil
+	case "set-slide-build":
+		var err error
+		changed, err = s.setSlideBuildLocked(action, target)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return nil
+		}
 	case "move-object-layer":
 		var err error
 		if action.Name != "" {
@@ -2321,19 +2852,19 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			changed, err = moveObjectLayer(target, action.ObjectID, action.Value, s.editingGroup)
 		}
 		if err != nil {
-			s.mu.Unlock()
 			return err
+		}
+		if !changed {
+			return nil
 		}
 	case "group-elements", "ungroup-elements", "enter-group", "exit-group":
 		var err error
 		changed, err = s.applyGroupAction(target, action)
 		if err != nil {
-			s.mu.Unlock()
 			return err
 		}
 	case "select-slide":
 		if action.Slide < 0 || action.Slide >= masterCount {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		s.currentMaster, s.selected = action.Slide, -1
@@ -2362,7 +2893,11 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		} else {
 			source = s.deck.Masters.Layouts[s.currentMaster-1]
 		}
-		clone := cloneMasterLayoutFresh(source)
+		clone := cloneMasterLayoutShell(source)
+		if err := cloneStructuredSlide(&s.deck, source.Slide, &clone.Slide); err != nil {
+			return err
+		}
+		refreshMasterPlaceholderSlots(&clone.Slide)
 		insert := s.currentMaster
 		s.deck.Masters.Layouts = append(s.deck.Masters.Layouts, MasterLayout{})
 		copy(s.deck.Masters.Layouts[insert+1:], s.deck.Masters.Layouts[insert:])
@@ -2371,7 +2906,6 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		s.selection = map[int]bool{}
 	case "reorder-master":
 		if action.Slide <= 0 || action.Slide >= masterCount || action.Value <= 0 || action.Value >= masterCount {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		if action.Slide != action.Value {
@@ -2387,12 +2921,10 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		s.selection = map[int]bool{}
 	case "delete-slide", "delete-layout":
 		if s.currentMaster <= 0 || s.currentMaster-1 >= len(s.deck.Masters.Layouts) {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		id := s.deck.Masters.Layouts[s.currentMaster-1].ID
 		if id == activityLayoutID {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		s.deck.Masters.Layouts = append(s.deck.Masters.Layouts[:s.currentMaster-1], s.deck.Masters.Layouts[s.currentMaster:]...)
@@ -2442,7 +2974,6 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			element = newShapeElement(editorShapeName(action.Name))
 		case "connector":
 			if action.ElementData == nil || !validShapeConnector(*action.ElementData, *target) {
-				s.mu.Unlock()
 				return errInvalidEditorAction
 			}
 			element = *action.ElementData
@@ -2455,7 +2986,6 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 				element.Path = "image.png"
 			}
 		default:
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		element = standardTextElement(element)
@@ -2464,7 +2994,11 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			switch element.Kind {
 			case "heading", "text", "bullet", "code", "text-image", "page-number":
 				if !q.Has("modern-font") {
-					q.Set("modern-font", "c64")
+					font := "c64"
+					if s.deck.Theme != nil {
+						font = "theme"
+					}
+					q.Set("modern-font", font)
 				}
 			case "image":
 				if !q.Has("image-style") {
@@ -2491,24 +3025,20 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			elementIndex = nativeEditorElementIndex(target.Elements, action.Element, action.ElementData.ID)
 		}
 		if elementIndex < -1 || elementIndex >= len(target.Elements) {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		s.selectGroupElement(target.Elements, elementIndex, action.Name == "toggle")
 	case "select-elements":
 		if err := s.selectGroupElements(target.Elements, action); err != nil {
-			s.mu.Unlock()
 			return err
 		}
 	case "update-element":
 		if action.ElementData == nil || action.Element < 0 || action.Element >= len(target.Elements) {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		updated := *action.ElementData
 		elementIndex := nativeEditorElementIndex(target.Elements, action.Element, updated.ID)
 		if elementIndex < 0 {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		if updated.ID == "" {
@@ -2519,90 +3049,89 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			updated.Kind, updated.Level, updated.Text = original.Kind, original.Level, original.Text
 			updated.ID, updated.SlotID, updated.PlaceholderRole = original.ID, original.SlotID, original.PlaceholderRole
 		}
-		target.Elements[elementIndex] = preserveRunStyles(target.Elements[elementIndex], updated)
+		if err := validateShapeAdjustments(updated); err != nil {
+			return err
+		}
+		updated = preserveRunStyles(target.Elements[elementIndex], updated)
+		if reflect.DeepEqual(target.Elements[elementIndex], updated) {
+			return nil
+		}
+		target.Elements[elementIndex] = updated
 		if elementIndex != action.Element && s.selection[action.Element] {
 			delete(s.selection, action.Element)
 			s.selection[elementIndex] = true
 		}
 		s.selected, changed = elementIndex, true
 	case "update-elements":
-		if len(action.ElementIndices) == 0 || len(action.ElementIndices) != len(action.ElementsData) {
-			s.mu.Unlock()
-			return errInvalidEditorAction
-		}
-		if err := resolveEditorBatch(target.Elements, &action); err != nil {
-			s.mu.Unlock()
+		elements, batchChanged, err := prepareEditorElementBatch(*target, action, protectedIndex)
+		if err != nil {
 			return err
 		}
-		for dataIndex, elementIndex := range action.ElementIndices {
-			if elementIndex < 0 || elementIndex >= len(target.Elements) {
-				s.mu.Unlock()
-				return errInvalidEditorAction
-			}
-			updated := action.ElementsData[dataIndex]
-			if protectedIndex(elementIndex) {
-				original := target.Elements[elementIndex]
-				updated.Kind, updated.Level, updated.Text = original.Kind, original.Level, original.Text
-				updated.ID, updated.SlotID, updated.PlaceholderRole = original.ID, original.SlotID, original.PlaceholderRole
-			}
-			if updated.ID == "" {
-				updated.ID = target.Elements[elementIndex].ID
-			}
-			if strings.TrimSpace(updated.Kind) == "" {
-				s.mu.Unlock()
-				return errInvalidEditorAction
-			}
-			target.Elements[elementIndex] = preserveRunStyles(target.Elements[elementIndex], updated)
+		if !batchChanged {
+			return nil
 		}
-		changed = true
+		target.Elements, changed = elements, true
 	case "convert-text-kind":
 		if protectedIndex(action.Element) {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		selected, err := convertNativeEditorTextKind(target, action.Element, action.Kind, action.Level, action.Cols, action.Rows)
 		if err != nil {
-			s.mu.Unlock()
 			return err
 		}
 		s.selected, s.selection, changed = selected, map[int]bool{selected: true}, true
 	case "convert-selected-text-kind":
 		for index := range s.selection {
 			if protectedIndex(index) {
-				s.mu.Unlock()
 				return errInvalidEditorAction
 			}
 		}
 		selected, selection, err := convertNativeEditorTextSelection(target, s.selection, action.Kind, action.Level, action.Cols, action.Rows)
 		if err != nil {
-			s.mu.Unlock()
 			return err
 		}
 		s.selected, s.selection, changed = selected, selection, true
 	case "duplicate-element":
 		if action.Element < 0 || action.Element >= len(target.Elements) {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		if protectedIndex(action.Element) {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		duplicate := target.Elements[action.Element]
-		duplicate.Query = removeImageQueryKeys(duplicate.Query, "group")
-		duplicate.ID = newStableID(duplicate.Kind)
+		duplicate := duplicateEditorElement(target.Elements[action.Element])
+		copied := []Element{duplicate}
+		if err := duplicateStructuredReferences(&s.deck, copied); err != nil {
+			return err
+		}
+		duplicate = copied[0]
 		insert := action.Element + 1
 		target.Elements = append(target.Elements, Element{})
 		copy(target.Elements[insert+1:], target.Elements[insert:])
 		target.Elements[insert] = duplicate
 		s.selected, s.selection, changed = insert, map[int]bool{insert: true}, true
+	case "paste-objects":
+		if action.preparedClipboard == nil {
+			return errInvalidEditorAction
+		}
+		changed = s.commitObjectClipboard(target, action.preparedClipboard)
+	case "delete-objects":
+		if action.SceneRevision == nil || *action.SceneRevision != s.version {
+			return editorFailure("stale-target", "", "", fmt.Errorf("the selection changed; cut the objects again"))
+		}
+		var err error
+		changed, err = s.deleteClipboardObjects(target, action.ObjectIDs)
+		if err != nil {
+			return err
+		}
 	case "paste-elements":
 		if len(action.ElementsData) == 0 {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		freshPastedGroups(action.ElementsData)
 		freshPastedConnectorIDs(action.ElementsData)
+		if err := duplicateStructuredReferences(&s.deck, action.ElementsData); err != nil {
+			return err
+		}
 		for _, source := range action.ElementsData {
 			element := source
 			element.Kind = strings.TrimSpace(element.Kind)
@@ -2614,7 +3143,6 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 			changed = true
 		}
 		if !changed {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		s.selection = map[int]bool{s.selected: true}
@@ -2639,52 +3167,39 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 		s.selected, s.selection = -1, map[int]bool{}
 	case "move-element":
 		if action.Element < 0 || action.Element >= len(target.Elements) {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		var err error
 		changed, err = moveObjectStack(target, target.Elements[action.Element].ID, action.Kind, s.editingGroup)
 		if err != nil {
-			s.mu.Unlock()
 			return err
 		}
 		s.selected = action.Element
 	case "update-slide":
 		if action.SlideData == nil {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
-		updated := cloneSlide(*action.SlideData)
-		updated.Elements = target.Elements
-		updated.FG = nativeEditorColorCode(updated.FG, false)
-		updated.BG = nativeEditorColorCode(updated.BG, true)
-		updated.HeaderFG = nativeEditorColorCode(updated.HeaderFG, false)
+		updated := prepareSlideAppearanceUpdate(*target, *action.SlideData)
 		*target, changed = updated, true
 	case "rename-master":
 		name := strings.TrimSpace(action.Name)
 		if name == "" {
-			s.mu.Unlock()
 			return errInvalidEditorAction
 		}
 		if s.currentMaster == 0 {
 			s.deck.Masters.Base.Name = name
 		} else {
 			if activityMaster {
-				s.mu.Unlock()
 				return errInvalidEditorAction
 			}
 			s.deck.Masters.Layouts[s.currentMaster-1].Name = name
 		}
 		changed = true
-	case "update-slide-notes":
-		index := max(0, min(action.Slide, masterCount-1))
-		masterSlideAt(&s.deck, index).Notes = action.Notes
-		changed = true
 	case "undo":
 		if len(s.undo) > 0 {
 			previous := s.historyElements()
-			s.redo = append(s.redo, cloneDeck(s.deck))
-			s.deck = s.undo[len(s.undo)-1]
+			s.redo = append(s.redo, before)
+			s.deck = restoreEditorHistoryDeck(s.undo[len(s.undo)-1])
 			s.undo = s.undo[:len(s.undo)-1]
 			s.currentMaster = min(s.currentMaster, len(s.deck.Masters.Layouts))
 			s.retainHistorySelection(previous, s.historyElements())
@@ -2693,51 +3208,65 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) error {
 	case "redo":
 		if len(s.redo) > 0 {
 			previous := s.historyElements()
-			s.undo = append(s.undo, cloneDeck(s.deck))
-			s.deck = s.redo[len(s.redo)-1]
+			s.undo = append(s.undo, before)
+			s.deck = restoreEditorHistoryDeck(s.redo[len(s.redo)-1])
 			s.redo = s.redo[:len(s.redo)-1]
 			s.currentMaster = min(s.currentMaster, len(s.deck.Masters.Layouts))
 			s.retainHistorySelection(previous, s.historyElements())
 			changed = true
 		}
 	default:
-		s.mu.Unlock()
 		return errInvalidEditorAction
 	}
 	if changed && s.currentMaster >= 0 && s.currentMaster <= len(before.Masters.Layouts) && s.currentMaster <= len(s.deck.Masters.Layouts) {
 		preserveInsertedStack(*masterSlideAt(&before, s.currentMaster), masterSlideAt(&s.deck, s.currentMaster), action)
 	}
-	if changed && action.Action != "move-element" && action.Action != "move-object-layer" && action.Action != "undo" && action.Action != "redo" {
+	if changed && action.Action != "set-page-size" && action.Action != "detach-deck-theme" && action.Action != "set-theme" && action.Action != "set-deck-theme" && action.Action != "set-slide-build" && action.Action != "move-element" && action.Action != "move-object-layer" && action.Action != "undo" && action.Action != "redo" {
 		standardizeDeckText(&s.deck)
 		target = masterSlideAt(&s.deck, s.currentMaster)
-		fitSlideShapeLabels(target, authoredTerminalWidth, authoredTerminalHeight)
+		fitSlideShapeLabels(target, authoredTerminalWidth, authoredTerminalHeight, s.deck.physicalCanvas())
 		pruneSingletonGroups(target)
 		s.expandSelectedGroups(target.Elements)
 		remapNativeEditorSelection(canonicalizeSlideElementOrder(target, authoredTerminalWidth, authoredTerminalHeight), &s.selected, &s.selection)
 	}
 	if changed && action.Action != "undo" && action.Action != "redo" {
+		previousElements := s.historyElements()
+		if err := reconcileEditorObjectReferences(&s.deck, before, action, s.currentMaster, true); err != nil {
+			return err
+		}
+		if editorActionChangesObjectReferences(action.Action) {
+			s.retainHistorySelection(previousElements, s.historyElements())
+		}
+		if err := s.acceptStructuredBudget(before, action, true, s.currentMaster); err != nil {
+			return err
+		}
+		registerPreparedClipboardAssets(action.preparedClipboard)
 		s.undo = append(s.undo, before)
 		if len(s.undo) > 100 {
 			s.undo = s.undo[len(s.undo)-100:]
 		}
 		s.redo = nil
 	}
-	if changed && action.Action != "undo" && action.Action != "redo" {
+	if changed && action.Action != "set-page-size" && action.Action != "detach-deck-theme" && action.Action != "undo" && action.Action != "redo" && action.Action != "set-theme" && action.Action != "set-deck-theme" && action.Action != "set-slide-build" {
 		s.deck.Masters.Normalize()
 	}
 	if !changed {
 		s.retainSceneForViewAction(action.Action)
+	}
+	if changed && (action.Action == "undo" || action.Action == "redo") {
+		_ = s.acceptStructuredBudget(before, action, true, s.currentMaster)
 	}
 	s.version++
 	companion := s.companion
 	var deck Deck
 	refreshScope := nativeEditorMasterRefreshScope(action.Action)
 	if changed && companion != nil && refreshScope != "" {
-		deck = cloneDeckForRender(s.deck)
+		deck = cloneDeckForScene(s.deck)
 	}
-	s.mu.Unlock()
+	deckPath, refreshRevision := s.deckPath, s.version
+	transaction.release()
 	if changed && companion != nil && refreshScope == "deck" {
-		companion.RefreshAllAsync(s.deckPath, deck.ResolvedSlides(), authoredTerminalWidth, authoredTerminalHeight)
+		companion.RefreshEditorDeckAsync(s, deckPath, deck, refreshRevision, authoredTerminalWidth, authoredTerminalHeight)
 	}
 	return nil
 }

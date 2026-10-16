@@ -41,8 +41,40 @@ func TestMediaDraftDoesNotMutateSource(t *testing.T) {
 		t.Fatal("stale draft accepted")
 	}
 	revision = 4
+	action.Slide = 1
+	if call().Code != 409 {
+		t.Fatal("wrong-slide draft accepted")
+	}
+	action.Slide = 0
 	mask = "invalid"
 	if call().Code != 400 {
 		t.Fatal("invalid mask accepted")
+	}
+}
+
+func TestCropRejectsOtherSlideWithoutMutation(t *testing.T) {
+	d := sceneFixture(t)
+	d.Slides = append(d.Slides, cloneSlide(d.Slides[0]))
+	s := newNativeEditorSession("Crop.md", d)
+	revision := s.version
+	assertEditorFailureUnchanged(t, s, nativeEditorAction{Action: "set-scene-crop", Slide: 1, SceneRevision: &revision, ObjectID: "image", Crop: &sceneCrop{Left: .2}})
+}
+
+func TestMediaDraftRejectsLockedGroup(t *testing.T) {
+	d := sceneFixture(t)
+	for i := range d.Slides[0].Elements {
+		if d.Slides[0].Elements[i].ID == "image" {
+			d.Slides[0].Elements[i].Query += "&group=locked"
+		}
+	}
+	d.Slides[0].Elements = append(d.Slides[0].Elements, Element{ID: "locked-peer", Kind: "shape", Query: "shape=square&group=locked&object-locked=1"})
+	s := newNativeEditorSession("Crop.md", d)
+	revision := s.version
+	a := nativeEditorAction{Slide: 0, SceneRevision: &revision, ObjectID: "image", Crop: &sceneCrop{Left: .1}}
+	body, _ := json.Marshal(a)
+	w := httptest.NewRecorder()
+	s.handleMediaDraft(w, httptest.NewRequest("POST", "/api/editor/media-draft", bytes.NewReader(body)))
+	if w.Code != 400 {
+		t.Fatalf("locked group preview: %d %s", w.Code, w.Body.String())
 	}
 }

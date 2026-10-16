@@ -22,8 +22,15 @@ type DeckAppearance struct {
 // editor state only: saving a recovered document writes the valid semantic
 // model, never the malformed optional envelope or this diagnostic.
 type documentDiagnostic struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code        string `json:"code"`
+	Message     string `json:"message"`
+	Conversion  bool   `json:"conversion,omitempty"`
+	Slide       int    `json:"slide"`
+	Object      string `json:"object,omitempty"`
+	Feature     string `json:"feature,omitempty"`
+	Severity    string `json:"severity,omitempty"`
+	Fallback    string `json:"fallback,omitempty"`
+	Remediation string `json:"remediation,omitempty"`
 }
 
 func (a DeckAppearance) MarshalJSON() ([]byte, error) {
@@ -43,8 +50,8 @@ func (a DeckAppearance) MarshalJSON() ([]byte, error) {
 }
 
 func (a *DeckAppearance) UnmarshalJSON(data []byte) error {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
+	fields, err := decodeMetadataJSONObject(data, "version", "mode", "defaultStyle", "profiles")
+	if err != nil {
 		return err
 	}
 	var value DeckAppearance
@@ -105,6 +112,9 @@ func (a *DeckAppearance) Validate() error {
 	if a.Version != 1 && a.Version != 2 && a.Version != 3 {
 		return fmt.Errorf("unsupported appearance version %d; use a newer Keynope", a.Version)
 	}
+	if _, err := decodeAppearanceProfiles(a.Extra["profiles"]); err != nil {
+		return err
+	}
 	if a.Version == 3 {
 		if a.Mode != "" || a.DefaultStyle != "" {
 			return fmt.Errorf("version 3 appearance has no deck style")
@@ -124,6 +134,40 @@ func (a *DeckAppearance) Validate() error {
 		return fmt.Errorf("unknown presentation appearance %q", style)
 	}
 	return nil
+}
+
+// Only implemented profile properties have semantics. Future nested objects
+// stay opaque, but known scopes must not use last-value-wins decoding.
+func decodeAppearanceProfiles(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	if len(raw) == 0 {
+		return map[string]json.RawMessage{}, nil
+	}
+	profiles, err := decodeMetadataJSONObject(raw, "retro", "modern")
+	if err != nil || profiles == nil {
+		return nil, fmt.Errorf("invalid appearance profiles: expected an unambiguous object")
+	}
+	for _, mode := range []string{"retro", "modern"} {
+		if raw, ok := profiles[mode]; ok {
+			if _, err := decodeAppearanceProfile(raw); err != nil {
+				return nil, fmt.Errorf("invalid %s appearance profile: %w", mode, err)
+			}
+		}
+	}
+	return profiles, nil
+}
+
+func decodeAppearanceProfile(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	profile, err := decodeMetadataJSONObject(raw, "textScale")
+	if err != nil || profile == nil {
+		return nil, fmt.Errorf("expected an unambiguous profile object")
+	}
+	if raw, ok := profile["textScale"]; ok {
+		var scale *float64
+		if err := json.Unmarshal(raw, &scale); err != nil || scale != nil && (math.IsNaN(*scale) || math.IsInf(*scale, 0) || *scale < .05 || *scale > 2) {
+			return nil, fmt.Errorf("text scale must be between 5%% and 200%% or null to inherit")
+		}
+	}
+	return profile, nil
 }
 
 func (d Deck) AppearanceMode() string {
@@ -191,16 +235,15 @@ func (d Deck) withAppearanceTextScale(mode string, scale *float64) (*DeckAppeara
 	if a.Extra == nil {
 		a.Extra = map[string]json.RawMessage{}
 	}
-	profiles := map[string]json.RawMessage{}
-	if raw := a.Extra["profiles"]; len(raw) > 0 {
-		if err := json.Unmarshal(raw, &profiles); err != nil || profiles == nil {
-			return nil, fmt.Errorf("invalid appearance profiles")
-		}
+	profiles, err := decodeAppearanceProfiles(a.Extra["profiles"])
+	if err != nil {
+		return nil, err
 	}
 	profile := map[string]json.RawMessage{}
 	if raw := profiles[mode]; len(raw) > 0 {
-		if err := json.Unmarshal(raw, &profile); err != nil || profile == nil {
-			return nil, fmt.Errorf("invalid %s appearance profile", mode)
+		profile, err = decodeAppearanceProfile(raw)
+		if err != nil {
+			return nil, err
 		}
 	}
 	if scale == nil {
@@ -238,32 +281,33 @@ func (d Deck) appearanceTextScale(mode string) float64 {
 	if d.Appearance == nil {
 		return fallback
 	}
-	var profiles map[string]json.RawMessage
-	if json.Unmarshal(d.Appearance.Extra["profiles"], &profiles) != nil {
+	profiles, err := decodeAppearanceProfiles(d.Appearance.Extra["profiles"])
+	if err != nil || len(profiles[mode]) == 0 {
 		return fallback
 	}
-	var profile struct {
-		TextScale *float64 `json:"textScale"`
-	}
-	if json.Unmarshal(profiles[mode], &profile) != nil || profile.TextScale == nil {
+	profile, err := decodeAppearanceProfile(profiles[mode])
+	var scale *float64
+	if err != nil || json.Unmarshal(profile["textScale"], &scale) != nil || scale == nil {
 		return fallback
 	}
-	if *profile.TextScale < .05 || *profile.TextScale > 2 {
-		return fallback
-	}
-	return *profile.TextScale
+	return *scale
 }
 
 var appearanceMetadataRE = regexp.MustCompile(`(?m)^<!--\s*keynope-appearance\s+base64:([^\r\n]*?)\s*-->[\t ]*\r?\n?`)
-var appearanceEnvelopeRE = regexp.MustCompile(`(?m)^<!--\s*keynope-appearance\b[^\r\n]*(?:\r?\n|$)`)
+var appearancePrefixRE = regexp.MustCompile(`(?m)^<!--\s*keynope-appearance(?:\s|=|-->|$)`)
+var appearanceEnvelopeRE = regexp.MustCompile(`(?m)^<!--\s*keynope-appearance(?:\s|=|-->|$)[^\r\n]*(?:\r?\n|$)`)
 
 func decodeDeckAppearance(text string) (*DeckAppearance, string, error) {
-	matches := appearanceMetadataRE.FindAllStringSubmatch(text, -1)
-	if len(matches) == 0 {
+	markers := findDocumentMetadataIndices(text, appearancePrefixRE, 2)
+	if len(markers) == 0 {
 		return nil, text, nil
 	}
-	if len(matches) != 1 {
+	if len(markers) != 1 {
 		return nil, text, fmt.Errorf("duplicate deck appearance metadata")
+	}
+	matches := findDocumentMetadata(text, appearanceMetadataRE, 2)
+	if len(matches) != 1 {
+		return nil, text, fmt.Errorf("malformed deck appearance metadata")
 	}
 	if len(matches[0][1]) > 64<<10 {
 		return nil, text, fmt.Errorf("deck appearance metadata is too large")
@@ -279,7 +323,7 @@ func decodeDeckAppearance(text string) (*DeckAppearance, string, error) {
 	if err := appearance.Validate(); err != nil {
 		return nil, text, err
 	}
-	return &appearance, appearanceMetadataRE.ReplaceAllString(text, ""), nil
+	return &appearance, rewriteDocumentMetadata(text, appearanceMetadataRE, nil), nil
 }
 
 // Optional appearance metadata must never make the authored slides
@@ -287,7 +331,7 @@ func decodeDeckAppearance(text string) (*DeckAppearance, string, error) {
 // document open and surface the reason to the editor.
 func recoverDeckAppearance(text string) (*DeckAppearance, string, []documentDiagnostic) {
 	appearance, remaining, err := decodeDeckAppearance(text)
-	if err == nil && (appearance != nil || !appearanceEnvelopeRE.MatchString(text)) {
+	if err == nil && (appearance != nil || firstDocumentMetadata(text, appearanceEnvelopeRE) == nil) {
 		return appearance, remaining, nil
 	}
 	message := "Ignored malformed appearance metadata and opened the deck with the Retro default."
@@ -298,7 +342,7 @@ func recoverDeckAppearance(text string) (*DeckAppearance, string, []documentDiag
 		}
 		message = "Ignored invalid appearance metadata (" + string(detail) + ") and opened the deck with the Retro default."
 	}
-	return nil, appearanceEnvelopeRE.ReplaceAllString(text, ""), []documentDiagnostic{{Code: "appearance-recovered", Message: message}}
+	return nil, rewriteDocumentMetadata(text, appearanceEnvelopeRE, nil), []documentDiagnostic{{Code: "appearance-recovered", Message: message}}
 }
 
 func encodeDeckAppearance(a *DeckAppearance) (string, error) {

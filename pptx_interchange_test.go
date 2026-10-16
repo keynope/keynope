@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"image"
 	"image/png"
 	"io"
 	"math"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -72,16 +74,54 @@ func TestPPTXDeckRoundTripKeepsEditableSubset(t *testing.T) {
 func TestPPTXExportSanitisesActivityData(t *testing.T) {
 	private := "KEYNOPE_PRIVATE_ACTIVITY_SENTINEL"
 	deck := Deck{Slides: []Slide{{
-		Notes:      private,
-		Engagement: &EngagementDefinition{ID: "activity", Kind: "storm", Prompt: private},
-		Elements:   []Element{{ID: "visible", Kind: "text", Text: "Visible", Query: "render=truetype&top=2&left=2"}},
+		Notes:            private,
+		Engagement:       &EngagementDefinition{ID: "activity", Kind: "storm", Prompt: private},
+		EngagementResult: &EngagementResult{Version: 1, ActivityID: "activity", Kind: "storm", State: map[string]json.RawMessage{"ideas": json.RawMessage(`["` + private + `"]`)}},
+		Extra:            &jsonExtensions{"authoring": json.RawMessage(`"` + private + `"`)},
+		Elements:         []Element{{ID: "visible", Kind: "text", Text: "Visible", Query: "render=truetype&top=2&left=2"}},
 	}}}
+	deck.Slides = append(deck.Slides, Slide{ID: "private-tab", TabID: "private-tab", Elements: []Element{{ID: "private-tab-text", Kind: "text", Text: private}}})
+	orphan, err := newTableData(2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphan.Cells[0][0].Text = private
+	deck.Objects = &DeckObjects{Version: 1, Tables: map[string]TableData{"unused-private-table": orphan}}
+	deck.Extra = &jsonExtensions{"private": json.RawMessage(`"` + private + `"`)}
+	before := cloneDeck(deck)
 	data, _, err := exportPPTXDocument(deck)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), private) {
-		t.Fatal("private activity data was written to pptx bytes")
+	// ZIP entries are usually compressed. Searching only the outer archive
+	// bytes could pass even if a slide/notes/workbook XML part leaked content.
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	visible := false
+	for _, part := range archive.File {
+		reader, err := part.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := io.ReadAll(reader)
+		reader.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(decoded, []byte(private)) {
+			t.Fatal("private activity/tab/orphan/extension data leaked into package part", part.Name)
+		}
+		if strings.HasPrefix(part.Name, "ppt/slides/") && bytes.Contains(decoded, []byte("Visible")) {
+			visible = true
+		}
+	}
+	if !visible {
+		t.Fatal("public slide text was lost while filtering private metadata")
+	}
+	if !reflect.DeepEqual(deck, before) {
+		t.Fatal("public export changed private source archive")
 	}
 }
 
@@ -170,6 +210,22 @@ func TestPPTXEmbedsEveryUsedC64Width(t *testing.T) {
 		{ID: "narrow", Kind: "text", Text: "NARROW", Query: "render=truetype&modern-font=c64&modern-size=135&modern-width=50&left=10&top=10&width=80&height=10&text-box=1"},
 		{ID: "wide", Kind: "text", Text: "WIDE", Query: "render=truetype&modern-font=c64&modern-size=135&modern-width=140&left=10&top=30&width=80&height=10&text-box=1"},
 	}}}}
+	// Compare against the unified editor model, where 100% is the C64 optical
+	// baseline, not the retired absolute-width interpretation of raw legacy data.
+	opened := preparePPTXEditorModel(deck)
+	scene, err := buildDocumentSlideScene(opened, 0, 245, 56)
+	if err != nil {
+		t.Fatal(err)
+	}
+	families := map[string]bool{}
+	for _, object := range scene.Objects {
+		if object.Text != nil {
+			families[pptxC64FontFamily(object.Text.WidthScale)] = true
+		}
+	}
+	if !families["Keynope C64 W20.835"] || !families["Keynope C64 W58.338"] {
+		t.Fatal("fixture did not use normalized editor widths", families)
+	}
 	data, _, err := exportPPTXDocument(deck)
 	if err != nil {
 		t.Fatal(err)
@@ -194,8 +250,10 @@ func TestPPTXEmbedsEveryUsedC64Width(t *testing.T) {
 		}
 		parts[file.Name] = body
 	}
-	if !bytes.Contains(parts["ppt/presentation.xml"], []byte(`typeface="Keynope C64 W50"`)) || !bytes.Contains(parts["ppt/presentation.xml"], []byte(`typeface="Keynope C64 W140"`)) {
-		t.Fatalf("width instances missing from font list: %s", parts["ppt/presentation.xml"])
+	for family := range families {
+		if !bytes.Contains(parts["ppt/presentation.xml"], []byte(`typeface="`+family+`"`)) {
+			t.Fatalf("displayed width instance missing from font list: %s", parts["ppt/presentation.xml"])
+		}
 	}
 	if len(parts["ppt/fonts/font1.fntdata"]) == 0 || len(parts["ppt/fonts/font2.fntdata"]) == 0 {
 		t.Fatal("each used C64 width must have an embedded editable font payload")
@@ -244,7 +302,8 @@ func TestPPTXSceneBoundsKeepFractionalPowerPointPositionsAnchored(t *testing.T) 
 
 func TestPPTXImportPreservesModernSceneBackgroundAndPictureBounds(t *testing.T) {
 	source := pptx.Presentation{Width: pptx.SlideWidthEMU, Height: pptx.SlideHeightEMU, Slides: []pptx.Slide{{
-		Objects: []pptx.Object{{ID: "picture", Kind: "image", X: 480, Y: 270, Width: 960, Height: 540, Image: tinyPPTXPNG(t), ImageMIME: "image/png"}},
+		Background: "#150027",
+		Objects:    []pptx.Object{{ID: "picture", Kind: "image", X: 480, Y: 270, Width: 960, Height: 540, Image: tinyPPTXPNG(t), ImageMIME: "image/png"}},
 	}}}
 	var encoded bytes.Buffer
 	if _, err := pptx.Write(context.Background(), &encoded, source); err != nil {
@@ -254,11 +313,9 @@ func TestPPTXImportPreservesModernSceneBackgroundAndPictureBounds(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	background, ok := ansiBG("#150027")
-	if !ok {
-		t.Fatal("test background was not recognised")
+	if !deck.Slides[0].BGSet {
+		t.Fatal("source background was not imported as an authored slide property")
 	}
-	deck.Slides[0].BG, deck.Slides[0].BGSet = background, true
 	if got := sceneColor(slideBG(deck.Slides[0])); got != "#150027" {
 		t.Fatalf("scene background = %q, want source colour", got)
 	}
@@ -276,6 +333,36 @@ func TestPPTXImportPreservesModernSceneBackgroundAndPictureBounds(t *testing.T) 
 	object := scene.Objects[0]
 	if math.Abs(object.Bounds.X-480) > 2 || math.Abs(object.Bounds.Y-270) > 2 || math.Abs(object.Bounds.Width-960) > 2 || math.Abs(object.Bounds.Height-540) > 2 {
 		t.Fatalf("picture bounds = %#v, want 480,270 960×540", object.Bounds)
+	}
+	exported, _, err := exportPPTXDocument(deck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, _, err := importPPTXDocument(exported, "reopened.pptx")
+	if err != nil || len(reopened.Slides) != 1 || len(reopened.Slides[0].Elements) != 1 || sceneColor(slideBG(reopened.Slides[0])) != "#150027" {
+		t.Fatal("background became a selectable rectangle or changed after export/reimport", err, reopened.Slides)
+	}
+}
+
+func TestPPTXBlankSlideBackgroundRemainsAProperty(t *testing.T) {
+	for _, colour := range []string{"#000000", "#ffffff", "#101820", "#aaff55"} {
+		d := Deck{Appearance: &DeckAppearance{Version: 3}, Masters: defaultMasterDeck(), Slides: []Slide{{ID: "blank", LayoutID: "blank", PageNumber: pageNumberHide}}}
+		d.Masters.Base.Slide.Elements = nil
+		d.Slides[0].BG, _ = ansiBG(colour)
+		d.Slides[0].BGSet = true
+		before := cloneDeck(d)
+		raw, _, err := exportPPTXDocument(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, _, err := pptx.Read(context.Background(), bytes.NewReader(raw), int64(len(raw)), pptx.Options{})
+		if err != nil || len(p.Slides) != 1 || len(p.Slides[0].Objects) != 0 || !strings.EqualFold(p.Slides[0].Background, colour) {
+			t.Fatal("blank export lost native colour or added background artwork", err, p)
+		}
+		loaded, _, err := importPPTXDocument(raw, "blank.pptx")
+		if err != nil || len(loaded.Slides[0].Elements) != 0 || !loaded.Slides[0].BGSet || !strings.EqualFold(sceneColor(slideBG(loaded.Slides[0])), colour) || !reflect.DeepEqual(d, before) {
+			t.Fatal("blank background was not portable/source-immutable", err, loaded.Slides)
+		}
 	}
 }
 

@@ -2,7 +2,7 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
+	"context"
 	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -44,28 +44,35 @@ import (
 )
 
 type Element struct {
-	Kind            string          `json:"kind,omitempty"`
-	Level           int             `json:"level,omitempty"`
-	Text            string          `json:"text,omitempty"`
-	Path            string          `json:"path,omitempty"`
-	AssetID         string          `json:"assetId,omitempty"`
-	Query           string          `json:"query,omitempty"`
-	Placeholder     bool            `json:"placeholder,omitempty"`
-	ID              string          `json:"id,omitempty"`
-	SlotID          string          `json:"slotId,omitempty"`
-	PlaceholderRole string          `json:"placeholderRole,omitempty"`
-	MasterSlotID    string          `json:"masterSlotId,omitempty"`
-	Inherited       bool            `json:"-"`
-	Extra           *jsonExtensions `json:"-"`
+	// Parser-owned compatibility allowance, never accepted from editor JSON or
+	// persisted. Only these unchanged dangling references may survive validation.
+	unresolvedConnectorReference string
+	ObjectID                     string          `json:"objectId,omitempty"`
+	Kind                         string          `json:"kind,omitempty"`
+	Level                        int             `json:"level,omitempty"`
+	Text                         string          `json:"text,omitempty"`
+	Path                         string          `json:"path,omitempty"`
+	AssetID                      string          `json:"assetId,omitempty"`
+	Query                        string          `json:"query,omitempty"`
+	Placeholder                  bool            `json:"placeholder,omitempty"`
+	ID                           string          `json:"id,omitempty"`
+	SlotID                       string          `json:"slotId,omitempty"`
+	PlaceholderRole              string          `json:"placeholderRole,omitempty"`
+	MasterSlotID                 string          `json:"masterSlotId,omitempty"`
+	Inherited                    bool            `json:"-"`
+	Extra                        *jsonExtensions `json:"-"`
 }
 
 // slideBackgroundMedia describes a source image painted below the slide's
 // canvas. `Fit` is cover, contain or stretch; it never changes the image's
 // authored pixels and remains independent from ordinary image objects.
 type slideBackgroundMedia struct {
-	AssetID string  `json:"assetId"`
-	Fit     string  `json:"fit,omitempty"`
-	Opacity float64 `json:"opacity,omitempty"`
+	Extra          *jsonExtensions `json:"-"`
+	SourceObjectID string          `json:"sourceObjectId,omitempty"` // Local hidden foreground owner retained by promotion.
+	AssetID        string          `json:"assetId"`
+	Fit            string          `json:"fit,omitempty"`
+	Opacity        float64         `json:"opacity,omitempty"`
+	OpacitySet     bool            `json:"opacitySet,omitempty"` // Distinguishes explicit zero from legacy omitted opacity.
 	// Query keeps the image treatment independent from placement. It uses the
 	// same bounded, allowlisted image query vocabulary as an ordinary image:
 	// brightness, tint, sharpness and Retro sampling therefore survive when an
@@ -78,18 +85,25 @@ func cloneSlideBackgroundMedia(value *slideBackgroundMedia) *slideBackgroundMedi
 		return nil
 	}
 	copy := *value
+	copy.Extra = cloneJSONExtensions(value.Extra)
 	return &copy
 }
 
 type Slide struct {
-	DefaultStyle   string       `json:"defaultStyle,omitempty"`
-	ThemeColors    *themeColors `json:"-"` // Derived theme defaults; never persisted as slide overrides.
-	ModernScene    *slideScene  `json:"-"` // Derived render projection; never authored metadata.
-	HideActivityQR bool         `json:"-"` // Derived from the deck when resolving slides.
-	TabID          string       `json:"tabId,omitempty"`
-	Elements       []Element    `json:"elements,omitempty"`
-	Effect         string       `json:"effect,omitempty"`
-	Background     string       `json:"background,omitempty"`
+	// Derived physical render context; never authored or serialized.
+	canvasWidth, canvasHeight float64
+	notesOwnerID              string                   // Runtime identity for legacy slides without an authored ID; never serialized.
+	previewGeometry           *sceneAttachmentGeometry // Request-owned projection sidecar; never authored or serialized.
+	ID                        string                   `json:"id,omitempty"`
+	DefaultStyle              string                   `json:"defaultStyle,omitempty"`
+	ThemeColors               *themeColors             `json:"-"` // Derived theme defaults; never persisted as slide overrides.
+	ShapeStrokeDefaults       *shapeStrokeDefaults     `json:"-"` // Derived outline defaults for geometry/routing, not authored keys.
+	ModernScene               *slideScene              `json:"-"` // Derived render projection; never authored metadata.
+	HideActivityQR            bool                     `json:"-"` // Derived from the deck when resolving slides.
+	TabID                     string                   `json:"tabId,omitempty"`
+	Elements                  []Element                `json:"elements,omitempty"`
+	Effect                    string                   `json:"effect,omitempty"`
+	Background                string                   `json:"background,omitempty"`
 	// BackgroundMedia is an inheritable, non-selectable slide layer. It is
 	// deliberately separate from ordinary images, which remain editable
 	// canvas objects even when placed at the back of a slide.
@@ -124,7 +138,7 @@ func (e *Element) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
-	extra, err := decodeJSONExtensions(data, "kind", "level", "text", "path", "assetId", "query", "placeholder", "id", "slotId", "placeholderRole", "masterSlotId")
+	extra, err := decodeJSONExtensions(data, "kind", "level", "text", "path", "assetId", "objectId", "query", "placeholder", "id", "slotId", "placeholderRole", "masterSlotId")
 	if err != nil {
 		return err
 	}
@@ -144,7 +158,7 @@ func (s *Slide) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
-	extra, err := decodeJSONExtensions(data, "defaultStyle", "tabId", "elements", "effect", "background", "backgroundMedia", "backgroundMediaSet", "fg", "bg", "headerFg", "ttfSize", "ttfWidth", "notes", "layoutId", "effectSet", "backgroundSet", "fgSet", "bgSet", "headerFgSet", "pageNumber", "engagement", "engagementResult")
+	extra, err := decodeJSONExtensions(data, "id", "defaultStyle", "tabId", "elements", "effect", "background", "backgroundMedia", "backgroundMediaSet", "fg", "bg", "headerFg", "ttfSize", "ttfWidth", "notes", "layoutId", "effectSet", "backgroundSet", "fgSet", "bgSet", "headerFgSet", "pageNumber", "engagement", "engagementResult")
 	if err != nil {
 		return err
 	}
@@ -287,19 +301,22 @@ type appArgs struct {
 	Untitled   bool
 	ImportPPTX bool
 	DeckPath   string
+	TemplateID string
 }
 
 type presenterState struct {
-	Slide       int                     `json:"slide"`
-	Page        int                     `json:"page"`
-	Presenting  bool                    `json:"presenting"`
-	Version     int64                   `json:"version"`
-	DeckVersion int64                   `json:"deckVersion"`
-	DeckSlide   int                     `json:"deckSlide"`
-	TimerMode   string                  `json:"timerMode,omitempty"`
-	TimerInput  string                  `json:"timerInput,omitempty"`
-	TimerEndMS  int64                   `json:"timerEndMs,omitempty"`
-	Engagement  *EngagementRuntimeState `json:"engagement,omitempty"`
+	Overlay     *PresentationOverlay     `json:"overlay,omitempty"`
+	BuildCursor *PresentationBuildCursor `json:"buildCursor,omitempty"`
+	Slide       int                      `json:"slide"`
+	Page        int                      `json:"page"`
+	Presenting  bool                     `json:"presenting"`
+	Version     int64                    `json:"version"`
+	DeckVersion int64                    `json:"deckVersion"`
+	DeckSlide   int                      `json:"deckSlide"`
+	TimerMode   string                   `json:"timerMode,omitempty"`
+	TimerInput  string                   `json:"timerInput,omitempty"`
+	TimerEndMS  int64                    `json:"timerEndMs,omitempty"`
+	Engagement  *EngagementRuntimeState  `json:"engagement,omitempty"`
 }
 
 type presenterTerminalFrame struct {
@@ -311,23 +328,35 @@ type presenterTerminalFrame struct {
 }
 
 type presenterCompanion struct {
-	server       *http.Server
-	url          string
-	html         string
-	pages        map[int][]exportPage
-	frame        presenterTerminalFrame
-	mu           sync.RWMutex
-	state        presenterState
-	target       string
-	paused       bool
-	helper       bool
-	seq          int64
-	fullPending  bool
-	slidePending bool
-	pendingSlide int
-	refreshPath  string
-	frames       map[chan presenterTerminalFrame]<-chan struct{}
-	token        string
+	closed            bool
+	pageChanges       []presenterPageChange
+	nativeProjection  *presenterNativeProjection
+	overlayRevision   int64
+	overlaySequences  map[string]int64
+	buildSession      string
+	buildGeneration   int64
+	buildDefinition   *SlideBuild
+	buildTimer        *time.Timer
+	buildDeadline     time.Time
+	buildRemaining    time.Duration
+	buildHasRemaining bool
+	server            *http.Server
+	url               string
+	html              string
+	pages             map[int][]exportPage
+	frame             presenterTerminalFrame
+	mu                sync.RWMutex
+	state             presenterState
+	target            string
+	paused            bool
+	helper            bool
+	seq               int64
+	fullPending       bool
+	slidePending      bool
+	pendingSlide      int
+	refreshPath       string
+	frames            map[chan presenterTerminalFrame]<-chan struct{}
+	token             string
 }
 
 var activePresenter *presenterCompanion
@@ -417,7 +446,7 @@ func isSelectableElement(element Element) bool {
 }
 
 func isPositionedElement(element Element) bool {
-	return element.Kind == "image" || element.Kind == "shape" || element.Kind == "page-number"
+	return element.Kind == "table" || element.Kind == "chart" || element.Kind == "image" || element.Kind == "shape" || element.Kind == "page-number"
 }
 
 func undoSlideSnapshot(state *EditState, slide *Slide) bool {
@@ -653,7 +682,9 @@ func appEngineMain() {
 	defer stopSandboxAccess()
 	var deck Deck
 	var err error
-	if args.ImportPPTX {
+	if args.TemplateID != "" {
+		deck, err = loadPresentationTemplate(args.TemplateID)
+	} else if args.ImportPPTX {
 		data, readErr := os.ReadFile(args.DeckPath)
 		if readErr != nil {
 			fmt.Fprintln(os.Stderr, readErr)
@@ -661,9 +692,7 @@ func appEngineMain() {
 		}
 		var report pptx.Report
 		deck, report, err = importPPTXDocument(data, args.DeckPath)
-		for _, warning := range report.Warnings {
-			deck.Diagnostics = append(deck.Diagnostics, documentDiagnostic{Code: warning.Code, Message: warning.Message})
-		}
+		deck.Diagnostics = append(deck.Diagnostics, documentConversionDiagnostics(report)...)
 	} else {
 		deck, err = parseDeck(args.DeckPath)
 	}
@@ -685,7 +714,11 @@ func appEngineMain() {
 	editor := newNativeEditorSession(editorPath, deck, args.Untitled || args.ImportPPTX, parsedDeckElementOrderChanged || args.ImportPPTX)
 	activeNativeEditor = editor
 	defer func() { activeNativeEditor = nil }()
-	slides := editor.deck.ResolvedSlides()
+	editor.mu.RLock()
+	initialDeck, initialRevision := cloneDeckForScene(editor.deck), editor.version
+	editor.mu.RUnlock()
+	slides := initialDeck.ResolvedSlides()
+	initialDependencies := captureNativeProjectionDependencies(initialDeck)
 	presenter, err := startPresenterCompanion(args.DeckPath, slides, authoredTerminalWidth, authoredTerminalHeight)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -696,6 +729,12 @@ func appEngineMain() {
 	defer presenter.Close()
 	editor.mu.Lock()
 	editor.companion = presenter
+	presenter.bindPreparedNativeProjection(editor, initialDeck, initialRevision, authoredTerminalWidth, authoredTerminalHeight, initialDependencies)
+	if editor.version > initialRevision {
+		// Preserve edits accepted while the initial HTML/renderer was starting.
+		// The published baseline above matches those exact bootstrap pages.
+		presenter.RefreshEditorDeckAsync(editor, editor.deckPath, cloneDeckForScene(editor.deck), editor.version, authoredTerminalWidth, authoredTerminalHeight)
+	}
 	editor.mu.Unlock()
 	presenter.Update(0, 0, false, nil)
 	<-closed
@@ -704,6 +743,14 @@ func appEngineMain() {
 func parseArgs(raw []string) (appArgs, bool) {
 	var args appArgs
 	for _, value := range raw {
+		if strings.HasPrefix(value, "--template=") {
+			id := strings.TrimPrefix(value, "--template=")
+			if _, err := templateMarkdown(id); err != nil || args.TemplateID != "" {
+				return appArgs{}, false
+			}
+			args.TemplateID, args.Untitled = id, true
+			continue
+		}
 		switch value {
 		case "--app":
 			args.AppMode = true
@@ -718,7 +765,7 @@ func parseArgs(raw []string) (appArgs, bool) {
 			args.DeckPath = value
 		}
 	}
-	return args, args.AppMode && args.DeckPath != "" && (!args.ImportPPTX || args.Untitled)
+	return args, args.AppMode && args.DeckPath != "" && (!args.ImportPPTX || args.Untitled) && !(args.TemplateID != "" && args.ImportPPTX)
 }
 
 var errStartupCancelled = errors.New("startup cancelled")
@@ -729,47 +776,11 @@ type startupMenuItem struct {
 }
 
 func decodeDeckAssets(text string) (map[string]DeckAsset, string, error) {
-	match := keynopeAssetsRE.FindStringSubmatch(text)
-	if match == nil {
-		return nil, text, nil
-	}
-	compressed, err := base64.StdEncoding.DecodeString(match[1])
-	if err != nil {
-		return nil, text, fmt.Errorf("decode embedded assets: %w", err)
-	}
-	reader, err := gzip.NewReader(bytes.NewReader(compressed))
-	if err != nil {
-		return nil, text, fmt.Errorf("open embedded assets: %w", err)
-	}
-	data, err := io.ReadAll(io.LimitReader(reader, 100<<20))
-	closeErr := reader.Close()
-	if err != nil || closeErr != nil {
-		return nil, text, fmt.Errorf("read embedded assets: %w", errors.Join(err, closeErr))
-	}
-	assets := map[string]DeckAsset{}
-	if err := json.Unmarshal(data, &assets); err != nil {
-		return nil, text, fmt.Errorf("parse embedded assets: %w", err)
-	}
-	return assets, keynopeAssetsRE.ReplaceAllString(text, ""), nil
+	return decodeDeckAssetArchive(text, maxDeckAssetArchiveBytes)
 }
 
 func encodeDeckAssets(assets map[string]DeckAsset) (string, error) {
-	if len(assets) == 0 {
-		return "", nil
-	}
-	data, err := json.Marshal(assets)
-	if err != nil {
-		return "", err
-	}
-	var compressed bytes.Buffer
-	writer := gzip.NewWriter(&compressed)
-	if _, err := writer.Write(data); err != nil {
-		return "", err
-	}
-	if err := writer.Close(); err != nil {
-		return "", err
-	}
-	return "<!-- keynope-assets version=1 base64:" + base64.StdEncoding.EncodeToString(compressed.Bytes()) + " -->", nil
+	return encodeDeckAssetArchive(assets, maxDeckAssetArchiveBytes)
 }
 
 func embeddedAssetPath(id string, asset DeckAsset) string {
@@ -787,6 +798,13 @@ func embeddedAssetPath(id string, asset DeckAsset) string {
 }
 
 func embeddedImageAsset(data []byte) (string, DeckAsset, string, error) {
+	return embeddedImageAssetContext(context.Background(), data)
+}
+
+func embeddedImageAssetContext(ctx context.Context, data []byte) (string, DeckAsset, string, error) {
+	if looksLikeSVG(data) {
+		return embeddedSVGAsset(ctx, data)
+	}
 	if len(data) == 0 || len(data) > 50<<20 {
 		return "", DeckAsset{}, "", errors.New("image is empty or too large")
 	}
@@ -799,7 +817,7 @@ func embeddedImageAsset(data []byte) (string, DeckAsset, string, error) {
 	if err != nil {
 		return "", DeckAsset{}, "", fmt.Errorf("decode image header: %w", err)
 	}
-	if config.Width <= 0 || config.Height <= 0 || int64(config.Width)*int64(config.Height) > 32_000_000 {
+	if config.Width <= 0 || config.Height <= 0 || config.Width > 32768 || config.Height > 32768 || int64(config.Width)*int64(config.Height) > 32_000_000 {
 		return "", DeckAsset{}, "", errors.New("image exceeds the 32 megapixel decoded size limit")
 	}
 	if animation, err := gif.DecodeAll(bytes.NewReader(data)); err == nil && len(animation.Image) > 1 {
@@ -810,9 +828,7 @@ func embeddedImageAsset(data []byte) (string, DeckAsset, string, error) {
 		targetW, targetH := boundedImageSize(width, height, 384)
 		decoded := decodeGIFAnimation(animation)
 		asset := DeckAsset{MIME: "image/gif", Width: targetW, Height: targetH, LoopCount: animation.LoopCount}
-		if targetW != width || targetH != height {
-			asset.Source = &DeckAssetSource{MIME: "image/png", Width: width, Height: height}
-		}
+		asset.Source = &DeckAssetSource{MIME: "image/png", Width: width, Height: height}
 		storedBytes := 0
 		for _, frame := range decoded {
 			frameImage := frame.image
@@ -835,12 +851,19 @@ func embeddedImageAsset(data []byte) (string, DeckAsset, string, error) {
 			asset.Frames = append(asset.Frames, DeckAssetFrame{Data: output.Bytes(), DelayMS: delay.Milliseconds()})
 			storedBytes += output.Len()
 			if asset.Source != nil {
-				var source bytes.Buffer
-				if err := png.Encode(&source, frame.image); err != nil {
-					return "", DeckAsset{}, "", err
+				if targetW == width && targetH == height {
+					// This derivative already is the decoded original frame. Keep
+					// explicit source provenance without encoding it a second time.
+					asset.Source.Frames = append(asset.Source.Frames, DeckAssetFrame{Data: append([]byte(nil), output.Bytes()...), DelayMS: delay.Milliseconds()})
+					storedBytes += output.Len()
+				} else {
+					var source bytes.Buffer
+					if err := png.Encode(&source, frame.image); err != nil {
+						return "", DeckAsset{}, "", err
+					}
+					storedBytes += source.Len()
+					asset.Source.Frames = append(asset.Source.Frames, DeckAssetFrame{Data: source.Bytes(), DelayMS: delay.Milliseconds()})
 				}
-				storedBytes += source.Len()
-				asset.Source.Frames = append(asset.Source.Frames, DeckAssetFrame{Data: source.Bytes(), DelayMS: delay.Milliseconds()})
 			}
 			if storedBytes > 50<<20 {
 				return "", DeckAsset{}, "", errors.New("animation exceeds the 50 MiB embedded storage limit")
@@ -866,13 +889,9 @@ func embeddedImageAsset(data []byte) (string, DeckAsset, string, error) {
 	if err := png.Encode(&output, outputImage); err != nil {
 		return "", DeckAsset{}, "", err
 	}
-	var source *DeckAssetSource
-	if targetW != width || targetH != height {
-		if len(data) > 50<<20 {
-			return "", DeckAsset{}, "", errors.New("full-resolution image exceeds the 50 MiB storage limit")
-		}
-		source = &DeckAssetSource{MIME: imageMIMEForFormat(format), Width: width, Height: height, Data: append([]byte(nil), data...)}
-	}
+	// The input size was bounded before decoding. Record original provenance
+	// even when the compact sampling derivative did not need resizing.
+	source := &DeckAssetSource{MIME: imageMIMEForFormat(format), Width: width, Height: height, Data: append([]byte(nil), data...)}
 	return makeDeckAssetWithSource(output.Bytes(), "image/png", targetW, targetH, source)
 }
 
@@ -884,6 +903,8 @@ func imageMIMEForFormat(format string) string {
 		return "image/gif"
 	case "png":
 		return "image/png"
+	case "webp":
+		return "image/webp"
 	default:
 		// image.Decode only reaches this point for a registered image format;
 		// PNG is the safe fallback for the compact derivative, while the
@@ -928,14 +949,22 @@ func makeDeckAsset(data []byte, mime string, width, height int) (string, DeckAss
 }
 
 func makeDeckAssetWithSource(data []byte, mime string, width, height int, source *DeckAssetSource) (string, DeckAsset, string, error) {
+	return makeDeckAssetWithVector(data, mime, width, height, source, nil)
+}
+
+func makeDeckAssetWithVector(data []byte, mime string, width, height int, source *DeckAssetSource, vector *DeckAssetVector) (string, DeckAsset, string, error) {
 	hash := sha256.New()
 	_, _ = hash.Write(data)
 	if source != nil {
 		_, _ = hash.Write([]byte("\x00keynope-source\x00"))
 		_, _ = hash.Write(source.Data)
 	}
+	if vector != nil {
+		_, _ = hash.Write([]byte("\x00keynope-vector-v1\x00"))
+		_, _ = hash.Write(vector.Data)
+	}
 	id := hex.EncodeToString(hash.Sum(nil))
-	asset := DeckAsset{Source: source, MIME: mime, Width: width, Height: height, Data: append([]byte(nil), data...)}
+	asset := DeckAsset{Vector: vector, Source: source, MIME: mime, Width: width, Height: height, Data: append([]byte(nil), data...)}
 	path := embeddedAssetPath(id, asset)
 	registerEmbeddedStillAsset(id, asset)
 	if runtime.GOOS == "js" {
@@ -955,6 +984,9 @@ func materializeDeckAssets(deck *Deck) {
 		return
 	}
 	for id, asset := range deck.Assets {
+		if !validObjectID(id) {
+			continue // Programmatic callers must not turn IDs into arbitrary paths.
+		}
 		path := embeddedAssetPath(id, asset)
 		if len(asset.Frames) > 0 {
 			registerEmbeddedAnimatedAsset(id, asset)
@@ -974,11 +1006,7 @@ func materializeDeckAssets(deck *Deck) {
 			})
 			continue
 		}
-		if _, err := os.Stat(path); err != nil {
-			if os.MkdirAll(filepath.Dir(path), 0o755) == nil {
-				_ = os.WriteFile(path, asset.Data, 0o644)
-			}
-		}
+		_ = materializeEmbeddedStillFile(path, asset.Data)
 		visitDeckImages(deck, func(element *Element) {
 			if element.AssetID == id {
 				element.Path = path
@@ -1008,7 +1036,7 @@ func visitDeckImages(deck *Deck, visit func(*Element)) {
 }
 
 func pruneUnusedDeckAssets(deck *Deck) {
-	if deck == nil || len(deck.Assets) == 0 {
+	if deck == nil || len(deck.Assets) == 0 || hasOpaqueObjectMetadata(*deck) {
 		return
 	}
 	used := map[string]bool{}
@@ -1043,7 +1071,6 @@ func visitDeckBackgroundMedia(deck *Deck, visit func(*slideBackgroundMedia)) {
 }
 
 func parseDeck(path string) (Deck, error) {
-	parsedDeckElementOrderChanged = false
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Deck{}, err
@@ -1052,22 +1079,50 @@ func parseDeck(path string) (Deck, error) {
 }
 
 func parseDeckData(path string, data []byte) (Deck, error) {
+	return parseDeckDataWithAssetPublication(path, data, true)
+}
+
+func parseDeckDataWithAssetPublication(path string, data []byte, publishAssets bool) (Deck, error) {
+	previousWidth, previousHeight, previousOrder := authoredTerminalWidth, authoredTerminalHeight, parsedDeckElementOrderChanged
+	accepted := false
+	defer func() {
+		if !accepted {
+			authoredTerminalWidth, authoredTerminalHeight, parsedDeckElementOrderChanged = previousWidth, previousHeight, previousOrder
+		}
+	}()
 	parsedDeckElementOrderChanged = false
 	text := string(data)
-	var documentExtra *jsonExtensions
-	if match := documentExtensionsRE.FindStringSubmatch(text); match != nil {
-		var extensionErr error
-		documentExtra, extensionErr = decodeExtensionComment(match)
-		if extensionErr != nil {
-			return Deck{}, extensionErr
-		}
-		text = documentExtensionsRE.ReplaceAllString(text, "")
+	if err := validateDocumentCommentBudget(text, defaultDocumentCommentLimits); err != nil {
+		return Deck{}, err
+	}
+	if err := validateCompatibleElementMetadata(text); err != nil {
+		return Deck{}, err
+	}
+	documentExtra, text, extensionErr := decodeDocumentExtensions(text)
+	if extensionErr != nil {
+		return Deck{}, extensionErr
 	}
 	appearance, text, diagnostics := recoverDeckAppearance(text)
+	pageSize, text, err := decodeDeckPageSize(text)
+	if err != nil {
+		return Deck{}, err
+	}
+	objects, text, err := decodeDeckObjects(text)
+	if err != nil {
+		return Deck{}, err
+	}
+	theme, text, err := decodeDeckTheme(text)
+	if err != nil {
+		return Deck{}, err
+	}
 	hideActivityQR := false
-	if match := activityQRSettingRE.FindStringSubmatch(text); match != nil {
+	qrSetting, remainingQR, err := activityQRMetadata.read(text)
+	if err != nil {
+		return Deck{}, err
+	}
+	if match := qrSetting; match != nil {
 		hideActivityQR = match[1] == "off"
-		text = activityQRSettingRE.ReplaceAllString(text, "")
+		text = remainingQR
 	}
 	tabs, text, err := decodeDeckTabs(text)
 	if err != nil {
@@ -1080,8 +1135,8 @@ func parseDeckData(path string, data []byte) (Deck, error) {
 	text = remainingAssets
 	// Retired bitmap/FIGlet payloads are not needed to migrate their text.
 	// Strip the envelope without decompressing or allocating its glyph maps.
-	hadRetiredFonts := keynopeFontsEnvelopeRE.MatchString(text)
-	text = keynopeFontsEnvelopeRE.ReplaceAllString(text, "")
+	hadRetiredFonts := firstDocumentMetadata(text, keynopeFontsEnvelopeRE) != nil
+	text = rewriteDocumentMetadata(text, keynopeFontsEnvelopeRE, nil)
 	if hadRetiredFonts {
 		diagnostics = append(diagnostics, documentDiagnostic{Code: "retired-font-data", Message: "Converted retired bitmap/FIGlet text to supported TrueType text; the retired font artwork will be removed when saved."})
 	}
@@ -1090,19 +1145,20 @@ func parseDeckData(path string, data []byte) (Deck, error) {
 	if malformedTextPayload {
 		diagnostics = append(diagnostics, documentDiagnostic{Code: "text-payload-recovered", Message: "Ignored malformed encoded text metadata while preserving the rest of the slide."})
 	}
-	authoredTerminalWidth = 0
-	authoredTerminalHeight = 0
-	if match := keynopeMetaRE.FindStringSubmatch(text); match != nil {
-		authoredTerminalWidth, _ = strconv.Atoi(match[1])
-		authoredTerminalHeight, _ = strconv.Atoi(match[2])
-		text = keynopeMetaRE.ReplaceAllString(text, "")
+	width, height, remainingCanvas, err := decodeCanvasMetadata(text)
+	if err != nil {
+		return Deck{}, err
 	}
+	authoredTerminalWidth, authoredTerminalHeight, text = width, height, remainingCanvas
 	masters, remaining, err := decodeMasterDeckMetadata(text)
 	if err != nil {
 		return Deck{}, err
 	}
 	text = remaining
 	base := filepath.Dir(path)
+	if err := validateDeckPlacementQueries(Deck{Masters: masters}); err != nil {
+		return Deck{}, err
+	}
 	resolveMasterDeckImagePaths(&masters, base)
 	parsedDeckElementOrderChanged = elementOrderMappingChanged(canonicalizeSlideElementOrder(&masters.Base.Slide, authoredTerminalWidth, authoredTerminalHeight))
 	for index := range masters.Layouts {
@@ -1110,20 +1166,40 @@ func parseDeckData(path string, data []byte) (Deck, error) {
 	}
 	var slides []Slide
 	for _, part := range splitSlides(text) {
-		slide := parseSlide(part, base)
-		if slide.TabID != "" || len(slide.Elements) > 0 || slide.TTFSize > 0 || slide.TTFWidth > 0 || slide.EffectSet || slide.BackgroundSet || slide.BackgroundMediaSet || slide.FGSet || slide.BGSet || slide.HeaderFGSet || slide.Effect != "" || slide.Background != "" || slide.BackgroundMedia != nil || slide.FG != "" || slide.BG != "" || slide.HeaderFG != "" || slide.Notes != "" || slide.LayoutID != "" || slide.PageNumber != "" || slide.Engagement != nil {
+		slide, err := parseSlideChecked(part, base)
+		if err != nil {
+			return Deck{}, fmt.Errorf("slide %d: %w", len(slides)+1, err)
+		}
+		if slide.ID != "" || slide.TabID != "" || len(slide.Elements) > 0 || slide.TTFSize > 0 || slide.TTFWidth > 0 || slide.EffectSet || slide.BackgroundSet || slide.BackgroundMediaSet || slide.FGSet || slide.BGSet || slide.HeaderFGSet || slide.Effect != "" || slide.Background != "" || slide.BackgroundMedia != nil || slide.FG != "" || slide.BG != "" || slide.HeaderFG != "" || slide.Notes != "" || slide.LayoutID != "" || slide.PageNumber != "" || slide.Engagement != nil || slide.EngagementResult != nil || slide.Extra != nil && len(*slide.Extra) > 0 {
 			parsedDeckElementOrderChanged = elementOrderMappingChanged(canonicalizeSlideElementOrder(&slide, authoredTerminalWidth, authoredTerminalHeight)) || parsedDeckElementOrderChanged
 			slides = append(slides, slide)
 		}
 	}
-	deck := Deck{Appearance: appearance, Diagnostics: diagnostics, Slides: slides, Masters: masters, Assets: assets, Tabs: tabs, HideActivityQR: hideActivityQR, Extra: documentExtra}
+	deck := Deck{Objects: objects, Appearance: appearance, Diagnostics: diagnostics, Slides: slides, Masters: masters, Assets: assets, Tabs: tabs, HideActivityQR: hideActivityQR, Extra: documentExtra}
+	deck.Theme = theme
+	deck.PageSize = pageSize
 	if deckUsesRetiredTextMetadata(deck) && !hadRetiredFonts {
 		deck.Diagnostics = append(deck.Diagnostics, documentDiagnostic{Code: "retired-text-data", Message: "Converted retired bitmap text settings to supported TrueType text; obsolete settings will be removed when saved."})
 	}
 	parsedDeckElementOrderChanged = ensureUniqueEngagementIDs(&deck) || parsedDeckElementOrderChanged
 	syncSlideTabs(&deck)
 	standardizeDeckText(&deck)
-	materializeDeckAssets(&deck)
+	preserveLoadedDanglingConnectors(&deck)
+	if err := validateDeckObjectReferences(deck); err != nil {
+		return Deck{}, err
+	}
+	if err := validateDeckSpeakerNotes(deck); err != nil {
+		return Deck{}, err
+	}
+	if err := validateDeckSlideStyleSettings(deck); err != nil {
+		return Deck{}, err
+	}
+	// Publishing embedded pixels and writing cache files belongs to acceptance,
+	// never to a candidate that can still fail reference validation.
+	if publishAssets {
+		materializeDeckAssets(&deck)
+	}
+	accepted = true
 	return deck, nil
 }
 
@@ -1135,12 +1211,35 @@ func ensureDefaultAuthoredSize() {
 }
 
 func serializeDeck(path string, deck Deck) ([]byte, error) {
+	return serializeDeckWithCommentLimits(path, deck, defaultDocumentCommentLimits)
+}
+
+func serializeDeckWithCommentLimits(path string, deck Deck, commentLimits documentCommentLimits) ([]byte, error) {
+	if err := deck.PageSize.Validate(); err != nil {
+		return nil, err
+	}
+	if err := validateDeckPlacementQueries(deck); err != nil {
+		return nil, err
+	}
+	if err := validateDeckSlideStyleSettings(deck); err != nil {
+		return nil, err
+	}
+	if err := validateDeckSpeakerNotes(deck); err != nil {
+		return nil, err
+	}
 	if authoredTerminalWidth <= 0 || authoredTerminalHeight <= 0 {
 		authoredTerminalWidth, authoredTerminalHeight = terminalSize()
+	}
+	if err := validateAuthoredCanvas(authoredTerminalWidth, authoredTerminalHeight); err != nil {
+		return nil, err
 	}
 	deck = cloneDeck(deck)
 	syncSlideTabs(&deck)
 	pruneUnusedDeckAssets(&deck)
+	pruneUnusedDeckObjects(&deck)
+	if err := validateDeckObjectReferences(deck); err != nil {
+		return nil, err
+	}
 	visitDeckImages(&deck, func(element *Element) {
 		if element.AssetID != "" {
 			element.Path = "keynope-asset:" + element.AssetID
@@ -1154,12 +1253,28 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 		canonicalizeSlideElementOrder(&deck.Masters.Layouts[index].Slide, authoredTerminalWidth, authoredTerminalHeight)
 	}
 	var out strings.Builder
+	compatibleRemaining := maxCompatibleElementArchiveBytes
 	if metadata, err := encodeExtensionComment("document", deck.Extra); err != nil {
 		return nil, err
 	} else if metadata != "" {
 		out.WriteString(metadata + "\n\n")
 	}
 	if metadata, err := encodeDeckAppearance(deck.Appearance); err != nil {
+		return nil, err
+	} else if metadata != "" {
+		out.WriteString(metadata + "\n\n")
+	}
+	if metadata, err := encodeDeckPageSize(deck.PageSize); err != nil {
+		return nil, err
+	} else if metadata != "" {
+		out.WriteString(metadata + "\n\n")
+	}
+	if metadata, err := encodeDeckObjects(deck.Objects); err != nil {
+		return nil, err
+	} else if metadata != "" {
+		out.WriteString(metadata + "\n\n")
+	}
+	if metadata, err := encodeDeckTheme(deck.Theme); err != nil {
 		return nil, err
 	} else if metadata != "" {
 		out.WriteString(metadata + "\n\n")
@@ -1197,6 +1312,12 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 	for slideIndex, slide := range deck.Slides {
 		if slideIndex > 0 {
 			out.WriteString("\n---\n")
+		}
+		if slide.ID != "" {
+			if !validObjectID(slide.ID) {
+				return nil, fmt.Errorf("invalid slide ID %q", slide.ID)
+			}
+			fmt.Fprintf(&out, "<!-- keynope-slide-id=%s -->\n", slide.ID)
 		}
 		if metadata, err := encodeExtensionComment("slide", slide.Extra); err != nil {
 			return nil, err
@@ -1240,11 +1361,11 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 			fmt.Fprintf(&out, "<!-- background=%s -->\n", value)
 		}
 		if slide.BackgroundMediaSet {
-			metadata, err := json.Marshal(slide.BackgroundMedia)
+			metadata, err := encodeBackgroundMetadata(slide.BackgroundMedia)
 			if err != nil {
 				return nil, err
 			}
-			fmt.Fprintf(&out, "<!-- keynope-background-media version=1 base64:%s -->\n", base64.StdEncoding.EncodeToString(metadata))
+			out.WriteString(metadata + "\n")
 		}
 		if slide.Notes != "" {
 			fmt.Fprintf(&out, "<!-- notes=base64:%s -->\n", base64.StdEncoding.EncodeToString([]byte(slide.Notes)))
@@ -1258,6 +1379,18 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 			out.WriteByte('\n')
 		}
 		for elementIndex, element := range slide.Elements {
+			if elementNeedsCompatibilityEnvelope(element) {
+				metadata, err := encodeCompatibleElementBudget(element, &compatibleRemaining)
+				if err != nil {
+					return nil, err
+				}
+				if elementIndex > 0 {
+					out.WriteByte('\n')
+				}
+				out.WriteString(metadata)
+				out.WriteByte('\n')
+				continue
+			}
 			if element.Placeholder && element.MasterSlotID == "" {
 				continue
 			}
@@ -1280,6 +1413,9 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 			if element.ID != "" {
 				element.Query = setQueryValue(element.Query, "element-id", element.ID)
 			}
+			if element.ObjectID != "" {
+				element.Query = setQueryValue(element.Query, "object-id", element.ObjectID)
+			}
 			if (element.Kind != "image" || element.Placeholder) && element.Query != "" {
 				fmt.Fprintf(&out, "<!-- %s -->\n", placementCommentText(element.Query))
 			}
@@ -1288,7 +1424,7 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 				out.WriteByte('\n')
 				continue
 			}
-			if isTrueType(element) && (element.Text == "" || strings.Contains(element.Text, "\n") || strings.ContainsAny(element.Text, "`<>#[]") || strings.HasPrefix(element.Text, "-") || strings.TrimSpace(element.Text) != element.Text) {
+			if canEncodeTrueTypeText(element) && (element.Text == "" || strings.Contains(element.Text, "\n") || strings.ContainsAny(element.Text, "`<>#[]") || strings.HasPrefix(element.Text, "-") || strings.TrimSpace(element.Text) != element.Text) {
 				level := ""
 				if element.Kind == "heading" {
 					level = fmt.Sprintf(" level=%d", max(1, min(2, element.Level)))
@@ -1297,6 +1433,8 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 				continue
 			}
 			switch element.Kind {
+			case "table", "chart":
+				fmt.Fprintf(&out, "[%s]\n", element.Kind)
 			case "connector":
 				out.WriteString("[connector]\n")
 			case "heading":
@@ -1313,12 +1451,13 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 					}
 				}
 			case "code":
-				out.WriteString("```\n")
+				fence := codeFenceForText(element.Text)
+				out.WriteString(fence + "\n")
 				out.WriteString(element.Text)
 				if !strings.HasSuffix(element.Text, "\n") {
 					out.WriteByte('\n')
 				}
-				out.WriteString("```\n")
+				out.WriteString(fence + "\n")
 			case "image":
 				src := element.Path
 				if element.AssetID != "" {
@@ -1334,8 +1473,14 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 				}
 				fmt.Fprintf(&out, "![image](%s)\n", src)
 			case "shape":
-				shape := shapeName(element)
-				fmt.Fprintf(&out, "[shape:%s]\n", shape)
+				query, _ := url.ParseQuery(element.Query)
+				if element.MasterSlotID != "" && !query.Has("shape") {
+					// The generic marker is already supported by the parser. Do
+					// not turn a sparse master instance into an explicit circle.
+					out.WriteString("[shape]\n")
+				} else {
+					fmt.Fprintf(&out, "[shape:%s]\n", shapeName(element))
+				}
 			case "text-image":
 				out.WriteString(element.Text)
 				out.WriteByte('\n')
@@ -1345,7 +1490,11 @@ func serializeDeck(path string, deck Deck) ([]byte, error) {
 			}
 		}
 	}
-	return []byte(out.String()), nil
+	text := out.String()
+	if err := validateDocumentCommentBudget(text, commentLimits); err != nil {
+		return nil, err
+	}
+	return []byte(text), nil
 }
 
 func canonicalizeSlideElementOrder(slide *Slide, width, height int) []int {
@@ -1523,7 +1672,7 @@ func projectExportDeck(deckPath string, slides []Slide, cols, rows int, presente
 			// Downloaded decks are presentation snapshots, not workshop hosts.
 			// Definitions can contain correct answers and live session codes.
 			for i := range pages {
-				pages[i].Engagement = nil
+				pages[i] = audienceExportPage(pages[i])
 			}
 		}
 		deck.Pages = append(deck.Pages, pages...)
@@ -1532,6 +1681,10 @@ func projectExportDeck(deckPath string, slides []Slide, cols, rows int, presente
 }
 
 func exportProjectedHTML(deck exportDeck, preserved preservedExportHead, presenter bool) (string, error) {
+	if !presenter {
+		// Also guard direct print/snapshot callers which already have pages.
+		deck = audienceExportDeck(deck)
+	}
 	if preserved.Title == "" {
 		title := strings.TrimSuffix(strings.TrimSpace(deck.Source), filepath.Ext(deck.Source))
 		if title == "" {
@@ -1568,8 +1721,8 @@ func exportSlidePagesFrozen(slide Slide, slideIndex, slideCount, cols, rows int)
 
 func exportSlidePagesMode(slide Slide, slideIndex, slideCount, cols, rows int, frozenImages bool) []exportPage {
 	if slide.ModernScene != nil {
-		lines := layout(withTrueTypeDefaults(slide), cols, rows)
-		return []exportPage{{Scene: slide.ModernScene, ShapePorts: slideShapePorts(slide, lines, cols, rows), Connectors: slideShapeConnectors(slide, lines, cols, rows), HideActivityQR: slide.HideActivityQR, TabOnly: slide.TabID != "", Slide: slideIndex, PageCount: 1, SlideCount: slideCount, Effect: slide.Effect, Background: slide.Background, BackgroundLines: staticBackgroundExportLines(slide.Background, cols, rows, ansiCSSColour(slideFG(slide)), slideBG(slide)), FG: ansiCSSColour(slideFG(slide)), BG: slide.ModernScene.Background, HeaderFG: ansiCSSColour(slideHeaderFG(slide)), Lines: []exportLine{}, HideChromePageNumber: true, Engagement: cloneEngagement(slide.Engagement)}}
+		ports, connectors := scenePageAttachments(slide, cols, rows)
+		return []exportPage{{Scene: slide.ModernScene, ShapePorts: ports, Connectors: connectors, HideActivityQR: slide.HideActivityQR, TabOnly: slide.TabID != "", Slide: slideIndex, PageCount: 1, SlideCount: slideCount, Effect: slide.Effect, Background: slide.Background, BackgroundLines: staticBackgroundExportLines(slide.Background, cols, rows, ansiCSSColour(slideFG(slide)), slideBG(slide)), FG: ansiCSSColour(slideFG(slide)), BG: slide.ModernScene.Background, HeaderFG: ansiCSSColour(slideHeaderFG(slide)), Lines: []exportLine{}, HideChromePageNumber: true, Engagement: cloneEngagement(slide.Engagement)}}
 	}
 	slide = withTrueTypeDefaults(slide)
 	pageCount := slidePageCount(slide, cols, rows)
@@ -1635,23 +1788,8 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = io.WriteString(w, html)
 	})
-	mux.HandleFunc("/state", func(w http.ResponseWriter, r *http.Request) {
-		companion.mu.RLock()
-		state := companion.state
-		companion.mu.RUnlock()
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(w).Encode(state)
-	})
-	mux.HandleFunc("/slides", func(w http.ResponseWriter, r *http.Request) {
-		pages, version := companion.slideSnapshot()
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(w).Encode(struct {
-			Pages   []exportPage `json:"pages"`
-			Version int64        `json:"version"`
-		}{pages, version})
-	})
+	mux.HandleFunc("/state", companion.handleState)
+	mux.HandleFunc("/slides", companion.handlePageUpdate)
 	mux.HandleFunc("/slide", func(w http.ResponseWriter, r *http.Request) {
 		raw := r.URL.Query().Get("index")
 		index, err := strconv.Atoi(raw)
@@ -1702,9 +1840,13 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 		}
 	})
 	mux.HandleFunc("/presenter-status", companion.handlePresenterStatus)
+	mux.HandleFunc("/presentation-overlay", companion.handlePresentationOverlay)
 	mux.HandleFunc("/engagement", companion.handleEngagement)
 	if activeNativeEditor != nil {
 		mux.HandleFunc("/api/editor/state", activeNativeEditor.handleState)
+		mux.HandleFunc("/api/editor/templates", activeNativeEditor.handleTemplates)
+		mux.HandleFunc("/api/editor/clipboard", activeNativeEditor.handleObjectClipboard)
+		mux.HandleFunc("/api/editor/paste-clipboard", activeNativeEditor.handlePasteObjectClipboard)
 		mux.HandleFunc("/api/editor/scene", activeNativeEditor.handleScene)
 		mux.HandleFunc("/api/editor/scene-fonts", activeNativeEditor.handleSceneFonts)
 		mux.HandleFunc("/api/editor/action", activeNativeEditor.handleAction)
@@ -1716,7 +1858,11 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 		mux.HandleFunc("/api/editor/emojis", activeNativeEditor.handleEmojiCatalog)
 		mux.HandleFunc("/api/editor/emoji-text-fonts", activeNativeEditor.handleEmojiTextFonts)
 		mux.HandleFunc("/api/editor/shape-draft", activeNativeEditor.handleShapeDraft)
+		mux.HandleFunc("/api/editor/shape-adjustment-draft", activeNativeEditor.handleShapeAdjustmentDraft)
 		mux.HandleFunc("/api/editor/media-draft", activeNativeEditor.handleMediaDraft)
+		mux.HandleFunc("/api/editor/table-draft", activeNativeEditor.handleTableDraft)
+		mux.HandleFunc("/api/editor/table-cell-style-draft", activeNativeEditor.handleTableCellStyleDraft)
+		mux.HandleFunc("/api/editor/text-style-draft", activeNativeEditor.handleTextStyleDraft)
 		mux.HandleFunc("/api/editor/activity-qr", activeNativeEditor.handleActivityQR)
 		mux.HandleFunc("/api/editor/workspace", activeNativeEditor.handleWorkspace)
 		mux.HandleFunc("/api/editor/upload", activeNativeEditor.handleUpload)
@@ -1724,6 +1870,8 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 		mux.HandleFunc("/api/editor/participant-page", activeNativeEditor.handleParticipantPage)
 		mux.HandleFunc("/api/editor/export-document", activeNativeEditor.handleExportDocument)
 		mux.HandleFunc("/api/editor/export-pptx", activeNativeEditor.handleExportPPTX)
+		mux.HandleFunc("/api/editor/pptx-captures", activeNativeEditor.handlePPTXCaptureManifest)
+		mux.HandleFunc("/api/editor/export-pdf", activeNativeEditor.handleExportPDF)
 		mux.HandleFunc("/api/editor/import-pptx", activeNativeEditor.handleImportPPTX)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1840,6 +1988,9 @@ func (p *presenterCompanion) handlePresenterStatus(w http.ResponseWriter, r *htt
 		if changed {
 			p.state.Version++
 		}
+	}
+	if p.maintainBuildCursorLocked() {
+		p.state.Version++
 	}
 	p.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
@@ -1974,15 +2125,21 @@ func (p *presenterCompanion) RefreshActiveSlideAsync(slides []Slide, cols, rows 
 		return
 	}
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
 	slideIndex := p.state.Slide
 	if slideIndex < 0 || slideIndex >= len(slides) {
 		p.mu.Unlock()
 		return
 	}
 	p.seq++
+	p.invalidateNativeProjectionLocked()
 	seq := p.seq
 	if p.fullPending || (p.slidePending && p.pendingSlide != slideIndex) {
 		p.fullPending, p.slidePending = true, false
+		p.freezeBuildForRefreshLocked()
 		// A newer local edit cannot discard a pending deck-wide change (such
 		// as a master edit). Render its latest complete snapshot instead.
 		deckPath := p.refreshPath
@@ -1991,6 +2148,7 @@ func (p *presenterCompanion) RefreshActiveSlideAsync(slides []Slide, cols, rows 
 		return
 	}
 	p.slidePending, p.pendingSlide = true, slideIndex
+	p.freezeBuildForRefreshLocked()
 	p.mu.Unlock()
 	slide := cloneSlide(slides[slideIndex])
 	slideCount := len(slides)
@@ -2014,7 +2172,9 @@ func (p *presenterCompanion) RefreshActiveSlideAsync(slides []Slide, cols, rows 
 		p.pages[slideIndex] = pages
 		p.slidePending = false
 		p.state.DeckVersion++
+		p.recordPageChangeLocked(false, []int{slideIndex})
 		p.state.DeckSlide = slideIndex
+		p.maintainBuildCursorLocked()
 		p.state.Version++
 	}()
 }
@@ -2025,6 +2185,9 @@ func (p *presenterCompanion) Update(slide, page int, presenting bool, deckState 
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.closed {
+		return
+	}
 	timerMode, timerInput, timerEndMS := p.state.TimerMode, p.state.TimerInput, p.state.TimerEndMS
 	if deckState != nil {
 		timerMode = deckState.TimerMode
@@ -2042,6 +2205,7 @@ func (p *presenterCompanion) Update(slide, page int, presenting bool, deckState 
 	p.state.TimerMode = timerMode
 	p.state.TimerInput = timerInput
 	p.state.TimerEndMS = timerEndMS
+	p.maintainBuildCursorLocked()
 	p.state.Version++
 }
 
@@ -2094,10 +2258,22 @@ func (p *presenterCompanion) PublishTerminalFrame(frame string, cols, rows int) 
 }
 
 func (p *presenterCompanion) Close() {
-	if p == nil || p.server == nil {
+	if p == nil {
 		return
 	}
-	_ = p.server.Close()
+	p.mu.Lock()
+	p.closed = true
+	p.seq++
+	p.fullPending, p.slidePending = false, false
+	p.invalidateNativeProjectionLocked()
+	p.cancelBuildTimerLocked()
+	p.state.BuildCursor = nil
+	p.state.Overlay = nil
+	p.overlaySequences = nil
+	p.mu.Unlock()
+	if p.server != nil {
+		_ = p.server.Close()
+	}
 }
 
 type preservedExportHead struct {
@@ -2769,7 +2945,7 @@ func exportLines(lines []Line, slide Slide, width, height, slideCount int) []exp
 			}
 			seenTrueType[line.Element] = true
 			element := slide.Elements[line.Element]
-			w, h := trueTypeBounds(element, width, height)
+			w, h := trueTypeBoundsOnCanvas(element, width, height, slide.physicalCanvas())
 			color := foreground(element.Query, element.Kind == "heading")
 			link := linkFor(element.Query)
 			out = append(out, exportLine{Row: line.Row, Col: line.Col, Element: line.Element, Role: "truetype", Link: link, Parts: []exportPart{{Col: line.Col, Text: strings.Repeat(" ", w), Color: color}}, TrueType: exportTrueTypeElement(element, w, h)})
@@ -3240,12 +3416,17 @@ body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Libe
 .keynope-presentation-glyph.stop { color: #ff6868; }
 .keynope-timer-input { width: 72px; box-sizing: border-box; color: #eee; background: #111; border: 1px solid #70b7ff; border-radius: 5px; padding: 6px; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .keynope-editor-status { margin-right: auto; color: #aeb4bb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.keynope-command-error { position:fixed; z-index:590; left:50%; bottom:68px; translate:-50% 0; display:flex; align-items:center; gap:12px; width:max-content; max-width:min(720px,calc(100vw - 32px)); box-sizing:border-box; padding:10px 12px; border:1px solid #fb7185; border-radius:6px; background:rgba(53,18,27,.98); color:#fff1f2; box-shadow:0 8px 28px #0008; font:500 13px/1.4 -apple-system,BlinkMacSystemFont,sans-serif; }
+.keynope-command-error[hidden] { display:none; }
+html[data-keynope-notes="true"] .keynope-command-error { bottom:max(68px,calc(100% - var(--editor-notes-top, 100%) + 8px)); }
+.keynope-command-error span { min-width:0; overflow-wrap:anywhere; }
+.keynope-command-error button { flex:none; color:#fff; background:#532030; border:1px solid #fb7185; border-radius:4px; padding:5px 9px; font:inherit; cursor:pointer; }
 .keynope-font-warning { position:fixed; z-index:590; left:50%; top:104px; translate:-50% 0; display:flex; align-items:center; gap:10px; max-width:min(720px,calc(100vw - 32px)); padding:9px 12px; box-sizing:border-box; color:#ffe9a8; background:rgba(52,40,8,.97); border:1px solid #d7a928; border-radius:6px; box-shadow:0 10px 32px rgba(0,0,0,.55); font:600 13px/1.35 -apple-system,BlinkMacSystemFont,sans-serif; }
 .keynope-font-warning[hidden] { display:none; }
 .keynope-font-warning span { min-width:0; overflow-wrap:anywhere; }
 .keynope-font-warning button { flex:none; color:#fff; background:#44370f; border:1px solid #d7a928; border-radius:4px; padding:5px 9px; }
 html[data-keynope-app="true"] .keynope-app-toolbar { display: flex; }
-html[data-keynope-app="true"] #stage { left: 210px; right: 0; }
+html[data-keynope-app="true"] #stage { left: 210px; right: 0; background: var(--keynope-workspace-background, #1d2024); }
 html[data-keynope-app="true"] button { transition: border-color 90ms ease, background-color 90ms ease, box-shadow 90ms ease, transform 70ms ease; }
 html[data-keynope-app="true"] button:hover:not(:disabled),
 html[data-keynope-app="true"] button:focus-visible:not(:disabled) { border-color: #70b7ff !important; box-shadow: 0 0 0 1px rgba(112,183,255,.28); outline: none; }
@@ -3275,8 +3456,10 @@ html[data-keynope-app="true"] button:active:not(:disabled) > span { translate: 0
 .keynope-topbar-link { width: 180px; min-width: 120px !important; box-sizing: border-box; color: #eee; background: #111; border: 1px solid #555; border-radius: 5px; padding: 5px 7px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .keynope-visual-panel { position: fixed; z-index: 90; display: grid; grid-template-columns: minmax(0,1fr) minmax(0,150px); gap: 7px 9px; width: min(300px,calc(100vw - 16px)); padding: 10px; box-sizing: border-box; border: 1px solid #5b6168; border-radius: 8px; color: #ddd; background: #202124; box-shadow: 0 12px 32px rgba(0,0,0,.55); }
 .keynope-visual-panel[hidden] { display: none; }
+.keynope-visual-panel .keynope-command-scope { grid-column:1 / -1; margin:0 0 4px; font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; }
 .keynope-visual-panel label { align-self: center; color: #aeb4bb; font-size: 11px; }
 .keynope-visual-panel select, .keynope-visual-panel input { width: 100%; min-width: 0; box-sizing: border-box; }
+.keynope-visual-panel select,.keynope-visual-panel input[type="number"] { color:#edf1f3; background:#111315; border:1px solid #59616a; border-radius:4px; padding:3px; }
 .keynope-emoji-picker { position: fixed; z-index: 110; width: 430px; max-height: 430px; padding: 10px; box-sizing: border-box; border: 1px solid #67717b; border-radius: 9px; color: #ddd; background: #202124; box-shadow: 0 16px 42px rgba(0,0,0,.65); font: 12px -apple-system, BlinkMacSystemFont, sans-serif; }
 .keynope-emoji-picker[hidden] { display: none; }
 .keynope-emoji-picker-controls { display: grid; grid-template-columns: 1fr 150px; gap: 7px; margin-bottom: 8px; }
@@ -3494,6 +3677,8 @@ html[data-keynope-app="true"] .keynope-editor-topbar button.keynope-page-number-
 .keynope-add-shape-menu button { display: grid; width: 54px; height: 48px; place-items: center; padding: 5px; color: inherit; background: #292929; border: 1px solid #555; border-radius: 6px; }
 .keynope-add-shape-menu button:hover { border-color: #70b7ff; background: #244766; }
 .keynope-add-shape-menu svg { width: 36px; height: 32px; }
+.keynope-add-shape-menu { grid-template-columns:repeat(4,54px); max-height: calc(100vh - 80px); overflow:auto; }
+.keynope-add-shape-category { grid-column:1 / -1; color:#aaa; text-align:left; font-size:12px; padding:5px 2px 0; }
 .keynope-editor-topbar button.active { border-color: #70b7ff; background: #244766; }
 .keynope-editor-topbar select { min-width: 132px; color: #eee; background: #292929; border: 1px solid #555; border-radius: 5px; padding: 5px 9px; font: inherit; }
 .keynope-editor-separator { width: 1px; height: 24px; flex: 0 0 auto; margin: 0 3px; background: #444; }
@@ -3557,12 +3742,25 @@ button.keynope-shape-outline-button { display: inline-flex; align-items: center;
 .keynope-canvas-element:hover { border-color: rgba(112,183,255,.65); }
 .keynope-canvas-element.active { border: 2px solid #ffd166; box-shadow: 0 0 0 1px #111; }
 .keynope-canvas-element.marquee-candidate { border: 2px solid #ffd166; background: rgba(255,209,102,.12); box-shadow: 0 0 0 1px #111; }
+.keynope-style-painter .keynope-canvas-element, .keynope-style-painter .keynope-connector-hit { cursor: crosshair !important; }
+.keynope-word-style-painter .keynope-canvas-element.style-painter-target { cursor: crosshair !important; }
+.keynope-word-painter-notice { position: absolute; bottom: 80px; left: 16px; max-width: min(450px, calc(100% - 32px)); z-index: 51000; padding: 10px 14px; box-sizing: border-box; border: 1px solid #70b7ff; border-radius: 6px; background: #182028; color: #fff; font: 13px/1.4 system-ui; box-shadow: 0 4px 20px #0005; }
+.keynope-word-painter-notice[hidden] { display: none; }
+.keynope-word-painter-notice p { margin: 0 0 8px; }
+.keynope-word-painter-notice button { margin-left: 12px; padding: 5px 8px; font: inherit; background: #29323b; color: #fff; border: 1px solid #65717a; border-radius: 4px; }
+.keynope-canvas-element.style-painter-target { outline: 2px dashed #70b7ff; outline-offset: 3px; background: rgba(112,183,255,.08); }
+.keynope-connector-hit.style-painter-target { stroke: #70b7ff; stroke-width: 2px; }
+.keynope-style-transfer { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+.keynope-style-transfer h4, .keynope-style-transfer p { flex-basis: 100%; margin: 0; }
 .keynope-canvas-marquee { position:absolute; pointer-events:none; box-sizing:border-box; border:1px solid #8fc9ff; background:rgba(112,183,255,.15); z-index:30; }
 .keynope-resize-handle { position: absolute; z-index: 1000002; pointer-events:auto; width: 9px; height: 9px; border: 1px solid #111; background: #ffd166; }
 .keynope-resize-handle.nw { left: -6px; top: -6px; cursor: nwse-resize; }
 .keynope-resize-handle.ne { right: -6px; top: -6px; cursor: nesw-resize; }
 .keynope-resize-handle.sw { left: -6px; bottom: -6px; cursor: nesw-resize; }
 .keynope-resize-handle.se { right: -6px; bottom: -6px; cursor: nwse-resize; }
+.keynope-shape-adjustment { position:absolute; z-index:1000005; width:24px; height:24px; padding:0; border:0; background:transparent; transform:translate(-50%,-50%); pointer-events:auto; touch-action:none; cursor:crosshair; }
+.keynope-shape-adjustment::after { content:''; display:block; margin:6px; width:12px; height:12px; box-sizing:border-box; background:#55ddff; border:1px solid #10202a; transform:rotate(45deg); }
+.keynope-shape-adjustment:hover::after,.keynope-shape-adjustment:focus-visible::after { background:#ffffff; outline:2px solid #55ddff; outline-offset:2px; }
 .keynope-colour-tool { position: relative; overflow: hidden; display: grid; width: 28px; min-width: 28px; place-items: center; padding: 4px 0; box-sizing: border-box; border-radius: 4px; color: #e9edf1; background: #343940; font: 11px -apple-system, BlinkMacSystemFont, sans-serif; }
 .keynope-colour-tool::after { content: ''; position: absolute; left: 7px; right: 7px; bottom: 4px; height: 3px; border-radius: 2px; background: var(--keynope-tool-colour, #fff); pointer-events: none; }
 .keynope-colour-picker { position: fixed; z-index: 520; display: grid; width: 252px; box-sizing: border-box; gap: 9px; padding: 10px; border: 1px solid #626a72; border-radius: 8px; color: #edf1f3; background: #1b1e21; box-shadow: 0 14px 42px rgba(0,0,0,.72); font: 12px ui-monospace,SFMono-Regular,Menlo,monospace; }
@@ -3621,7 +3819,8 @@ func exportHTMLSuffix() string {
 	return `<script>
 const keynopeIntroductionAssets = ` + introductionAssetsJSON + `;
 ` + activityGamesJS + activityDesignJS + "\nconst keynopeTTFFontData = '" + strings.TrimSpace(trueTypeFontBase64) + "';\n" + trueTypeJS + `
-` + participantTransferJS + workspaceJS + shapedTextJS + sceneJS + `
+` + participantTransferJS + workspaceJS + conversionReportJS + shapedTextJS + textStyleToolsJS + sceneJS + templatesJS + tablesJS + chartsJS + buildsJS + presentationToolsJS + `
+const keynopeShapeCatalog = ` + shapeCatalogJSON() + `;
 const deck = JSON.parse(document.getElementById('keynope-data').textContent);
 let pageIndex = Math.max(0, deck.pages.findIndex(page => !page.tabOnly));
 const stage = document.getElementById('stage');
@@ -3639,15 +3838,79 @@ const effectLayer = document.getElementById('effect-layer');
 let contentLayer = document.getElementById('content-layer');
 const chromeLayer = document.getElementById('chrome-layer');
 let modernPageView=null,modernPageSource=null,modernPageGeneration=0;
+let standaloneBuildPlayback=null,standaloneBuildPage=null,standaloneBuildEntry=null,standaloneBuildReady=false;
+const standaloneBuildSession='presentation-'+Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('');
+let standaloneBuildCursor=null,standaloneBuildGeneration=0;
+let remoteBuildCursor=null,remoteBuildPlayback=null,remoteBuildPage=null;
+function clearRemoteBuildPlayback(){remoteBuildPlayback?.dispose();remoteBuildPlayback=null;remoteBuildPage=null;}
+function syncRemoteBuildPlayback(page){
+  if(keynopeSnapshotMode||!remoteBuildCursor||page.scene?.slideId!==remoteBuildCursor.slideId||!modernPageView){clearRemoteBuildPlayback();return;}
+  if(remoteBuildPage!==page){clearRemoteBuildPlayback();remoteBuildPage=page;remoteBuildPlayback=KeynopeBuilds.controller(modernPageView.element,page.scene.build,{transitions:false});}
+  remoteBuildPlayback.applyCursor(remoteBuildCursor);
+}
+function clearStandaloneBuildPlayback(){standaloneBuildPlayback?.dispose();standaloneBuildPlayback=null;standaloneBuildPage=null;standaloneBuildCursor=null;standaloneBuildReady=false;}
+function standaloneBuildChanged(page,value){
+  const before=standaloneBuildCursor;
+  const motion=value.paused||before?.paused?'seek':value.motion||'seek';
+  standaloneBuildCursor={session:standaloneBuildSession,slideId:page.scene.slideId||'slide-'+page.slide+'-'+page.page,step:value.step,generation:++standaloneBuildGeneration,startedAtMs:Date.now(),motion,paused:value.paused};
+  try{window.opener?.keynopePublishParticipantPage?.();}catch(_error){}
+}
+function syncStandaloneBuildPlayback(page){
+  // Native/broadcast surfaces will consume the shared cursor contract. Do not
+  // independently auto-run a participant or external screen ahead of its host.
+  if(keynopeAppSurface||window.KEYNOPE_PRESENTER||window.KEYNOPE_PARTICIPANT_VIEW||keynopeSnapshotMode||!page.scene?.build){clearStandaloneBuildPlayback();return;}
+  if(standaloneBuildPage!==page){
+    clearStandaloneBuildPlayback();standaloneBuildPage=page;
+    standaloneBuildPlayback=KeynopeBuilds.controller(modernPageView.element,page.scene.build,{transitions:false,onChange:value=>standaloneBuildChanged(page,value)});
+    if(standaloneBuildEntry==='final'){standaloneBuildReady=true;standaloneBuildPlayback.seek(standaloneBuildPlayback.snapshot().total);}
+    else {
+      const runtime=standaloneBuildPlayback;
+      Promise.all([modernPageView.ready,KeynopeScene.ensureFonts(window.KEYNOPE_MODERN_FONT_URL)]).then(()=>{
+        if(standaloneBuildPlayback===runtime&&standaloneBuildPage===page&&!keynopeSnapshotMode){standaloneBuildReady=true;if(runtime.snapshot().step===0)runtime.start();drawFrame();}
+      }).catch(()=>{});
+    }
+    standaloneBuildEntry=null;
+  }else if(standaloneBuildEntry){
+    if(standaloneBuildEntry==='final')standaloneBuildPlayback.seek(standaloneBuildPlayback.snapshot().total);else standaloneBuildPlayback.start();
+    standaloneBuildEntry=null;
+  }
+}
+function consumeStandaloneBuildKey(event){
+  if(keynopeAppSurface||window.KEYNOPE_PRESENTER||window.KEYNOPE_PARTICIPANT_VIEW||keynopeSnapshotMode)return false;
+  if(['ArrowRight',' ','n','PageDown'].includes(event.key)){
+    if(standaloneBuildPlayback?.next()){event.preventDefault();event.stopPropagation();return true;}
+    standaloneBuildEntry='initial';
+  }else if(['ArrowLeft','PageUp'].includes(event.key)){
+    if(standaloneBuildPlayback?.previous()){event.preventDefault();event.stopPropagation();return true;}
+    standaloneBuildEntry='final';
+  }else if(event.key==='Home')standaloneBuildEntry='initial';
+  else if(event.key==='End')standaloneBuildEntry='final';
+  return false;
+}
 const modernPageLayer=document.createElement('div');
 modernPageLayer.className='keynope-modern-presentation';
 modernPageLayer.setAttribute('aria-hidden','true');
 Object.assign(modernPageLayer.style,{position:'absolute',overflow:'hidden',zIndex:'2',display:'none',pointerEvents:'none'});
-stage.append(modernPageLayer);
+const modernSlideViewport=document.createElement('div'),modernSlideGroup=document.createElement('div');
+modernSlideViewport.className='keynope-slide-viewport';modernSlideGroup.className='keynope-slide-group';
+Object.assign(modernSlideViewport.style,{position:'absolute',overflow:'hidden',zIndex:'2',display:'none',pointerEvents:'none'});
+Object.assign(modernSlideGroup.style,{position:'absolute',inset:'0',zIndex:'2'});
+modernSlideViewport.append(modernSlideGroup);stage.append(modernSlideViewport);modernSlideGroup.append(modernPageLayer);
 const modernBackdrop=document.createElement('canvas');
 modernBackdrop.className='keynope-scene-backdrop';
-Object.assign(modernBackdrop.style,{position:'absolute',zIndex:'1',display:'none',pointerEvents:'none'});
-stage.append(modernBackdrop);
+Object.assign(modernBackdrop.style,{position:'absolute',transform:'none',zIndex:'1',display:'none',pointerEvents:'none'});
+modernSlideGroup.append(modernBackdrop);
+const slideCompositor=KeynopeBuilds.slideTransition(modernSlideViewport,modernSlideGroup);
+let modernPaintedPageKey=null,modernSlideTransitionKey='',modernTransitionReady=false;
+function syncSlideComposition(page){
+  const cursor=remoteBuildCursor||standaloneBuildCursor;
+  if(keynopeSnapshotMode||sceneReducedMotion.matches||presenterTimerMode||cursor?.paused||!cursor){slideCompositor.cancel();return;}
+  if(!modernTransitionReady||(!remoteBuildCursor&&!standaloneBuildReady))return;
+  const key=KeynopeBuilds.cursorKey(cursor);if(key===modernSlideTransitionKey)return;
+  modernSlideTransitionKey=key;
+  if(cursor.motion!=='enter'){slideCompositor.cancel();return;}
+  slideCompositor.play(KeynopeBuilds.normalize(page.scene?.build).transition,{elapsed:Date.now()-cursor.startedAtMs});
+}
 const modernLinkViews=new Map();
 let modernLinksActive=false;
 function syncModernLinks(page){
@@ -3686,7 +3949,11 @@ function modernBackdropContentKey(page){
   return key;
 }
 const sceneReducedMotion=matchMedia('(prefers-reduced-motion: reduce)');
-function clearModernPage() {
+if(!window.KEYNOPE_PARTICIPANT_VIEW)sceneReducedMotion.addEventListener('change',()=>{if(sceneReducedMotion.matches){slideCompositor.cancel();standaloneBuildPlayback?.settleAnimations();remoteBuildPlayback?.settleAnimations();}drawFrame();});
+function clearModernPage({preserveTransition=false}={}) {
+  if(!preserveTransition){slideCompositor.cancel();modernPaintedPageKey=null;modernSlideTransitionKey='';modernTransitionReady=false;modernSlideViewport.style.display='none';}
+  clearStandaloneBuildPlayback();
+  clearRemoteBuildPlayback();
   modernBackdropKey='';
   modernBackdrop.style.display='none';
   modernLinksActive=false;modernLinkViews.clear();linkLayer.replaceChildren();
@@ -3694,24 +3961,41 @@ function clearModernPage() {
 }
 function drawModernPage(page) {
   if(modernPageSource!==page.scene){
+    const key=page.scene.slideId||[page.slide,page.page].join(':');
+    const navigation=modernPaintedPageKey!==key;
+    if(navigation){
+      const cursor=remoteBuildCursor;
+      const transition=KeynopeBuilds.normalize(page.scene.build).transition;
+      const owner=cursor?cursor.motion==='enter'&&!cursor.paused:!keynopeAppSurface&&!window.KEYNOPE_PRESENTER&&!window.KEYNOPE_PARTICIPANT_VIEW;
+      const animate=owner&&!keynopeSnapshotMode&&!presenterTimerMode&&!sceneReducedMotion.matches&&transition.effect!=='cut'&&transition.durationMs>0&&(!cursor||Date.now()-cursor.startedAtMs<transition.durationMs)&&standaloneBuildEntry!=='final';
+      let outgoing=animate&&modernPageView?slideCompositor.snapshot():null;
+      if(animate&&!outgoing){outgoing=document.createElement('div');outgoing.style.background='#000';}
+      slideCompositor.hold(outgoing);modernTransitionReady=false;modernSlideTransitionKey='';
+    }else slideCompositor.cancel();
+    modernPaintedPageKey=key;
+    clearRemoteBuildPlayback();
     const retained=modernPageView?.update(page.scene);
-    if(!retained)clearModernPage();
+    if(!retained)clearModernPage({preserveTransition:true});
     modernPageSource=page.scene;
     const generation=modernPageGeneration;
     if(!retained)modernPageView=KeynopeScene.mount(modernPageLayer,page.scene);
     syncModernLinks(page);
     if(!retained)modernPageLayer.style.visibility='hidden';
     KeynopeScene.ensureFonts(window.KEYNOPE_MODERN_FONT_URL).then(()=>modernPageView?.ready).then(()=>{
-      if(generation===modernPageGeneration&&modernPageView){modernPageLayer.style.visibility='visible';drawFrame();}
+      if(generation===modernPageGeneration&&modernPageView){modernPageLayer.style.visibility='visible';modernTransitionReady=true;drawFrame();}
     }).catch(error=>{
       if(generation!==modernPageGeneration)return;
       modernPageLayer.style.visibility='visible';modernPageLayer.textContent='Could not load presentation fonts. '+error.message;
+      slideCompositor.cancel();
     });
   }
   modernPageLayer.style.display='block';
   presenterCanvas.style.display='block';
   const canvasBox=presenterCanvas.getBoundingClientRect(),stageBox=stage.getBoundingClientRect();
-  Object.assign(modernPageLayer.style,{left:(canvasBox.left-stageBox.left)+'px',top:(canvasBox.top-stageBox.top)+'px',width:canvasBox.width+'px',height:canvasBox.height+'px'});
+  const boxKey=[canvasBox.width,canvasBox.height].join(':');
+  if(modernSlideViewport.dataset.box&&modernSlideViewport.dataset.box!==boxKey)slideCompositor.cancel();modernSlideViewport.dataset.box=boxKey;
+  Object.assign(modernSlideViewport.style,{display:'block',left:(canvasBox.left-stageBox.left)+'px',top:(canvasBox.top-stageBox.top)+'px',width:canvasBox.width+'px',height:canvasBox.height+'px'});
+  Object.assign(modernPageLayer.style,{left:'0',top:'0',width:canvasBox.width+'px',height:canvasBox.height+'px'});
   Object.assign(modernPageView.element.style,{transformOrigin:'0 0',transform:'scale('+canvasBox.width/page.scene.width+','+canvasBox.height/page.scene.height+')'});
   modernPageView.element.style.background='transparent';
   Object.assign(modernBackdrop.style,{display:'block',left:modernPageLayer.style.left,top:modernPageLayer.style.top,width:canvasBox.width+'px',height:canvasBox.height+'px'});
@@ -3731,7 +4015,7 @@ function drawModernPage(page) {
   modernPageView.setTime(contentAnimationElapsedMS);
   presenterCanvas.style.display='block';presenterCanvas.style.zIndex='3';
   presenterContext.clearRect(0,0,presenterCanvas.width,presenterCanvas.height);
-  linkLayer.style.display=presenterTimerMode==='running'?'none':'block';effectLayer.style.display='none';contentLayer.style.display='none';chromeLayer.style.display='none';
+  linkLayer.style.display=presenterTimerMode==='running'?'none':'block';linkLayer.style.pointerEvents=slideCompositor.active()?'none':'';effectLayer.style.display='none';contentLayer.style.display='none';chromeLayer.style.display='none';
   if(presenterTimerMode==='running')drawPresenterTestCard();
   drawPresenterTimer();drawEditorExportConfirmation();
 }
@@ -3740,6 +4024,42 @@ const presenterSurface = window.KEYNOPE_APP_SURFACE
   : (new URLSearchParams(location.search).get('keynopeSurface') || 'external');
 const presenterMainSurface = presenterSurface === 'main';
 const keynopeAppSurface = presenterSurface === 'app';
+let remotePresentationOverlay=null,presentationToolsView=null,presentationToolsBar=null,presentationToolsHost=null,presentationToolsBox='';
+const presentationOverlayKey=value=>value?[KeynopePresentationTools.contextKey(value),value.revision].join(':'):'';
+function presentationToolsContext(page){
+  if(!page||keynopeSnapshotMode)return null;
+  let cursor=remoteBuildCursor,position=null;
+  if(keynopeAppSurface&&window.KEYNOPE_WEB_EDITOR){try{const popup=window.keynopeLivePresentationWindow;if(!popup||popup.closed)return null;position=popup.keynopePresentationPosition?.();cursor=position?.buildCursor;}catch(_error){return null;}if(!position||position.slide!==page.slide||position.page!==page.page)return null;}
+  else if(window.KEYNOPE_PRESENTER&&(!presenterPresenting||!cursor))return null;
+  if(keynopeAppSurface&&!window.KEYNOPE_PRESENTER&&!window.KEYNOPE_WEB_EDITOR)return null;
+  const session=cursor?.session||position?.overlay?.session||standaloneBuildSession,slideId=cursor?.slideId||position?.overlay?.slideId||page.scene?.slideId||'view-slide-'+page.slide+'-'+page.page;
+  return {session,slideId,slide:page.slide,page:page.page};
+}
+function ensurePresentationTools(){
+  if(presentationToolsView)return presentationToolsView;
+  presentationToolsHost=document.createElement('div');presentationToolsHost.className='keynope-presentation-tools-host';presentationToolsHost.style.cssText='position:absolute;overflow:hidden;pointer-events:none;z-index:80';stage.append(presentationToolsHost);
+  const readOnly=!!window.KEYNOPE_PARTICIPANT_VIEW||(!!window.KEYNOPE_PRESENTER&&!keynopeAppSurface&&!presenterMainSurface);
+  presentationToolsView=KeynopePresentationTools.create(presentationToolsHost,{readOnly,onChange:state=>presentationToolsBar?.update(state,!!presentationToolsContext(presenterPageAt(pageIndex))&&!presenterTimerMode),onError:error=>{window.showEngagementToast?.(error.message);console.warn('Presenter tools:',error.message);},send:async request=>{
+    if(window.KEYNOPE_PRESENTER){const r=await fetch('/presentation-overlay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request),signal:AbortSignal.timeout(8000)});if(!r.ok){syncPresenterState();throw Error((await r.text()).trim());}const state=await r.json();syncPresenterState();return state;}
+    if(keynopeAppSurface&&window.KEYNOPE_WEB_EDITOR){const popup=window.keynopeLivePresentationWindow;if(!popup||popup.closed)throw Error('Presentation stopped');return popup.keynopeAcceptToolSnapshot?.(request.overlay);}
+    try{window.opener?.keynopePublishParticipantPage?.();}catch(_error){}return request.overlay;
+  }});
+  if(!readOnly&&!keynopeAppSurface){const bar=document.createElement('div');bar.className='keynope-presentation-tools-launcher';bar.style.cssText='position:fixed;bottom:10px;right:16px;z-index:2100';document.body.append(bar);presentationToolsBar=KeynopePresentationTools.toolbar(bar,presentationToolsView);presentationToolsBar.button.style.cssText='width:44px;height:38px;background:#182028cc;border:1px solid #65717a;border-radius:4px';}
+  return presentationToolsView;
+}
+function syncPresentationTools(page=presenterPageAt(pageIndex)){
+  if(!presentationToolsView&&!presentationToolsContext(page))return;
+  const tools=ensurePresentationTools(),context=presentationToolsContext(page);tools.context(context);
+  let source=remotePresentationOverlay;
+  if(keynopeAppSurface&&window.KEYNOPE_WEB_EDITOR){try{source=window.keynopeLivePresentationWindow?.keynopePresentationOverlaySnapshot?.();}catch(_error){source=null;}}
+  if(context&&source&&KeynopePresentationTools.contextKey(source)===KeynopePresentationTools.contextKey(context))tools.apply(source);
+  const active=!!context&&!keynopeSnapshotMode&&!presenterTimerMode&&!keynopeEngagementOverlay&&!remoteBuildCursor?.paused;
+  tools.setVisible(active,active);presentationToolsBar?.update(tools.snapshot(),active);
+  if(active){let geometry;if(page.scene&&modernSlideViewport.style.display!=='none'){const s=modernSlideViewport.style;geometry={left:s.left,top:s.top,width:s.width,height:s.height};}else{const canvas=presenterCanvas.getBoundingClientRect(),box=stage.getBoundingClientRect();geometry={left:(canvas.left-box.left)+'px',top:(canvas.top-box.top)+'px',width:canvas.width+'px',height:canvas.height+'px'};}const key=JSON.stringify(geometry);if(key!==presentationToolsBox){presentationToolsBox=key;Object.assign(presentationToolsHost.style,geometry);}}
+}
+window.keynopePresentationOverlaySnapshot=()=>window.KEYNOPE_PRESENTER?remotePresentationOverlay:presentationToolsView?.snapshot()||null;
+window.keynopeAcceptToolSnapshot=source=>{const tools=ensurePresentationTools(),current=tools.snapshot();if(!current||KeynopePresentationTools.contextKey(current)!==KeynopePresentationTools.contextKey(source))return null;const next=KeynopePresentationTools.normalize({...source,revision:Math.max(current.revision,source.revision)+1});if(!next)return null;tools.apply(next,{force:true});try{window.opener?.keynopePublishParticipantPage?.();}catch(_error){}return tools.snapshot();};
+addEventListener('keydown',event=>{if(keynopeFormControlTarget(event.target))return;if(presentationToolsView?.snapshot()?.mode==='ink'&&presentationToolsView.element.style.display!=='none'&&(event.metaKey||event.ctrlKey)&&['z','y'].includes(event.key.toLowerCase())){event.preventDefault();event.stopImmediatePropagation();event.shiftKey||event.key.toLowerCase()==='y'?presentationToolsView.redo():presentationToolsView.undo();return;}if(event.key==='Escape'&&presentationToolsView?.exit()){event.preventDefault();event.stopImmediatePropagation();}},{capture:true});
 // Standalone HTML and live presentation share this renderer. Presenter state
 // synchronization remains separately gated by KEYNOPE_PRESENTER.
 const keynopeCanvasRenderer = true;
@@ -3754,6 +4074,7 @@ function scheduleEditorCanvasOverlay() {
 }
 let editorSpeakerNotesVisible = false;
 let refreshEditorPresenterControls = () => {};
+let refreshPresenterPreview = () => {};
 let editorCanvasCaret = null;
 let editorExportConfirmation = null;
 let keynopeEditorMasterMode = false;
@@ -4106,13 +4427,19 @@ let keynopeLobbyPresentation = null;
 let keynopeLobbyPresentationConnecting = false;
 let keynopeLobbyPresentationRetryAt = 0;
 window.keynopePublishParticipantPage = () => {
+  syncPresentationTools();
+  refreshPresenterPreview();
   syncPresenterState().then(() => publishLobbyPresentation()).catch(console.warn);
 };
 window.keynopePresentationPosition = () => {
   if (window.KEYNOPE_PRESENTER && keynopeAppSurface && window.keynopeParticipantPosition) return window.keynopeParticipantPosition;
   const page = presenterPageAt(pageIndex);
-  return page ? {slide:page.slide,page:page.page,tabOnly:!!page.tabOnly,key:[pageIndex,presenterDeckVersion].join(':')} : null;
+  const cursor=remoteBuildCursor||standaloneBuildCursor;
+  const overlay=window.keynopePresentationOverlaySnapshot();
+  const previewKey=[pageIndex,presenterDeckVersion,KeynopeBuilds.cursorKey(cursor)].join(':');
+  return page ? {slide:page.slide,page:page.page,tabOnly:!!page.tabOnly,buildCursor:cursor,overlay,previewKey,key:[previewKey,presentationOverlayKey(overlay)].join(':')} : null;
 };
+window.keynopeAdvanceBuild=delta=>delta>0?!!standaloneBuildPlayback?.next():!!standaloneBuildPlayback?.previous();
 window.keynopePresentationTimerEnd = () => presenterTimerBroadcast && presenterTimerCanBroadcast() && presenterTimerMode === 'running' && Number.isSafeInteger(presenterTimerEndMS) && presenterTimerEndMS > 0 ? presenterTimerEndMS : 0;
 const participantTabPublications = new WeakMap();
 async function publishParticipantTabs(channel) {
@@ -4237,7 +4564,7 @@ async function publishLobbyPresentation(force = false) {
       }
       if(!publicationCurrent())return;
       const document = host.document;
-      await host.channel.send({type:'presentation-md',format:'rendered-v1',presenting:true,transfer:document.id,parts:document.parts.length,slide:position.slide,page:position.page,slideCount:document.slideCount,timerEndMs,sentAt:Date.now()});
+      await host.channel.send({type:'presentation-md',format:'rendered-v1',presenting:true,transfer:document.id,parts:document.parts.length,slide:position.slide,page:position.page,slideCount:document.slideCount,timerEndMs,buildCursor:timerEndMs?null:position.buildCursor,overlay:timerEndMs?null:position.overlay,sentAt:Date.now()});
       if (!host.sentTransfers.has(document.id) || force) {
         for (let index=0;index<document.parts.length;index++) {
           if(!publicationCurrent())return;
@@ -5419,11 +5746,11 @@ function engagementButton(label,className,clicked) {
   button.type = 'button'; button.textContent = label; button.className = className || '';
   button.addEventListener('click',clicked); return button;
 }
-function showEngagementToast(message) {
+function showEngagementToast(message, duration=1600) {
   const toast = document.createElement('div');
   toast.className = 'keynope-engagement-toast'; toast.textContent = message;
   document.body.appendChild(toast);
-  setTimeout(() => toast.remove(),1600);
+  setTimeout(() => toast.remove(),duration);
   return toast;
 }
 async function copyEngagementJoinURL(url) {
@@ -6173,8 +6500,12 @@ function sizeCanvasToAspect(availableWidth, availableHeight, targetAspect) {
   document.documentElement.style.setProperty('--cell', canvasCell + 'px');
   return {width: cssWidth, height: cssHeight};
 }
+function presentationPageAspect() {
+  const scene=deck.pages[pageIndex]?.scene;
+  return scene?.width>0&&scene?.height>0 ? scene.width/scene.height : 16/9;
+}
 function sizeEditorCanvas(stageRect) {
-  const targetAspect = 16 / 9;
+  const targetAspect = presentationPageAspect();
   const topChromeHeight = document.documentElement.dataset.keynopeWorkspace === 'inspector' ? 56 : 96;
   const bottomChromeHeight = 52;
   const notesHeight = editorSpeakerNotesVisible ? 132 : 0;
@@ -6201,7 +6532,7 @@ function resize() {
     return;
   }
   if (keynopeCanvasRenderer) {
-    sizeCanvasToAspect(innerWidth, innerHeight, 16 / 9);
+    sizeCanvasToAspect(innerWidth, innerHeight, presentationPageAspect());
     return;
   }
   let low = 1, high = Math.max(8, innerHeight);
@@ -7234,15 +7565,23 @@ function render() {
   // The explicit diagnostic refresh remains synchronous.
   window.keynopeScheduleThumbnailRefresh?.();
   const page = deck.pages[pageIndex];
+  const aspect=presentationPageAspect();
+  if(render.pageAspect!==aspect){render.pageAspect=aspect;resize();}
 	updateAccessibleSlide(page);
 	if (keynopeEngagementOverlay && keynopeEngagementRuntime && keynopeEngagementRuntime.definition.id !== page.engagement?.id) closeEngagementRuntime();
-  stage.style.background = page.bg;
+  // The slide paints its own background within the fitted canvas. Keep the
+  // editor's pasteboard independent of slide colours (including after edits
+  // and navigation), while presentation surfaces retain their full backdrop.
+  stage.style.background = keynopeAppSurface ? '' : page.bg;
   effectLayer.style.color = page.fg;
   contentLayer.style.color = page.fg;
   chromeLayer.innerHTML = keynopeAppSurface && !page.hideChromePageNumber ? '<span class="page-no">' + esc(label(page)) + '</span>' : '';
   drawFrame();
   renderActivityMarker();
-  if (keynopeAppSurface) scheduleEditorCanvasOverlay();
+  // The painted scene and its pointer/selection geometry are one snapshot.
+  // Do not leave old hit boxes visible until a later (possibly throttled)
+  // animation frame after moving or reordering objects.
+  if (keynopeAppSurface) renderEditorCanvasOverlay();
 }
 function lineKey(line) {
   const col = line.parts && line.parts.length ? line.parts[0].col : (line.col || 0);
@@ -7741,6 +8080,8 @@ function effectLines(page, frame) {
 }
 let getEditorConnectorPreview = () => [];
 function drawFrame() {
+  syncPresentationTools();
+  if(sceneReducedMotion.matches){standaloneBuildPlayback?.settleAnimations();remoteBuildPlayback?.settleAnimations();}
   const page = presenterPageAt(pageIndex);
   if (!page) return;
   if (window.KEYNOPE_PRESENTER && !presenterPresenting && !presenterMainSurface && !keynopeAppSurface) {
@@ -7748,7 +8089,7 @@ function drawFrame() {
     drawPresenterSnow();
     return;
   }
-  if(page.scene){presenterTransitionUntil=0;drawModernPage(page);return;}
+  if(page.scene){presenterTransitionUntil=0;drawModernPage(page);syncStandaloneBuildPlayback(page);syncRemoteBuildPlayback(page);syncSlideComposition(page);syncPresentationTools(page);return;}
   if(modernPageView)clearModernPage();
   presenterCanvas.style.zIndex='2';
   if (keynopeCanvasRenderer && presenterTransitionUntil && performance.now() < presenterTransitionUntil) {
@@ -7904,6 +8245,11 @@ function tick() {
 window.keynopePrepareSnapshot = async index => {
   if (keynopeAppSurface || window.KEYNOPE_PRESENTER) throw new Error('Snapshots require a standalone export document');
   if (!Number.isInteger(index) || index < 0 || index >= deck.pages.length) throw new Error('Invalid snapshot page');
+	// Snapshot documents are isolated from the editor. Seed procedural artwork
+	// by its authored slide/page so native and browser fallback captures agree.
+	const snapshotSeed=(0x6d2b79f5 ^ Math.imul((deck.pages[index].slide||0)+1,2654435761) ^ (deck.pages[index].page||0))>>>0;
+	let snapshotRandomState=snapshotSeed;
+	Math.random=()=>{snapshotRandomState=(snapshotRandomState+0x6d2b79f5)>>>0;let value=snapshotRandomState;value=Math.imul(value^(value>>>15),value|1);value^=value+Math.imul(value^(value>>>7),value|61);return ((value^(value>>>14))>>>0)/4294967296;};
   keynopeSnapshotMode = true;
   pageIndex = index; frame = 0; contentAnimationPageIndex = index; contentAnimationElapsedMS = 0;
   presenterTransitionUntil = 0; effectState.clear(); modernBackdropKey = '';
@@ -7917,6 +8263,8 @@ window.keynopePrepareSnapshot = async index => {
     await Promise.all(presenterContentLinesFor(index,page).filter(line=>line.trueType).map(line=>KeynopeTrueType.readyFor(line.trueType)));
   }
   await document.fonts.ready;
+	// Resource-readiness callbacks must not change the initial procedural frame.
+	snapshotRandomState=snapshotSeed;effectState.clear();modernBackdropKey='';
   drawFrame();
   activityMarker.style.display = 'none'; linkLayer.style.display = 'none'; chromeLayer.style.display = 'none';
   // Do not await animation frames here: native export windows may be occluded
@@ -7990,6 +8338,22 @@ function publishPresenterPage(index) {
     body: JSON.stringify({action: 'navigate-presentation', slide: page.slide, page: page.page})
   }).catch(() => {});
 }
+let buildNavigationQueue=Promise.resolve();
+function navigatePresenterBuild(direction){
+  const run=async()=>{
+    await syncPresenterState();
+    if(!remoteBuildCursor)return;
+    for(let attempt=0;attempt<2;attempt++){
+      const response=await fetch('/api/editor/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'navigate-build',name:direction,buildGeneration:remoteBuildCursor.generation}),signal:AbortSignal.timeout(12000)});
+      if(response.ok){await syncPresenterState();return;}
+      const error=await response.text();
+      if(attempt||!error.includes('refresh the build cursor'))throw Error(error);
+      await syncPresenterState();if(!remoteBuildCursor)return;
+    }
+  };
+  const task=buildNavigationQueue.then(run);buildNavigationQueue=task.catch(()=>{});return task;
+}
+function buildNavigationDirection(key){return ['ArrowRight',' ','n','PageDown'].includes(key)?'next':['ArrowLeft','PageUp'].includes(key)?'previous':key==='Home'?'first':key==='End'?'last':null;}
 function publishPresenterTimer(seconds) {
   if (!window.KEYNOPE_PRESENTER) return;
   fetch('/api/editor/action', {
@@ -7999,10 +8363,15 @@ function publishPresenterTimer(seconds) {
   }).catch(() => {});
 }
 function keynopeFormControlTarget(target) {
-  return !!target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable || !!target.closest?.('[data-keynope-scene-dialog],[aria-modal="true"],[role="menu"],.kn-portrait-gallery,.keynope-workspace-more'));
+  return !!target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable || !!target.closest?.('[data-keynope-scene-dialog],[aria-modal="true"],[role="menu"],.kn-portrait-gallery,.keynope-workspace-more,.keynope-next-state,.keynope-presenter-tools-panel'));
 }
 addEventListener('keydown', e => {
   if (keynopeFormControlTarget(e.target)) return;
+  const buildDirection=buildNavigationDirection(e.key);
+  if(window.KEYNOPE_PRESENTER&&!keynopeAppSurface&&remoteBuildCursor&&buildDirection&&presenterTimerMode!=='config'){
+    e.preventDefault();e.stopPropagation();navigatePresenterBuild(buildDirection).catch(console.warn);return;
+  }
+  if(consumeStandaloneBuildKey(e))return;
   if (keynopeAppSurface && keynopeEditorMasterMode) return;
   if (window.KEYNOPE_PRESENTER && presenterMainSurface) {
     if (presenterTimerMode === 'config') {
@@ -8095,71 +8464,100 @@ function startPageTransition(fromIndex, toIndex) {
   presenterTransitionFromIndex = fromIndex;
   presenterTransitionToIndex = toIndex;
 }
-async function refreshPresenterSlide(slideIndex, expectedVersion) {
-  if (!Number.isInteger(slideIndex) || slideIndex < 0) {
-    location.reload();
-    return false;
-  }
-  const response = await fetch('/slide?index=' + encodeURIComponent(slideIndex), {cache: 'no-store',signal:AbortSignal.timeout(12000)});
-  if (!response.ok) {
-    return false;
-  }
+async function refreshPresenterDeck(expectedVersion, current=()=>true, recoverFull=false) {
+  if(!current())return false;
+  const since=presenterDeckVersion;
+  const query=new URLSearchParams({scenePatches:'1'});
+  if(since>=0&&!recoverFull)query.set('since',String(since));
+  const response = await fetch('/slides?'+query.toString(), {cache:'no-store',signal:AbortSignal.timeout(12000)});
+  if (!response.ok) return false;
   const snapshot = await response.json();
-  const pages = snapshot.pages;
+  if(!current())return false;
+  if (!Array.isArray(snapshot.pages) || (!snapshot.delta && !snapshot.pages.length)) return false;
   if (!Number.isFinite(snapshot.version) || snapshot.version < expectedVersion) return false;
-  if (!Array.isArray(pages) || pages.length === 0) {
-    return false;
+  if(presenterDeckVersion!==since)return false;
+  const previous = deck.pages[pageIndex];
+  if(snapshot.delta){
+    if(recoverFull)return false;
+    if(Number(snapshot.baseVersion||0)!==since)return false;
+    const indices=snapshot.replaceSlides||[];
+    if(!Array.isArray(indices)||indices.some(index=>!Number.isInteger(index)||index<0)||new Set(indices).size!==indices.length)return false;
+    const replaced=new Set(indices);
+    let pages=snapshot.pages;
+    if(snapshot.patchedPages!==undefined){
+      try{
+        if(!Array.isArray(snapshot.patchedPages)||snapshot.patchedPages.some(page=>!page.scenePatch||page.scene))throw Error('Invalid native scene patch envelope');
+        pages=pages.concat(KeynopeWorkspace.applyScenePagePatches(snapshot.patchedPages,deck.pages));
+      }catch(_err){
+        // Missing/corrupt client baselines recover once, without advancing the
+        // local version or mutating any retained scene. Never retry a new owner.
+        return refreshPresenterDeck(expectedVersion,()=>current()&&presenterDeckVersion===since,true);
+      }
+    }
+    const identities=pages.map(page=>page.slide+':'+page.page);
+    if(pages.some(page=>!Number.isInteger(page.slide)||!Number.isInteger(page.page)||page.page<0||!replaced.has(page.slide))||new Set(identities).size!==identities.length)return false;
+    if(indices.some(index=>!deck.pages.some(page=>page.slide===index)||!pages.some(page=>page.slide===index)))return false;
+    deck.pages=deck.pages.filter(page=>!replaced.has(page.slide)).concat(pages).sort((a,b)=>a.slide-b.slide||a.page-b.page);
+    invalidateContentAnimationSlides(indices);
+    invalidateEffectSlides(indices);
+  }else{
+    if(snapshot.patchedPages?.length)return false;
+    deck.pages = snapshot.pages;
+    clearContentAnimationCache();
+    effectState.clear();
   }
-  const first = deck.pages.findIndex(page => page.slide === slideIndex);
-  if (first < 0) {
-    location.reload();
-    return false;
-  }
-  let end = first;
-  while (end < deck.pages.length && deck.pages[end].slide === slideIndex) end++;
-  deck.pages.splice(first, end - first, ...pages);
   presenterDeckVersion = snapshot.version;
-  invalidateContentAnimationSlides([slideIndex]);
-  invalidateEffectSlides([slideIndex]);
-  pageIndex = Math.min(pageIndex, deck.pages.length - 1);
+  const retained = previous ? deck.pages.findIndex(page => page.slide === previous.slide && page.page === previous.page) : -1;
+  pageIndex = retained >= 0 ? retained : Math.min(pageIndex, deck.pages.length - 1);
   return true;
 }
-async function syncPresenterStateOnce() {
+async function refreshPresenterSlide(slideIndex, expectedVersion) {
+  // Compatibility entry point: a single-slide hint cannot prove that this view
+  // has received every prior publication. Use the same bounded union/recovery.
+  return refreshPresenterDeck(expectedVersion);
+}
+async function syncPresenterStateOnce(editorRequest=null) {
   if (!window.KEYNOPE_PRESENTER) return;
+  const current=()=>!editorRequest||editorRequest.current();
   try {
-    const response = await fetch('/state', {cache: 'no-store',signal:AbortSignal.timeout(12000)});
+    if(!current())return;
+    const target=editorRequest?'/state?editorRevision='+encodeURIComponent(editorRequest.revision)+'&editorOwner='+encodeURIComponent(editorRequest.owner):'/state';
+    const response = await fetch(target, {cache: 'no-store',signal:AbortSignal.timeout(12000)});
     if (!response.ok) return;
     const state = await response.json();
+    if(!current())return;
     if (Number.isFinite(state.version) && state.version < presenterVersion) return;
-    if (keynopeAppSurface) window.keynopeParticipantPosition = {slide:state.slide,page:state.page,key:[state.slide,state.page,state.deckVersion||0].join(':')};
+    const previousBuildKey=KeynopeBuilds.cursorKey(remoteBuildCursor);
+    const previousOverlayKey=presentationOverlayKey(remotePresentationOverlay);
+    remotePresentationOverlay=KeynopePresentationTools.normalize(state.overlay);
+    const overlayChanged=previousOverlayKey!==presentationOverlayKey(remotePresentationOverlay);
+    const nextBuildCursor=KeynopeBuilds.cursorKey(state.buildCursor)?state.buildCursor:null;
+    if (keynopeAppSurface) {const previewKey=[state.slide,state.page,state.deckVersion||0,KeynopeBuilds.cursorKey(nextBuildCursor)].join(':');window.keynopeParticipantPosition = {slide:state.slide,page:state.page,buildCursor:nextBuildCursor,overlay:remotePresentationOverlay,previewKey,key:[previewKey,presentationOverlayKey(remotePresentationOverlay)].join(':')};}
     if (keynopeAppSurface && keynopeEditorMasterMode) return;
     const initialSync = presenterVersion < 0;
     let slideRefreshed = false;
     if (initialSync) {
       // A newly opened presentation may have booted from the original HTML.
       // Load every cached slide, not just the last one that was edited.
-      const snapshotResponse = await fetch('/slides', {cache:'no-store',signal:AbortSignal.timeout(12000)});
-      if (!snapshotResponse.ok) return;
-      const snapshot = await snapshotResponse.json();
-      if (!Array.isArray(snapshot.pages) || !snapshot.pages.length) return;
-      if (!Number.isFinite(snapshot.version) || snapshot.version < (state.deckVersion || 0)) return;
-      deck.pages = snapshot.pages;
-      presenterDeckVersion = snapshot.version;
-      clearContentAnimationCache();
-      effectState.clear();
-      pageIndex = Math.min(pageIndex, deck.pages.length - 1);
-      slideRefreshed = true;
+      slideRefreshed = await refreshPresenterDeck(state.deckVersion || 0,current);
+      if (!slideRefreshed) return;
 	} else if ((state.deckVersion || 0) !== presenterDeckVersion) {
 		if (keynopeAppSurface && keynopeEditorVisualResizeActive) return;
-      slideRefreshed = await refreshPresenterSlide(Number.isInteger(state.deckSlide) ? state.deckSlide : -1, state.deckVersion || 0);
+      // A background/slow client may have missed several publications. Request
+      // their coherent union, not just the last changed slide. Expired lineage
+      // and structural changes return a complete snapshot automatically.
+      slideRefreshed = await refreshPresenterDeck(state.deckVersion || 0,current);
       if (!slideRefreshed) return;
     }
     // A render-only deck revision does not advance the presenter navigation
     // revision. It still has to repaint immediately: otherwise the editor
     // keeps the previous scene geometry/typography until the next command,
     // making every numerical control appear one change behind.
+    if(!current()||state.version<presenterVersion)return;
     if (!initialSync && state.version === presenterVersion && !slideRefreshed) return;
     presenterVersion = state.version;
+    remoteBuildCursor=nextBuildCursor;
+    const buildChanged=previousBuildKey!==KeynopeBuilds.cursorKey(remoteBuildCursor);
     const wasPresenting = presenterPresenting;
     presenterPresenting = !!state.presenting;
 	syncEngagementRuntime(state.engagement);
@@ -8169,17 +8567,23 @@ async function syncPresenterStateOnce() {
       presenterTimerEndMS = Number(state.timerEndMs || 0);
     }
     const index = deck.pages.findIndex(page => page.slide === state.slide && page.page === state.page);
-    if (index >= 0 && index !== pageIndex) {
+    const pageChanged = index >= 0 && index !== pageIndex;
+    if (pageChanged) {
       if (presenterPresenting && wasPresenting) startPageTransition(pageIndex, index);
       pageIndex = index;
       frame = 0;
       render();
-    } else if (slideRefreshed) {
+    } else if (slideRefreshed||buildChanged) {
       frame = 0;
       render();
     }
-    if (slideRefreshed && keynopeAppSurface && editorState) renderEditorTopbar();
+    // Navigation can publish selection before its scene arrives. Reconcile the
+    // inspector once the matching page owns the canvas, even without a content
+    // revision; otherwise geometry controls retain the previous slide's bounds.
+    if ((slideRefreshed || pageChanged) && keynopeAppSurface) window.keynopeRefreshEditorCanvasState?.();
     refreshEditorPresenterControls();
+    if(overlayChanged)syncPresentationTools();
+    if((buildChanged||overlayChanged)&&keynopeAppSurface)publishLobbyPresentation().catch(console.warn);
   } catch (_err) {
   }
 }
@@ -8365,30 +8769,74 @@ function keynopeTerminalSequence(e) {
 }
 if (keynopeAppSurface) {
   let editorState = null;
+  // The presenter synchronizer lives outside this editor block. Keep its
+  // callback inside the state owner's lexical scope, rather than swallowing a
+  // ReferenceError after painting a newly accepted native scene.
+  window.keynopeRefreshEditorCanvasState=()=>{if(editorState)renderEditorTopbar();};
   let editorStateVersion = -1;
+  const speakerNotesDrafts=new Map();
   let editorDocumentEpoch = 0, editorStatePoll = null;
   let activeInlineEditor = null;
   let inlineEditCompletion = Promise.resolve();
   window.keynopePrepareDocumentSave=async()=>{
+	if(activeCanvasDrag?.shapeAdjustment)activeCanvasDrag.cancel();
+    await KeynopeTables.commitPending();
+    await KeynopeCharts.commitPending();
+    await KeynopeBuilds.commitPending();
     await KeynopeScene.commitPendingText();
     if(activeInlineEditor)await activeInlineEditor.finish(true);
     else await inlineEditCompletion;
     if(activeInlineEditor)throw Error('Text could not be committed. Your draft is still open; retry before saving.');
-    flushSpeakerNotes();
+    await flushSpeakerNotes();
     await editorActionQueue;
-    if(speakerNotesDirty)throw Error('Speaker notes could not be committed. Please retry saving.');
+    if(hasPendingSpeakerNotes())throw Error('Speaker notes could not be committed. Your draft has been kept.');
+  };
+  let pptxCaptureAbort=null;
+  window.keynopeCancelPPTXCapture=()=>pptxCaptureAbort?.abort();
+  window.keynopePreparePPTXExport=async()=>{
+    pptxCaptureAbort?.abort();
+    const controller=new AbortController();pptxCaptureAbort=controller;
+    try{
+      await window.keynopePrepareDocumentSave();
+      if(controller.signal.aborted)throw new DOMException('Export cancelled','AbortError');
+      return JSON.stringify(await KeynopeScene.capturePPTX({signal:controller.signal}));
+    }
+    finally{if(pptxCaptureAbort===controller)pptxCaptureAbort=null;}
   };
   let inlineEditTransitionSequence = 0;
   let suppressSelectionTopbar = false;
   let pendingCanvasSelection = null;
   let editorStatus = null;
+  // Errors must remain visible even when the compact workspace has no status
+  // bar. Do not steal focus from a draft, or put protocol JSON into the UI.
+  const editorCommandErrorNotice=document.createElement('aside'),editorCommandErrorText=document.createElement('span'),editorCommandErrorDismiss=document.createElement('button');
+  editorCommandErrorNotice.className='keynope-command-error';editorCommandErrorNotice.hidden=true;editorCommandErrorNotice.setAttribute('role','alert');editorCommandErrorNotice.setAttribute('aria-live','assertive');
+  editorCommandErrorDismiss.type='button';editorCommandErrorDismiss.textContent='Dismiss';editorCommandErrorDismiss.setAttribute('aria-label','Dismiss editor error');editorCommandErrorDismiss.onclick=()=>{editorCommandErrorNotice.hidden=true;};
+  editorCommandErrorNotice.append(editorCommandErrorText,editorCommandErrorDismiss);document.body.append(editorCommandErrorNotice);
   let editorNormalPages = null;
   let editorWorkspaceSequence = 0;
   let editorMutationPreviewSequence = 0;
   let editorTransparencyIconSequence = 0;
-  let editorElementClipboard = [];
+  let editorElementClipboard = null;
   let editorActionQueue = Promise.resolve();
   let activeCanvasDrag = null;
+  let canvasStyleClipboard=null,canvasStylePainter=null;
+  const wordPainterNotice=document.createElement('aside');wordPainterNotice.className='keynope-word-painter-notice';wordPainterNotice.hidden=true;wordPainterNotice.setAttribute('aria-label','Word painter status');
+  const wordPainterHint=document.createElement('p');wordPainterHint.textContent='Word painter · Double-click a text box, then select words to paint.';
+  const wordPainterKeep=document.createElement('label'),wordPainterSticky=document.createElement('input');wordPainterSticky.type='checkbox';wordPainterSticky.setAttribute('aria-label','Keep word format painter active');wordPainterSticky.onchange=()=>KeynopeTextStyles.setPainterSticky(wordPainterSticky.checked);wordPainterKeep.append(wordPainterSticky,' Keep painting');
+  const wordPainterCancel=document.createElement('button');wordPainterCancel.type='button';wordPainterCancel.textContent='Cancel painter';wordPainterCancel.onclick=()=>KeynopeTextStyles.clearPainter();wordPainterNotice.append(wordPainterHint,wordPainterKeep,wordPainterCancel);stage.append(wordPainterNotice);
+  function wordPainterScope(){return {documentEpoch:editorDocumentEpoch,sceneMaster:!!editorState?.masterMode,group:editorState?.editingGroup||''};}
+  function refreshWordPainterNotice(){
+    const painter=window.KeynopeTextStyles?.painterState(wordPainterScope());
+    const textOpen=!!document.querySelector('dialog[open][data-keynope-scene-dialog="text"],dialog[open][data-keynope-scene-dialog="table"]');
+    wordPainterNotice.hidden=!painter||textOpen||!!presenterTimerMode;wordPainterSticky.checked=!!painter?.sticky;stage.classList.toggle('keynope-word-style-painter',!!painter&&!presenterTimerMode);
+    if(!painter&&!canvasStylePainter)stage.querySelectorAll('.style-painter-target').forEach(hit=>hit.classList.remove('style-painter-target'));
+  }
+  document.addEventListener('keynope-word-painter-change',()=>{if(KeynopeTextStyles.painterState()&&canvasStylePainter)stopCanvasStylePainter();refreshWordPainterNotice();});
+  // Cancel the canvas painter before responsive workspace drawers consume
+  // Escape (closing an inspector can otherwise deselect the source). Modal
+  // dialogs own their own cancellation and local draft/painter history.
+  window.addEventListener('keydown',event=>{if((canvasStylePainter||window.KeynopeTextStyles?.painterState())&&event.key==='Escape'&&![...document.querySelectorAll('dialog[open],[aria-modal="true"]')].some(n=>n.getClientRects().length)){event.preventDefault();event.stopImmediatePropagation();if(canvasStylePainter)stopCanvasStylePainter();KeynopeTextStyles.clearPainter();}},true);
 	let canvasMemberBounds = new Map();
 	let activeCanvasVisualMenu = null;
   let activeCanvasTextEffectDropdown = null;
@@ -8400,7 +8848,8 @@ if (keynopeAppSurface) {
   let lastPublishedEditorTabsAvailable = null;
   let lastPublishedEditorQRVisible = null;
   let publishedEditorDiagnostics = new Set();
-  let publishedEditorDiagnosticPath = '';
+  let publishedEditorDiagnosticList = null;
+  let publishedEditorDiagnosticOwner = '';
   let publishedEditorDiagnosticToast = null;
   const editorFontFailures=new Map();
   const editorFontWarning=document.createElement('div'),editorFontWarningText=document.createElement('span'),editorFontRetry=document.createElement('button');
@@ -8424,23 +8873,35 @@ if (keynopeAppSurface) {
   editorFontRetry.onclick=prepareEditorFonts;
   prepareEditorFonts();
   function publishEditorDiagnostics() {
-    const path = editorState?.path || '';
-    if (path !== publishedEditorDiagnosticPath) {
-      publishedEditorDiagnosticPath = path;
+    const owner = editorState?.notesSessionId || editorState?.path || '';
+    if (owner !== publishedEditorDiagnosticOwner) {
+      publishedEditorDiagnosticOwner = owner;
       publishedEditorDiagnostics.clear();
+      publishedEditorDiagnosticList = null;
+      document.querySelector('.keynope-conversion-report')?.close();
     }
-    const fresh = (editorState?.diagnostics || []).filter(issue => {
-      const key = (issue.code || '') + '\n' + (issue.message || '');
+    const issues=editorState?.diagnostics || null;
+    // Elided action responses retain the same immutable list. Avoid scanning
+    // or stringifying thousands of notices again for a selection/paint edit.
+    if(issues===publishedEditorDiagnosticList)return;
+    publishedEditorDiagnosticList=issues;
+    const fresh = (issues || []).filter(issue => {
+      const key = JSON.stringify([issue.code,issue.message,issue.conversion,issue.slide,issue.object,issue.feature,issue.severity,issue.fallback,issue.remediation]);
       if (publishedEditorDiagnostics.has(key)) return false;
       publishedEditorDiagnostics.add(key);
       return true;
     });
     if (!fresh.length) return;
-    const suffix = fresh.length > 1 ? ' (+' + (fresh.length - 1) + ' more)' : '';
+    const conversion=fresh.filter(issue=>issue.conversion);
+    if(conversion.length)KeynopeConversionReport.show({warnings:conversion},'PowerPoint imported');
+    const recovered=fresh.filter(issue=>!issue.conversion);
+    if(!recovered.length)return;
+    const suffix = recovered.length > 1 ? ' (+' + (recovered.length - 1) + ' more)' : '';
     if (publishedEditorDiagnosticToast?.isConnected) publishedEditorDiagnosticToast.remove();
-    publishedEditorDiagnosticToast = showEngagementToast('DOCUMENT RECOVERED: ' + fresh[0].message + suffix);
+    publishedEditorDiagnosticToast = showEngagementToast('DOCUMENT RECOVERED: ' + recovered[0].message + suffix);
   }
   function publishEditorDirtyState() {
+    publishEditorStyleCommands();
     const tabsAvailable = !!editorState?.hasActivities && !editorState?.masterMode;
     const qrVisible = !editorState?.hideActivityQR;
     if (tabsAvailable !== lastPublishedEditorTabsAvailable || qrVisible !== lastPublishedEditorQRVisible) {
@@ -8448,7 +8909,7 @@ if (keynopeAppSurface) {
       lastPublishedEditorQRVisible = qrVisible;
       window.webkit?.messageHandlers?.keynopePresenter?.postMessage({action:'editor-tabs-availability',available:tabsAvailable,activityQRVisible:qrVisible});
     }
-    const dirty = !!(editorState && editorState.dirty) || !!activeInlineEditor?.isDirty() || window.keynopeHasPendingActivityResults();
+    const dirty = !!(editorState && editorState.dirty) || hasPendingSpeakerNotes() || !!activeInlineEditor?.isDirty() || KeynopeTables.isDirty() || KeynopeCharts.isDirty() || KeynopeBuilds.isDirty() || window.keynopeHasPendingActivityResults();
     saveButton.disabled = !dirty;
     if (dirty === lastPublishedEditorDirty && !window.KEYNOPE_WEB_EDITOR) return;
     lastPublishedEditorDirty = dirty;
@@ -8478,7 +8939,18 @@ if (keynopeAppSurface) {
     const fallback=setTimeout(()=>finish('timeout'),250);
     requestAnimationFrame(()=>requestAnimationFrame(()=>finish('raf')));
   }
+  function showEditorCommandError(error,context=null) {
+    if(context&&context.epoch!==editorDocumentEpoch)return;
+    const message=error?.message||String(error)||'Editor action failed';
+    if(editorStatus)editorStatus.textContent=message;
+    editorCommandErrorText.textContent=message;editorCommandErrorNotice.hidden=false;
+  }
   async function performEditorAction(action) {
+    action={notesSessionId:editorState?.notesSessionId,...action};
+    // Batch targets are stable IDs, but IDs alone do not identify the view
+    // which owns the edit. Send the complete scope and let the mutation lock
+    // reject a navigation/master switch that races the request.
+    if(action.action==='update-elements')action={sceneRevision:editorState.version,sceneMaster:!!editorState.masterMode,slide:editorState.current,...action};
     const performanceStarted=window.KEYNOPE_PERFORMANCE&&!action.skipOuterPerformance?performance.now():0;
     const documentEpoch = editorDocumentEpoch;
     const selectionOnly = ['select-element','select-elements'].includes(action.action);
@@ -8488,17 +8960,24 @@ if (keynopeAppSurface) {
     }
     const enteringMasters = action.action === 'toggle-master-mode' && editorState && !editorState.masterMode;
     if (enteringMasters) editorNormalPages = (deck.pages || []).slice();
-    const response = await fetch('/api/editor/action', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(action)
+    const response = await fetch(action.action==='paste-objects'?'/api/editor/paste-clipboard':'/api/editor/action', {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'application/problem+json'}, body: JSON.stringify(action)
     });
     if (!response.ok) {
-      const message = (await response.text()).trim() || 'Editor action failed';
-      if (editorStatus) editorStatus.textContent = message;
-      throw new Error(message);
+      if(documentEpoch!==editorDocumentEpoch)return;
+      let problem = null;
+      const body = (await response.text()).trim();
+      if(documentEpoch!==editorDocumentEpoch)return;
+      if((response.headers.get('Content-Type')||'').includes('application/problem+json')){try{problem=JSON.parse(body);}catch(_){}}
+      const message = problem?.message || body || 'Editor action failed';
+      showEditorCommandError(message);
+      const error=new Error(message);error.code=problem?.code||response.headers.get('X-Keynope-Error-Code')||'command-failed';error.field=problem?.field||'';error.objectId=problem?.objectId||'';throw error;
     }
-    const nextState = mergeEditorStateResponse(await response.json());
+    const responseState = await response.json();
+    const nextState = mergeEditorStateResponse(responseState);
     const performanceResponded=performanceStarted?performance.now():0;
     if(documentEpoch!==editorDocumentEpoch)return;
+    if(!selectionOnly)editorCommandErrorNotice.hidden=true;
     // The hosted WASM bridge applies the matching workspace before it releases
     // the action response. Do not immediately render the same chrome a second
     // time. Native HTTP actions have no applied revision marker and continue
@@ -8527,12 +9006,30 @@ if (keynopeAppSurface) {
       renderEditorPanels();
     }
     if(!workspaceAlreadyApplied)await syncEditorWorkspace();
+    if(!window.KEYNOPE_WEB_EDITOR&&!selectionOnly&&!editorState.masterMode){
+      // Demand the accepted native scene now. Background presentation updates
+      // still coalesce; this editor must not wait for their polling interval.
+      await syncPresenterStateOnce({revision:nextState.version,owner:nextState.notesSessionId,
+        current:()=>documentEpoch===editorDocumentEpoch&&editorState?.notesSessionId===nextState.notesSessionId&&editorState.current===nextState.current&&!editorState.masterMode});
+    }
+    if(action.action==='paste-objects'&&responseState.clipboardWarnings?.length){
+      const message=responseState.clipboardWarnings.join(' ');
+      if(editorStatus)editorStatus.textContent=message;
+      const toast=showEngagementToast(message,7000);toast.setAttribute('role','status');toast.setAttribute('aria-live','polite');
+    }
     recordEditorPerformance(action,performanceStarted,performanceResponded);
   }
   function editorAction(action) {
-    if(!window.KEYNOPE_PERFORMANCE)return queueEditorOperation(() => performEditorAction(action));
+    const epoch=editorDocumentEpoch;
+    action={notesSessionId:editorState?.notesSessionId,...action};
+    if(action.action==='update-elements')action={sceneRevision:editorState.version,sceneMaster:!!editorState.masterMode,slide:editorState.current,...action};
+    const execute=value=>{
+      if(epoch!==editorDocumentEpoch)throw Error('The document changed; action cancelled.');
+      return performEditorAction(value);
+    };
+    if(!window.KEYNOPE_PERFORMANCE)return queueEditorOperation(() => execute(action));
     const started=performance.now(),measured={...action,skipOuterPerformance:true};
-    return queueEditorOperation(() => performEditorAction(measured)).then(value=>{
+    return queueEditorOperation(() => execute(measured)).then(value=>{
       const completed=performance.now();recordEditorPerformance(action,started,completed,completed);return value;
     });
   }
@@ -8554,16 +9051,21 @@ if (keynopeAppSurface) {
     return fallback >= 0 && fallback < elements.length ? fallback : -1;
   }
   let nextEditorElementPerformanceKind = '';
-  function updateEditorElementByID(id, fallback, element) {
+  function updateEditorElementByID(id, fallback, element, context=canvasGeometryContext(), expected=null) {
     const performanceKind=nextEditorElementPerformanceKind;
     nextEditorElementPerformanceKind='';
+    const initialIndex=editorElementIndexByID(id,fallback),signature=JSON.stringify(expected||canvasElementAt(initialIndex));
     return queueEditorOperation(async () => {
+      if(!canvasGeometryContextCurrent(context,false))throw new Error('The document or view changed; edit cancelled.');
+      if(!canvasGeometryGestureCurrent(context))throw new Error('The document changed during the gesture; edit cancelled.');
       const currentIndex = editorElementIndexByID(id, fallback);
       if (currentIndex < 0) throw new Error('Dragged element is no longer available');
-      await performEditorAction({action: 'update-element', performanceKind, element: currentIndex, elementData: element});
+      if(JSON.stringify(canvasElementAt(currentIndex))!==signature)throw new Error('The object changed; edit cancelled.');
+      await performEditorAction({action:'update-elements',performanceKind,slide:context.slide,sceneMaster:context.master,sceneRevision:editorState.version,mutationRevision:context.mutationRevision,elementIndices:[currentIndex],elementsData:[element]});
     });
   }
   const editorClipboardPrefix = 'keynope-elements:';
+  const editorClipboardMIME = 'web application/x-keynope-objects';
   function editorClipboardTextTarget(target) {
     return !!target && (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable);
   }
@@ -8574,29 +9076,102 @@ if (keynopeAppSurface) {
     if (!indices.length && editorState.selected >= 0 && editorState.selected < elements.length) indices.push(editorState.selected);
     return indices.map(index => JSON.parse(JSON.stringify(elements[index])));
   }
+  function editorClipboardPlainText(bundle) {
+    return bundle.elements.map(element=>{
+      if(element.kind==='table')return (bundle.objects?.tables?.[element.objectId]?.cells||[]).map(row=>row.map(cell=>cell.hidden?'':cell.text||'').join('\t')).join('\n');
+      if(element.kind==='chart'){
+        const chart=bundle.objects?.charts?.[element.objectId];
+        return chart?[chart.title||'',(chart.categories||[]).join('\t'),...(chart.series||[]).map(series=>[series.name,...series.values].join('\t'))].filter(Boolean).join('\n'):'[chart]';
+      }
+      return element.text||(element.kind==='image'?'[image]':element.kind==='shape'?'[shape]':'');
+    }).filter(Boolean).join('\n');
+  }
+  async function writeEditorClipboard(bundle) {
+    const data=editorClipboardPrefix+JSON.stringify(bundle);
+    const text=editorClipboardPlainText(bundle);
+    const encoded=await new Promise((resolve,reject)=>{
+      const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=()=>reject(reader.error);
+      reader.readAsDataURL(new Blob([data],{type:'application/json'}));
+    });
+    const escape=value=>value.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const html='<div data-keynope-objects="'+encoded+'"><pre>'+escape(text)+'</pre></div>';
+    const native=window.webkit?.messageHandlers?.keynopeClipboard;
+    if(native){await native.postMessage({action:'write',data,text,html});return true;}
+    if(window.ClipboardItem&&navigator.clipboard?.write){
+      const formats={'text/plain':new Blob([text],{type:'text/plain'}),'text/html':new Blob([html],{type:'text/html'})};
+      if(ClipboardItem.supports?.(editorClipboardMIME))formats[editorClipboardMIME]=new Blob([data],{type:'application/x-keynope-objects'});
+      try{await navigator.clipboard.write([new ClipboardItem(formats)]);return true;}catch(_err){}
+    }
+    // Old browsers retain the historical Keynope text transport. The owned
+    // in-memory bundle also remains available when clipboard permission fails.
+    try{await navigator.clipboard.writeText(data);return true;}catch(_err){return false;}
+  }
+  async function writeEditorPlainText(text) {
+    const native=window.webkit?.messageHandlers?.keynopeClipboard;
+    if(native){await native.postMessage({action:'text-write',text});return;}
+    if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(text);return;}
+    throw Error('The clipboard is unavailable in this browser.');
+  }
+  function readEditorClipboardHTML(html) {
+    // Read only our base64 attribute; never instantiate foreign clipboard
+    // HTML (which can contain remote images, scripts or SVG).
+    const encoded=html.match(/\bdata-keynope-objects\s*=\s*["']([A-Za-z0-9+/=]+)["']/i)?.[1];
+    if(!encoded)return null;
+    if(encoded.length>90*1024*1024)throw Error('Object clipboard exceeds the supported size.');
+    const data=new TextDecoder('utf-8',{fatal:true}).decode(Uint8Array.from(atob(encoded),char=>char.charCodeAt(0)));
+    if(!data.startsWith(editorClipboardPrefix))throw Error('Invalid Keynope object clipboard.');
+    return data;
+  }
+  async function readEditorClipboard() {
+    const native=window.webkit?.messageHandlers?.keynopeClipboard;
+    if(native){
+      const formats=await native.postMessage({action:'read'});
+      if(typeof formats==='string')return formats;
+      return formats.data||readEditorClipboardHTML(formats.html||'')||formats.text||'';
+    }
+    let items;
+    try{items=await navigator.clipboard?.read?.();}catch(_err){}
+    if(items){
+      let plain='';
+      for(const item of items){
+        if(item.types.includes(editorClipboardMIME))return await (await item.getType(editorClipboardMIME)).text();
+        if(item.types.includes('text/html')){
+          const data=readEditorClipboardHTML(await (await item.getType('text/html')).text());if(data)return data;
+        }
+        if(item.types.includes('text/plain'))plain=await (await item.getType('text/plain')).text();
+      }
+      return plain;
+    }
+    try{return await navigator.clipboard.readText();}catch(_err){return null;}
+  }
   async function editorClipboardCommand(command) {
     if (command === 'copy' || command === 'cut') {
       const elements = selectedEditorElements();
       if (!elements.length) return;
-      editorElementClipboard = elements;
-      try { await navigator.clipboard.writeText(editorClipboardPrefix + JSON.stringify(elements)); } catch (_err) {}
+      const revision=editorState.version;
+      const response=await fetch('/api/editor/clipboard',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:revision,ids:elements.map(element=>element.id)})});
+      if(!response.ok)throw Error((await response.text()).trim()||'Could not copy objects');
+      const bundle=await response.json();
+      editorElementClipboard = bundle;
+      const systemCopied=await writeEditorClipboard(bundle);
+      if(bundle.warnings?.length&&editorStatus)editorStatus.textContent=bundle.warnings.join(' ');
+      else if(!systemCopied&&editorStatus)editorStatus.textContent='Copied within this editor. Allow clipboard access to paste into another window.';
       if (command === 'cut') {
-        const action = (editorState.selection || []).length > 1
-          ? {action: 'delete-selection'}
-          : {action: 'delete-element', element: editorState.selected};
-        await editorAction(action);
+        await editorAction({action:'delete-objects',objectIds:bundle.elements.map(element=>element.id),sceneRevision:revision});
       }
       return;
     }
-    let elements = editorElementClipboard;
-    try {
-      const value = await navigator.clipboard.readText();
-      if (value.startsWith(editorClipboardPrefix)) {
-        const parsed = JSON.parse(value.slice(editorClipboardPrefix.length));
-        if (Array.isArray(parsed)) elements = parsed;
-      }
-    } catch (_err) {}
-    if (elements && elements.length) await editorAction({action: 'paste-elements', elementsData: elements});
+    let bundle = editorElementClipboard;
+    const value = await readEditorClipboard();
+    if (value?.startsWith(editorClipboardPrefix)) {
+      const parsed = JSON.parse(value.slice(editorClipboardPrefix.length));
+      // Retain legacy clipboard compatibility within an already-open deck.
+      if(Array.isArray(parsed)){await editorAction({action:'paste-elements',elementsData:parsed});return;}
+      bundle=parsed;
+    }else if(value){
+      await editorAction({action:'add-element',kind:'text',elementData:{kind:'text',text:value,query:'render=truetype'}});return;
+    }else if(value!==null)return; // An intentionally empty system clipboard is not the internal fallback.
+    if (bundle?.elements?.length) await editorAction({action: 'paste-objects', clipboard: bundle});
   }
   window.keynopeClipboardCommand = editorClipboardCommand;
   function editorButton(label, action, parent) {
@@ -8738,6 +9313,7 @@ if (keynopeAppSurface) {
       if (closed) closed();
     };
     const choose = selected => {
+      if(finished)return; // Ignore a late eyedropper/native response after close.
       const normalized = keynopeNormaliseColour(selected,'');
       if (!normalized) return;
       value = normalized;
@@ -8780,7 +9356,7 @@ if (keynopeAppSurface) {
     controls.append(field,apply);
     actions.append(pick,cancel,nativeInput);
     picker.append(grid,controls,actions);
-    document.body.appendChild(picker);
+    (anchor.closest('dialog[open]') || document.body).appendChild(picker);
     const anchorRect = anchor.getBoundingClientRect();
     const pickerRect = picker.getBoundingClientRect();
     picker.style.left = Math.max(8,Math.min(innerWidth-pickerRect.width-8,anchorRect.left)) + 'px';
@@ -9330,10 +9906,12 @@ if (keynopeAppSurface) {
   saveButton.disabled = true;
   saveButton.setAttribute('aria-label','Save presentation');
   saveButton.addEventListener('click', async () => {
-    if(activeInlineEditor)await activeInlineEditor.finish(true);
-    await window.keynopeFlushActivityResults();
-    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
-    if (handler && editorState && (editorState.dirty || window.keynopeHasPendingActivityResults())) handler.postMessage({action: 'save-presentation'});
+    try{
+      await window.keynopePrepareDocumentSave();
+      await window.keynopeFlushActivityResults();
+      const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
+      if (handler && editorState && (editorState.dirty || window.keynopeHasPendingActivityResults())) handler.postMessage({action: 'save-presentation'});
+    }catch(error){showEditorCommandError(error);}
   });
   const mainTopbar = document.createElement('div');
   mainTopbar.className = 'keynope-topbar-mode';
@@ -9425,6 +10003,80 @@ if (keynopeAppSurface) {
     mainTopbar.appendChild(button);
     return button;
   }
+  addElementIconButton('Add table','table','<rect x="2" y="3" width="16" height="14"/><path d="M2 8h16M2 12h16M8 3v14M13 3v14"/>',0,async()=>{
+    await editorActionQueue;
+    const state=editorState,capture=canvasGeometryContext(),target={slide:state.current,sceneMaster:!!state.masterMode,sceneRevision:state.version,notesSessionId:state.notesSessionId};
+    KeynopeTables.insert((rows,cols)=>{if(!canvasGeometryContextCurrent(capture)||target.notesSessionId!==editorState?.notesSessionId)throw Error('The document changed; insert the table again.');return editorAction({action:'insert-table',...target,rows,cols});});
+  });
+  addElementIconButton('Add chart','chart','<path d="M2 2v16h16"/><rect x="5" y="10" width="3" height="5"/><rect x="10" y="6" width="3" height="9"/><rect x="15" y="3" width="3" height="12"/>',0,async()=>{
+    await editorActionQueue;
+    const state=editorState,target={slide:state.current,sceneMaster:!!state.masterMode,sceneRevision:state.version};
+    await editorAction({action:'insert-chart',...target});editSelectedChart();
+  });
+  function editSelectedChart(){
+    const selected=editorState?.selectedChart;if(!selected||!canvasSelectionCommandAllows('chart.edit',selected.objectId))return;
+    const target={slide:editorState.current,sceneMaster:!!editorState.masterMode,sceneRevision:editorState.version,objectId:selected.objectId};
+    const epoch=editorDocumentEpoch,path=editorState.path,group=editorState.editingGroup||'';
+    const available=()=>epoch===editorDocumentEpoch&&path===editorState?.path&&target.sceneRevision===editorState?.version&&target.slide===editorState?.current&&target.sceneMaster===!!editorState?.masterMode&&group===(editorState?.editingGroup||'');
+    KeynopeCharts.edit(selected.data,chartData=>{if(!available())throw Error('The document changed; reopen the chart editor.');return editorAction({action:'set-chart-data',...target,chartData});},{pickColor:openKeynopeColourPicker,onDirty:publishEditorDirtyState,theme:()=>editorState?.theme,available});
+  }
+  function editSelectedTable(selection){
+    const selected=editorState?.selectedTable;if(!selected||!canvasSelectionCommandAllows('table.edit',selected.objectId))return;
+    const target={slide:editorState.current,sceneMaster:!!editorState.masterMode,sceneRevision:editorState.version,objectId:selected.objectId,documentEpoch:editorDocumentEpoch};
+    KeynopeTables.edit(selected.data,tableData=>{if(target.documentEpoch!==editorDocumentEpoch)throw Error('The document changed; reopen the table editor.');return editorAction({action:'set-table',...target,tableData});},{onDirty:publishEditorDirtyState,pickColor:openKeynopeColourPicker,copyText:writeEditorPlainText,selection,theme:()=>editorState?.theme,styleClipboard:()=>canvasStyleClipboard,styleTransfer:(action,tableData,cellRange,request)=>tableCellStyleOperation(target,action,tableData,cellRange,request)});
+  }
+  async function tableCellStyleOperation(target,action,tableData,cellRange,request={}){
+    request.signal?.throwIfAborted();
+    const epoch=editorDocumentEpoch;
+    if(target.documentEpoch!==epoch)throw Error('The document changed; reopen the table editor.');
+    const {documentEpoch,...scope}=target;
+    const styleData=request.styleData||canvasStyleClipboard;
+    if(action==='paste-object-style'&&styleData?.context!=='table-cells')throw Error('Copy a cell style first.');
+    const response=await fetch('/api/editor/table-cell-style-draft',{method:'POST',headers:{'Content-Type':'application/json'},signal:request.signal,body:JSON.stringify({...scope,action,styleContext:'table-cells',tableData,cellRange,property:request.property,propertyValue:request.propertyValue,propertyDelta:request.propertyDelta,styleData:action==='paste-object-style'?styleData:undefined})});
+    if(!response.ok)throw Error((await response.text()).trim());
+    const result=await response.json();
+    request.signal?.throwIfAborted();
+    if(epoch!==editorDocumentEpoch||editorState.version!==target.sceneRevision||editorState.current!==target.slide||!!editorState.masterMode!==!!target.sceneMaster)throw Error('The document changed; reopen the table editor.');
+    if(action==='copy-object-style'){
+      canvasStyleClipboard=result.styleClipboard;
+      const native=window.webkit?.messageHandlers?.keynopeClipboard;
+      if(native)await native.postMessage({action:'style-write',data:JSON.stringify(canvasStyleClipboard)});
+    }
+    return result;
+  }
+  async function textRangeStyleOperation(target,action,textRuns,textRange,request={}){
+    request.signal?.throwIfAborted();
+    const current=()=>target.documentEpoch===editorDocumentEpoch&&editorState.version===target.sceneRevision&&editorState.current===target.slide&&!!editorState.masterMode===!!target.sceneMaster;
+    if(!current())throw Error('The document changed; reopen the text editor.');
+    const {documentEpoch,...scope}=target,styleData=request.styleData||canvasStyleClipboard;
+    if(action==='paste-object-style'&&styleData?.context!=='text-range')throw Error('Copy a word style first.');
+    const response=await fetch('/api/editor/text-style-draft',{method:'POST',headers:{'Content-Type':'application/json'},signal:request.signal,body:JSON.stringify({...scope,action,styleContext:'text-range',textRuns,textRange,tableWord:request.tableWord,modernSize:request.tableWord?undefined:request.modernSize,property:request.property,propertyValue:request.propertyValue,propertyDelta:request.propertyDelta,styleData:action==='paste-object-style'?styleData:undefined})});
+    if(!response.ok)throw Error((await response.text()).trim());
+    const result=await response.json();request.signal?.throwIfAborted();
+    if(!current())throw Error('The document changed; reopen the text editor.');
+    if(action==='copy-object-style'){
+      canvasStyleClipboard=result.styleClipboard;
+      const native=window.webkit?.messageHandlers?.keynopeClipboard;
+      if(native)await native.postMessage({action:'style-write',data:JSON.stringify(canvasStyleClipboard)});
+    }
+    return result;
+  }
+  async function fitSelectedTable(){
+    await editorActionQueue;
+    const selected=editorState?.selectedTable;if(!selected||!canvasSelectionCommandAllows('table.fit',selected.objectId))return;
+    const target={slide:editorState.current,sceneMaster:!!editorState.masterMode,sceneRevision:editorState.version,objectId:selected.objectId},source=selected.data;
+    const notice=text=>{const toast=showEngagementToast(text,5000);toast.setAttribute('role','status');return toast;};
+    const message=notice('Measuring table content…');
+    try{
+      const response=await fetch('/api/editor/scene?slide='+target.slide);if(!response.ok)throw Error(await response.text());
+      const scene=await response.json(),object=scene.objects.find(o=>o.id===target.objectId);await KeynopeScene.ensureFonts();
+      const fitted=await KeynopeScene.fittedTable(document.body,scene,object,source);
+      if(!fitted.changed){message.remove();notice('Table content already fits.');return;}
+      const scaleX=scene.width/deck.cols,scaleY=scene.height/deck.rows,b=fitted.bounds;
+      await editorAction({action:'set-table',...target,tableData:fitted.data,geometry:{x:b.x/scaleX,y:b.y/scaleY,width:b.width/scaleX,height:b.height/scaleY}});
+      message.remove();notice('Table fitted without changing font sizes.');
+    }catch(error){message.remove();notice(error.message);}
+  }
   addElementIconButton('Add title', 'heading', '<path d="M3 4v12M11 4v12M3 10h8"/><path d="M14 7h3v9M14 16h5"/>', 1);
   addElementIconButton('Add subtitle', 'heading', '<path d="M3 4v12M11 4v12M3 10h8"/><text x="13" y="17" fill="currentColor" stroke="none" font-size="11" font-family="-apple-system, sans-serif" font-weight="700">2</text>', 2);
   let insertTextDefaults={};
@@ -9489,18 +10141,18 @@ if (keynopeAppSurface) {
   addShapeButton.setAttribute('aria-expanded','false');
   const connectDrawing = '<rect x="1" y="2" width="5" height="5"/><rect x="14" y="13" width="5" height="5"/><path d="M6 4.5h4v11h4"/><circle cx="6" cy="4.5" r="1"/><circle cx="14" cy="15.5" r="1"/>';
   const connectShapesButton = addElementIconButton('Connect shapes', 'connector', connectDrawing, 0, toggleShapeConnecting);
-  for (const [shape, label, drawing] of [
-    ['circle','Circle','<circle cx="20" cy="18" r="13"/>'],
-    ['square','Square','<rect x="7" y="5" width="26" height="26" rx="1"/>'],
-    ['triangle','Triangle','<path d="M20 4 35 31H5z"/>'],
-    ['diamond','Diamond','<path d="m20 3 16 15-16 15L4 18z"/>']
-  ]) {
+  let shapeCategory='';
+  for (const definition of keynopeShapeCatalog) {
+    const shape=definition.id,label=definition.title;
+    if(definition.category!==shapeCategory){shapeCategory=definition.category;const heading=document.createElement('div');heading.className='keynope-add-shape-category';heading.textContent=shapeCategory;addShapeMenu.append(heading);}
     const button = document.createElement('button');
     button.type = 'button';
     button.setAttribute('role','menuitem');
     button.title = 'Add ' + label.toLowerCase();
     button.setAttribute('aria-label', button.title);
-    button.innerHTML = '<svg viewBox="0 0 40 36" aria-hidden="true" fill="currentColor" stroke="currentColor" stroke-width="1.5">' + drawing + '</svg>';
+    const icon=document.createElementNS('http://www.w3.org/2000/svg','svg');icon.setAttribute('viewBox','-.08 -.08 1.16 1.16');icon.setAttribute('aria-hidden','true');
+    const path=document.createElementNS(icon.namespaceURI,'path');path.setAttribute('d',definition.path);path.setAttribute('fill','currentColor');path.setAttribute('fill-rule','evenodd');icon.append(path);button.append(icon);
+    button.dataset.category=definition.category;
     button.addEventListener('click', () => {
       closeAddShapeMenu();
       editorAction({action: 'add-element', kind:'shape', name:shape}).catch(() => {});
@@ -9537,13 +10189,14 @@ if (keynopeAppSurface) {
   }, true);
   const imageInput = document.createElement('input');
   imageInput.type = 'file';
-  imageInput.accept = 'image/*';
+  imageInput.accept = 'image/*,.svg,image/svg+xml';
   imageInput.hidden = true;
 	imageInput.addEventListener('change', async () => {
 		if (!imageInput.files || !imageInput.files[0]) return;
 		const selectedFile = imageInput.files[0];
 		const animatedGIF = selectedFile.type === 'image/gif' || /\.gif$/i.test(selectedFile.name || '');
-		if (animatedGIF) showEditorRenderingProgress();
+		const rendersSource = animatedGIF || selectedFile.type === 'image/svg+xml' || /\.svg$/i.test(selectedFile.name || '');
+		if (rendersSource) showEditorRenderingProgress();
 		try {
 			const body = new FormData();
 			body.append('image', selectedFile);
@@ -9559,7 +10212,7 @@ if (keynopeAppSurface) {
 		} catch (error) {
       window.alert('Could not import image\n\n' + (error && error.message ? error.message : String(error)));
 		} finally {
-			if (animatedGIF) hideEditorRenderingProgress();
+			if (rendersSource) hideEditorRenderingProgress();
 			imageInput.value = '';
 		}
   });
@@ -9683,29 +10336,65 @@ if (keynopeAppSurface) {
   selectionTopbar.replaceChildren(ribbonPanels.content,ribbonPanels.style,ribbonPanels.arrange);
   document.body.appendChild(topbar);
 
-  workspace = KeynopeWorkspace.mount({topbar,header:ribbonHeader,quick:quickTools,tabs:ribbonTabs,main:mainTopbar,selection:selectionTopbar,panels:ribbonPanels,addSlide:addSlideButton,resize:()=>{resize();requestAnimationFrame(drawFrame);},appearance:()=>editorState?.appearance,canUseSlidePresets:()=>!editorState?.masterMode,objects:()=>{
+  workspace = KeynopeWorkspace.mount({topbar,header:ribbonHeader,quick:quickTools,tabs:ribbonTabs,main:mainTopbar,selection:selectionTopbar,panels:ribbonPanels,addSlide:addSlideButton,resize:()=>{resize();requestAnimationFrame(drawFrame);},appearance:()=>editorState?.appearance,selectionCapabilities:()=>editorState?.selectionCapabilities,canUseSlidePresets:()=>!editorState?.masterMode,objects:()=>{
     const elements=editorState?.slides?.[editorState.current]?.elements||[];
     const selected=new Set(editorState?.selection||[]);selected.add(editorState?.selected);
     return elements.map((element,index)=>{
       const query=new URLSearchParams(element.query||''),kind=element.kind||'Object';
-      const description=element.text||(kind==='shape'?query.get('shape'):kind==='connector'?'Connection':kind==='image'?'Image':'');
+      const name=query.get('object-name')||'';
+      const description=name||element.text||(kind==='shape'?query.get('shape'):kind==='connector'?'Connection':kind==='image'?'Image':'');
       const label=(index+1)+'. '+kind+(description?' — '+String(description).replace(/\[\/?color(?:=#[0-9a-f]{6})?\]/gi,'').replace(/\s+/g,' ').slice(0,100):'')+(query.get('group')?' · grouped':'');
       const legacyRank=index+((kind==='image'||kind==='shape')&&query.get('layer')!=='front'?0:elements.length)+(kind==='connector'?2*elements.length:0);
-      return {id:element.id||String(index),kind,alt:query.get('alt-text')||'',decorative:query.get('image-decorative')==='1',label,locked:query.get('object-locked')==='1',hidden:query.get('object-hidden')==='1',group:query.get('group')||'',rank:query.has('z-index')?Number(query.get('z-index')):legacyRank,opacity:query.has('modern-opacity')?Number(query.get('modern-opacity')):1,selected:selected.has(index)};
+      return {id:element.id||String(index),kind,name,alt:query.get('alt-text')||'',decorative:query.get('image-decorative')==='1',label,locked:query.get('object-locked')==='1',hidden:query.get('object-hidden')==='1',group:query.get('group')||'',rank:query.has('z-index')?Number(query.get('z-index')):legacyRank,opacity:query.has('modern-opacity')?Number(query.get('modern-opacity')):1,selected:selected.has(index)};
     }).sort((a,b)=>a.rank-b.rank);
-  },moveObjectLayer:(objectId,value,name,kind)=>editorAction({action:'move-object-layer',objectId,value,name,kind}),
+  },moveObjectLayer:(objectId,value,name,kind,capture=canvasGeometryContext())=>queueEditorOperation(async()=>{
+    if(!canvasGeometryGestureCurrent(capture)||capture.owner&&capture.owner!==editorState.notesSessionId)throw Error('The document or object list changed; reorder cancelled.');
+    await performEditorAction({action:'move-object-layer',objectId,value,name,kind,slide:capture.slide,sceneMaster:capture.master,sceneRevision:editorState.version,mutationRevision:capture.mutationRevision,notesSessionId:capture.owner||editorState.notesSessionId});
+  }),
   addPreset:name=>editorAction({action:'add-slide',name}),
   setTheme:name=>editorAction({action:'set-theme',name}),
+  getTheme:()=>editorState?.theme,
+  hasDeckTheme:()=>!!editorState?.hasDeckTheme,
+  themeDraftContext:()=>({owner:editorState?.notesSessionId,base:editorState?.theme}),
+  themePresets:()=>editorState?.themePresets||[],
+  setDeckTheme:(themeData,themeDraft)=>editorAction({action:'set-deck-theme',themeData,themeDraft}),
+  detachDeckTheme:themeDraft=>editorAction({action:'detach-deck-theme',themeDraft}),
+  editBuilds:async()=>{
+    if(activeInlineEditor)await activeInlineEditor.finish(true);
+    const capture={...canvasGeometryContext(),owner:editorState.notesSessionId};
+    const available=()=>canvasGeometryContextCurrent(capture)&&capture.owner===editorState?.notesSessionId;
+    const response=await fetch('/api/editor/scene?slide='+capture.slide,{cache:'no-store'});
+    if(!response.ok)throw Error((await response.text()).trim()||'Could not prepare Builds');
+    const scene=await response.json();
+    if(!available()||scene.revision!==capture.revision||!!scene.master!==capture.master)throw Error('The slide changed; open Builds again.');
+    const elements=editorState.slides[capture.slide].elements||[],byID=new Map(elements.map(e=>[e.id,e]));
+    const buildTargets=canvasSelectionCommand('build.add');
+    const selectedIds=buildTargets?.enabled?[...buildTargets.eligibleIds]:[];
+    const objects=scene.objects.map(object=>{const e=byID.get(object.id),q=new URLSearchParams(e?.query||'');return {id:object.id,label:(e?.text||object.shape||object.kind||'Object').replace(/\s+/g,' ').slice(0,90),locked:q.get('object-locked')==='1',hidden:q.get('object-hidden')==='1'};});
+    await KeynopeBuilds.edit({scene,build:editorState.slideBuild,objects,selectedIds,available,onDirty:publishEditorDirtyState,apply:buildData=>{if(!available())throw Error('The document changed; reopen Builds.');return editorAction({action:'set-slide-build',slide:capture.slide,sceneMaster:capture.master,sceneRevision:capture.revision,notesSessionId:capture.owner,buildData});}});
+  },
+  pickColor:openKeynopeColourPicker,
+  selectionPaintTarget:()=>({targetIds:[...(editorState?.selectionCapabilities?.targetIds||[])],revision:editorState?.version,mutationRevision:editorState?.mutationRevision,slide:editorState?.current,master:!!editorState?.masterMode,epoch:editorDocumentEpoch,owner:editorState?.notesSessionId,group:editorState?.editingGroup||''}),
   groupScope:()=>editorState?.editingGroup||'',
   groupAction:action=>{const elements=editorState?.slides?.[editorState.current]?.elements||[],index=editorState?.selected;return editorAction({action,element:index,elementData:elements[index]});},
   setObjectLock:locked=>editorAction({action:'set-object-lock',value:locked?1:0}),
-  setImageDescription:async(id,description,decorative)=>{
+  setObjectName:async(id,name,capture)=>{
+    if(editorDocumentEpoch!==capture.epoch||editorState.version!==capture.revision||editorState.current!==capture.slide||!!editorState.masterMode!==capture.master)throw Error('The document changed. Cancel and rename the object again.');
+    const elements=editorState.slides[capture.slide]?.elements||[],index=elements.findIndex(element=>element.id===id);
+    if(index<0)throw Error('This object is no longer available.');
+    const element={...elements[index]},q=new URLSearchParams(element.query||'');
+    if(name.trim())q.set('object-name',name.trim());else q.delete('object-name');
+    element.query=q.toString();await editorAction({action:'update-elements',slide:capture.slide,sceneMaster:capture.master,sceneRevision:capture.revision,elementIndices:[index],elementsData:[element]});
+  },
+  setImageDescription:async(id,description,decorative,capture)=>{
+    if(!capture||!canvasGeometryContextCurrent(capture,false)||capture.owner!==editorState.notesSessionId)throw Error('The document or image selection changed; select the image again.');
     const elements=editorState?.slides?.[editorState.current]?.elements||[],index=elements.findIndex((element,index)=>(element.id||String(index))===id);
     if(index<0||elements[index].kind!=='image')throw Error('This image is no longer available.');
     const element={...elements[index]},query=new URLSearchParams(element.query||'');
+    if((query.get('alt-text')||'')!==capture.alt|| (query.get('image-decorative')==='1')!==capture.decorative)throw Error('The image description changed. Reset the draft to use the current description.');
     if(description)query.set('alt-text',description);else query.delete('alt-text');
     if(decorative)query.set('image-decorative','1');else query.delete('image-decorative');
-    element.query=query.toString();await editorAction({action:'update-elements',elementIndices:[index],elementsData:[element]});
+    element.query=query.toString();await editorAction({action:'update-elements',slide:capture.slide,sceneMaster:capture.master,sceneRevision:editorState.version,notesSessionId:capture.owner,elementIndices:[index],elementsData:[element]});
   },
   setObjectVisibility:async hidden=>{
     const elements=editorState?.slides?.[editorState.current]?.elements||[],indices=[];
@@ -9714,10 +10403,13 @@ if (keynopeAppSurface) {
     await editorAction({action:'update-elements',elementIndices:indices,elementsData:indices.map(index=>{const element={...elements[index]},q=new URLSearchParams(element.query||'');if(hidden)q.set('object-hidden','1');else q.delete('object-hidden');element.query=q.toString();return element;})});
   },
   setObjectOpacity:async value=>{
-    const elements=editorState?.slides?.[editorState.current]?.elements||[],indices=[];
-    elements.forEach((element,index)=>{if(editorState.selected===index||(editorState.selection||[]).includes(index))indices.push(index);});
-    if(!indices.length)return;
-    await editorAction({action:'update-elements',elementIndices:indices,elementsData:indices.map(index=>{const element={...elements[index]},q=new URLSearchParams(element.query||'');if(value===1)q.delete('modern-opacity');else q.set('modern-opacity',String(value));element.query=q.toString();return element;})});
+    const caps=editorState?.selectionCapabilities;
+    if(!caps?.targetIds?.length)return;
+    await editorAction({action:'set-selection-property',property:'paint.opacity',propertyValue:value,objectIds:caps.targetIds,slide:editorState.current,sceneMaster:!!editorState.masterMode,sceneRevision:editorState.version});
+  },setSelectionPaint:async(property,value,expected)=>{
+    if(!expected?.targetIds?.length)return;
+    if(!canvasGeometryContextCurrent(expected)||expected.owner!==editorState.notesSessionId)throw Error('The document changed; pick the colour or style again.');
+    await editorAction({action:'set-selection-property',property,propertyValue:value,objectIds:expected.targetIds,slide:expected.slide,sceneMaster:expected.master,sceneRevision:expected.revision,notesSessionId:expected.owner});
   },selectObject:async(id,toggle=false)=>{
     const elements=editorState?.slides?.[editorState.current]?.elements||[];
     const index=elements.findIndex((element,index)=>(element.id||String(index))===id);
@@ -9834,12 +10526,12 @@ if (keynopeAppSurface) {
   speakerNotesInput.placeholder = 'Add notes for this slide…';
   speakerNotesPanel.append(speakerNotesLabel, speakerNotesInput);
   document.body.appendChild(speakerNotesPanel);
-  let speakerNotesSlide = -1;
+  let speakerNotesDisplayedOwner = null;
   let speakerNotesSaveTimer = null;
-  let speakerNotesDirty = false;
-  let speakerNotesDirtySlide = -1;
-  let speakerNotesDirtyValue = '';
-  let speakerNotesSavingSlide = -1;
+  const speakerNotesDraftStatus=document.createElement('div'),speakerNotesDraftMessage=document.createElement('span'),speakerNotesRetry=document.createElement('button'),speakerNotesDiscard=document.createElement('button');
+  speakerNotesDraftStatus.hidden=true;speakerNotesDraftMessage.setAttribute('role','status');
+  speakerNotesRetry.type=speakerNotesDiscard.type='button';speakerNotesRetry.textContent='Retry notes';speakerNotesDiscard.textContent='Discard note draft';
+  speakerNotesDraftStatus.append(speakerNotesDraftMessage,speakerNotesRetry,speakerNotesDiscard);speakerNotesPanel.append(speakerNotesDraftStatus);
   let notesToggleButton = null;
   function setSpeakerNotesVisible(visible, focusNotes) {
     editorSpeakerNotesVisible = !!visible;
@@ -9854,37 +10546,71 @@ if (keynopeAppSurface) {
   }
   function renderSpeakerNotes(slide) {
     if (!slide) return;
-    const changedSlide = speakerNotesSlide !== editorState.current;
-    if (changedSlide || (document.activeElement !== speakerNotesInput && speakerNotesSavingSlide !== editorState.current && !speakerNotesDirty)) {
-      speakerNotesInput.value = slide.notes || '';
-      speakerNotesSlide = editorState.current;
+    const owner=currentSpeakerNotesOwner(),entry=owner&&speakerNotesDrafts.get(owner.key);
+    const value=entry?entry.value:slide.notes||'';
+    if(speakerNotesInput.value!==value)speakerNotesInput.value=value;
+    speakerNotesInput.disabled=!owner;speakerNotesDisplayedOwner=owner;
+    speakerNotesDraftStatus.hidden=!entry?.error;
+    speakerNotesDraftMessage.textContent=entry?.error?entry.error.message+' Your draft is kept. ':'';
+    speakerNotesRetry.disabled=speakerNotesDiscard.disabled=!!entry?.pending;
+  }
+  function currentSpeakerNotesOwner() {
+    const index=editorState?.current,master=!!editorState?.masterMode;
+    const slide=editorState?.slides?.[index];if(!slide)return null;
+    const id=editorState.notesOwnerId||(master?(index===0?editorState.masters?.base?.id:editorState.masters?.layouts?.[index-1]?.id):slide.id);
+    return id&&editorState.notesSessionId?{id,index,master,session:editorState.notesSessionId,epoch:editorDocumentEpoch,key:editorDocumentEpoch+':'+(master?'master:':'slide:')+id}:null;
+  }
+  function hasPendingSpeakerNotes(){return [...speakerNotesDrafts.values()].some(entry=>entry.owner.epoch===editorDocumentEpoch&&(entry.pending||entry.value!==entry.base));}
+  function resetSpeakerNotesDrafts(){clearTimeout(speakerNotesSaveTimer);speakerNotesSaveTimer=null;speakerNotesDrafts.clear();speakerNotesDisplayedOwner=null;}
+  async function flushSpeakerNoteDraft(entry) {
+    const owner=entry.owner;
+    while(owner.epoch===editorDocumentEpoch&&speakerNotesDrafts.get(owner.key)===entry){
+      if(entry.pending){const pending=entry.pending,generation=entry.sendingGeneration;try{await pending;}catch(error){if(entry.generation===generation)throw error;}continue;}
+      if(entry.value===entry.base){speakerNotesDrafts.delete(owner.key);break;}
+      const generation=entry.generation,value=entry.value;entry.sendingGeneration=generation;
+      const pending=queueEditorOperation(async()=>{
+        if(owner.epoch!==editorDocumentEpoch||speakerNotesDrafts.get(owner.key)!==entry)return;
+        const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(entry.base));
+        if(owner.epoch!==editorDocumentEpoch||speakerNotesDrafts.get(owner.key)!==entry)return;
+        const hash=Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join('');
+        await performEditorAction({action: 'update-slide-notes',slide:owner.index,sceneMaster:owner.master,sceneRevision:editorState.version,notesOwnerId:owner.id,notesSessionId:owner.session,notesBeforeHash:hash,notes:value});
+        if(owner.epoch!==editorDocumentEpoch)return;
+        entry.base=value;entry.error=null;
+      });
+      entry.pending=pending;
+      try{await pending;}catch(error){
+        if(owner.epoch!==editorDocumentEpoch)return;
+        if(error.code==='missing-target'){speakerNotesDrafts.delete(owner.key);showEditorCommandError(error,owner);return;}
+        entry.error=error;
+        if(entry.generation===generation)throw error;
+      }finally{if(entry.pending===pending)entry.pending=null;if(owner.epoch===editorDocumentEpoch){renderSpeakerNotes(editorState?.slides?.[editorState.current]);publishEditorDirtyState();}}
     }
   }
-  function flushSpeakerNotes() {
-    if (!speakerNotesDirty || speakerNotesDirtySlide < 0) return;
-    if (speakerNotesSaveTimer) {
-      clearTimeout(speakerNotesSaveTimer);
-      speakerNotesSaveTimer = null;
-    }
-    const slide = speakerNotesDirtySlide;
-    const notes = speakerNotesDirtyValue;
-    speakerNotesDirty = false;
-    speakerNotesSavingSlide = slide;
-    editorAction({action: 'update-slide-notes', slide, notes}).then(() => {
-      if (speakerNotesSavingSlide === slide) speakerNotesSavingSlide = -1;
-    }).catch(() => {
-      speakerNotesSavingSlide = -1;
-      speakerNotesDirty = true;
-      speakerNotesDirtySlide = slide;
-      speakerNotesDirtyValue = notes;
-    });
+  async function flushSpeakerNotes() {
+    clearTimeout(speakerNotesSaveTimer);speakerNotesSaveTimer=null;
+    const epoch=editorDocumentEpoch;
+    while(epoch===editorDocumentEpoch&&hasPendingSpeakerNotes())await Promise.all([...speakerNotesDrafts.values()].filter(entry=>entry.owner.epoch===epoch).map(flushSpeakerNoteDraft));
+    if(epoch===editorDocumentEpoch){renderSpeakerNotes(editorState?.slides?.[editorState.current]);publishEditorDirtyState();}
   }
+  function flushSpeakerNotesInBackground(){const epoch=editorDocumentEpoch;flushSpeakerNotes().catch(error=>showEditorCommandError(error,{epoch}));}
+  speakerNotesRetry.addEventListener('click',async()=>{
+    const owner=speakerNotesDisplayedOwner,entry=owner&&speakerNotesDrafts.get(owner.key);if(!entry||entry.pending)return;
+    try{
+      await syncEditorState();
+      if(currentSpeakerNotesOwner()?.key!==owner.key)return;
+      const saved=editorState.slides[editorState.current].notes||'';
+      if(saved!==entry.base){if(!confirm('These notes changed while you were editing. Replace them with your draft?'))return;entry.base=saved;}
+      await flushSpeakerNotes();
+    }catch(error){showEditorCommandError(error,owner);}
+  });
+  speakerNotesDiscard.addEventListener('click',()=>{const owner=speakerNotesDisplayedOwner,entry=owner&&speakerNotesDrafts.get(owner.key);if(!entry||entry.pending)return;speakerNotesDrafts.delete(owner.key);if(editorCommandErrorText.textContent===entry.error?.message)editorCommandErrorNotice.hidden=true;renderSpeakerNotes(editorState.slides[editorState.current]);publishEditorDirtyState();});
   speakerNotesInput.addEventListener('input', () => {
-    speakerNotesDirty = true;
-    speakerNotesDirtySlide = editorState ? editorState.current : -1;
-    speakerNotesDirtyValue = speakerNotesInput.value;
-    if (speakerNotesSaveTimer) clearTimeout(speakerNotesSaveTimer);
-    speakerNotesSaveTimer = setTimeout(flushSpeakerNotes, 2000);
+    const owner=currentSpeakerNotesOwner();if(!owner||owner.key!==speakerNotesDisplayedOwner?.key)return;
+    let entry=speakerNotesDrafts.get(owner.key);
+    if(!entry){entry={owner,base:editorState.slides[editorState.current].notes||'',value:'',generation:0,pending:null,error:null};speakerNotesDrafts.set(owner.key,entry);}
+    entry.value=speakerNotesInput.value;entry.generation++;
+    clearTimeout(speakerNotesSaveTimer);speakerNotesSaveTimer=setTimeout(flushSpeakerNotesInBackground,2000);
+    publishEditorDirtyState();
   });
   speakerNotesInput.addEventListener('keydown', async event => {
     event.stopPropagation();
@@ -9911,9 +10637,9 @@ if (keynopeAppSurface) {
     }
   });
   speakerNotesInput.addEventListener('keyup', event => event.stopPropagation());
-  speakerNotesInput.addEventListener('blur', flushSpeakerNotes);
+  speakerNotesInput.addEventListener('blur',event=>{if(speakerNotesDraftStatus.contains(event.relatedTarget))return;flushSpeakerNotesInBackground();});
   document.addEventListener('pointerdown', event => {
-    if (!speakerNotesPanel.contains(event.target)) flushSpeakerNotes();
+    if (!speakerNotesPanel.contains(event.target)) flushSpeakerNotesInBackground();
   }, true);
 
   let editorPreviewOriginal = null;
@@ -9969,9 +10695,15 @@ if (keynopeAppSurface) {
     return [element.kind || '', element.level || 0, element.text || '', element.path || '', element.query || '', element.id || '', element.slotId || ''].join('\u001f');
   }
   function mergeEditorStateResponse(next) {
-    if (!next || Array.isArray(next.slides)) return next;
+    if (!next) return next;
     const previous = editorState;
+    if(next.diagnosticsUnchanged&&previous&&!previous.diagnosticsUnchanged&&previous.notesSessionId===next.notesSessionId){
+      next.diagnostics=previous.diagnostics;
+      delete next.diagnosticsUnchanged;
+    }
+    if(Array.isArray(next.slides))return next;
     if (!previous || !Array.isArray(previous.slides)) return next;
+    if (!next.themePresets) next.themePresets = previous.themePresets;
     const slides = previous.slides.slice();
     if (next.currentSlide && Number.isInteger(next.current) && next.current >= 0 && next.current < slides.length) {
       slides[next.current] = next.currentSlide;
@@ -10225,7 +10957,7 @@ if (keynopeAppSurface) {
     });
     return button;
   }
-  async function beginInlineEdit(index, hit) {
+  async function beginInlineEdit(index, hit, point) {
     const transition = ++inlineEditTransitionSequence;
     if (activeInlineEditor && activeInlineEditor.element === index && activeInlineEditor.editor.isConnected) {
       activeInlineEditor.editor.focus();
@@ -10238,13 +10970,36 @@ if (keynopeAppSurface) {
     // settle before capturing the state used to reject stale scene requests.
     await editorActionQueue;
     if (transition !== inlineEditTransitionSequence || !editorState || !editorState.slides || !editorState.slides[editorState.current]) return;
-    const requestedSlide=editorState.current,requestedPath=editorState.path,requestedRevision=editorState.version,requestedMaster=!!editorState.masterMode;
+    const requestedSlide=editorState.current,requestedPath=editorState.path,requestedRevision=editorState.version,requestedMaster=!!editorState.masterMode,requestedDocumentEpoch=editorDocumentEpoch,requestedGroup=editorState.editingGroup||'';
     // Polling and workspace synchronization may replace editorState with an
     // equivalent snapshot while the scene/font request is in flight. Object
     // identity is therefore not a stale-document signal. Reject only a real
     // document revision/path/slide/scope change or a newer edit request.
-    const editRequestCurrent=()=>transition===inlineEditTransitionSequence&&editorState&&editorState.current===requestedSlide&&editorState.path===requestedPath&&editorState.version===requestedRevision&&!!editorState.masterMode===requestedMaster;
+    const editRequestCurrent=()=>transition===inlineEditTransitionSequence&&requestedDocumentEpoch===editorDocumentEpoch&&editorState&&editorState.current===requestedSlide&&editorState.path===requestedPath&&editorState.version===requestedRevision&&!!editorState.masterMode===requestedMaster;
     const original = editorState.slides[editorState.current].elements[index];
+    if(original?.kind==='image'&&!canvasSelectionCommandAllows('image.crop',original.id))return;
+    if(original?.kind==='chart'){editSelectedChart();return;}
+    if(original?.kind==='table'){
+      if(!canvasSelectionCommandAllows('table.edit',original.id))return;
+      const response=await fetch('/api/editor/scene?slide='+requestedSlide);if(!editRequestCurrent())return;if(!response.ok)throw Error(await response.text());
+      const scene=await response.json();if(!editRequestCurrent())return;
+      const object=scene.objects.find(o=>o.id===original.id),selected=editorState.selectedTable;
+      if(!object?.editable||!selected||selected.objectId!==object.id)return;
+      await KeynopeScene.ensureFonts();if(!editRequestCurrent())return;
+      keynopeEditorTextEditActive=true;
+      try{await KeynopeTables.canvas(object,selected.data,tableData=>{if(requestedDocumentEpoch!==editorDocumentEpoch)throw Error('The document changed; reopen the table editor.');return editorAction({action:'set-table',slide:requestedSlide,sceneMaster:requestedMaster,sceneRevision:requestedRevision,objectId:object.id,tableData});},{
+        canvasScene:document.querySelector('#stage .keynope-modern-scene'),inspectorHost:document.querySelector('.keynope-workspace-inspector'),point,
+        theme:()=>editorState?.theme,
+        painterScope:wordPainterScope(),
+        styleAvailable:()=>editRequestCurrent()&&(editorState?.editingGroup||'')===requestedGroup&&!presenterTimerMode&&!activeCanvasDrag&&!shapeConnecting,
+        wordStyleTransfer:(action,textRuns,textRange,tableWord,request)=>textRangeStyleOperation({slide:requestedSlide,sceneMaster:requestedMaster,sceneRevision:requestedRevision,objectId:object.id,documentEpoch:requestedDocumentEpoch},action,textRuns,textRange,{...request,tableWord}),
+        styleClipboard:()=>canvasStyleClipboard,styleTransfer:(action,tableData,cellRange,request)=>tableCellStyleOperation({slide:requestedSlide,sceneMaster:requestedMaster,sceneRevision:requestedRevision,objectId:object.id,documentEpoch:requestedDocumentEpoch},action,tableData,cellRange,request),
+        resolveEmojiFonts:async text=>{const response=await fetch('/api/editor/emoji-text-fonts?'+new URLSearchParams({text}));if(!response.ok)throw Error('Could not load emoji font');return response.json();},
+        pickColor:openKeynopeColourPicker,renderDraft:async(tableData,signal)=>{const response=await fetch('/api/editor/table-draft',{method:'POST',headers:{'Content-Type':'application/json'},signal,body:JSON.stringify({slide:requestedSlide,sceneMaster:requestedMaster,sceneRevision:requestedRevision,objectId:object.id,tableData})});if(!response.ok)throw Error(await response.text());const scene=await response.json();return scene.objects.find(candidate=>candidate.id===object.id)?.table;},
+        copyText:writeEditorPlainText,onEditTable:editSelectedTable,onFitTable:fitSelectedTable,onDirty:publishEditorDirtyState,onClose:()=>{keynopeEditorTextEditActive=false;publishEditorDirtyState();queueMicrotask(refreshWordPainterNotice);},
+        onOutsideCommit:async position=>{await new Promise(requestAnimationFrame);if(editorState.current!==requestedSlide||editorState.path!==requestedPath||!!editorState.masterMode!==requestedMaster)return;const hit=document.elementFromPoint(position.x,position.y)?.closest('.keynope-canvas-element');if(!hit||!canvasOverlay.contains(hit))return;const element=editorState.slides[requestedSlide]?.elements[Number(hit.dataset.element)];if(element)await editorAction({action:'select-element',element:Number(hit.dataset.element),elementData:{id:element.id}});}
+      });}catch(error){keynopeEditorTextEditActive=false;if(editorStatus)editorStatus.textContent=error.message;throw error;}return;
+    }
     // Unified decks choose their editor from the concrete object projection.
     // Do not resurrect the retired deck-level Retro/Modern appearance gate:
     // a Sans/Mono text or source image remains modern in an otherwise C64 deck.
@@ -10252,10 +11007,17 @@ if (keynopeAppSurface) {
       const response=await fetch('/api/editor/scene?slide='+requestedSlide);if(!editRequestCurrent())return;if(!response.ok)throw new Error(await response.text());
       const scene=await response.json();if(!editRequestCurrent())return;
       const object=scene.objects.find(o=>o.id===original.id);
-      if(object?.editable&&object.kind==='image'&&object.media){KeynopeScene.editImage(object,(crop,modernMask)=>editorAction({action:'set-scene-crop',performanceKind:'crop',sceneMaster:!!scene.master,slide:scene.slideIndex,sceneRevision:scene.revision,objectId:object.id,crop,modernMask}),{renderDraft:async(crop,modernMask,signal)=>{const response=await fetch('/api/editor/media-draft',{method:'POST',headers:{'Content-Type':'application/json'},signal,body:JSON.stringify({sceneMaster:!!scene.master,slide:scene.slideIndex,sceneRevision:scene.revision,objectId:object.id,crop,modernMask})});if(!response.ok)throw new Error(await response.text());return response.json();}});return;}
+      if(object?.editable&&object.kind==='image'&&object.media&&canvasSelectionCommandAllows('image.crop',original.id)){KeynopeScene.editImage(object,(crop,modernMask)=>editorAction({action:'set-scene-crop',performanceKind:'crop',sceneMaster:!!scene.master,slide:scene.slideIndex,sceneRevision:scene.revision,objectId:object.id,crop,modernMask}),{renderDraft:async(crop,modernMask,signal)=>{const response=await fetch('/api/editor/media-draft',{method:'POST',headers:{'Content-Type':'application/json'},signal,body:JSON.stringify({sceneMaster:!!scene.master,slide:scene.slideIndex,sceneRevision:scene.revision,objectId:object.id,crop,modernMask})});if(!response.ok)throw new Error(await response.text());return response.json();}});return;}
       if((object?.kind==='shape'?(object.labelStyle||object.style):object?.style)!=='retro'||(object?.kind==='text'&&object.text&&!object.retroText&&!object.retroLines)||(object?.kind==='shape'&&object.label&&!object.retroLabel)){
-        if(object?.editable){await KeynopeScene.ensureFonts();if(!editRequestCurrent())return;await KeynopeScene.editText(object,(runs,modernFont,modernLineHeight,modernSize,modernParagraphBefore,modernParagraphAfter,modernWidth,shapeTextBounds)=>editorAction({action:'set-scene-text',performanceKind:'typing',sceneMaster:!!scene.master,slide:scene.slideIndex,sceneRevision:scene.revision,objectId:object.id,textRuns:runs,modernFont,modernLineHeight,modernSize,modernParagraphBefore,modernParagraphAfter,modernWidth,shapeTextBounds}),{
+        if(object?.editable){await KeynopeScene.ensureFonts();if(!editRequestCurrent())return;await KeynopeScene.editText(object,(runs,modernFont,modernLineHeight,modernSize,modernParagraphBefore,modernParagraphAfter,modernWidth,shapeTextBounds)=>{
+          if(requestedDocumentEpoch!==editorDocumentEpoch)throw Error('The document changed; reopen the text editor.');
+          return editorAction({action:'set-scene-text',performanceKind:'typing',sceneMaster:!!scene.master,slide:scene.slideIndex,sceneRevision:scene.revision,objectId:object.id,textRuns:runs,modernFont,modernLineHeight,modernSize,modernParagraphBefore,modernParagraphAfter,modernWidth,shapeTextBounds});
+        },{
           canvasScene:document.querySelector('#stage .keynope-modern-scene'),inspectorHost:document.querySelector('.keynope-workspace-inspector'),
+          styleClipboard:()=>canvasStyleClipboard,
+          painterScope:wordPainterScope(),
+          styleAvailable:()=>editRequestCurrent()&&(editorState?.editingGroup||'')===requestedGroup&&!presenterTimerMode&&!activeCanvasDrag&&!shapeConnecting,
+          styleTransfer:(action,textRuns,textRange,request)=>textRangeStyleOperation({slide:requestedSlide,sceneMaster:requestedMaster,sceneRevision:requestedRevision,objectId:object.id,documentEpoch:requestedDocumentEpoch},action,textRuns,textRange,request),
           renderShapeDraft:async (bounds,signal)=>{const response=await fetch('/api/editor/shape-draft',{method:'POST',headers:{'Content-Type':'application/json'},signal,body:JSON.stringify({sceneMaster:!!scene.master,slide:scene.slideIndex,sceneRevision:scene.revision,objectId:object.id,shapeTextBounds:bounds})});if(!response.ok)throw new Error(await response.text());return response.json();},
           onOutsideCommit:async point=>{
             // Re-hit-test after the committed scene is painted. Never replay a
@@ -10755,14 +11517,19 @@ if (keynopeAppSurface) {
     const element = editorState.slides[editorState.current].elements[index];
     return element ? {...element} : null;
   }
+  const canvasLabelStyleKeys=new Set(` + shapeLabelStyleKeysJSON() + `);
   function canvasShapeLabel(shape) {
     let data={};
     try{data=JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(new URLSearchParams(shape.query||'').get('shape-label')||''),c=>c.charCodeAt(0))));}catch(_err){}
-    const query=new URLSearchParams(data.query||'ttf-size=97&fg=%23ffffff');query.set('render','truetype');query.set('text-align','center');query.set('text-valign','middle');
+    const query=new URLSearchParams(data.query||'ttf-size=97&fg=%23ffffff'),outer=new URLSearchParams(shape.query||'');
+    for(const [key,value]of outer)if(key.startsWith('label-')&&canvasLabelStyleKeys.has(key.slice(6))){const name=key.slice(6);if(value==='none'&&(name==='ttf-weight'||name==='modern-runs'))query.delete(name);else query.set(name,value);}
+    if(outer.has('label-fg'))query.delete('theme-fg');else if(outer.has('label-theme-fg')){query.delete('fg');query.delete('header');}
+    query.set('render','truetype');if(!query.has('text-align'))query.set('text-align','center');if(!query.has('text-valign'))query.set('text-valign','middle');
     return {kind:'text',id:shape.id,text:data.text||'',query:query.toString(),_shapeLabelData:data};
   }
   function withCanvasShapeLabel(shape,label) {
     const query=new URLSearchParams(shape.query||'');
+    const style=new URLSearchParams(label.query||'');for(const [key]of [...query])if(key.startsWith('label-')&&canvasLabelStyleKeys.has(key.slice(6))){const name=key.slice(6);if(style.has(name))query.set(key,style.get(name));else query.delete(key);}
     if(label.text){const data={...(label._shapeLabelData||{}),text:label.text,query:label.query};const bytes=new TextEncoder().encode(JSON.stringify(data));query.set('shape-label',btoa(Array.from(bytes,b=>String.fromCharCode(b)).join('')));}
     else query.delete('shape-label');
     return {...shape,query:query.toString()};
@@ -10772,6 +11539,7 @@ if (keynopeAppSurface) {
     const edit=canvasTool(label.text?'Edit shape text':'Add text','',()=>beginInlineEdit(index));
     content.append(edit);
     if(!label.text)return;
+    if(editorState?.selectionCapabilities?.properties?.['label.size']?.eligibleIds?.length)return; // Shared label section owns styling; keep content edit here.
     const heading=document.createElement('span');heading.textContent='Text';heading.style.cssText='color:#ffd166;border-left:1px solid #59616a;padding-left:8px';style.append(heading);
     const update=(key,value)=>labelTypography({labelPaint:{[key]:value}});
     const sceneLabel=deck.pages?.[pageIndex]?.scene?.objects?.find(object=>object.id===shape.id);
@@ -10779,13 +11547,13 @@ if (keynopeAppSurface) {
     const labelTypography=values=>changeModernTextStyle(index,{kind:'label',...values}).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;});
     const sizeField=document.createElement('label');sizeField.className='keynope-ttf-width-control';sizeField.append('Shape text size');
     const sizeInput=document.createElement('input');sizeInput.type='number';sizeInput.className='keynope-ttf-size';sizeInput.min=1;sizeInput.max=1024;sizeInput.step='any';sizeInput.value=modernLabel?canvasAuthoredTextMetric(label,'modern-size',modernLabel.size):KeynopeTrueType.size(label);sizeInput.setAttribute('aria-label','Shape text size');
-    sizeInput.addEventListener('keydown',event=>event.stopPropagation());sizeInput.onchange=()=>{if(sizeInput.checkValidity())labelTypography({textSize:Number(sizeInput.value)});};sizeField.append(sizeInput);content.append(sizeField);
+    sizeInput.title='Clear to restore inherited shape text size.';sizeInput.addEventListener('keydown',event=>event.stopPropagation());sizeInput.onchange=()=>{if(sizeInput.checkValidity())labelTypography({textSize:sizeInput.value===''?'':Number(sizeInput.value)});};sizeField.append(sizeInput);content.append(sizeField);
     const font=document.createElement('select');font.setAttribute('aria-label','Shape label font family');
-    for(const [value,name] of [['c64','Keynope C64'],['sans','Go — proportional'],['mono','Go Mono — monospaced']])font.add(new Option(name,value));
+    for(const [value,name] of [['theme','Use theme font'],['c64','Keynope C64'],['sans','Go — proportional'],['mono','Go Mono — monospaced']])font.add(new Option(name,value));
     font.value=q.get('modern-font')||'c64';font.addEventListener('keydown',event=>event.stopPropagation());font.onchange=()=>labelTypography({modernFont:font.value});content.append(font);
     const widthField=document.createElement('label');widthField.className='keynope-ttf-width-control';widthField.append('Shape text width');
     const widthInput=document.createElement('input');widthInput.type='number';widthInput.className='keynope-ttf-width';widthInput.min=1;widthInput.max=200;widthInput.step=1;widthInput.value=modernLabel?canvasAuthoredTextMetric(label,'modern-width',Number((modernLabel.widthScale*100).toFixed(6))):KeynopeTrueType.widthPercent(label);widthInput.setAttribute('aria-label','Shape text width');
-    widthInput.addEventListener('keydown',event=>event.stopPropagation());widthInput.onchange=()=>{if(widthInput.checkValidity())labelTypography({textWidth:Number(widthInput.value)});};widthField.append(widthInput);content.append(widthField);
+    widthInput.title='Clear to restore inherited shape text width.';widthInput.addEventListener('keydown',event=>event.stopPropagation());widthInput.onchange=()=>{if(widthInput.checkValidity())labelTypography({textWidth:widthInput.value===''?'':Number(widthInput.value)});};widthField.append(widthInput);content.append(widthField);
     const labelBold=canvasTextIsBold(label,sceneLabel?.label);
     const emphasisTools=document.createElement('span');emphasisTools.style.cssText='display:flex;gap:6px;flex-basis:100%';content.append(emphasisTools);
     const bold=canvasTool('B',labelBold?'active':'',()=>labelTypography({textBold:!labelBold}));bold.title='Bold shape text';bold.setAttribute('aria-label',bold.title);bold.setAttribute('aria-pressed',String(labelBold));emphasisTools.append(bold);
@@ -10836,9 +11604,10 @@ if (keynopeAppSurface) {
     const objects=deck.pages[pageIndex]?.scene?.objects||[],bounds=canvasCurrentBounds();
     const objectsByID=new Map(objects.map(object=>[object.id,object]));
     const snapshot=indices.map(index=>({index,element:canvasElementAt(index),bounds:bounds.get(index)}));
-    if(snapshot.some(({element:e})=>{const o=objectsByID.get(e?.id);return !o||!['text','shape','image','connector'].includes(o.kind)||o.retroText||(o.kind==='text'&&o.retroLines)||e.inherited||new URLSearchParams(e.query||'').get('object-locked')==='1';}))return false;
-    try{KeynopeWorkspace.resizeConnectedSelection(snapshot,1,deck.cols,deck.rows);return true;}catch{return false;}
+    if(snapshot.some(({element:e})=>{const o=objectsByID.get(e?.id);return !o||!['text','shape','image','table','chart','connector'].includes(o.kind)||o.retroText||(o.kind==='text'&&o.retroLines)||e.inherited||new URLSearchParams(e.query||'').get('object-locked')==='1';}))return false;
+    try{KeynopeWorkspace.resizeConnectedSelection(snapshot,1,deck.cols,deck.rows,undefined,canvasPhysicalGeometry());return true;}catch{return false;}
   }
+  function canvasPhysicalGeometry(){return deck.pages[pageIndex]?.scene||{width:1920,height:1080};}
   function canvasCurrentBounds() {
     const scene=deck.pages[pageIndex]?.scene,elements=editorState?.slides?.[editorState.current]?.elements||[];
     // Overlay reconciliation can trail a committed scene by one animation
@@ -10846,18 +11615,56 @@ if (keynopeAppSurface) {
     return scene?KeynopeWorkspace.sceneSelectionBounds(scene,elements,deck.cols,deck.rows):canvasMemberBounds;
   }
   function canvasUnionBounds(indices,bounds=canvasCurrentBounds()) {
-    const boxes=indices.map(i=>bounds.get(i)).filter(Boolean).map(b=>KeynopeWorkspace.visualBounds(b,deck.cols,deck.rows));
+    const boxes=indices.map(i=>bounds.get(i)).filter(Boolean).map(b=>KeynopeWorkspace.visualBounds(b,deck.cols,deck.rows,canvasPhysicalGeometry()));
     if(!boxes.length)return null;
     return {minX:Math.min(...boxes.map(b=>b.minX)),minY:Math.min(...boxes.map(b=>b.minY)),maxX:Math.max(...boxes.map(b=>b.maxX)),maxY:Math.max(...boxes.map(b=>b.maxY))};
   }
   function canvasMoveSnapshot(indices,bounds=canvasCurrentBounds()) {
-    return indices.map(index=>({index,element:canvasElementAt(index),bounds:bounds.get(index)})).filter(item=>item.element&&item.bounds);
+    const context=canvasGeometryContext();
+    return indices.map(index=>({index,element:canvasElementAt(index),bounds:bounds.get(index),context})).filter(item=>item.element&&item.bounds);
   }
-  function clampCanvasMove(snapshot,dx,dy) {
-    return KeynopeWorkspace.clampMove(snapshot.map(s=>s.bounds),dx,dy,deck.cols,deck.rows);
+  function canvasGeometryContext() {
+    return {epoch:editorDocumentEpoch,revision:editorState.version,mutationRevision:editorState.mutationRevision,slide:editorState.current,master:!!editorState.masterMode,group:editorState.editingGroup||''};
   }
-  function setCanvasObjectOrigin(query,x,y) {
+  function canvasGeometryContextCurrent(context,checkRevision=true) {
+    return context.epoch===editorDocumentEpoch&&(!checkRevision||context.revision===editorState.version)&&context.slide===editorState.current&&context.master===!!editorState.masterMode&&context.group===(editorState.editingGroup||'');
+  }
+  function canvasGeometryGestureCurrent(context) {
+    return canvasGeometryContextCurrent(context,false)&&context.mutationRevision===editorState.mutationRevision;
+  }
+  function canvasArrangeTargets(snapshot,context) {
+    // Selection, timer and private-result traffic can advance the command
+    // revision without changing authored geometry. Preserve the captured
+    // targets, but reject mutations/inheritance changes and view replacement.
+    if(!canvasGeometryGestureCurrent(context))throw Error('The slide changed; reopen Arrange and try again.');
+    const currentBounds=canvasCurrentBounds(),targets=new Map();
+    for(const {index,element,bounds} of snapshot){
+      const current=editorElementIndexByID(element.id,index),liveBounds=currentBounds.get(current);
+      if(current<0||JSON.stringify(canvasElementAt(current))!==JSON.stringify(element)||!liveBounds||['minX','minY','maxX','maxY','rotation'].some(key=>(liveBounds[key]||0)!==(bounds[key]||0)))throw Error('An object changed; reopen Arrange and try again.');
+      targets.set(element.id,current);
+    }
+    return targets;
+  }
+  function canvasArrangeAction(context,targets,updates,options={}) {
+    return performEditorAction({...options,action:'update-elements',sceneRevision:editorState.version,mutationRevision:context.mutationRevision,sceneMaster:context.master,slide:context.slide,elementIndices:updates.map(element=>targets.get(element.id)),elementsData:updates});
+  }
+  function clampCanvasMove(snapshot,dx,dy,precise=false) {
+    return KeynopeWorkspace.clampMove(snapshot.map(s=>s.bounds),dx,dy,deck.cols,deck.rows,precise?0:1,canvasPhysicalGeometry());
+  }
+  function preserveCanvasPositionOverride(query,element) {
+    if(!element?.masterSlotId)return;
+    const owned=['left_pct','right','right_pct','bottom','align','valign','row_delta','shape-offset-x','shape-offset-y','object-offset-x','object-offset-y'];
+    const cleared=new Set((query.get('master-clear')||'').split(',').filter(key=>key&&!owned.includes(key)));
+    for(const key of owned)if(!query.has(key))cleared.add(key);
+    if(cleared.size)query.set('master-clear',[...cleared].sort().join(','));else query.delete('master-clear');
+  }
+  function setCanvasObjectOrigin(query,x,y,element) {
+    // A legacy master can use the same field for paragraph justification and
+    // placement. Preserve the rendered paragraph intent before suppressing it.
+    const object=element?.masterSlotId?deck.pages[pageIndex]?.scene?.objects.find(object=>object.id===element.id):null;
+    if(!query.has('text-align')&&(query.get('align')==='justify'||object?.text?.align==='justify'))query.set('text-align','justify');
     clearCanvasPlacementAnchors(query);
+    query.delete('align');
     query.delete('shape-offset-x');query.delete('shape-offset-y');
     for(const [anchor,axis,value] of [['left','x',x],['top','y',y]]){
       // Round only numerical noise, never the authored fractional position.
@@ -10866,9 +11673,10 @@ if (keynopeAppSurface) {
       const offset=Math.round((precise-whole)*1e10)/1e10;
       if(offset)query.set('object-offset-'+axis,String(offset));else query.delete('object-offset-'+axis);
     }
+    preserveCanvasPositionOverride(query,element);
   }
   async function rotateCanvasSelection(index,degrees) {
-    const revision=editorState.version,slide=editorState.current;
+    const context=canvasGeometryContext();
     const indices=canvasSelectedIndices(index),snapshot=canvasMoveSnapshot(indices);
     const objects=deck.pages[pageIndex]?.scene?.objects||[];
     if(snapshot.length!==indices.length||snapshot.length<2)throw Error('Select at least two objects.');
@@ -10876,110 +11684,290 @@ if (keynopeAppSurface) {
       const object=objects.find(object=>object.id===item.element.id);
       if(!object||object.kind==='connector'||object.retroText||item.element.inherited||new URLSearchParams(item.element.query||'').get('object-locked')==='1')throw Error('This selection contains an object that cannot rotate as a group.');
     }
-    const rotated=KeynopeWorkspace.rotateSelection(snapshot,degrees,deck.cols,deck.rows);
+    const rotated=KeynopeWorkspace.rotateSelection(snapshot,degrees,deck.cols,deck.rows,undefined,canvasPhysicalGeometry());
     for(const item of rotated.items){
-      const box=KeynopeWorkspace.visualBounds(item.bounds,deck.cols,deck.rows);
+      const box=KeynopeWorkspace.visualBounds(item.bounds,deck.cols,deck.rows,canvasPhysicalGeometry());
       if(item.bounds.minX<0||item.bounds.minY<0||box.minX<0||box.minY<0||box.maxX>deck.cols||box.maxY>deck.rows)throw Error('Rotation would extend outside the slide. Move the selection inward first.');
     }
     return queueEditorOperation(async()=>{
-      if(editorState.version!==revision||editorState.current!==slide)throw Error('Selection changed; try rotating again.');
+      const targets=canvasArrangeTargets(snapshot,context);
       const updates=rotated.items.map(item=>{
         const element={...item.element},q=new URLSearchParams(element.query||'');
-        setCanvasObjectOrigin(q,item.bounds.minX,item.bounds.minY);
+        setCanvasObjectOrigin(q,item.bounds.minX,item.bounds.minY,element);
         q.delete('orientation');q.set('object-rotation',String(item.bounds.rotation));
         element.query=q.toString();return element;
       });
-      await performEditorAction({action:'update-elements',performanceKind:'rotate',elementIndices:rotated.items.map(item=>item.index),elementsData:updates});
+      await canvasArrangeAction(context,targets,updates,{performanceKind:'rotate'});
     });
   }
-  async function resizeCanvasSelection(index,factor,pivot=null) {
-    const revision=editorState.version,slide=editorState.current;
-    const indices=canvasSelectedIndices(index),bounds=canvasCurrentBounds();
-    const snapshot=indices.map(index=>({index,element:canvasElementAt(index),bounds:bounds.get(index)}));
+  async function resizeCanvasSelection(index,factor,pivot=null,captured=null) {
+    const context=captured?.context||canvasGeometryContext();
+    const indices=captured?.indices||canvasSelectedIndices(index),bounds=canvasCurrentBounds();
+    const snapshot=captured?.snapshot||indices.map(index=>({index,element:canvasElementAt(index),bounds:bounds.get(index)}));
+    if(captured)canvasArrangeTargets(snapshot,context);
     const objects=deck.pages[pageIndex]?.scene?.objects||[];
     if(snapshot.length!==indices.length||snapshot.length<2)throw Error('Select at least two objects.');
     for(const item of snapshot){
       const object=objects.find(object=>object.id===item.element.id);
-      if(!object||!['text','shape','image','connector'].includes(object.kind)||object.retroText||(object.kind==='text'&&object.retroLines)||item.element.inherited||new URLSearchParams(item.element.query||'').get('object-locked')==='1')throw Error('This selection contains an object that cannot resize as a group.');
+      if(!object||!['text','shape','image','table','chart','connector'].includes(object.kind)||object.retroText||(object.kind==='text'&&object.retroLines)||item.element.inherited||new URLSearchParams(item.element.query||'').get('object-locked')==='1')throw Error('This selection contains an object that cannot resize as a group.');
     }
-    const resized=KeynopeWorkspace.resizeConnectedSelection(snapshot,factor,deck.cols,deck.rows,pivot);
+    const resized=KeynopeWorkspace.resizeConnectedSelection(snapshot,factor,deck.cols,deck.rows,pivot,canvasPhysicalGeometry());
     if(factor===1)return;
     for(const item of resized.items){
-      const b=item.bounds,outer=KeynopeWorkspace.visualBounds(b,deck.cols,deck.rows),minimum=item.element.kind==='shape'?.5:1;
+      const b=item.bounds,outer=KeynopeWorkspace.visualBounds(b,deck.cols,deck.rows,canvasPhysicalGeometry()),minimum=item.element.kind==='shape'?.5:1;
       if(b.maxX-b.minX<minimum||b.maxY-b.minY<minimum)throw Error('A member would become too small.');
       if(b.minX<0||b.minY<0||outer.minX<0||outer.minY<0||outer.maxX>deck.cols||outer.maxY>deck.rows)throw Error('Resizing would extend outside the slide. Move the selection inward first.');
     }
     return queueEditorOperation(async()=>{
-      if(editorState.version!==revision||editorState.current!==slide)throw Error('Selection changed; try resizing again.');
+      const targets=canvasArrangeTargets(snapshot,context);
       const updates=resized.items.map(item=>{
         const element={...item.element},q=new URLSearchParams(element.query||''),b=item.bounds;
-        if(element.kind==='shape')setCanvasShapeBounds(q,b);
+        if(element.kind==='shape')setCanvasShapeBounds(q,b,element);
         else{
-          setCanvasObjectOrigin(q,b.minX,b.minY);
+          setCanvasObjectOrigin(q,b.minX,b.minY,element);
           q.set('width',String(Math.round((b.maxX-b.minX)*1e10)/1e10));q.set('height',String(Math.round((b.maxY-b.minY)*1e10)/1e10));
-          if(element.kind==='image'){q.delete('scale');q.set('stretch','1');}else q.set('text-box','1');
+          if(element.kind==='image'){q.delete('scale');q.set('stretch','1');}else if(!['table','chart'].includes(element.kind))q.set('text-box','1');
         }
         element.query=q.toString();return element;
       });
-      await performEditorAction({action:'update-elements',performanceKind:'resize',elementIndices:[...resized.items,...resized.connectors].map(item=>item.index),elementsData:[...updates,...resized.connectors.map(item=>item.element)]});
+      await canvasArrangeAction(context,targets,[...updates,...resized.connectors.map(item=>item.element)],{performanceKind:'resize'});
     });
   }
   function moveCanvasMembers(snapshot,dx,dy,precise=false) {
-    ({dx,dy}=KeynopeWorkspace.clampMove(snapshot.map(s=>s.bounds),dx,dy,deck.cols,deck.rows,precise?0:1));
+    const context=snapshot[0]?.context||canvasGeometryContext();
+    ({dx,dy}=KeynopeWorkspace.clampMove(snapshot.map(s=>s.bounds),dx,dy,deck.cols,deck.rows,precise?0:1,canvasPhysicalGeometry()));
     if(!dx&&!dy)return Promise.resolve();
     return queueEditorOperation(async()=>{
+      if(!canvasGeometryGestureCurrent(context))throw Error('The slide changed; move cancelled.');
+      const currentBounds=canvasCurrentBounds();
       const indices=[],updates=[];
       for(const {index,element,bounds} of snapshot){
         const current=editorElementIndexByID(element.id,index);
         if(current<0)throw Error('A selected element is no longer available');
+        // Selection-only responses may advance the revision during a drag.
+        // Permit those, but never reuse geometry after an actual object edit.
+        const liveBounds=currentBounds.get(current);
+        if(JSON.stringify(canvasElementAt(current))!==JSON.stringify(element)||!liveBounds||['minX','minY','maxX','maxY','rotation'].some(key=>(liveBounds[key]||0)!==(bounds[key]||0)))throw Error('An object changed; move cancelled.');
         const updated={...canvasElementAt(current)},q=new URLSearchParams(updated.query||'');
-        setCanvasObjectOrigin(q,bounds.minX+dx,bounds.minY+dy);
-        if(updated.kind==='shape')moveCanvasShapeBounds(q,bounds,dx,dy);
+        setCanvasObjectOrigin(q,bounds.minX+dx,bounds.minY+dy,updated);
+        if(updated.kind==='shape')moveCanvasShapeBounds(q,bounds,dx,dy,updated);
         updated.query=q.toString();indices.push(current);updates.push(updated);
       }
-      await performEditorAction({action:'update-elements',performanceKind:'drag',elementIndices:indices,elementsData:updates});
+      await performEditorAction({action:'update-elements',performanceKind:'drag',sceneRevision:editorState.version,mutationRevision:context.mutationRevision,sceneMaster:context.master,slide:context.slide,elementIndices:indices,elementsData:updates});
     });
   }
+  let canvasGeometryDraft=null;
+  let canvasAlignmentReference='slide';
+  let editorStyleCommandBusy=false,editorStylePublishedSignature='',editorStyleScopeSignature='';
+  function editorStyleCommandState(context='') {
+    const off={copy:false,paste:false,reset:false,painter:false};
+    if(!editorState||presenterTimerMode||activeCanvasDrag||shapeConnecting)return off;
+    if(context!==''&&context!=='shape-label')return off;
+    const modal=[...document.querySelectorAll('dialog[open],[aria-modal="true"]')].filter(n=>n.getClientRects().length).at(-1);
+    if(modal?.keynopeTextStyleCommandState)return context===''&&!editorStyleCommandBusy?modal.keynopeTextStyleCommandState():off;
+    if(activeInlineEditor||editorClipboardTextTarget(document.activeElement))return off;
+    if(modal)return context===''&&!editorStyleCommandBusy&&modal.keynopeTableStyleCommandState?modal.keynopeTableStyleCommandState():off;
+    if(editorStyleCommandBusy)return off;
+    const caps=editorState.selectionCapabilities;
+    if(!caps||caps.revision!==editorState.version)return off;
+    const prefix=context==='shape-label'?'style.label.':'style.';
+    return {copy:!!caps.commands?.[prefix+'copy']?.enabled,paste:!!caps.commands?.[prefix+'paste']?.enabled&&!!canvasStyleClipboard&&(canvasStyleClipboard.context||'')===context,reset:!!caps.commands?.[prefix+'reset']?.enabled,painter:!!canvasStylePainter&&(canvasStylePainter.context||'')===context||!!caps.commands?.[prefix+'copy']?.enabled};
+  }
+  function publishEditorStyleCommands() {
+    refreshWordPainterNotice();
+    const scope=JSON.stringify([editorDocumentEpoch,editorState?.version,editorState?.current,!!editorState?.masterMode,editorState?.editingGroup||'',!!presenterTimerMode,!!activeCanvasDrag,!!shapeConnecting]);
+    if(scope!==editorStyleScopeSignature){editorStyleScopeSignature=scope;document.dispatchEvent(new Event('keynope-style-scope-change'));}
+    const state=editorStyleCommandState(),labels=editorStyleCommandState('shape-label'),flags={};
+    for(const [context,values]of [['',state],['label.',labels]])for(const [name,enabled]of Object.entries(values))flags['style.'+context+name]=enabled;
+    const signature=JSON.stringify(flags);if(signature===editorStylePublishedSignature)return;
+    editorStylePublishedSignature=signature;
+    window.webkit?.messageHandlers?.keynopePresenter?.postMessage({action:'editor-style-commands',flags});
+  }
+  async function editorStyleCommand(command,context='') {
+    if(!['copy','paste','reset','painter'].includes(command))return false;
+    if(!editorStyleCommandState(context)[command])return false;
+    const modal=[...document.querySelectorAll('dialog[open],[aria-modal="true"]')].filter(n=>n.getClientRects().length).at(-1);
+    if(modal?.keynopeTextStyleCommand)return modal.keynopeTextStyleCommand(command);
+    KeynopeTextStyles.clearPainter();
+    if(modal?.keynopeTableStyleCommand){
+      if(canvasStylePainter)stopCanvasStylePainter();
+      // A native menu or a replaced cell control may leave focus on body.
+      // Return keyboard ownership to the modal, without entering a cell caret.
+      if(!modal.contains(document.activeElement))modal.focus({preventScroll:true});
+      return modal.keynopeTableStyleCommand(command);
+    }
+    editorStyleCommandBusy=true;publishEditorStyleCommands();
+    try{
+      if(command==='copy')await copyCanvasObjectStyle(context);
+      else if(command==='paste'||command==='reset')await applyCanvasObjectStyle([...editorState.selectionCapabilities.targetIds],command==='reset',context);
+      else if(command==='painter'){
+        const active=canvasStylePainter&&(canvasStylePainter.context||'')===context;
+        if(canvasStylePainter)stopCanvasStylePainter();
+        if(!active){await copyCanvasObjectStyle(context);canvasStylePainter={sticky:false,context,epoch:editorDocumentEpoch};stage.classList.add('keynope-style-painter');editorTopbarPanelSignature='';renderEditorTopbar();}
+      }
+      return true;
+    }finally{editorStyleCommandBusy=false;editorTopbarPanelSignature='';renderEditorTopbar();}
+  }
+  window.keynopeStyleCommand=editorStyleCommand;
+  window.keynopeStyleCommandState=()=>{const state=editorStyleCommandState(),labels=editorStyleCommandState('shape-label'),flags={};for(const [context,values]of [['',state],['label.',labels]])for(const [name,enabled]of Object.entries(values))flags['style.'+context+name]=enabled;return flags;};
+  document.addEventListener('focusin',publishEditorStyleCommands);
+  document.addEventListener('focusout',()=>queueMicrotask(publishEditorStyleCommands));
+  for(const event of ['pointerdown','pointerup','pointercancel'])document.addEventListener(event,()=>queueMicrotask(publishEditorStyleCommands),true);
+  document.addEventListener('keynope-style-capabilities',publishEditorStyleCommands);
+  // Observe modal lifecycle only, not every chart/table/animation repaint.
+  new MutationObserver(records=>{if(records.some(r=>r.type==='attributes'?r.target.matches('dialog,[aria-modal]'):[...r.addedNodes,...r.removedNodes].some(n=>n.nodeType===1&&n.matches('dialog,[aria-modal]'))))publishEditorStyleCommands();}).observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['open','hidden','aria-modal']});
+  let canvasStyleRestoreStarted=false;
+  function restoreCanvasObjectStyle() {
+    if(canvasStyleRestoreStarted)return;
+    const native=window.webkit?.messageHandlers?.keynopeClipboard;
+    if(!native)return;
+    canvasStyleRestoreStarted=true;
+    native.postMessage({action:'style-read'}).then(value=>{
+      if(canvasStyleClipboard||!value)return;
+      const snapshot=JSON.parse(value);
+      if(snapshot?.version!==1||!snapshot.fields)return;
+      canvasStyleClipboard=snapshot;
+      editorTopbarPanelSignature='';renderEditorTopbar();
+    }).catch(()=>{}); // A missing buffer never blocks editing.
+  }
+  function stopCanvasStylePainter() {
+    canvasStylePainter=null;stage.classList.remove('keynope-style-painter');
+    canvasOverlay.querySelectorAll('.style-painter-target').forEach(hit=>hit.classList.remove('style-painter-target'));
+    editorTopbarPanelSignature='';renderEditorTopbar();
+  }
+  async function copyCanvasObjectStyle(styleContext='') {
+    const caps=editorState?.selectionCapabilities;
+    if(!caps?.commands?.[styleContext==='shape-label'?'style.label.copy':'style.copy']?.enabled)throw Error('Select one eligible object to copy its style.');
+    const epoch=editorDocumentEpoch;
+    const response=await fetch('/api/editor/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'copy-object-style',styleContext,slide:editorState.current,sceneMaster:!!editorState.masterMode,sceneRevision:editorState.version,objectIds:caps.targetIds})});
+    if(!response.ok)throw Error((await response.text()).trim());
+    const state=await response.json();
+    if(epoch!==editorDocumentEpoch)throw Error('The document changed; copy the style again.');
+    canvasStyleClipboard=state.styleClipboard;
+    if(!canvasStyleClipboard)throw Error('Could not copy the style.');
+    const native=window.webkit?.messageHandlers?.keynopeClipboard;
+    if(native)await native.postMessage({action:'style-write',data:JSON.stringify(canvasStyleClipboard)});
+    editorTopbarPanelSignature='';renderEditorTopbar();
+    if(editorStatus)editorStatus.textContent='Style copied. Select another object and Paste style, or use Format painter.';
+  }
+  async function applyCanvasObjectStyle(ids,reset=false,styleContext='') {
+    if(!reset&&!canvasStyleClipboard)throw Error('Copy a style first.');
+    if(!reset&&(canvasStyleClipboard.context||'')!==styleContext)throw Error('Copy a matching '+(styleContext?'label':'object')+' style first.');
+    return editorAction({action:reset?'reset-object-style':'paste-object-style',styleContext,slide:editorState.current,sceneMaster:!!editorState.masterMode,sceneRevision:editorState.version,objectIds:ids,styleData:reset?undefined:canvasStyleClipboard});
+  }
+  function appendCanvasStyleTransferTools(container,styleContext='') {
+    const labels=styleContext==='shape-label',prefix=labels?'style.label.':'style.',suffix=labels?' label style':' style',active=!!canvasStylePainter&&(canvasStylePainter.context||'')===styleContext;
+    const section=document.createElement('div');section.className='keynope-style-transfer';
+    const heading=document.createElement('h4');heading.textContent=labels?'Label style transfer':'Style transfer';section.append(heading);
+    if(labels){const state=editorState?.selectionCapabilities?.commands?.['style.label.paste'];if(state?.eligibleIds?.length<state?.totalCount){const note=document.createElement('p');note.textContent=state.eligibleIds.length+' of '+state.totalCount+' selected objects have labels.';section.append(note);}}
+    const handle=fn=>async()=>{try{await fn();}catch(error){if(editorStatus)editorStatus.textContent=error.message;}};
+    const copy=canvasTool('Copy'+suffix,'',handle(()=>editorStyleCommand('copy',styleContext)));copy.setAttribute('aria-label','Copy'+suffix);applyCanvasCommandControl(copy,prefix+'copy');
+    const paste=canvasTool('Paste'+suffix,'',handle(()=>editorStyleCommand('paste',styleContext)));paste.setAttribute('aria-label','Paste'+suffix);applyCanvasCommandControl(paste,prefix+'paste');paste.disabled||=!canvasStyleClipboard||(canvasStyleClipboard.context||'')!==styleContext;
+    const reset=canvasTool('Reset'+suffix,'',handle(()=>editorStyleCommand('reset',styleContext)));reset.setAttribute('aria-label','Reset'+suffix);reset.title='Restore inherited formatting without changing content or position';applyCanvasCommandControl(reset,prefix+'reset');
+    const painterLabel=labels?'Label format painter':'Format painter';
+    const painter=canvasTool(painterLabel,active?'active':'',handle(()=>editorStyleCommand('painter',styleContext)));painter.setAttribute('aria-label',painterLabel);painter.setAttribute('aria-pressed',String(active));if(!active)applyCanvasCommandControl(painter,prefix+'copy');
+    for(const control of [copy,paste,reset,painter])control.disabled||=editorStyleCommandBusy;
+    section.append(copy,paste,painter,reset);
+    if(active){const label=document.createElement('label'),sticky=document.createElement('input');sticky.type='checkbox';sticky.checked=canvasStylePainter.sticky;sticky.setAttribute('aria-label',labels?'Keep label format painter active':'Keep format painter active');sticky.onchange=()=>{if(canvasStylePainter)canvasStylePainter.sticky=sticky.checked;};label.append(sticky,' Keep painting');section.append(label);}
+    container.append(section);
+  }
+  function canvasStylePainterTarget(event,allowTables=false) {
+    const hit=event.target.closest?.('.keynope-canvas-element,.keynope-connector-hit');
+    if(!hit||!canvasOverlay.contains(hit))return null;
+    const index=Number(hit.dataset.element),element=canvasElementAt(index);
+    if(!element||!['text','heading','bullet','code','text-image','page-number','shape','image','connector',...(allowTables?['table']:[])].includes(element.kind))return null;
+    const indices=canvasGroupMembers(index);
+    if(indices.some(i=>new URLSearchParams(canvasElementAt(i)?.query||'').get('object-locked')==='1'||canvasElementAt(i)?.inherited))return null;
+    if(canvasStylePainter?.context==='shape-label'&&(element.kind!=='shape'||!deck.pages[pageIndex]?.scene?.objects.find(o=>o.id===element.id)?.label?.runs?.some(r=>r.text)||canvasGroupID(element)&&canvasGroupID(element)!==editorState.editingGroup))return null;
+    return {hit,ids:indices.map(i=>canvasElementAt(i)?.id).filter(Boolean)};
+  }
+  canvasOverlay.addEventListener('pointerover',event=>{
+    if(presenterTimerMode)return;
+    const wordPainter=window.KeynopeTextStyles?.painterState(wordPainterScope());
+    if(!canvasStylePainter&&!wordPainter)return;
+    canvasOverlay.querySelectorAll('.style-painter-target').forEach(hit=>hit.classList.remove('style-painter-target'));
+    const target=canvasStylePainterTarget(event,!!wordPainter);
+    if(wordPainter&&target){
+      const element=canvasElementAt(Number(target.hit.dataset.element)),object=deck.pages[pageIndex]?.scene?.objects.find(o=>o.id===element?.id);
+      const texts=object?.table?object.table.cells.map(cell=>cell.text):[object?.kind==='shape'?object.label:object?.text];
+      if(!object?.editable||object.retroText||object.retroLabel||object.kind==='text'&&object.retroLines||!['text','heading','code','bullet','shape','table'].includes(element?.kind)||canvasGroupID(element)&&canvasGroupID(element)!==editorState.editingGroup||!texts.some(text=>text?.runs?.some(r=>r.text)||text?.paragraphs?.some(p=>p.runs?.some(r=>r.text))))return;
+    }
+    target?.hit.classList.add('style-painter-target');
+  });
+  canvasOverlay.addEventListener('pointerout',event=>event.target.closest?.('.style-painter-target')?.classList.remove('style-painter-target'));
+  // Capture before selection/drag/marquee handlers: painting never moves an object.
+  stage.addEventListener('pointerdown',event=>{
+    if(!canvasStylePainter||event.button!==0)return;
+    event.preventDefault();event.stopImmediatePropagation();
+    const painter=canvasStylePainter,target=canvasStylePainterTarget(event);
+    if(painter.epoch!==editorDocumentEpoch){stopCanvasStylePainter();return;}
+    if(!target){if(editorStatus)editorStatus.textContent=painter.context==='shape-label'?'Choose an unlocked labelled shape; enter its group first.':'Choose an unlocked, editable object.';return;}
+    applyCanvasObjectStyle(target.ids,false,painter.context||'').then(()=>{if(canvasStylePainter===painter&&!painter.sticky)stopCanvasStylePainter();}).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;});
+  },true);
   function canvasGeometryControls(index) {
     const indices=canvasSelectedIndices(index),snapshot=canvasMoveSnapshot(indices),selectionBounds=canvasUnionBounds(indices);
     if(!selectionBounds||snapshot.length!==indices.length||snapshot.some(item=>item.element.kind==='connector'))return null;
     const form=document.createElement('form');form.className='keynope-geometry-controls';form.setAttribute('aria-label','Object geometry');
     const caption=document.createElement('p');caption.textContent='Position and size · slide cells';form.append(caption);
     const single=snapshot.length===1&&(!canvasGroupID(snapshot[0].element)||canvasGroupID(snapshot[0].element)===editorState.editingGroup);
-    const bounds=single?snapshot[0].bounds:selectionBounds;
-    const locked=snapshot.some(item=>new URLSearchParams(item.element.query||'').get('object-locked')==='1');
+    const accepted=single&&editorState.selectionCapabilities?.revision===editorState.version?editorState.selectionCapabilities.geometry:null;
+    const bounds=accepted?{...snapshot[0].bounds,minX:accepted.x,minY:accepted.y,maxX:accepted.x+accepted.width,maxY:accepted.y+accepted.height}:single?snapshot[0].bounds:selectionBounds;
+    const permission=canvasSelectionCommand(single?'arrange.geometry':'arrange.move');
+    const locked=permission?!permission.enabled:snapshot.some(item=>new URLSearchParams(item.element.query||'').get('object-locked')==='1');
     const values={x:bounds.minX,y:bounds.minY,width:bounds.maxX-bounds.minX,height:bounds.maxY-bounds.minY},inputs={};
+    const selectionKey=JSON.stringify([editorDocumentEpoch,editorState.current,!!editorState.masterMode,editorState.editingGroup||'',snapshot.map(item=>item.element.id)]);
+    const draftKey=JSON.stringify([editorState.version,selectionKey]);
+    if(canvasGeometryDraft?.key!==draftKey)canvasGeometryDraft={key:draftKey,selectionKey,values:{},aspectLocked:canvasGeometryDraft?.selectionKey===selectionKey&&!!canvasGeometryDraft.aspectLocked,ratio:values.width/values.height};
+    const draft=canvasGeometryDraft;
     const step=snapshot.every(item=>item.element.kind==='shape')?.5:1;
     const sceneObject=single?deck.pages[pageIndex]?.scene?.objects.find(object=>object.id===snapshot[0].element.id):null;
-    const preciseSize=['shape','image'].includes(sceneObject?.kind)||(sceneObject?.kind==='text'&&!sceneObject.retroText&&!sceneObject.retroLines);
+    const preciseSize=['shape','image','table','chart'].includes(sceneObject?.kind)||(sceneObject?.kind==='text'&&!sceneObject.retroText&&!sceneObject.retroLines);
     for(const [key,label] of [['x','X'],['y','Y'],['width','Width'],['height','Height']]){
-      const wrapper=document.createElement('label'),input=document.createElement('input');wrapper.textContent=label;input.type='number';input.required=true;input.setAttribute('aria-label','Object '+label.toLowerCase());input.value=String(Math.round(values[key]*1000)/1000);input.step='any';input.min=key==='width'||key==='height'?String(step):'0';input.max=String(key==='x'||key==='width'?deck.cols:deck.rows);input.disabled=locked||(!single&&(key==='width'||key==='height'));input.title='Slide cells; '+(step===1?'whole-cell':'half-cell')+' placement';wrapper.append(input);form.append(wrapper);inputs[key]=input;
+      const wrapper=document.createElement('label'),input=document.createElement('input');wrapper.textContent=label;input.type='number';input.required=true;input.setAttribute('aria-label','Object '+label.toLowerCase());input.value=Object.hasOwn(draft.values,key)?draft.values[key]:String(Math.round(values[key]*1000)/1000);input.step='any';input.min=key==='width'||key==='height'?String(step):'0';input.max=String(key==='x'||key==='width'?deck.cols:deck.rows);input.disabled=locked||(!single&&(key==='width'||key==='height'));input.title='Slide cells; '+(step===1?'whole-cell':'half-cell')+' placement';input.addEventListener('input',()=>{draft.values[key]=input.value;});wrapper.append(input);form.append(wrapper);inputs[key]=input;
     }
     for(const key of ['x','y'])inputs[key].title='Position in slide cells; fractional values supported';
     if(preciseSize)for(const key of ['width','height'])inputs[key].title=(sceneObject.kind==='text'?'Wrapping space':'Size')+' in slide cells; fractional values supported';
+    const fieldNumber=key=>inputs[key].value===String(Math.round(values[key]*1000)/1000)?values[key]:Number(inputs[key].value);
+    if(single&&preciseSize){
+      const label=document.createElement('label');label.className='keynope-geometry-aspect';
+      const aspect=document.createElement('input');aspect.type='checkbox';aspect.checked=!!draft.aspectLocked;aspect.disabled=locked;
+      aspect.setAttribute('aria-label','Lock object aspect ratio');label.append(aspect,document.createTextNode('Lock aspect ratio'));form.append(label);
+      aspect.addEventListener('change',()=>{
+        draft.aspectLocked=aspect.checked;
+        const width=fieldNumber('width'),height=fieldNumber('height');
+        draft.ratio=width>0&&height>0&&Number.isFinite(width/height)?width/height:values.width/values.height;
+      });
+      for(const key of ['width','height'])inputs[key].addEventListener('input',()=>{
+        if(!draft.aspectLocked||!(draft.ratio>0)||!Number.isFinite(draft.ratio))return;
+        const value=Number(inputs[key].value);if(!(value>0)||!Number.isFinite(value))return;
+        const other=key==='width'?'height':'width',paired=key==='width'?value/draft.ratio:value*draft.ratio;
+        inputs[other].value=String(paired);draft.values[other]=inputs[other].value;
+      });
+    }
     const status=document.createElement('p');status.setAttribute('role','status');status.className='keynope-geometry-status';
-    const apply=document.createElement('button');apply.type='submit';apply.textContent='Apply geometry';apply.disabled=locked;form.append(apply,status);
-    const revision=editorState.version,slide=editorState.current;
+    const apply=document.createElement('button');apply.type='submit';apply.textContent='Apply geometry';apply.disabled=locked;applyCanvasCommandControl(apply,single?'arrange.geometry':'arrange.move');form.append(apply,status);
+    const reset=document.createElement('button');reset.type='button';reset.textContent='Reset fields';reset.disabled=locked;form.append(reset);
+    reset.addEventListener('click',()=>{
+      draft.values={};draft.ratio=values.width/values.height;
+      for(const key of Object.keys(inputs))inputs[key].value=String(Math.round(values[key]*1000)/1000);
+      status.textContent='Fields restored to the current object.';
+    });
+    const slide=editorState.current,context=canvasGeometryContext();
     form.addEventListener('keydown',event=>event.stopPropagation());
     form.addEventListener('submit',async event=>{
       event.preventDefault();if(!form.reportValidity()||locked)return;
-      if(editorState.version!==revision||editorState.current!==slide){status.textContent='Selection changed; reopen Arrange before applying.';return;}
-      const next={};for(const key of Object.keys(inputs)){const shown=String(Math.round(values[key]*1000)/1000);next[key]=inputs[key].value===shown?values[key]:Number(inputs[key].value);}
+      if(!canvasGeometryGestureCurrent(context)){status.textContent='The slide changed; reopen Arrange before applying.';return;}
+      const next={};for(const key of Object.keys(inputs))next[key]=fieldNumber(key);
       if(Object.values(next).some(value=>!Number.isFinite(value))||next.x+next.width>deck.cols||next.y+next.height>deck.rows){status.textContent='Keep the box within the slide.';return;}
       const resized=single&&(Math.abs(next.width-values.width)>.0001||Math.abs(next.height-values.height)>.0001);
       const dx=next.x-values.x,dy=next.y-values.y;
       apply.disabled=true;
       try{
-        if(!resized)await moveCanvasMembers(snapshot,dx,dy,true);
-        else{
-          const source=snapshot[0],updated={...source.element},q=new URLSearchParams(updated.query||'');
+        if(single){
           const dimension=value=>Math.max(step,preciseSize?value:Math.round(value/step)*step);
-          const box={minX:values.x+dx,minY:values.y+dy,maxX:values.x+dx+dimension(next.width),maxY:values.y+dy+dimension(next.height)};
-          if(box.maxX>deck.cols||box.maxY>deck.rows)throw Error('Rounded dimensions exceed the slide; reduce the box size.');
-          if(updated.kind==='shape')setCanvasShapeBounds(q,box);
-          else{setCanvasObjectOrigin(q,box.minX,box.minY);q.set('width',String(box.maxX-box.minX));q.set('height',String(box.maxY-box.minY));if(updated.kind==='image'){q.delete('scale');q.set('stretch','1');}else q.set('text-box','1');}
-          updated.query=q.toString();await updateEditorElementByID(updated.id,source.index,updated);
+          await queueEditorOperation(async()=>{canvasArrangeTargets(snapshot,context);await performEditorAction({action:'set-selection-geometry',slide,sceneMaster:context.master,sceneRevision:editorState.version,mutationRevision:context.mutationRevision,objectIds:[snapshot[0].element.id],geometryResize:resized,geometry:{x:next.x,y:next.y,width:dimension(next.width),height:dimension(next.height)}});});
         }
+        else await moveCanvasMembers(snapshot,dx,dy,true);
         status.textContent='Geometry applied.';
       }catch(error){status.textContent=error.message||'Could not apply geometry';}finally{apply.disabled=locked;}
     });
@@ -10998,28 +11986,29 @@ if (keynopeAppSurface) {
     return units;
   }
   function distributeCanvasSelection(index,axis) {
-    const units=canvasArrangeUnits(index),moves=KeynopeWorkspace.distribute(units,axis);
+    const units=canvasArrangeUnits(index),moves=KeynopeWorkspace.distribute(units,axis),context=canvasGeometryContext();
     if(!moves.some(move=>Math.abs(move.dx)>0.000001||Math.abs(move.dy)>0.000001))return;
     return queueEditorOperation(async()=>{
+      const targets=canvasArrangeTargets(units.flatMap(unit=>unit.snapshot),context);
       const indices=[],updates=[];
       for(const move of moves){
         if(!move.dx&&!move.dy)continue;
         for(const {index,element,bounds} of units.find(unit=>unit.id===move.id).snapshot){
           const current=editorElementIndexByID(element.id,index);if(current<0)throw Error('A selected element is no longer available');
           const updated={...canvasElementAt(current)},q=new URLSearchParams(updated.query||'');
-          setCanvasObjectOrigin(q,bounds.minX+move.dx,bounds.minY+move.dy);
-          if(updated.kind==='shape')moveCanvasShapeBounds(q,bounds,move.dx,move.dy);
+          setCanvasObjectOrigin(q,bounds.minX+move.dx,bounds.minY+move.dy,updated);
+          if(updated.kind==='shape')moveCanvasShapeBounds(q,bounds,move.dx,move.dy,updated);
           updated.query=q.toString();indices.push(current);updates.push(updated);
         }
       }
-      if(indices.length)await performEditorAction({action:'update-elements',elementIndices:indices,elementsData:updates});
-    });
+      if(indices.length)await canvasArrangeAction(context,targets,updates);
+    }).catch(error=>showEditorCommandError(error,context));
   }
   function matchCanvasSelectionSize(index,axis,status) {
-    const units=canvasArrangeUnits(index),revision=editorState.version,slide=editorState.current;
+    const units=canvasArrangeUnits(index),context=canvasGeometryContext();
     if(units.length<2||units.some(unit=>unit.snapshot.length!==1))return;
     return queueEditorOperation(async()=>{
-      if(editorState.version!==revision||editorState.current!==slide)throw Error('Selection changed; reopen Arrange before applying.');
+      const targets=canvasArrangeTargets(units.flatMap(unit=>unit.snapshot),context);
       // Matching dimensions is a local-box operation, unlike distribution
       // which uses the rotated outer bounds for spacing on the slide.
       const changes=KeynopeWorkspace.matchSize(units.map(unit=>{
@@ -11033,15 +12022,15 @@ if (keynopeAppSurface) {
         const current=editorElementIndexByID(source.element.id,source.index);
         if(current<0)throw Error('A selected element is no longer available.');
         const updated={...canvasElementAt(current)},q=new URLSearchParams(updated.query||'');
-        if(updated.kind==='shape')setCanvasShapeBounds(q,box);
+        if(updated.kind==='shape')setCanvasShapeBounds(q,box,updated);
         else{
-          setCanvasObjectOrigin(q,box.minX,box.minY);
+          setCanvasObjectOrigin(q,box.minX,box.minY,updated);
           q.set('width',String(box.maxX-box.minX));q.set('height',String(box.maxY-box.minY));
-          if(updated.kind==='image'){q.delete('scale');q.set('stretch','1');}else q.set('text-box','1');
+          if(updated.kind==='image'){q.delete('scale');q.set('stretch','1');}else if(!['table','chart'].includes(updated.kind))q.set('text-box','1');
         }
         updated.query=q.toString();indices.push(current);updates.push(updated);
       }
-      if(indices.length)await performEditorAction({action:'update-elements',elementIndices:indices,elementsData:updates});
+      if(indices.length)await canvasArrangeAction(context,targets,updates);
     }).catch(error=>{status.textContent=error.message||'Could not match object sizes.';});
   }
   function alignCanvasGroup(index,alignment,vertical=false){
@@ -11050,31 +12039,34 @@ if (keynopeAppSurface) {
     const b=canvasUnionBounds(indices);if(!b)return false;
     const dx=vertical?0:alignment==='left'?-b.minX:alignment==='right'?deck.cols-b.maxX:(deck.cols-b.maxX-b.minX)/2;
     const dy=!vertical?0:alignment==='top'?-b.minY:alignment==='bottom'?deck.rows-b.maxY:(deck.rows-b.maxY-b.minY)/2;
-    moveCanvasMembers(canvasMoveSnapshot(indices),dx,dy,true).catch(()=>{});return true;
+    moveCanvasMembers(canvasMoveSnapshot(indices),dx,dy,true).catch(showEditorCommandError);return true;
   }
   function alignCanvasSceneObjects(index,alignment,vertical=false){
     if(!deck.pages[pageIndex]?.scene)return false;
-    const units=canvasArrangeUnits(index),revision=editorState.version,slide=editorState.current;
+    const units=canvasArrangeUnits(index),context=canvasGeometryContext();
     if(!units.length)return false;
+    const reference=canvasAlignmentReference==='selection'&&units.length>1?{
+      minX:Math.min(...units.map(unit=>unit.bounds.minX)),minY:Math.min(...units.map(unit=>unit.bounds.minY)),
+      maxX:Math.max(...units.map(unit=>unit.bounds.maxX)),maxY:Math.max(...units.map(unit=>unit.bounds.maxY))
+    }:{minX:0,minY:0,maxX:deck.cols,maxY:deck.rows};
+    const moves=KeynopeWorkspace.alignmentMoves(units,alignment,vertical,reference);
     queueEditorOperation(async()=>{
-      if(editorState.version!==revision||editorState.current!==slide)return;
+      const targets=canvasArrangeTargets(units.flatMap(unit=>unit.snapshot),context);
       const indices=[],updates=[];
       for(const unit of units){
-        const b=unit.bounds;
-        const desiredX=vertical?0:alignment==='left'?-b.minX:alignment==='right'?deck.cols-b.maxX:(deck.cols-b.maxX-b.minX)/2;
-        const desiredY=!vertical?0:alignment==='top'?-b.minY:alignment==='bottom'?deck.rows-b.maxY:(deck.rows-b.maxY-b.minY)/2;
-        const {dx,dy}=KeynopeWorkspace.clampMove(unit.snapshot.map(s=>s.bounds),desiredX,desiredY,deck.cols,deck.rows,0);
+        const move=moves.find(move=>move.id===unit.id);
+        const {dx,dy}=KeynopeWorkspace.clampMove(unit.snapshot.map(s=>s.bounds),move.dx,move.dy,deck.cols,deck.rows,0,canvasPhysicalGeometry());
         if(!dx&&!dy)continue;
         for(const item of unit.snapshot){
           const element={...item.element},q=new URLSearchParams(element.query||'');
           if(q.get('align')==='justify'&&!q.has('text-align'))q.set('text-align','justify');
-          setCanvasObjectOrigin(q,item.bounds.minX+dx,item.bounds.minY+dy);
-          if(element.kind==='shape')moveCanvasShapeBounds(q,item.bounds,dx,dy);
-          element.query=q.toString();indices.push(item.index);updates.push(element);
+          setCanvasObjectOrigin(q,item.bounds.minX+dx,item.bounds.minY+dy,element);
+          if(element.kind==='shape')moveCanvasShapeBounds(q,item.bounds,dx,dy,element);
+          element.query=q.toString();indices.push(targets.get(element.id));updates.push(element);
         }
       }
-      if(indices.length)await performEditorAction({action:'update-elements',elementIndices:indices,elementsData:updates});
-    }).catch(()=>{});
+      if(indices.length)await canvasArrangeAction(context,targets,updates);
+    }).catch(error=>showEditorCommandError(error,context));
     return true;
   }
   function appendCanvasGroupTools(container,index){
@@ -11090,12 +12082,12 @@ if (keynopeAppSurface) {
   function clearCanvasGuides(){canvasOverlay.querySelectorAll('.keynope-alignment-guide').forEach(node=>node.remove());}
   function snappedCanvasMove(snapshot,bounds,dx,dy,event){
     clearCanvasGuides();
-    if(document.documentElement.dataset.keynopeSnapping==='off'||event.altKey||(!dx&&!dy))return clampCanvasMove(snapshot,dx,dy);
+    if(document.documentElement.dataset.keynopeSnapping==='off'||event.altKey||(!dx&&!dy))return clampCanvasMove(snapshot,dx,dy,true);
     const excluded=new Set(snapshot.map(item=>item.index)),targets=[{minX:0,minY:0,maxX:deck.cols,maxY:deck.rows,spacing:false}];
-    for(const [index,box] of canvasCurrentBounds())if(!excluded.has(index))targets.push(KeynopeWorkspace.visualBounds(box,deck.cols,deck.rows));
+    for(const [index,box] of canvasCurrentBounds())if(!excluded.has(index))targets.push(KeynopeWorkspace.visualBounds(box,deck.cols,deck.rows,canvasPhysicalGeometry()));
     const rect=canvasOverlay.getBoundingClientRect();
-    const result=KeynopeWorkspace.snapMove(KeynopeWorkspace.visualBounds(bounds,deck.cols,deck.rows),targets,dx,dy,6*deck.cols/Math.max(1,rect.width),6*deck.rows/Math.max(1,rect.height));
-    const clamped=clampCanvasMove(snapshot,result.dx,result.dy);
+    const result=KeynopeWorkspace.snapMove(KeynopeWorkspace.visualBounds(bounds,deck.cols,deck.rows,canvasPhysicalGeometry()),targets,dx,dy,6*deck.cols/Math.max(1,rect.width),6*deck.rows/Math.max(1,rect.height),0);
+    const clamped=clampCanvasMove(snapshot,result.dx,result.dy,true);
     for(const guide of result.guides){
       if((guide.axis==='x'&&clamped.dx!==result.dx)||(guide.axis==='y'&&clamped.dy!==result.dy))continue;
       if(guide.spacing){
@@ -11122,13 +12114,15 @@ if (keynopeAppSurface) {
     const indices=canvasSelectedIndices(index),currentBounds=canvasCurrentBounds(),snapshot=indices.map(index=>({index,element:canvasElementAt(index),bounds:currentBounds.get(index)})),bounds=canvasUnionBounds(indices);
     if(!bounds||snapshot.length<2)return false;
     if(!canvasSelectionCanResize(indices))return false;
-    const revision=editorState.version,slide=editorState.current;
+    const slide=editorState.current,context=canvasGeometryContext();
     const pivot={x:corner.includes('w')?bounds.maxX:bounds.minX,y:corner.includes('n')?bounds.maxY:bounds.minY};
     const sourceScene=deck.pages[pageIndex]?.scene;
     let previewFrame=0,pendingPreview=null;
     const master=!!editorState.masterMode,hasConnectors=sourceScene?.objects.some(object=>object.kind==='connector');
     let draftGeneration=0,draftBusy=false,queuedDraft=null,draftController=null;
-    const currentDraft=()=>activeCanvasDrag===token&&modernPageSource===sourceScene&&editorState.version===revision&&editorState.current===slide&&!!editorState.masterMode===master;
+    let finished=false;
+    const sourcePage=pageIndex;
+    const currentDraft=()=>!finished&&activeCanvasDrag===token&&pageIndex===sourcePage&&canvasGeometryGestureCurrent(context);
     const paintPreview=scene=>{
       pendingPreview=scene;
       if(!previewFrame)previewFrame=requestAnimationFrame(()=>{previewFrame=0;if(currentDraft())modernPageView?.update(pendingPreview);pendingPreview=null;});
@@ -11138,10 +12132,10 @@ if (keynopeAppSurface) {
       const request=queuedDraft;queuedDraft=null;draftBusy=true;
       const controller=new AbortController();draftController=controller;
       try{
-        const response=await fetch('/api/editor/connector-draft',{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,body:JSON.stringify({revision,master,slide,bounds:request.bounds,routes:request.routes})});
+        const response=await fetch('/api/editor/connector-draft',{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,body:JSON.stringify({revision:request.revision,master,slide,bounds:request.bounds,routes:request.routes})});
         if(!response.ok)return;
         const result=await response.json();
-        if(!currentDraft()||request.generation!==draftGeneration||result.revision!==revision)return;
+        if(!currentDraft()||request.generation!==draftGeneration||result.revision!==request.revision)return;
         const routes=new Map((result.routes||[]).map(route=>[route.id,route]));
         paintPreview({...request.scene,objects:request.scene.objects.map(object=>{
           const route=routes.get(object.id);if(object.kind!=='connector'||!route)return object;
@@ -11173,7 +12167,7 @@ if (keynopeAppSurface) {
       if(hasConnectors){
         const bounds={};for(const item of items)if(item.element.kind==='shape'){const b=item.bounds;bounds[item.element.id]={x:b.minX,y:b.minY,width:b.maxX-b.minX,height:b.maxY-b.minY};}
         const routes={};for(const item of connectors){const raw=new URLSearchParams(item.element.query||'').get('connector-route');if(raw)routes[item.element.id]=JSON.parse(raw);}
-        if(Object.keys(bounds).length){queuedDraft={bounds,routes,scene,generation:draftGeneration};sendConnectorDraft();}
+        if(Object.keys(bounds).length){queuedDraft={bounds,routes,scene,generation:draftGeneration,revision:editorState.version};sendConnectorDraft();}
       }
     };
     const dx=(corner.includes('w')?bounds.minX:bounds.maxX)-pivot.x,dy=(corner.includes('n')?bounds.minY:bounds.maxY)-pivot.y;
@@ -11183,27 +12177,91 @@ if (keynopeAppSurface) {
     let factor=1;
     const calculate=e=>Math.max(.001,1+((e.clientX-event.clientX)*vx+(e.clientY-event.clientY)*vy)/(vx*vx+vy*vy));
     const move=e=>{
+      if(e.pointerId!==event.pointerId||finished)return;
+      if(!currentDraft()){cancel();return;}
       const candidate=calculate(e);let resized;
-      try{resized=KeynopeWorkspace.resizeConnectedSelection(snapshot,candidate,deck.cols,deck.rows,pivot);}catch{return;}
-      for(const item of resized.items){const b=item.bounds,outer=KeynopeWorkspace.visualBounds(b,deck.cols,deck.rows),minimum=item.element.kind==='shape'?.5:1;if(b.maxX-b.minX<minimum||b.maxY-b.minY<minimum||b.minX<0||b.minY<0||outer.minX<0||outer.minY<0||outer.maxX>deck.cols||outer.maxY>deck.rows)return;}
+      try{resized=KeynopeWorkspace.resizeConnectedSelection(snapshot,candidate,deck.cols,deck.rows,pivot,canvasPhysicalGeometry());}catch{return;}
+      for(const item of resized.items){const b=item.bounds,outer=KeynopeWorkspace.visualBounds(b,deck.cols,deck.rows,canvasPhysicalGeometry()),minimum=item.element.kind==='shape'?.5:1;if(b.maxX-b.minX<minimum||b.maxY-b.minY<minimum||b.minX<0||b.minY<0||outer.minX<0||outer.minY<0||outer.maxX>deck.cols||outer.maxY>deck.rows)return;}
       factor=candidate;
       preview(resized.items,resized.connectors);
       Object.assign(hit.style,{left:(pivot.x+(bounds.minX-pivot.x)*factor)/deck.cols*100+'%',top:(pivot.y+(bounds.minY-pivot.y)*factor)/deck.rows*100+'%',width:(bounds.maxX-bounds.minX)*factor/deck.cols*100+'%',height:(bounds.maxY-bounds.minY)*factor/deck.rows*100+'%'});
     };
     const cleanup=()=>{
+      if(finished)return;
+      const restore=currentDraft();finished=true;
       draftGeneration++;queuedDraft=null;draftController?.abort();draftController=null;
       if(previewFrame)cancelAnimationFrame(previewFrame);previewFrame=0;pendingPreview=null;
-      if(modernPageSource===sourceScene)modernPageView?.update(sourceScene);
-      hit.removeEventListener('pointermove',move);hit.removeEventListener('pointerup',finish);hit.removeEventListener('pointercancel',cancel);window.removeEventListener('keydown',escape,true);window.removeEventListener('blur',cancel);
+      if(restore)modernPageView?.update(deck.pages[pageIndex]?.scene||sourceScene);
+      hit.removeEventListener('pointermove',move);hit.removeEventListener('pointerup',finish);hit.removeEventListener('pointercancel',cancel);hit.removeEventListener('lostpointercapture',cancel);window.removeEventListener('keydown',escape,true);window.removeEventListener('blur',cancel);
       Object.assign(hit.style,original);if(activeCanvasDrag===token)activeCanvasDrag=null;
       if(hit.hasPointerCapture(event.pointerId))hit.releasePointerCapture(event.pointerId);
     };
-    const cancel=()=>{cleanup();renderEditorCanvasOverlay();};
+    const cancel=e=>{if(finished||e?.pointerId!=null&&e.pointerId!==event.pointerId)return;cleanup();renderEditorCanvasOverlay();};
     token.cancel=cancel;
     const escape=e=>{if(e.key==='Escape'){e.preventDefault();e.stopImmediatePropagation();cancel();}};
-    const finish=async e=>{move(e);cleanup();try{if(editorState.version!==revision||editorState.current!==slide)throw Error('Selection changed; resize cancelled.');await resizeCanvasSelection(index,factor,pivot);}catch(error){if(editorStatus)editorStatus.textContent=error.message;}finally{renderEditorCanvasOverlay();}};
-    hit.addEventListener('pointermove',move);hit.addEventListener('pointerup',finish);hit.addEventListener('pointercancel',cancel);window.addEventListener('keydown',escape,true);window.addEventListener('blur',cancel);
+    const finish=async e=>{if(finished||e.pointerId!==event.pointerId)return;if(!currentDraft()){cancel();return;}move(e);cleanup();try{await resizeCanvasSelection(index,factor,pivot,{context,indices,snapshot});}catch(error){showEditorCommandError(error,context);}finally{renderEditorCanvasOverlay();}};
+    hit.addEventListener('pointermove',move);hit.addEventListener('pointerup',finish);hit.addEventListener('pointercancel',cancel);hit.addEventListener('lostpointercapture',cancel);window.addEventListener('keydown',escape,true);window.addEventListener('blur',cancel);
     return true;
+  }
+  function beginCanvasMovePreview(snapshot,context){
+    const source=deck.pages[pageIndex]?.scene,sourcePage=pageIndex,view=modernPageView;
+    if(!source||!view)return {move(){},stop(){},restore(){}};
+    const ids=new Set(snapshot.map(item=>item.element.id));
+    const shapes=snapshot.filter(item=>item.element.kind==='shape');
+    const connected=shapes.length&&source.objects.some(object=>object.kind==='connector');
+    let dx=0,dy=0,generation=0,frame=0,closed=false,busy=false,queued=null,controller=null,routed=null;
+    const current=()=>!closed&&pageIndex===sourcePage&&modernPageView===view&&canvasGeometryGestureCurrent(context);
+    const candidate=()=>({...source,objects:source.objects.map(object=>{
+      const route=routed?.generation===generation?routed.routes.get(object.id):null;
+      if(route&&object.kind==='connector'){
+        const projected={...object,points:route.points.map(p=>({x:p.x*source.width/deck.cols,y:p.y*source.height/deck.rows}))};
+        if(object.retroLines&&routed.lines?.[object.id]){projected.bounds={x:0,y:0,width:source.width,height:source.height};projected.retroLines={...object.retroLines,lines:routed.lines[object.id]};}
+        return projected;
+      }
+      if(!ids.has(object.id)||object.kind==='connector')return object;
+      const x=dx*source.width/deck.cols,y=dy*source.height/deck.rows;
+      const projected={...object,bounds:{...object.bounds,x:object.bounds.x+x,y:object.bounds.y+y}};
+      if(object.retroLines)projected.sampleOffset={x:(object.sampleOffset?.x||0)+x,y:(object.sampleOffset?.y||0)+y};
+      return projected;
+    })});
+    const schedule=()=>{if(!frame&&current())frame=requestAnimationFrame(paint);};
+    const pump=async()=>{
+      if(busy||!queued||!current())return;
+      const request=queued;queued=null;busy=true;controller=new AbortController();
+      try{
+        const response=await fetch('/api/editor/connector-draft',{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,body:JSON.stringify({revision:request.revision,master:context.master,slide:context.slide,bounds:request.bounds})});
+        if(!response.ok)return;
+        const result=await response.json();
+        if(!current()||request.generation!==generation||result.revision!==request.revision)return;
+        routed={generation,lines:result.lines,routes:new Map((result.routes||[]).map(route=>[route.id,route]))};schedule();
+      }catch(error){/* Keep immediate transforms; release commits authoritative routing. */}
+      finally{busy=false;controller=null;if(queued&&current())pump();}
+    };
+    const paintPositions=()=>{
+      // Moving changes no local artwork. Do not traverse unrelated rich table
+      // cells or serialize image payloads for each pointer frame. Authoritative
+      // vector routes can share this narrow path without revisiting rich cells.
+      const x=dx*source.width/deck.cols,y=dy*source.height/deck.rows;
+      const positions=source.objects.filter(object=>ids.has(object.id)&&object.kind!=='connector').map(object=>({id:object.id,x:object.bounds.x+x,y:object.bounds.y+y}));
+      const routes=routed?.generation===generation?[...routed.routes].map(([id,route])=>({id,points:route.points.map(p=>({x:p.x*source.width/deck.cols,y:p.y*source.height/deck.rows}))})):[];
+      if(!view.previewPositions?.(positions,routes))return view.update(candidate());
+      return true;
+    };
+    function paint(){frame=0;if(!current())return;paintPositions();if(queued)pump();}
+    const stop=keep=>{
+      if(closed)return;
+      if(frame){cancelAnimationFrame(frame);frame=0;if(keep&&current())paintPositions();}
+      closed=true;generation++;queued=null;controller?.abort();
+    };
+    return {
+      move(x,y,immediate=false){
+        if(!current()||!Number.isFinite(x)||!Number.isFinite(y)||x===dx&&y===dy)return;
+        dx=x;dy=y;generation++;routed=null;
+        if(connected){const bounds={};for(const item of shapes){const b=item.bounds;bounds[item.element.id]={x:b.minX+dx,y:b.minY+dy,width:b.maxX-b.minX,height:b.maxY-b.minY};}queued={generation,revision:editorState.version,bounds};}
+        if(immediate){if(frame)cancelAnimationFrame(frame);frame=0;paint();}else schedule();
+      },stop,
+      restore(){stop(false);if(pageIndex===sourcePage&&canvasGeometryGestureCurrent(context))modernPageView?.update(deck.pages[pageIndex]?.scene||source);}
+    };
   }
   function beginCanvasGroupDrag(hit,event,index){
     const members=canvasGroupMembers(index);
@@ -11215,30 +12273,43 @@ if (keynopeAppSurface) {
       showEngagementToast('Unlock the group members before moving this selection.');
       return true;
     }
-    const snapshot=canvasMoveSnapshot(indices),bounds=canvasUnionBounds(indices);
+    const snapshot=canvasMoveSnapshot(indices),bounds=canvasUnionBounds(indices),context=canvasGeometryContext();
     if(!bounds)return false;
     if(!selected){
       editorState.selected=index;editorState.selection=indices;
       editorAction({action:'select-element',element:index,elementData:{id:canvasElementAt(index)?.id}}).catch(()=>{});
     }
-    const startX=event.clientX,startY=event.clientY;
+    const startX=event.clientX,startY=event.clientY,movePreview=beginCanvasMovePreview(snapshot,context);
     const originals=[...canvasOverlay.querySelectorAll('.keynope-canvas-element')].filter(h=>indices.includes(Number(h.dataset.element))).map(h=>({hit:h,left:h.style.left,top:h.style.top}));
     const restoreTargets=()=>{for(const item of originals){item.hit.style.left=item.left;item.hit.style.top=item.top;}};
     const token={hit,pointerId:event.pointerId,indices};activeCanvasDrag=token;
     hit.classList.add('active');hit.setPointerCapture(event.pointerId);renderEditorTopbar();
-    const delta=e=>{const r=canvasOverlay.getBoundingClientRect();return snappedCanvasMove(snapshot,bounds,Math.round((e.clientX-startX)*deck.cols/r.width),Math.round((e.clientY-startY)*deck.rows/r.height),e);};
-    const move=e=>{const {dx,dy}=delta(e);for(const item of originals){item.hit.style.left=(parseFloat(item.left)+dx/deck.cols*100)+'%';item.hit.style.top=(parseFloat(item.top)+dy/deck.rows*100)+'%';}};
-    const finish=async e=>{
+    let moveEngaged=false;
+    const delta=e=>{const r=canvasOverlay.getBoundingClientRect(),move=KeynopeWorkspace.pointerMove(e.clientX-startX,e.clientY-startY,r.width,r.height,deck.cols,deck.rows,moveEngaged);moveEngaged=move.engaged;return snappedCanvasMove(snapshot,bounds,move.dx,move.dy,e);};
+    let finished=false,pointerFrame=0,pendingPointer=null;
+    const move=e=>{if(e.pointerId!==event.pointerId)return;pendingPointer=e;if(!pointerFrame)pointerFrame=requestAnimationFrame(()=>{pointerFrame=0;const latest=pendingPointer;pendingPointer=null;if(finished||!latest)return;const {dx,dy}=delta(latest);movePreview.move(dx,dy,true);for(const item of originals){item.hit.style.left=(parseFloat(item.left)+dx/deck.cols*100)+'%';item.hit.style.top=(parseFloat(item.top)+dy/deck.rows*100)+'%';}});};
+    const cleanup=(keep=false)=>{
+      if(pointerFrame)cancelAnimationFrame(pointerFrame);pointerFrame=0;pendingPointer=null;
+      movePreview.stop(keep);
+      finished=true;
       hit.removeEventListener('pointermove',move);hit.removeEventListener('pointerup',finish);hit.removeEventListener('pointercancel',cancel);
+      window.removeEventListener('keydown',escape,true);window.removeEventListener('blur',cancel);
+      hit.classList.remove('active');
       if(activeCanvasDrag===token)activeCanvasDrag=null;
       if(hit.hasPointerCapture(event.pointerId))hit.releasePointerCapture(event.pointerId);
-      const {dx,dy}=delta(e);
       clearCanvasGuides();
-      if(dx||dy){await moveCanvasMembers(snapshot,dx,dy).catch(()=>{});restoreTargets();renderEditorCanvasOverlay();}
-      else {restoreTargets();refreshCanvasSelectionInPlace();} // Keep the hit target alive for dblclick.
     };
-    const cancel=()=>{clearCanvasGuides();hit.removeEventListener('pointermove',move);hit.removeEventListener('pointerup',finish);restoreTargets();if(activeCanvasDrag===token)activeCanvasDrag=null;renderEditorCanvasOverlay();};
-    hit.addEventListener('pointermove',move);hit.addEventListener('pointerup',finish);hit.addEventListener('pointercancel',cancel,{once:true});
+    const finish=async e=>{
+      if(finished||e.pointerId!==event.pointerId)return;
+      const {dx,dy}=delta(e);
+      movePreview.move(dx,dy);cleanup(true);
+      if(dx||dy){try{if(!canvasGeometryGestureCurrent(context))throw Error('The slide changed; move cancelled.');await moveCanvasMembers(snapshot,dx,dy,true);}catch(error){if(editorStatus)editorStatus.textContent=error.message;}finally{movePreview.restore();restoreTargets();renderEditorCanvasOverlay();}}
+      else {movePreview.restore();restoreTargets();refreshCanvasSelectionInPlace();} // Keep the hit target alive for dblclick.
+    };
+    const cancel=e=>{if(finished||e?.pointerId!=null&&e.pointerId!==event.pointerId)return;cleanup();movePreview.restore();restoreTargets();renderEditorCanvasOverlay();};
+    const escape=e=>{if(e.key==='Escape'){e.preventDefault();e.stopImmediatePropagation();cancel();}};
+    token.cancel=cancel;
+    hit.addEventListener('pointermove',move);hit.addEventListener('pointerup',finish);hit.addEventListener('pointercancel',cancel);window.addEventListener('keydown',escape,true);window.addEventListener('blur',cancel);
     return true;
   }
   function canvasSelectedIndices(index, compatible) {
@@ -11257,34 +12328,34 @@ if (keynopeAppSurface) {
     closeSlideContextMenu();
     const elements=editorState.slides[editorState.current].elements;
     const initial=new Set(editorState.selection||[]),hits=[...canvasOverlay.querySelectorAll('.keynope-canvas-element')];
+    const context=canvasGeometryContext(),units=KeynopeWorkspace.marqueeSelectionUnits(elements,canvasCurrentBounds(),hits.map(hit=>Number(hit.dataset.element)),editorState.editingGroup||'');
+    const members=new Map(units.map(unit=>[unit.index,unit.members])),aspect=(rect.height/deck.rows)/(rect.width/deck.cols);
     const start={x:event.clientX-rect.left,y:event.clientY-rect.top};
     const clicked=event.target.closest?.('.keynope-canvas-element');
     const clickedIndex=clicked?Number(clicked.dataset.element):-1;
     const marquee=document.createElement('div');marquee.className='keynope-canvas-marquee';marquee.hidden=true;
     canvasOverlay.appendChild(marquee);
-    let dragged=false,candidates=new Set(initial);
+    let dragged=false,finished=false,candidates=new Set(initial);
     const token={marquee:true,cancel:()=>finish(null)};activeCanvasDrag=token;
     const move=e=>{
-      if(e.pointerId!==event.pointerId)return;
+      if(finished||e.pointerId!==event.pointerId)return;
+      if(!canvasGeometryGestureCurrent(context)){finish(null);return;}
       if(!dragged&&Math.hypot(e.clientX-event.clientX,e.clientY-event.clientY)<4)return;
       dragged=true;marquee.hidden=false;
       const x=Math.max(0,Math.min(rect.width,e.clientX-rect.left)),y=Math.max(0,Math.min(rect.height,e.clientY-rect.top));
       const left=Math.min(start.x,x),top=Math.min(start.y,y),right=Math.max(start.x,x),bottom=Math.max(start.y,y);
       Object.assign(marquee.style,{left:left+'px',top:top+'px',width:(right-left)+'px',height:(bottom-top)+'px'});
-      candidates=new Set(initial);
+      candidates=KeynopeWorkspace.marqueeCandidates(units,{minX:left/rect.width*deck.cols,minY:top/rect.height*deck.rows,maxX:right/rect.width*deck.cols,maxY:bottom/rect.height*deck.rows},aspect,initial);
       for(const hit of hits){
-        const index=Number(hit.dataset.element),members=canvasGroupMembers(index);
-        const b=canvasUnionBounds(members);if(!b)continue;
-        if(b.maxX/deck.cols*rect.width>left&&b.minX/deck.cols*rect.width<right&&b.maxY/deck.rows*rect.height>top&&b.minY/deck.rows*rect.height<bottom)members.forEach(i=>candidates.add(i));
-      }
-      for(const hit of hits){
-        const selected=canvasGroupMembers(Number(hit.dataset.element)).some(i=>candidates.has(i));
+        const selected=(members.get(Number(hit.dataset.element))||[]).some(i=>candidates.has(i));
         hit.classList.toggle('marquee-candidate',selected);hit.classList.toggle('active',selected);
       }
     };
     const finish=e=>{
-      if(e&&e.pointerId!==event.pointerId)return;
+      if(finished||e&&e.pointerId!==event.pointerId)return;
+      if(e&&!canvasGeometryGestureCurrent(context))e=null;
       if(e)move(e);
+      finished=true;
       window.removeEventListener('pointermove',move,true);window.removeEventListener('pointerup',finish,true);
       window.removeEventListener('pointercancel',cancel,true);window.removeEventListener('blur',cancel);
       stage.removeEventListener('lostpointercapture',cancel);
@@ -11301,7 +12372,7 @@ if (keynopeAppSurface) {
       const indices=[...candidates].sort((a,b)=>a-b);
       editorAction({action:'select-elements',elementIndices:indices,elementsData:indices.map(i=>({id:elements[i].id}))}).catch(()=>refreshCanvasSelectionInPlace());
     };
-    const cancel=()=>finish(null);
+    const cancel=e=>{if(e?.pointerId!=null&&e.pointerId!==event.pointerId)return;finish(null);};
     stage.setPointerCapture(event.pointerId);
     stage.addEventListener('lostpointercapture',cancel);
     window.addEventListener('pointermove',move,true);window.addEventListener('pointerup',finish,true);
@@ -11415,6 +12486,7 @@ if (keynopeAppSurface) {
     const sequence = ++editorMutationPreviewSequence;
     const slide = editorState ? editorState.current : -1;
     const stateVersion = editorState ? editorState.version : -1;
+    const context=editorState?canvasGeometryContext():null;
     editorMutationPreviewController?.abort();
     const controller=new AbortController();editorMutationPreviewController=controller;
     try {
@@ -11422,11 +12494,11 @@ if (keynopeAppSurface) {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
 		signal:controller.signal,
-		body: JSON.stringify({name:frozenImage ? 'frozen-image' : '', element: index, elementData: element, cols: deck.cols, rows: deck.rows})
+		body: JSON.stringify({name:frozenImage ? 'frozen-image' : '', sceneRevision:stateVersion,sceneMaster:context?.master,slide,element: index, elementData: element, cols: deck.cols, rows: deck.rows})
       });
       if (!response.ok) return;
       const pages = await response.json();
-      if (sequence !== editorMutationPreviewSequence || !editorState || editorState.current !== slide || editorState.version !== stateVersion) return;
+      if (sequence !== editorMutationPreviewSequence || !editorState || !context || !canvasGeometryContextCurrent(context) || editorState.current !== slide || editorState.version !== stateVersion) return;
       replaceEditorPreviewPages(slide, pages);
       drawFrame();
       if (refreshOverlay) scheduleEditorCanvasOverlay();
@@ -11447,6 +12519,9 @@ if (keynopeAppSurface) {
     return 0;
   }
   function canvasSupportsTextCapability(element,capability) {
+    const caps=editorState?.selectionCapabilities;
+    const properties={size:'text.size',width:'text.width',font:'text.font',emphasis:'text.bold',alignment:'text.align',paragraph:'text.lineHeight'};
+    if(caps?.revision===editorState?.version&&caps.targetIds.includes(element?.id)&&caps.properties?.[properties[capability]])return caps.properties[properties[capability]].eligibleIds.includes(element.id);
     const object=deck.pages?.[pageIndex]?.scene?.objects?.find(o=>o.id===element?.id);
     if(Array.isArray(object?.textCapabilities))return object.textCapabilities.includes(capability);
     // Old preview snapshots may predate capability metadata.
@@ -11455,6 +12530,36 @@ if (keynopeAppSurface) {
     if(capability==='font'||capability==='paragraph')return modern;
     if(capability==='width')return modern||KeynopeTrueType.is(element);
     return ['size','emphasis','alignment'].includes(capability);
+  }
+  function canvasSelectionProperty(property) {
+    const caps=editorState?.selectionCapabilities;
+    return caps?.revision===editorState?.version?caps.properties?.[property]:null;
+  }
+  function canvasSelectionPropertyApplies(property) {
+    return !!canvasSelectionProperty(property)?.eligibleIds?.length;
+  }
+  function applyCanvasPropertyControl(control,property) {
+    const state=canvasSelectionProperty(property);
+    control.dataset.selectionProperty=property;
+    if(!state)return;
+    control.disabled=!state.editable;
+    if(state.reason)control.title=state.reason;
+    else if(state.provenance==='mixed')control.title+=(control.title?' · ':'')+'Mixed explicit and inherited styles';
+    else if(state.provenance==='inherited')control.title+=(control.title?' · ':'')+'Inherited';
+  }
+  function canvasSelectionCommand(name) {
+    const caps=editorState?.selectionCapabilities;
+    return caps?.revision===editorState?.version?caps.commands?.[name]:null;
+  }
+  function canvasSelectionCommandAllows(name,id) {
+    const state=canvasSelectionCommand(name);
+    return !!state?.enabled&&(!id||state.eligibleIds.includes(id));
+  }
+  function applyCanvasCommandControl(control,name) {
+    const state=canvasSelectionCommand(name);control.dataset.selectionCommand=name;
+    if(!state)return;
+    control.disabled=control.disabled||!state.enabled;
+    if(state.reason)control.title=state.reason;
   }
   function canvasModernText(element) {
     if(!element?.id)return null;
@@ -11468,6 +12573,13 @@ if (keynopeAppSurface) {
     return value==='end'?'right':value==='start'?'left':value;
   }
   function applyCanvasAlignmentState(button,elements,value,vertical=false){
+    const state=canvasSelectionProperty(vertical?'text.vertical':'text.align');
+    if(state){
+      const all=state.state==='value'&&state.value===value;
+      button.classList.toggle('active',all);button.setAttribute('aria-pressed',all?'true':state.state==='mixed'?'mixed':'false');
+      applyCanvasPropertyControl(button,vertical?'text.vertical':'text.align');
+      return;
+    }
     const matches=elements.filter(e=>canvasTextAlignment(e,vertical)===value).length;
     const all=elements.length>0&&matches===elements.length;
     button.classList.toggle('active',all);
@@ -11480,8 +12592,11 @@ if (keynopeAppSurface) {
     for(const [caption,property,key,min,fallback] of [['Line spacing (×)','lineHeight','modernLineHeight',.5,1.25],['Before (em)','paragraphBefore','modernParagraphBefore',0,0],['After (em)','paragraphAfter','modernParagraphAfter',0,0]]){
       const values=texts.map(text=>text[property]??fallback),mixed=values.some(value=>value!==values[0]);
       const label=document.createElement('label');label.className='keynope-ttf-width-control';label.append(caption);
-      const input=document.createElement('input');input.type='number';input.min=min;input.max=4;input.step='any';input.className='keynope-ttf-size';input.setAttribute('aria-label',caption);input.value=mixed?'':String(values[0]);input.placeholder=mixed?'Mixed':'';input.title='Multiples of font size. Clear to restore the default.';
-      input.addEventListener('keydown',event=>event.stopPropagation());input.onchange=()=>{if(input.checkValidity())apply({[key]:input.value===''?0:Number(input.value)});};label.append(input);section.append(label);
+      const input=document.createElement('input');input.type='number';input.min=min;input.max=4;input.step='any';input.className='keynope-ttf-size';input.setAttribute('aria-label',caption);input.value=mixed?'':String(values[0]);input.placeholder=mixed?'Mixed':'';input.title='Multiples of font size. Clear to restore inheritance.';
+      applyCanvasPropertyControl(input,{modernLineHeight:'text.lineHeight',modernParagraphBefore:'text.paragraphBefore',modernParagraphAfter:'text.paragraphAfter'}[key]);
+      const state=canvasSelectionProperty({modernLineHeight:'text.lineHeight',modernParagraphBefore:'text.paragraphBefore',modernParagraphAfter:'text.paragraphAfter'}[key]);
+      if(state){input.value=state.state==='value'?String(state.value):'';input.placeholder=state.state==='mixed'?'Mixed':'';}
+      input.addEventListener('keydown',event=>event.stopPropagation());input.onchange=()=>{if(input.checkValidity())apply({[key]:input.value===''?'':Number(input.value)});};label.append(input);section.append(label);
     }
     container.append(section);
   }
@@ -11518,7 +12633,13 @@ if (keynopeAppSurface) {
     const revision=editorState.version;
     if(!Number.isInteger(revision))throw Error('The editing target is not ready. Reselect the text.');
     const action=Object.hasOwn(values,'textWidth')||Object.hasOwn(values,'textWidthDelta')?'set-text-width':Object.hasOwn(values,'textSize')||Object.hasOwn(values,'textSizeDelta')?'set-text-size':'set-modern-text-style';
-    const result=await editorAction({action,slide,sceneMaster:master,sceneRevision:revision,objectIds,...values});
+    const propertyNames={textSize:'text.size',textWidth:'text.width',modernFont:'text.font',textBold:'text.bold',textItalic:'text.italic',textUnderline:'text.underline',textAlign:'text.align',textVertical:'text.vertical',modernLineHeight:'text.lineHeight',modernParagraphBefore:'text.paragraphBefore',modernParagraphAfter:'text.paragraphAfter'};
+    const keys=Object.keys(values),property=keys.length===1?propertyNames[keys[0]]:null;
+    const spacingKeys=keys.filter(key=>key!=='kind');
+    if(spacingKeys.length===1&&['textSize','textWidth','textAlign','textVertical','modernLineHeight','modernParagraphBefore','modernParagraphAfter'].includes(spacingKeys[0])&&values[spacingKeys[0]]===''){
+      return editorAction({action:'set-selection-property',slide,sceneMaster:master,sceneRevision:revision,objectIds,property:propertyNames[spacingKeys[0]].replace('text.',values.kind==='label'?'label.':'text.'),propertyValue:''});
+    }
+    const result=await editorAction(property?{action:'set-selection-property',slide,sceneMaster:master,sceneRevision:revision,objectIds,property,propertyValue:values[keys[0]]}:{action,slide,sceneMaster:master,sceneRevision:revision,objectIds,...values});
     // Relative controls do not retain a typed DOM value of their own. Rebuild
     // just the toolbar after the committed state arrives so adjacent number
     // inputs immediately reflect +/− changes, including in the native bridge.
@@ -11594,7 +12715,7 @@ if (keynopeAppSurface) {
     updateCanvasElement(index, element => {
       const query = new URLSearchParams(element.query || '');
       const outline = query.get('outline') || '';
-      if (!outline) query.set('outline', '1');
+      if (!outline || outline === 'none') query.set('outline', '1');
       else if (outline === '1') query.set('outline', 'dark');
       else query.delete('outline');
       element.query = query.toString();
@@ -11614,7 +12735,7 @@ if (keynopeAppSurface) {
       else if (shape === 'diamond') { label = '\u00a0⃟'; large = true; }
     }
     const outline = query.get('outline') || '';
-    const button = canvasTool(label, outline ? 'active' : '', () => cycleCanvasOutline(index));
+    const button = canvasTool(label, outline && outline !== 'none' ? 'active' : '', () => cycleCanvasOutline(index));
     button.classList.add('keynope-outline-button');
     if (element.kind === 'image') {
       button.innerHTML = '<svg viewBox="0 0 800 600" aria-hidden="true"><path d="M391 74 C468 70 499 124 550 151 C609 182 667 191 680 250 C694 314 646 348 614 393 C580 441 572 503 511 520 C451 537 414 493 360 484 C297 473 245 518 196 477 C145 434 174 376 143 327 C114 279 119 217 169 188 C220 158 270 181 312 130 C335 102 356 78 391 74Z" fill="#9b9b9b" stroke="#fff" stroke-width="32" stroke-linejoin="round"/></svg>';
@@ -11660,7 +12781,7 @@ if (keynopeAppSurface) {
         const resolved=editorElementIndexMaps().rawToResolved.get(candidateIndex);
         const line=deck.pages[pageIndex]?.lines?.find(line=>line.trueType&&line.element===resolved);
         const width=Number(query.get('width'))||line?.trueType.width||110,height=Number(query.get('height'))||line?.trueType.height||10;
-        const aspect=(1080/deck.rows)/(1920/deck.cols);
+        const aspect=KeynopeWorkspace.cellAspect(deck.cols,deck.rows,canvasPhysicalGeometry());
         query.set('width',String(Math.max(1,Math.min(deck.cols,Math.round(height*aspect)))));
         query.set('height',String(Math.max(1,Math.min(deck.rows,Math.round(width/aspect)))));
       }
@@ -11801,7 +12922,7 @@ if (keynopeAppSurface) {
   }
   function canvasTextGradientTools(container,index,element) {
     const query = new URLSearchParams(element.query || '');
-    const active = !!query.get('gradient-start') && !!query.get('gradient-end');
+    const active = query.get('gradient-dir') !== 'none' && !!query.get('gradient-start') && !!query.get('gradient-end');
     const direction = query.get('gradient-dir') || 'horizontal';
     let toggle;
     toggle = canvasTool('', (active ? 'active ' : '') + 'keynope-icon-button keynope-text-effect-button', () => {
@@ -11810,6 +12931,7 @@ if (keynopeAppSurface) {
         updateCanvasElements(index,canvasTextEffectCompatible,updated => {
           const values = new URLSearchParams(updated.query || '');
           if (!value) {
+            values.set('gradient-dir','none');
             values.delete('gradient-start');
             values.delete('gradient-end');
           } else {
@@ -11834,14 +12956,14 @@ if (keynopeAppSurface) {
   }
   function canvasTextShadowTools(container,index,element) {
     const query = new URLSearchParams(element.query || '');
-    const shadow = query.get('shadow') || '';
+    const shadow = query.get('shadow') === 'none' ? '' : query.get('shadow') || '';
     let button;
     button = canvasTool('', (shadow ? 'active ' : '') + 'keynope-icon-button keynope-text-effect-button', () => {
       openCanvasTextEffectDropdown(button,[['','Off'],['soft','Soft'],['solid','Hard']],shadow,value => {
         updateCanvasElements(index,canvasTextEffectCompatible,updated => {
           const values = new URLSearchParams(updated.query || '');
           if (!value) {
-            values.delete('shadow');
+            values.set('shadow','none');
             values.delete('shadow-color');
             values.delete('shadow-x');
             values.delete('shadow-y');
@@ -11887,6 +13009,7 @@ if (keynopeAppSurface) {
           const values = new URLSearchParams(updated.query || '');
           const key = updated.kind === 'heading' ? 'header' : 'fg';
           values.set(key,next);
+          values.delete('theme-fg');
           if (key === 'header') values.delete('fg');
           updated.query = values.toString();
         });
@@ -11894,9 +13017,29 @@ if (keynopeAppSurface) {
     });
     return button;
   }
+  function canvasThemeColourTool(index) {
+    const compatible = element => ['heading','text','text-image','bullet','code','shape','page-number','connector'].includes(element.kind);
+    const elements = canvasSelectedIndices(index, compatible).map(canvasElementAt);
+    const select = document.createElement('select');
+    select.setAttribute('aria-label','Theme colour'); select.title='Link colour to the deck theme';
+    const tokens = elements.map(element => new URLSearchParams(element.query || '').get('theme-fg') || '');
+    const mixed = tokens.some(token => token !== tokens[0]);
+    if (mixed) { const option = new Option('Mixed','mixed'); option.disabled=true;select.add(option); }
+    select.add(new Option('Custom / inherited colour',''));
+    for (const [value,label] of [['text','Text'],['heading','Heading'],['surface','Surface'],['muted','Muted'],['line','Line'],...Array.from({length:6},(_,i)=>['accent-'+(i+1),'Accent '+(i+1)])]) select.add(new Option(label,value));
+    select.value = mixed ? 'mixed' : tokens[0] || '';
+    select.addEventListener('keydown',event=>event.stopPropagation());
+    select.onchange=()=>updateCanvasElements(index,compatible,element=>{
+      const values=new URLSearchParams(element.query||'');
+      if(select.value){values.set('theme-fg',select.value);values.delete('fg');values.delete('header');}
+      else values.delete('theme-fg');
+      element.query=values.toString();
+    });
+    return select;
+  }
   function setCanvasAlignment(index, alignment) {
-    if(alignCanvasGroup(index,alignment))return;
     if(alignCanvasSceneObjects(index,alignment))return;
+    if(alignCanvasGroup(index,alignment))return;
     updateCanvasElements(index, element => ['heading','text','text-image','bullet','code','shape','image','page-number'].includes(element.kind), element => {
       const query = new URLSearchParams(element.query || '');
       if(query.get('align')==='justify'&&!query.has('text-align'))query.set('text-align','justify');
@@ -11906,8 +13049,8 @@ if (keynopeAppSurface) {
     });
   }
   function setCanvasVerticalAlignment(index, alignment) {
-    if(alignCanvasGroup(index,alignment,true))return;
     if(alignCanvasSceneObjects(index,alignment,true))return;
+    if(alignCanvasGroup(index,alignment,true))return;
     updateCanvasElements(index, element => ['heading','text','text-image','bullet','code','shape','image','page-number'].includes(element.kind), element => {
       const query = new URLSearchParams(element.query || '');
       query.set('valign', alignment);
@@ -11945,6 +13088,8 @@ if (keynopeAppSurface) {
   }
   function canvasElementSupportsTransparency(element) {
     if (!element || canvasElementIsGIF(element) || !['heading','text','text-image','bullet','code','shape','image'].includes(element.kind)) return false;
+    const object=deck.pages?.[pageIndex]?.scene?.objects?.find(object=>object.id===element.id);
+    if(!object||object.media?.frames?.length>1||object.retroLines?.frames?.length>1||!object.text&&!object.retroText&&!object.retroLines)return false;
     if (KeynopeTrueType.is(element)) return true;
     const glyph = (new URLSearchParams(element.query || '').get('glyph') || '').toLowerCase();
     return glyph === '' || glyph === 'blocks' || glyph === 'block';
@@ -11968,24 +13113,29 @@ if (keynopeAppSurface) {
     return button;
   }
   function appendCanvasShapeKindTools(container, index, query) {
-    const current = query.get('shape') || 'circle';
-    for (const [shape, drawing] of [
-      ['circle','<circle cx="10" cy="10" r="7"/>'],
-      ['square','<rect x="3" y="3" width="14" height="14" rx="1"/>'],
-      ['triangle','<path d="M10 2 18 17H2z"/>'],
-      ['diamond','<path d="m10 2 8 8-8 8-8-8z"/>']
-    ]) {
-      const button = canvasTool('', current === shape ? 'active keynope-icon-button keynope-canvas-shape-kind' : 'keynope-icon-button keynope-canvas-shape-kind', () => {
+    const element=canvasElementAt(index),object=deck.pages?.[pageIndex]?.scene?.objects.find(object=>object.id===element?.id);
+    const current = object?.shape || query.get('shape') || 'circle';
+    const selector=document.createElement('select');selector.setAttribute('aria-label','Shape type');
+    for(const category of [...new Set(keynopeShapeCatalog.map(d=>d.category))]){
+      const group=document.createElement('optgroup');group.label=category;
+      for(const definition of keynopeShapeCatalog.filter(d=>d.category===category)){const option=document.createElement('option');option.value=definition.id;option.textContent=definition.title;group.append(option);}selector.append(group);
+    }
+    selector.value=current;selector.onchange=()=>{
         updateCanvasElement(index, element => {
           const values = new URLSearchParams(element.query || '');
-          values.set('shape', shape);
+          for(const definition of keynopeShapeCatalog)for(const adjustment of definition.adjustments||[])values.delete('shape-'+adjustment.key);
+          values.set('shape', selector.value);
           element.query = values.toString();
         });
-      });
-      button.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" fill="currentColor" stroke="currentColor" stroke-width="1.5">' + drawing + '</svg>';
-      button.title = 'Change to ' + shape;
-      button.setAttribute('aria-label', button.title);
-      container.appendChild(button);
+    };container.append(selector);
+    const definition=keynopeShapeCatalog.find(d=>d.id===current);
+    for(const adjustment of definition?.adjustments||[]){
+      const label=document.createElement('label');label.textContent=adjustment.label;
+      const input=document.createElement('input');input.type='number';input.min=String(adjustment.min*100);input.max=String(adjustment.max*100);input.step='any';input.style.width='85px';input.setAttribute('aria-label',adjustment.label);
+      applyCanvasCommandControl(input,'shape.adjust');
+      const handle=object?.shapeGeometry?.handles?.find(handle=>handle.key===adjustment.key);
+      input.value=String(Math.round(1e6*Number(handle?.value??query.get('shape-'+adjustment.key)??adjustment.default))/1e4);
+      input.addEventListener('keydown',event=>event.stopPropagation());input.onchange=()=>{if(!input.checkValidity()||input.value===''||!canvasSelectionCommandAllows('shape.adjust',element.id))return;editorAction({action:'set-shape-adjustment',sceneRevision:editorState.version,sceneMaster:!!editorState.masterMode,slide:editorState.current,objectId:element.id,shapeAdjustment:{key:adjustment.key,value:Number(input.value)/100}}).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;});};label.append(input);container.append(label);
     }
   }
   function canvasDeleteTool(index) {
@@ -11996,6 +13146,10 @@ if (keynopeAppSurface) {
     return button;
   }
   function visualQueryControl(panel, index, labelText, key, value, options) {
+    const property='image.'+(key==='shape'?'sampling':key);
+    if(canvasElementAt(index)?.kind==='image'&&canvasSelectionProperty(property)){
+      appendSharedImageControl(panel,labelText,property,options);return;
+    }
     const label = document.createElement('label');
     label.textContent = labelText;
     let input;
@@ -12029,8 +13183,44 @@ if (keynopeAppSurface) {
     });
     panel.append(label, input);
   }
+  function appendSharedImageControl(panel,labelText,property,options) {
+    const context=canvasGeometryContext(),ids=[...(editorState.selectionCapabilities?.targetIds||[])];
+    const label=document.createElement('label'),valueLabel=document.createElement('small');
+    label.append(document.createTextNode(labelText),valueLabel);
+    const row=document.createElement('div');row.style.cssText='display:flex;align-items:center;gap:5px;min-width:0';
+    const input=document.createElement(options.values?'select':'input');input.setAttribute('aria-label',labelText);input.dataset.selectionProperty=property;
+    if(options.values){for(const [value,text]of options.values)input.add(new Option(text,value));const mixed=new Option('Mixed','mixed');mixed.disabled=true;input.add(mixed);}
+    else{input.type='range';input.min=options.min;input.max=options.max;input.step=options.step;}
+    const inherit=document.createElement('button');inherit.type='button';inherit.textContent='↶';inherit.setAttribute('aria-label','Inherit image '+labelText.toLowerCase());
+    const refresh=()=>{
+      const state=canvasSelectionProperty(property);
+      const applies=!!state?.eligibleIds?.length;
+      label.hidden=row.hidden=!applies;
+      label.style.display=applies?'':'none';row.style.display=applies?'flex':'none';
+      input.disabled=!state?.editable;inherit.disabled=!state?.editable||state.provenance==='inherited';
+      input.value=state?.state==='mixed'?(options.values?'mixed':String(options.fallback)):String(state?.value??options.fallback??'');
+      valueLabel.textContent=' · '+(state?.state==='mixed'?'Mixed':state?.value??'')+(state?.eligibleIds.length<state?.totalCount?' · '+state.eligibleIds.length+' of '+state.totalCount:'');
+      input.title=state?.reason||labelText+': '+(state?.state==='mixed'?'Mixed':state?.value??'');
+    };
+    (panel.imageControlRefreshers ||= []).push(refresh);
+    const commit=async value=>{
+      const current=editorState.selectionCapabilities;
+      if(!canvasGeometryContextCurrent(context,false)||JSON.stringify(ids)!==JSON.stringify(current?.targetIds)){showEngagementToast('Selection changed; reopen image adjustments.');return;}
+      input.disabled=inherit.disabled=true;
+      try{await editorAction({action:'set-selection-property',property,propertyValue:value,objectIds:ids,sceneRevision:editorState.version,sceneMaster:context.master,slide:context.slide,performanceKind:'treatment'});}
+      catch(error){showEngagementToast(error.message||'Could not adjust image');}
+      finally{for(const update of panel.imageControlRefreshers||[])update();}
+    };
+    input.addEventListener('pointerdown',event=>event.stopPropagation());
+    input.addEventListener('keydown',event=>event.stopPropagation());
+    input.addEventListener('input',()=>{if(!options.values)valueLabel.textContent=' · '+input.value;});
+    input.addEventListener('change',()=>commit(options.values?input.value:Number(input.value)));
+    inherit.addEventListener('click',()=>commit(''));
+    row.append(input,inherit);panel.append(label,row);refresh();
+  }
   function canvasVisualMenu(index, element) {
     const button = canvasTool('', 'keynope-icon-button keynope-adjust-image-button', () => {
+      if(!canvasSelectionCommandAllows('image.adjust',element.id))return;
       if (activeCanvasVisualMenu && activeCanvasVisualMenu.index === index) {
         closeCanvasVisualMenu(true);
         return;
@@ -12058,6 +13248,7 @@ if (keynopeAppSurface) {
         '<circle r="155" fill="#181818" stroke="currentColor" stroke-width="42"/><circle r="58" fill="none" stroke="currentColor" stroke-width="42"/>' +
       '</g></svg>';
     button.title = 'Adjust image';
+    applyCanvasCommandControl(button,'image.adjust');
     button.setAttribute('aria-label', 'Adjust image');
     button.setAttribute('aria-haspopup','dialog');
     button.setAttribute('aria-expanded','false');
@@ -12075,6 +13266,10 @@ if (keynopeAppSurface) {
   function appendCanvasVisualControls(panel, index, element) {
     const query = new URLSearchParams(element.query || '');
     if (element.kind === 'image') {
+      const command=canvasSelectionCommand('image.adjust');
+      if(command&&command.eligibleIds.length<command.totalCount){const scope=document.createElement('p');scope.className='keynope-command-scope';scope.textContent='Image adjustments: '+command.eligibleIds.length+' of '+command.totalCount+' objects. Other types stay unchanged.';panel.append(scope);}
+      if(canvasSelectionPropertyApplies('image.fit'))appendSharedImageControl(panel,'Framing','image.fit',{values:[['legacy','Original behavior'],['contain','Fit'],['cover','Fill'],['stretch','Stretch']]});
+      if(canvasSelectionPropertyApplies('image.mask'))appendSharedImageControl(panel,'Mask','image.mask',{values:[['none','Rectangle'],['rounded','Rounded rectangle'],['ellipse','Ellipse']]});
       if((query.get('image-style')||'modern')==='retro'){
         visualQueryControl(panel, index, 'Glyph', 'glyph', query.get('glyph') || 'blocks', {values: [['blocks','Blocks'],['braille','Braille'],['ascii','ASCII'],['dense','Dense']]});
         visualQueryControl(panel, index, 'Sampling', 'shape', query.get('shape') || 'subject', {values: [['subject','Subject'],['contrast','Contrast'],['saturation','Saturation'],['luma','Luma'],['alpha','Alpha']]});
@@ -12116,7 +13311,23 @@ if (keynopeAppSurface) {
     }));
     panel.append(label, input);
   }
-  function appendSlideBackgroundVisualControls(panel, slide, updateSlide) {
+  function appendSlideBackgroundVisualControls(panel, slide, updateSlide, slideIndex = editorState.current) {
+    const resolved = slideIndex === editorState.current ? editorState.resolvedCurrent || editorState.resolved?.[slideIndex] : editorState.resolved?.[slideIndex];
+    const background = slide?.backgroundMediaSet ? slide.backgroundMedia : resolved?.backgroundMedia || slide?.backgroundMedia;
+    if (!background?.assetId) return;
+    const inherited = !slide.backgroundMediaSet;
+    const sourceID = inherited ? '' : background.sourceObjectId;
+    if (!sourceID || slide.elements?.some(element => element.id === sourceID && element.kind === 'image' && element.assetId === background.assetId)) {
+      const restore = document.createElement('button');
+      restore.type = 'button'; restore.textContent = sourceID ? 'Move background back to image' : inherited ? 'Convert inherited background to image' : 'Convert background to image';
+      const context = {slide: slideIndex, master: !!editorState.masterMode, revision: editorState.version, epoch: editorDocumentEpoch};
+      restore.addEventListener('click', () => {
+        closeSlideContextMenu();
+        if (context.epoch !== editorDocumentEpoch) return;
+        editorAction({action:'restore-background-image', objectId:sourceID || '', slide:context.slide, sceneMaster:context.master, sceneRevision:context.revision}).catch(() => {});
+      });
+      panel.appendChild(restore);
+    }
     if (!slide?.backgroundMedia?.assetId) return;
     const query = new URLSearchParams(slide.backgroundMedia.query || '');
     const section = document.createElement('div');
@@ -12139,25 +13350,25 @@ if (keynopeAppSurface) {
     backgroundVisualQueryControl(section, slide, updateSlide, 'Sharpness', 'sharpness', query.get('sharpness'), {min:.2,max:2,step:.1,fallback:1});
     if ((query.get('image-style') || 'modern') === 'retro') backgroundVisualQueryControl(section, slide, updateSlide, 'Alpha', 'alpha', query.get('alpha'), {min:0,max:255,step:16,fallback:96});
     const opacity = document.createElement('label'); opacity.textContent = 'Opacity';
-    const opacityInput = document.createElement('input'); opacityInput.type = 'range'; opacityInput.min = '0.05'; opacityInput.max = '1'; opacityInput.step = '.05'; opacityInput.value = String(slide.backgroundMedia.opacity || 1); opacityInput.title = 'Opacity: ' + opacityInput.value;
+    const opacityInput = document.createElement('input'); opacityInput.type = 'range'; opacityInput.min = '0'; opacityInput.max = '1'; opacityInput.step = '.05'; opacityInput.value = String(slide.backgroundMedia.opacitySet ? slide.backgroundMedia.opacity ?? 0 : slide.backgroundMedia.opacity || 1); opacityInput.title = 'Opacity: ' + opacityInput.value;
     opacityInput.addEventListener('input', () => { opacityInput.title = 'Opacity: ' + opacityInput.value; });
-    opacityInput.addEventListener('change', () => { slide.backgroundMedia.opacity = Number(opacityInput.value); slide.backgroundMediaSet = true; updateSlide(); });
+    opacityInput.addEventListener('change', () => { slide.backgroundMedia.opacity = Number(opacityInput.value); slide.backgroundMedia.opacitySet = true; slide.backgroundMediaSet = true; updateSlide(); });
     section.append(opacity, opacityInput); panel.appendChild(section);
   }
 
   function canvasImageStyleTool(index,element){
-    const field=document.createElement('label'),select=document.createElement('select'),query=new URLSearchParams(element.query||'');
-    field.className='keynope-ttf-width-control';field.append('Image style');select.setAttribute('aria-label','Image style');
-    select.add(new Option('Modern — source image','modern'));select.add(new Option('Retro — ASCII conversion','retro'));
-    select.value=query.get('image-style')||'modern';select.addEventListener('keydown',event=>event.stopPropagation());
-    select.onchange=()=>updateCanvasElement(index,updated=>{const q=new URLSearchParams(updated.query||'');q.set('image-style',select.value);updated.query=q.toString();},'treatment');
-    field.append(select);return field;
+    const field=document.createElement('div');
+    field.className='keynope-ttf-width-control';
+    appendSharedImageControl(field,'Image style','image.style',{values:[['modern','Modern — source image'],['retro','Retro — ASCII conversion']]});
+    return field;
   }
   function canvasHasEmoji(element) {
     return KeynopeTrueType.is(element)&&/[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(element.text||'');
   }
   function appendCanvasTintControls(panel,index,element,emoji=false) {
       const query=new URLSearchParams(element.query||'');
+      const shared=!emoji&&canvasSelectionProperty('image.tint');
+      const context=canvasGeometryContext(), ids=shared?[...editorState.selectionCapabilities.targetIds]:[];
       const tintLabel=document.createElement('label');
       tintLabel.textContent=emoji?'Emoji tint':'Monochrome tint';
       tintLabel.style.color='#eee';
@@ -12167,23 +13378,41 @@ if (keynopeAppSurface) {
       tintEnabled.type='checkbox';tintEnabled.style.width='auto';
       tintEnabled.checked=query.has('tint');tintEnabled.setAttribute('aria-label',emoji?'Enable emoji tint':'Enable monochrome tint');
       let tint=query.get('tint')||'#ffffff';
-      const applyTint=()=>updateCanvasElements(index,updated=>emoji?canvasHasEmoji(updated):updated.kind==='image',updated=>{
+      let tintBusy=false, tintReset=null;
+      const applyTint=async(value)=>{
+        if(shared){
+          if(tintBusy)return;
+          if(!canvasGeometryContextCurrent(context,false)||JSON.stringify(ids)!==JSON.stringify(editorState.selectionCapabilities?.targetIds)){showEngagementToast('Selection changed; reopen image adjustments.');return;}
+          const next=typeof value==='string'?value:(tintEnabled.checked?tint:'none');
+          tintBusy=true;refreshTint();
+          try{await editorAction({action:'set-selection-property',property:'image.tint',propertyValue:next,objectIds:ids,sceneRevision:editorState.version,sceneMaster:context.master,slide:context.slide});}
+          catch(error){showEngagementToast(error.message||'Could not update image tint');}
+          finally{tintBusy=false;for(const update of panel.imageControlRefreshers||[])update();}
+          return;
+        }
+        return updateCanvasElements(index,updated=>emoji?canvasHasEmoji(updated):updated.kind==='image',updated=>{
         const values=new URLSearchParams(updated.query||'');
         if(tintEnabled.checked)values.set('tint',tint);else values.delete('tint');
         updated.query=values.toString();
-      });
+        });
+      };
       const tintColour=canvasTool('','keynope-colour-tool',()=>{
         openKeynopeColourPicker(tintColour,tint,next=>{
-          tint=next;tintEnabled.checked=true;refreshTint();applyTint();
+          tint=next;tintEnabled.checked=true;if(!shared)refreshTint();applyTint(next);
         });
       });
       tintColour.textContent='A';tintColour.title=emoji?'Choose emoji tint':'Choose monochrome tint';tintColour.setAttribute('aria-label',tintColour.title);
       const refreshTint=()=>{
+        if(shared&&!tintBusy){const state=canvasSelectionProperty('image.tint');if(state){tintEnabled.indeterminate=state.state==='mixed';tintEnabled.checked=state.value!=='none'&&state.state!=='mixed';if(state.value&&state.value!=='none')tint=state.value;}}
+        const state=shared&&canvasSelectionProperty('image.tint');
+        tintEnabled.disabled=tintColour.disabled=!!shared&&(tintBusy||!state?.editable);
+        if(tintReset)tintReset.disabled=tintBusy||!state?.editable||state.provenance==='inherited';
         tintColour.style.setProperty('--keynope-tool-colour',tint);
         tintColour.setAttribute('aria-pressed',String(tintEnabled.checked));
       };
-      tintEnabled.addEventListener('change',()=>{refreshTint();applyTint();});
+      tintEnabled.addEventListener('change',()=>{if(!shared)refreshTint();applyTint();});
       refreshTint();tintControls.append(tintEnabled,tintColour);panel.append(tintLabel,tintControls);
+      if(shared){tintReset=document.createElement('button');tintReset.type='button';tintReset.textContent='↶';tintReset.title='Inherit image tint';tintReset.setAttribute('aria-label',tintReset.title);tintReset.onclick=()=>applyTint('');tintControls.append(tintReset);(panel.imageControlRefreshers ||= []).push(refreshTint);refreshTint();}
   }
   function closeCanvasVisualMenu() {
     const restoreFocus = arguments[0] === true;
@@ -12222,16 +13451,16 @@ if (keynopeAppSurface) {
     left += offsetX; top += offsetY;
     return {minX:left, minY:top, maxX:Math.min(deck.cols, left + width), maxY:Math.min(deck.rows, top + height), color:query.get('fg') || ''};
   }
-  function moveCanvasShapeBounds(query,bounds,dx,dy) {
+  function moveCanvasShapeBounds(query,bounds,dx,dy,element) {
     // Translation must preserve authored dimensions (including inheritance),
     // not rewrite them from a floating-point scene projection.
     const width=query.get('width'),height=query.get('height');
-    setCanvasShapeBounds(query,{minX:bounds.minX+dx,minY:bounds.minY+dy,maxX:bounds.maxX+dx,maxY:bounds.maxY+dy});
+    setCanvasShapeBounds(query,{minX:bounds.minX+dx,minY:bounds.minY+dy,maxX:bounds.maxX+dx,maxY:bounds.maxY+dy},element);
     if(width===null)query.delete('width');else query.set('width',width);
     if(height===null)query.delete('height');else query.set('height',height);
   }
-  function setCanvasShapeBounds(query, next) {
-    setCanvasObjectOrigin(query,Math.max(0,next.minX),Math.max(0,next.minY));
+  function setCanvasShapeBounds(query, next,element) {
+    setCanvasObjectOrigin(query,Math.max(0,next.minX),Math.max(0,next.minY),element);
     // Keep historical half-cell shape coverage; only the finer remainder
     // belongs to the continuous shared-scene placement layer.
     for(const axis of ['x','y']){
@@ -12241,6 +13470,7 @@ if (keynopeAppSurface) {
     }
     query.set('width', String(Math.max(.5, Math.round((next.maxX - next.minX)*1e10)/1e10)));
     query.set('height', String(Math.max(.5, Math.round((next.maxY - next.minY)*1e10)/1e10)));
+    preserveCanvasPositionOverride(query,element);
   }
   function applyCanvasLink(index, input, value) {
     value = value.trim();
@@ -12370,6 +13600,8 @@ if (keynopeAppSurface) {
     };
   }
   function renderEditorTopbar() {
+    restoreCanvasObjectStyle();
+    publishEditorStyleCommands();
     editorTopbarScene = deck.pages[pageIndex]?.scene || null;
     editorTopbarVersion = editorState?.version;
     connectShapesButton.disabled = (editorState?.slides?.[editorState.current]?.elements || []).filter(e=>e.kind==='shape').length < 2;
@@ -12406,7 +13638,7 @@ if (keynopeAppSurface) {
     const textElement = textIndex == null ? null : slide.elements[textIndex];
     const shapeIndex = selectedIndices.find(candidate => slide.elements[candidate].kind === 'shape');
     const shapeElement = shapeIndex == null ? null : slide.elements[shapeIndex];
-    if (activeCanvasVisualMenu && (!element || activeCanvasVisualMenu.index !== index)) closeCanvasVisualMenu();
+    if (activeCanvasVisualMenu && (!element || !selectedIndices.includes(activeCanvasVisualMenu.index))) closeCanvasVisualMenu();
     const contextual = !!shapeConnecting || (!suppressSelectionTopbar && (!!activeInlineEditor || !!element));
     saveButton.hidden = false;
     const webDocumentControls = topbar.querySelector('.keynope-web-controls');
@@ -12428,6 +13660,7 @@ if (keynopeAppSurface) {
     const selectedIDs=new Set(panelMemberIndices.map(candidate=>slide.elements[candidate]?.id).filter(Boolean));
     const sceneObjects=(deck.pages?.[pageIndex]?.scene?.objects||[]).filter(object=>selectedIDs.has(object.id)).map(object=>({
       id:object.id,kind:object.kind,bounds:object.bounds,rotation:object.rotation||0,
+      shape:object.shape,shapeAdjustments:object.shapeGeometry?.handles?.map(handle=>({key:handle.key,value:handle.value})),
       text:!!object.text,retroText:!!object.retroText,retroLines:!!object.retroLines
     }));
     const panelSignature=JSON.stringify({
@@ -12435,9 +13668,21 @@ if (keynopeAppSurface) {
       path:editorState?.path||'',slide:editorState?.current,master:!!editorState?.masterMode,editingGroup:editorState?.editingGroup||'',
       selected:selectedIndices,members:panelMemberIndices.map(candidate=>editorTopbarElementSnapshot(slide.elements[candidate])),
       sceneObjects,shapeCount:(slide?.elements||[]).filter(candidate=>candidate.kind==='shape').length,
-      connecting:!!shapeConnecting,connectorDefaults,editingConnector,cols:deck.cols,rows:deck.rows
+      connecting:!!shapeConnecting,connectorDefaults,editingConnector,cols:deck.cols,rows:deck.rows,
+      capabilities:editorState?.selectionCapabilities?.properties,
+      commands:editorState?.selectionCapabilities?.commands,
+      acceptedGeometry:editorState?.selectionCapabilities?.geometry,
+      styleClipboard:!!canvasStyleClipboard,stylePainter:!!canvasStylePainter
     });
-    if(panelSignature===editorTopbarPanelSignature)return;
+    if(panelSignature===editorTopbarPanelSignature){
+      // Native selection can precede the scene/overlay which supplies its
+      // bounds. Complete a previously unavailable geometry section without
+      // rebuilding the rest of the inspector or disturbing focused controls.
+      if(contextual&&editorState?.selectionCapabilities?.commands?.['arrange.geometry']?.enabled&&!arrange.querySelector('[aria-label="Object geometry"]')){
+        const geometry=canvasGeometryControls(index);if(geometry)arrange.prepend(geometry);
+      }
+      return;
+    }
     editorTopbarPanelSignature=panelSignature;
     for(const id of ['content','style','arrange'])ribbonPanels[id].replaceChildren();
     const remove=contextual?canvasDeleteTool(index):deleteSlideButton;
@@ -12477,10 +13722,14 @@ if (keynopeAppSurface) {
       return;
     }
     const query = new URLSearchParams(element.query || '');
+    appendCanvasStyleTransferTools(style);
+    if(editorState?.selectionCapabilities?.contexts?.['shape-label']?.length)appendCanvasStyleTransferTools(style,'shape-label');
     appendCanvasGroupTools(arrange,index);
     const selectedText = !!textElement;
     const rotatableText = selectedElements.some(candidate => KeynopeTrueType.is(candidate)||['heading','text','text-image','bullet'].includes(candidate.kind));
-    const positionable = selectedElements.some(candidate => ['heading','text','text-image','bullet','code','shape','image','page-number'].includes(candidate.kind));
+    const positionable = selectedElements.some(candidate => ['heading','text','text-image','bullet','code','shape','image','page-number','table','chart'].includes(candidate.kind));
+    if(element.kind==='chart'&&selectedElements.length===1){const edit=canvasTool('Edit chart','',editSelectedChart);applyCanvasCommandControl(edit,'chart.edit');content.append(edit);}
+    if(element.kind==='table'&&selectedElements.length===1){const edit=canvasTool('Edit table','',editSelectedTable),fit=canvasTool('Fit table to content','',fitSelectedTable);edit.setAttribute('aria-label','Edit table');fit.setAttribute('aria-label','Fit table to content');applyCanvasCommandControl(edit,'table.edit');applyCanvasCommandControl(fit,'table.fit');content.append(edit,fit);}
     if (selectedText) {
       const typographyElements=[...new Set(selectedIndices.flatMap(canvasGroupMembers))].map(i=>slide.elements[i]).filter(Boolean);
       if(typographyElements.length>1){
@@ -12521,14 +13770,18 @@ if (keynopeAppSurface) {
 		const size=document.createElement('input');size.type='number';size.min='1';size.max=modernText?'1024':'512';size.step=modernText?'any':'1';size.value=String(canvasTextSize(textElement));size.className='keynope-ttf-size';size.title=modernText?'Font size in scene pixels (1–1024)':'TrueType font size (1–512)';size.setAttribute('aria-label',modernText?'Font size':'TrueType font size');
         if(metricItems.some(canvasModernText)){size.max='1024';size.step='any';}
         if(mixedSizes){size.value='';size.placeholder='Mixed';}
+        const sizeState=canvasSelectionProperty('text.size');
+        if(sizeState){size.value=sizeState.state==='value'?String(sizeState.value):'';size.placeholder=sizeState.state==='mixed'?'Mixed':'';}
         if(metricItems.length>1)size.title='Applies to '+metricItems.length+' text objects in their own style units. Use +/− to preserve size differences.';
+        size.title+=' Clear to restore inheritance.';
+        applyCanvasPropertyControl(size,'text.size');
         size.addEventListener('keydown',event=>event.stopPropagation());size.addEventListener('change',()=>{
-          if(size.value===''||!size.checkValidity())return;
-          changeModernTextStyle(textIndex,{textSize:Number(size.value)}).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;});
+          if(!size.checkValidity())return;
+          changeModernTextStyle(textIndex,{textSize:size.value===''?'':Number(size.value)}).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;});
         });
         const sizeStack=document.createElement('span');sizeStack.className='keynope-text-size-stack';
         for(const [label,delta,title] of [['+',1,'Increase font size'],['−',-1,'Decrease font size']]){
-          const button=canvasTool(label,'',()=>changeCanvasTextSize(textIndex,delta));button.title=title;button.setAttribute('aria-label',title);sizeStack.append(button);
+          const button=canvasTool(label,'',()=>changeCanvasTextSize(textIndex,delta));button.title=title;button.setAttribute('aria-label',title);applyCanvasPropertyControl(button,'text.size');sizeStack.append(button);
         }
         const sizeLabel=document.createElement('label');sizeLabel.className='keynope-ttf-width-control';sizeLabel.append('Font size',size);
         const sizeControl=document.createElement('span');sizeControl.className='keynope-text-metric-control';sizeControl.append(sizeLabel,sizeStack);content.append(sizeControl);
@@ -12539,27 +13792,35 @@ if (keynopeAppSurface) {
         width.value=String(modernText?authoredWidth(textElement):KeynopeTrueType.widthPercent(textElement));width.className='keynope-ttf-width';
         const widths=metricItems.filter(e=>canvasSupportsTextCapability(e,'width')).map(e=>canvasModernText(e)?authoredWidth(e):KeynopeTrueType.widthPercent(e));
         if(widths.some(value=>value!==widths[0])){width.value='';width.placeholder='Mixed';}
-        width.title='Font width: 100% is the selected font’s Keynope baseline. Does not resize the text box.';
+        const widthState=canvasSelectionProperty('text.width');
+        if(widthState){width.value=widthState.state==='value'?String(widthState.value):'';width.placeholder=widthState.state==='mixed'?'Mixed':'';}
+        width.title='Font width: 100% is the selected font’s Keynope baseline. Does not resize the text box. Clear to restore inheritance.';
         width.setAttribute('aria-label','TrueType width percent');
+        applyCanvasPropertyControl(width,'text.width');
         width.addEventListener('keydown',event=>event.stopPropagation());
         width.addEventListener('change',()=>{
-          if(width.value===''||!width.checkValidity())return;
-          changeModernTextStyle(textIndex,{textWidth:Number(width.value)}).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;});
+          if(!width.checkValidity())return;
+          changeModernTextStyle(textIndex,{textWidth:width.value===''?'':Number(width.value)}).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;});
         });
         for(const [label,delta,title] of [['+',1,'Increase font width'],['−',-1,'Decrease font width']]){
           const button=canvasTool(label,'',()=>changeModernTextStyle(textIndex,{textWidthDelta:delta}).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;}));
           button.title=title;button.setAttribute('aria-label',title);widthStack.append(button);
+          applyCanvasPropertyControl(button,'text.width');
         }
         widthLabel.append(width);
         const widthControl=document.createElement('span');widthControl.className='keynope-text-metric-control';widthControl.append(widthLabel,widthStack);content.append(widthControl);
         const boldItems=selectedElements.filter(e=>canvasSupportsTextCapability(e,'emphasis'));
-        const boldOn=boldItems.length>0&&boldItems.every(e=>canvasTextIsBold(e));
-        const boldMixed=!boldOn&&boldItems.some(e=>canvasTextIsBold(e));
+        const boldState=canvasSelectionProperty('text.bold');
+        const boldOn=boldState?boldState.state==='value'&&boldState.value===true:boldItems.length>0&&boldItems.every(e=>canvasTextIsBold(e));
+        const boldMixed=boldState?boldState.state==='mixed':!boldOn&&boldItems.some(e=>canvasTextIsBold(e));
         const emphasisTools=document.createElement('span');emphasisTools.style.cssText='display:flex;gap:6px;flex-basis:100%';content.append(emphasisTools);
         const bold=canvasTool('B',boldOn?'active':'',()=>changeModernTextStyle(textIndex,{textBold:!boldOn}).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;}));bold.title='Bold text';bold.setAttribute('aria-label',bold.title);bold.setAttribute('aria-pressed',boldMixed?'mixed':String(boldOn));emphasisTools.append(bold);
+        applyCanvasPropertyControl(bold,'text.bold');
         for(const [caption,key,property] of [['Italic','textItalic','italic'],['Underline','textUnderline','underline']]){
-          const on=boldItems.length>0&&boldItems.every(e=>canvasTextHasEmphasis(e,property)),mixed=!on&&boldItems.some(e=>canvasTextHasEmphasis(e,property));
+          const state=canvasSelectionProperty('text.'+property);
+          const on=state?state.state==='value'&&state.value===true:boldItems.length>0&&boldItems.every(e=>canvasTextHasEmphasis(e,property)),mixed=state?state.state==='mixed':!on&&boldItems.some(e=>canvasTextHasEmphasis(e,property));
           const button=canvasTool(caption[0],on?'active':'',()=>changeModernTextStyle(textIndex,{[key]:!on}).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;}));button.title=caption+' text';button.setAttribute('aria-label',button.title);button.setAttribute('aria-pressed',mixed?'mixed':String(on));button.style[property==='italic'?'fontStyle':'textDecoration']=property;emphasisTools.append(button);
+          applyCanvasPropertyControl(button,'text.'+property);
         }
       }
       const paragraphTexts=selectedElements.filter(e=>canvasSupportsTextCapability(e,'paragraph')).map(e=>{
@@ -12568,8 +13829,11 @@ if (keynopeAppSurface) {
       const modernItems=selectedElements.filter(e=>canvasSupportsTextCapability(e,'font')&&canvasModernText(e));
       if(modernItems.length){
         const fontLabel=document.createElement('label'),font=document.createElement('select');fontLabel.className='keynope-ttf-width-control';fontLabel.append('Font'+(selectedElements.length>1?' · '+modernItems.length+' of '+selectedElements.length+' objects':''),font);font.setAttribute('aria-label','Font family');
-        for(const [value,label]of [['mixed','Mixed'],['c64','Keynope C64'],['sans','Go — proportional'],['mono','Go Mono — monospaced']])font.add(new Option(label,value));font.options[0].disabled=true;
+        for(const [value,label]of [['mixed','Mixed'],['theme','Use theme font'],['c64','Keynope C64'],['sans','Go — proportional'],['mono','Go Mono — monospaced']])font.add(new Option(label,value));font.options[0].disabled=true;
         const values=modernItems.map(e=>new URLSearchParams(e.query||'').get('modern-font')||'');font.value=values.every(v=>v===values[0])?values[0]:'mixed';
+        const fontState=canvasSelectionProperty('text.font');
+        if(fontState){font.value=fontState.state==='mixed'?'mixed':(fontState.fontBinding?fontState.fontBinding==='theme':fontState.provenance==='inherited')?'theme':fontState.value;}
+        applyCanvasPropertyControl(font,'text.font');
         font.addEventListener('keydown',event=>event.stopPropagation());font.onchange=()=>changeModernTextStyle(textIndex,{modernFont:font.value}).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;});content.append(fontLabel);
       }
       if(paragraphTexts.length)appendCanvasParagraphControls(content,paragraphTexts,values=>changeModernTextStyle(textIndex,values).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;}),selectedElements.length);
@@ -12585,25 +13849,33 @@ if (keynopeAppSurface) {
     }
     if (positionable) {
       const geometry=canvasGeometryControls(index);if(geometry)arrange.appendChild(geometry);
+      const referenceLabel=document.createElement('label');referenceLabel.className='keynope-alignment-reference';referenceLabel.textContent='Align to';
+      const reference=document.createElement('select');reference.setAttribute('aria-label','Alignment reference');
+      const canAlignSelection=canvasArrangeUnits(index).length>1;
+      for(const [value,label] of [['slide','Slide'],['selection','Selection']]){const option=document.createElement('option');option.value=value;option.textContent=label;option.disabled=value==='selection'&&!canAlignSelection;reference.append(option);}
+      reference.value=canAlignSelection?canvasAlignmentReference:'slide';reference.disabled=canvasSelectionCommand('arrange.align')?.enabled===false;
+      reference.addEventListener('change',()=>{canvasAlignmentReference=reference.value;});reference.addEventListener('keydown',event=>event.stopPropagation());referenceLabel.append(reference);arrange.append(referenceLabel);
       for (const [alignment, symbol, title] of [['left','≡←','Align left'],['center','≡','Align centre'],['right','→≡','Align right']]) {
         const button = canvasTool(symbol, query.get('align') === alignment ? 'active' : '', () => setCanvasAlignment(index, alignment));
         button.title = title;
         button.setAttribute('aria-label', title);
+        applyCanvasCommandControl(button,'arrange.align');
         arrange.appendChild(button);
       }
-      for (const alignment of ['top','middle','bottom']) arrange.appendChild(canvasVerticalAlignmentTool(index, alignment, query.get('valign') === alignment));
+      for (const alignment of ['top','middle','bottom']) {const button=canvasVerticalAlignmentTool(index, alignment, query.get('valign') === alignment);applyCanvasCommandControl(button,'arrange.align');arrange.appendChild(button);}
       const arrangeUnits=canvasArrangeUnits(index);
       const matchStatus=document.createElement('p');matchStatus.setAttribute('role','status');matchStatus.className='keynope-geometry-status';
       for(const [axis,label] of [['width','Match width'],['height','Match height'],['both','Match size']]){
         const button=canvasTool(label,'',()=>matchCanvasSelectionSize(index,axis,matchStatus));
         button.title=label+' to the primary selected object; keeps top-left positions and font sizes';button.setAttribute('aria-label',label);
         button.disabled=arrangeUnits.length<2||arrangeUnits.some(unit=>unit.snapshot.length!==1);
+        applyCanvasCommandControl(button,'arrange.match');
         if(button.disabled)button.title+=' · Select at least two unlocked individual objects (enter groups to edit members).';
         arrange.appendChild(button);
       }
       arrange.appendChild(matchStatus);
       for(const [axis,label] of [['horizontal','Distribute horizontally'],['vertical','Distribute vertically']]){
-        const button=canvasTool(label,'',()=>distributeCanvasSelection(index,axis));button.title=label+' with equal gaps; outer objects stay fixed';button.setAttribute('aria-label',label);button.disabled=arrangeUnits.length<3;arrange.appendChild(button);
+        const button=canvasTool(label,'',()=>distributeCanvasSelection(index,axis));button.title=label+' with equal gaps; outer objects stay fixed';button.setAttribute('aria-label',label);button.disabled=arrangeUnits.length<3;applyCanvasCommandControl(button,'arrange.distribute');arrange.appendChild(button);
       }
     }
     if (selectedText) {
@@ -12613,10 +13885,11 @@ if (keynopeAppSurface) {
         applyCanvasAlignmentState(button,alignmentElements,alignment);
         button.title=title;button.setAttribute('aria-label',title);content.append(button);
       }
-      for(const alignment of ['top','middle','bottom']){
-        const button=canvasVerticalAlignmentTool(textIndex,alignment,false,true);
-        applyCanvasAlignmentState(button,alignmentElements,alignment,true);content.append(button);
-      }
+      const inheritAlignment=(property,key,title)=>{
+        const button=canvasTool('↶','keynope-icon-button',()=>setCanvasTextAlignment(textIndex,key,''));
+        button.title=title;button.setAttribute('aria-label',title);applyCanvasPropertyControl(button,property);
+        const state=canvasSelectionProperty(property);button.disabled=button.disabled||state?.provenance==='inherited';button.style.marginRight='8px';content.append(button);
+      };
       if (selectedElements.some(candidate => KeynopeTrueType.is(candidate)||['heading','text','text-image','bullet'].includes(candidate.kind))) {
         const justify = canvasTool('', 'keynope-svg-button', () => setCanvasTextAlignment(textIndex,'text-align','justify'));
         justify.innerHTML = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 4h16M2 8h16M2 12h16M2 16h16"/></svg>';
@@ -12625,6 +13898,12 @@ if (keynopeAppSurface) {
         applyCanvasAlignmentState(justify,alignmentElements,'justify');
         content.appendChild(justify);
       }
+      inheritAlignment('text.align','text-align','Inherit horizontal text alignment');
+      for(const alignment of ['top','middle','bottom']){
+        const button=canvasVerticalAlignmentTool(textIndex,alignment,false,true);
+        applyCanvasAlignmentState(button,alignmentElements,alignment,true);content.append(button);
+      }
+      inheritAlignment('text.vertical','text-valign','Inherit vertical text alignment');
       if (rotatableText && selectedElements.length===1) {
         const rotate = canvasTool('⟳', 'keynope-icon-button keynope-rotate-button', () => rotateCanvasText(textIndex));
         rotate.innerHTML = '<span class="keynope-rotate-icon" aria-hidden="true">⟳</span><span class="keynope-rotate-label">ROTATE</span>';
@@ -12632,13 +13911,14 @@ if (keynopeAppSurface) {
         rotate.setAttribute('aria-label', 'Rotate');
         arrange.appendChild(rotate);
       }
-      style.appendChild(canvasColourTool(textIndex, textElement, ''));
+      if(!canvasSelectionProperty('paint.color'))style.appendChild(canvasColourTool(textIndex, textElement, ''));
+      if(!canvasSelectionProperty('paint.colorToken'))style.appendChild(canvasThemeColourTool(textIndex));
       const emojiIndex=selectedIndices.find(candidate=>canvasHasEmoji(slide.elements[candidate]));
       if(emojiIndex!=null)appendCanvasTintControls(style,emojiIndex,slide.elements[emojiIndex],true);
-      if (selectedElements.some(canvasTextEffectCompatible)) appendCanvasTypographyEffectTools(style,textIndex,textElement);
+      if (!canvasSelectionProperty('paint.gradientDirection') && selectedElements.some(canvasTextEffectCompatible)) appendCanvasTypographyEffectTools(style,textIndex,textElement);
       if (selectedElements.length === 1) style.appendChild(canvasLinkTool(textIndex, query));
     }
-    if (!selectedText && shapeElement) style.appendChild(canvasColourTool(shapeIndex, shapeElement, ''));
+    if (!selectedText && shapeElement) { if(!canvasSelectionProperty('paint.color'))style.appendChild(canvasColourTool(shapeIndex, shapeElement, ''));if(!canvasSelectionProperty('paint.colorToken'))style.appendChild(canvasThemeColourTool(shapeIndex)); }
     if (!selectedText && selectedElements.length===1 && selectedElements.some(candidate=>candidate.kind==='image')) {
       const rotate=canvasTool('⟳','keynope-icon-button keynope-rotate-button',()=>rotateCanvasText(index));
       rotate.title='Rotate';rotate.setAttribute('aria-label','Rotate');arrange.appendChild(rotate);
@@ -12652,27 +13932,31 @@ if (keynopeAppSurface) {
       const label=document.createElement('label');label.textContent='Rotate selection by (°)';label.style.gridColumn='1 / -1';
       const input=document.createElement('input');input.type='number';input.step='any';input.min='-360';input.max='360';input.value='90';input.required=true;input.setAttribute('aria-label','Selection rotation degrees');label.append(input);
       const button=document.createElement('button');button.type='submit';button.textContent='Rotate together';
+      applyCanvasCommandControl(button,'arrange.rotate');
       const status=document.createElement('p');status.setAttribute('role','status');form.append(label,button,status);
       form.addEventListener('keydown',event=>event.stopPropagation());
-      form.onsubmit=async event=>{event.preventDefault();if(!form.reportValidity()||button.disabled)return;button.disabled=true;try{await rotateCanvasSelection(index,Number(input.value));}catch(error){status.textContent=error.message||'Could not rotate selection';}finally{button.disabled=false;}};
+      form.onsubmit=async event=>{event.preventDefault();if(!form.reportValidity()||button.disabled)return;button.disabled=true;try{await rotateCanvasSelection(index,Number(input.value));}catch(error){status.textContent=error.message||'Could not rotate selection';}finally{button.disabled=false;applyCanvasCommandControl(button,'arrange.rotate');}};
       arrange.append(form);
       const resizeForm=document.createElement('form');resizeForm.className='keynope-geometry-controls';resizeForm.setAttribute('aria-label','Resize selection');
       const resizeLabel=document.createElement('label');resizeLabel.textContent='Proportional size (%)';resizeLabel.style.gridColumn='1 / -1';
       const scale=document.createElement('input');scale.type='number';scale.step='any';scale.min='0.1';scale.max='1000';scale.value='100';scale.required=true;scale.setAttribute('aria-label','Selection size percent');resizeLabel.append(scale);
       const resizeButton=document.createElement('button');resizeButton.type='submit';resizeButton.textContent='Resize together';
+      applyCanvasCommandControl(resizeButton,'arrange.resize');
       const resizeStatus=document.createElement('p');resizeStatus.setAttribute('role','status');resizeForm.append(resizeLabel,resizeButton,resizeStatus);
       resizeForm.title='Scale positions and boxes about the selection centre; keep font sizes and crop settings.';
       resizeForm.addEventListener('keydown',event=>event.stopPropagation());
-      resizeForm.onsubmit=async event=>{event.preventDefault();if(!resizeForm.reportValidity()||resizeButton.disabled)return;resizeButton.disabled=true;try{await resizeCanvasSelection(index,Number(scale.value)/100);}catch(error){resizeStatus.textContent=error.message||'Could not resize selection';}finally{resizeButton.disabled=false;}};
+      resizeForm.onsubmit=async event=>{event.preventDefault();if(!resizeForm.reportValidity()||resizeButton.disabled)return;resizeButton.disabled=true;try{await resizeCanvasSelection(index,Number(scale.value)/100);}catch(error){resizeStatus.textContent=error.message||'Could not resize selection';}finally{resizeButton.disabled=false;applyCanvasCommandControl(resizeButton,'arrange.resize');}};
       arrange.append(resizeForm);
     }
     if(selectedElements.length===1){
       const object=deck.pages?.[pageIndex]?.scene?.objects?.find(candidate=>candidate.id===element.id);
-      if(object&&['text','image','shape'].includes(object.kind)&&!object.retroText&&!(object.kind==='text'&&object.retroLines)){
+      const rotation=canvasSelectionProperty('geometry.rotation');
+      if(rotation?rotation.eligibleIds.includes(element.id):object&&['text','image','shape'].includes(object.kind)&&!object.retroText&&!(object.kind==='text'&&object.retroLines)){
         const field=document.createElement('label');field.className='keynope-ttf-width-control';field.append('Rotation (°)');
-        const input=document.createElement('input');input.type='number';input.min='-360';input.max='360';input.step='any';input.value=String(canvasAuthoredTextMetric(element,'object-rotation',object.rotation||0));input.setAttribute('aria-label','Object rotation degrees');
+        const input=document.createElement('input');input.type='number';input.min='-360';input.max='360';input.step='any';input.value=String(canvasAuthoredTextMetric(element,'object-rotation',object?.rotation||0));input.setAttribute('aria-label','Object rotation degrees');
         input.addEventListener('keydown',event=>event.stopPropagation());
-        input.onchange=async()=>{if(input.value===''||!input.checkValidity())return;const changed={...element},q=new URLSearchParams(element.query||'');q.delete('orientation');q.set('object-rotation',String(Number(input.value)));changed.query=q.toString();await editorAction({action:'update-elements',elementIndices:[index],elementsData:[changed]});};
+        if(rotation?.state==='value')input.value=String(rotation.value);applyCanvasPropertyControl(input,'geometry.rotation');
+        input.onchange=async()=>{if(input.value===''||!input.checkValidity())return;try{await editorAction({action:'set-selection-property',slide:editorState.current,sceneMaster:!!editorState.masterMode,sceneRevision:editorState.version,objectIds:[element.id],property:'geometry.rotation',propertyValue:Number(input.value)});}catch(error){if(editorStatus)editorStatus.textContent=error.message;}};
         field.append(input);arrange.append(field);
       }
     }
@@ -12683,8 +13967,10 @@ if (keynopeAppSurface) {
     }
     if (selectedElements.length === 1 && element.kind === 'shape') appendCanvasShapeKindTools(content, index, query);
     if (selectedElements.length === 1 && element.kind === 'shape') appendShapeLabelTools(content,style,index,element);
-    if (selectedElements.length === 1 && element.kind === 'image') {style.appendChild(canvasImageStyleTool(index,element));content.appendChild(canvasVisualMenu(index, element));}
-    if (selectedElements.length === 1) style.appendChild(canvasOutlineTool(index, element, query));
+    if (canvasSelectionPropertyApplies('image.style')) style.appendChild(canvasImageStyleTool(index,element));
+    const adjustmentImageIndex=selectedIndices.find(candidate=>slide.elements[candidate]?.kind==='image');
+    if(adjustmentImageIndex!==undefined)content.appendChild(canvasVisualMenu(adjustmentImageIndex,slide.elements[adjustmentImageIndex]));
+    if (selectedElements.length === 1 && !canvasSelectionProperty('paint.outline')) style.appendChild(canvasOutlineTool(index, element, query));
     if (selectedElements.length === 1) arrange.appendChild(canvasDuplicateTool(index));
     if (selectedElements.length === 1) arrange.appendChild(canvasLayerTool(index, 'backward'));
     if (selectedElements.length === 1) arrange.appendChild(canvasLayerTool(index, 'forward'));
@@ -12699,6 +13985,113 @@ if (keynopeAppSurface) {
       handle.setAttribute('aria-label', 'Resize from ' + corner);
       hit.appendChild(handle);
     }
+  }
+
+  function shapeAdjustmentPosition(object,handle,value=handle.value) {
+    const b=object.bounds,angle=(object.rotation||0)*Math.PI/180;
+    const x=(handle.origin.x+handle.vector.x*value-.5)*b.width,y=(handle.origin.y+handle.vector.y*value-.5)*b.height;
+    return {x:b.x+b.width/2+Math.cos(angle)*x-Math.sin(angle)*y,y:b.y+b.height/2+Math.sin(angle)*x+Math.cos(angle)*y};
+  }
+  function placeShapeAdjustment(node,object,handle,value,scene) {
+    const p=shapeAdjustmentPosition(object,handle,value);
+    node.style.left=p.x/scene.width*100+'%';node.style.top=p.y/scene.height*100+'%';
+    node.setAttribute('aria-valuenow',String(Math.round(value*10000)/100));
+    node.setAttribute('aria-valuetext',String(Math.round(value*10000)/100)+' percent');
+  }
+  function beginShapeAdjustment(event,node,object,handle,scene) {
+    if(event.button!==0||activeCanvasDrag||activeInlineEditor)return;
+    event.preventDefault();event.stopPropagation();
+    const context=canvasGeometryContext();
+    const sourceScene=scene,sourcePage=pageIndex,token={shapeAdjustment:true,elementID:object.id,hit:node,pointerId:event.pointerId};
+    activeCanvasDrag=token;
+    let value=handle.value,closed=false,frame=0,busy=false,pending=null,generation=0,controller=null;
+    const current=()=>!closed&&activeCanvasDrag===token&&pageIndex===sourcePage&&canvasGeometryGestureCurrent(context);
+    const payload=(v,revision=editorState.version)=>({sceneRevision:revision,mutationRevision:context.mutationRevision,sceneMaster:context.master,slide:context.slide,objectId:object.id,shapeAdjustment:{key:handle.key,value:v}});
+    const paintPosition=v=>placeShapeAdjustment(node,object,handle,v,scene);
+    const pump=async()=>{
+      if(busy||!pending||!current())return;
+      const request=pending;pending=null;busy=true;controller=new AbortController();
+      try{
+        const response=await fetch('/api/editor/shape-adjustment-draft',{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,body:JSON.stringify(payload(request.value,request.revision))});
+        if(!response.ok)throw Error((await response.text()).trim()||'Could not preview the adjustment.');
+        const draft=await response.json();
+        if(!current()||request.generation!==generation||draft.revision!==request.revision)return;
+        const originals=new Map(sourceScene.objects.map(o=>[o.id,o]));
+        const updates=new Map(draft.objects.map(o=>[o.id,{...o,editable:originals.get(o.id)?.editable,...(!originals.get(o.id)?.label?{label:undefined,labelPaint:undefined}:{})}]));
+        modernPageView?.update({...sourceScene,objects:sourceScene.objects.map(o=>updates.get(o.id)||o)});
+        for(const other of canvasOverlay.querySelectorAll('.keynope-shape-adjustment')){
+          const projected=updates.get(other.dataset.objectId),h=projected?.shapeGeometry?.handles?.find(h=>h.key===other.dataset.adjustment);
+          if(h)placeShapeAdjustment(other,projected,h,h.value,scene);
+        }
+        paintPosition(value);
+      }catch(error){if(current()&&error.name!=='AbortError'&&editorStatus)editorStatus.textContent=error.message;}
+      finally{busy=false;controller=null;if(pending&&current())pump();}
+    };
+    const trackValue=e=>{
+      const rect=canvasOverlay.getBoundingClientRect(),b=object.bounds,angle=-(object.rotation||0)*Math.PI/180;
+      const x=(e.clientX-rect.left)*scene.width/Math.max(1,rect.width)-b.x-b.width/2,y=(e.clientY-rect.top)*scene.height/Math.max(1,rect.height)-b.y-b.height/2;
+      const local={x:(Math.cos(angle)*x-Math.sin(angle)*y)/b.width+.5,y:(Math.sin(angle)*x+Math.cos(angle)*y)/b.height+.5};
+      const v=handle.vector,den=v.x*v.x+v.y*v.y;
+      return ((local.x-handle.origin.x)*v.x+(local.y-handle.origin.y)*v.y)/den;
+    };
+    const startTrack=trackValue(event);
+    const calculate=e=>Math.max(handle.min,Math.min(handle.max,Math.round((handle.value+trackValue(e)-startTrack)*1e6)/1e6));
+    const move=e=>{
+      if(!current()||e.pointerId!==event.pointerId)return;
+      const next=calculate(e);if(Math.abs(next-value)<1e-9)return;value=next;paintPosition(value);
+      pending={value,generation:++generation,revision:editorState.version};
+      if(!frame)frame=requestAnimationFrame(()=>{frame=0;pump();});
+    };
+    const cleanup=()=>{
+      if(closed)return;const restore=current();closed=true;++generation;pending=null;controller?.abort();
+      if(frame)cancelAnimationFrame(frame);
+      node.removeEventListener('pointermove',move);node.removeEventListener('pointerup',finish);node.removeEventListener('pointercancel',cancel);node.removeEventListener('lostpointercapture',cancel);window.removeEventListener('blur',cancel);
+      if(activeCanvasDrag===token)activeCanvasDrag=null;
+      if(node.hasPointerCapture(event.pointerId))node.releasePointerCapture(event.pointerId);
+      if(restore)modernPageView?.update(deck.pages[pageIndex]?.scene||sourceScene);
+      refreshCanvasShapeAdjustments();
+    };
+    const cancel=e=>{if(e?.pointerId!=null&&e.pointerId!==event.pointerId)return;cleanup();};token.cancel=cancel;
+    const finish=async e=>{
+      if(e.pointerId!==event.pointerId)return;
+      if(!current()){cleanup();return;}
+      move(e);const final=value;cleanup();
+      if(Math.abs(final-handle.value)<1e-6)return;
+      try{await queueEditorOperation(async()=>{if(!canvasGeometryGestureCurrent(context))throw Error('The shape changed; adjustment cancelled.');await performEditorAction({action:'set-shape-adjustment',performanceKind:'shape-adjustment',...payload(final)});});}
+      catch(error){showEditorCommandError(error,context);}
+    };
+    node.addEventListener('pointermove',move);node.addEventListener('pointerup',finish);node.addEventListener('pointercancel',cancel);node.addEventListener('lostpointercapture',cancel);window.addEventListener('blur',cancel);
+    node.setPointerCapture(event.pointerId);
+  }
+  function refreshCanvasShapeAdjustments() {
+    if(activeCanvasDrag)return;
+    const scene=deck.pages?.[pageIndex]?.scene,existing=new Map([...canvasOverlay.querySelectorAll('.keynope-shape-adjustment')].map(n=>[n.dataset.objectId+':'+n.dataset.adjustment,n]));
+    const indices=editorState&&editorState.selected>=0?canvasSelectedIndices(editorState.selected):[];
+    const element=indices.length===1?canvasElementAt(indices[0]):null;
+    const object=element&&scene?.objects.find(o=>o.id===element.id);
+    const q=element?new URLSearchParams(element.query||''):null;
+    const editable=element&&canvasSelectionCommandAllows('shape.adjust',element.id)&&q.get('object-hidden')!=='1';
+    if(object?.kind==='shape'&&editable&&(!canvasGroupID(element)||canvasGroupID(element)===editorState.editingGroup)){
+      for(const h of object.shapeGeometry?.handles||[]){
+        const key=object.id+':'+h.key;let node=existing.get(key);existing.delete(key);
+        if(!node){node=document.createElement('button');node.type='button';node.className='keynope-shape-adjustment';node.dataset.objectId=object.id;node.dataset.adjustment=h.key;node.setAttribute('role','slider');canvasOverlay.append(node);}
+        node.setAttribute('aria-label','Adjust '+h.label.toLowerCase());node.title=h.label+' · drag to adjust, or use arrow keys';node.setAttribute('aria-valuemin',String(h.min*100));node.setAttribute('aria-valuemax',String(h.max*100));
+        placeShapeAdjustment(node,object,h,h.value,scene);
+        node.onpointerdown=e=>beginShapeAdjustment(e,node,object,h,scene);
+        node.ondblclick=e=>{e.preventDefault();e.stopPropagation();};node.onclick=e=>{e.preventDefault();e.stopPropagation();};
+        node.onkeydown=async e=>{
+          if(!['ArrowLeft','ArrowDown','ArrowRight','ArrowUp','Home','End'].includes(e.key))return;
+          e.preventDefault();e.stopPropagation();if(node.disabled||activeCanvasDrag)return;
+          const step=e.shiftKey ? .05 : .01,delta=['ArrowLeft','ArrowDown'].includes(e.key)?-step:step;
+          const value=e.key==='Home'?h.min:e.key==='End'?h.max:Math.max(h.min,Math.min(h.max,Math.round((h.value+delta)*1e6)/1e6));
+          node.disabled=true;
+          try{await editorAction({action:'set-shape-adjustment',sceneRevision:editorState.version,sceneMaster:!!editorState.masterMode,slide:editorState.current,objectId:object.id,shapeAdjustment:{key:h.key,value}});}
+          catch(error){if(editorStatus)editorStatus.textContent=error.message;}
+          finally{node.disabled=false;}
+        };
+      }
+    }
+    existing.forEach(n=>n.remove());
   }
 
   function refreshCanvasSelectionResize() {
@@ -12736,6 +14129,14 @@ if (keynopeAppSurface) {
       }
       return;
     }
+    const elements=editorState.slides?.[editorState.current]?.elements||[];
+    // Native scene delivery is independent of the authored-state response.
+    // Sorting/reordering can therefore change numeric indices before the next
+    // scene arrives. Rebind retained hits by ID instead of highlighting the
+    // new occupant of an old index.
+    if([...canvasOverlay.querySelectorAll('.keynope-canvas-element')].some(hit=>hit.dataset.elementId!==(elements[Number(hit.dataset.element)]?.id||''))){
+      renderEditorCanvasOverlay();return;
+    }
     const selected = new Set(editorState.selection || []);
     if (editorState.selected >= 0) selected.add(editorState.selected);
     for (const hit of canvasOverlay.querySelectorAll('.keynope-canvas-element')) {
@@ -12747,6 +14148,7 @@ if (keynopeAppSurface) {
       else if(!handles.length)appendCanvasResizeHandles(hit);
     }
     refreshCanvasSelectionResize();
+	refreshCanvasShapeAdjustments();
   }
 
   let shapeConnecting = null,shapeConnectionLauncher=null;
@@ -12755,10 +14157,23 @@ if (keynopeAppSurface) {
   let editingConnector = '';
   function appendConnectorTools(container,index,element,defaults=false){
     const q=new URLSearchParams(element.query||'');
+    // Authored line styles use the retained shared inspector, including
+    // mixed/group subsets, provenance, locks and accepted-value updates.
+    // This contextual section keeps only the single-line geometry tools.
+    if(!defaults){
+      const context=canvasGeometryContext();
+      const edit=canvasTool('Edit bends',editingConnector===element.id?'active':'',()=>{if(!canvasGeometryContextCurrent(context,false))return;editingConnector=editingConnector===element.id?'':element.id;renderEditorTopbar();renderEditorCanvasOverlay()});edit.disabled=canvasSelectionProperty('line.path')?.value!=='elbow'||!canvasSelectionProperty('line.path')?.editable;container.append(edit);
+      const reset=canvasTool('Auto-route','',()=>{
+        if(!canvasGeometryContextCurrent(context,false))return;
+        editingConnector='';
+        editorAction({action:'set-selection-property',slide:context.slide,sceneMaster:context.master,sceneRevision:editorState.version,objectIds:[element.id],property:'line.routing',propertyValue:'automatic'}).catch(error=>showEngagementToast(error.message||'Could not route line'));
+      });applyCanvasPropertyControl(reset,'line.routing');container.append(reset);
+      container.append(canvasDeleteTool(index));
+      return;
+    }
     const set=(key,value)=>{
       if(value){q.set(key,value);connectorDefaults[key]=value;}else{q.delete(key);delete connectorDefaults[key];}
-      if(defaults){shapeConnecting?.updatePreview?.();return;}
-      updateCanvasElement(index,e=>{const v=new URLSearchParams(e.query||'');if(value)v.set(key,value);else v.delete(key);if(key==='connector-mode')v.delete('connector-route');e.query=v.toString();});
+      shapeConnecting?.updatePreview?.();
     };
     const choice=(label,key,options,fallback)=>{const field=document.createElement('label');field.className='keynope-ttf-width-control';field.append(label);const select=document.createElement('select');select.setAttribute('aria-label',label);for(const [value,name]of options){const opt=document.createElement('option');opt.value=value;opt.textContent=name;select.append(opt)}select.value=q.get(key)||fallback;select.addEventListener('change',()=>set(key,select.value));field.append(select);container.append(field);};
     choice('Line path','connector-mode',[['elbow','Elbow'],['straight','Straight']],'straight');
@@ -12770,10 +14185,6 @@ if (keynopeAppSurface) {
     const colour=canvasTool('','keynope-colour-tool',()=>openKeynopeColourPicker(colour,q.get('fg')||inheritedColour,value=>{colour.style.setProperty('--keynope-tool-colour',value);set('fg',value);inherit.disabled=false;}));
     colour.title='Line color';colour.setAttribute('aria-label','Line color');colour.innerHTML='<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M3 17 21 7" stroke="currentColor" stroke-width="3"/></svg>';colour.style.setProperty('--keynope-tool-colour',q.get('fg')||inheritedColour);container.append(colour);
     const inherit=canvasTool('Inherit color','',()=>{set('fg','');colour.style.setProperty('--keynope-tool-colour',inheritedColour);inherit.disabled=true;});inherit.title='Use the slide or master text color';inherit.disabled=!q.has('fg');container.append(inherit);
-    if(defaults)return;
-    const edit=canvasTool('Edit bends',editingConnector===element.id?'active':'',()=>{editingConnector=editingConnector===element.id?'':element.id;renderEditorTopbar();renderEditorCanvasOverlay()});edit.disabled=q.get('connector-mode')!=='elbow';container.append(edit);
-    const reset=canvasTool('Auto-route','',()=>{editingConnector='';updateCanvasElement(index,e=>{const v=new URLSearchParams(e.query||'');v.delete('connector-route');v.set('connector-mode','elbow');e.query=v.toString()})});container.append(reset);
-    container.append(canvasDeleteTool(index));
   }
   function compactConnectorPoints(points){
     const out=[];for(const p of points){const last=out.at(-1);if(last&&last.x===p.x&&last.y===p.y)continue;out.push({...p});while(out.length>=3){const a=out.at(-3),b=out.at(-2),c=out.at(-1);if(a.x===b.x&&b.x===c.x||a.y===b.y&&b.y===c.y)out.splice(out.length-2,1);else break}}return out;
@@ -12790,15 +14201,15 @@ if (keynopeAppSurface) {
   function beginConnectorSegmentDrag(event,handle,element,points,segment){
     if(event.button!==0)return;event.preventDefault();event.stopPropagation();
     const horizontal=points[segment].y===points[segment+1].y,origin=horizontal?event.clientY:event.clientX;
-    const token={connector:true,elementID:element.id},originalPages=deck.pages.slice();activeCanvasDrag=token;
+    const token={connector:true,elementID:element.id},originalPages=deck.pages.slice(),context=canvasGeometryContext();activeCanvasDrag=token;
     let moved=points,delta=0,pending=null,pumping=false;
     const edited=()=>{const e={...element},q=new URLSearchParams(e.query||'');q.set('connector-mode','elbow');q.set('connector-route',JSON.stringify(moved));e.query=q.toString();return e};
     const pump=async()=>{if(pumping)return;pumping=true;while(pending&&activeCanvasDrag===token){const e=pending;pending=null;await previewCanvasMutation(editorElementIndexByID(element.id),e,false)}pumping=false};
-    const move=e=>{const r=canvasOverlay.getBoundingClientRect();delta=Math.round(((horizontal?e.clientY:e.clientX)-origin)*(horizontal?deck.rows/r.height:deck.cols/r.width)*2)/2;moved=displacedConnectorSegment(points,segment,delta);handle.style[horizontal?'top':'left']=((horizontal?(points[segment].y+delta)/deck.rows:(points[segment].x+delta)/deck.cols)*100)+'%';pending=edited();pump();};
-    const cleanup=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);window.removeEventListener('pointercancel',cancel);activeCanvasDrag=null;pending=null};
-    const cancel=()=>{cleanup();editorMutationPreviewSequence++;deck.pages=originalPages;drawFrame();renderEditorCanvasOverlay()};token.cancel=cancel;
-    const up=async()=>{cleanup();if(delta){await updateEditorElementByID(element.id,editorElementIndexByID(element.id),edited()).catch(()=>{});}else{editorMutationPreviewSequence++;deck.pages=originalPages;}drawFrame();renderEditorCanvasOverlay()};
-    window.addEventListener('pointermove',move);window.addEventListener('pointerup',up,{once:true});window.addEventListener('pointercancel',cancel,{once:true});
+    const move=e=>{if(e.pointerId!==event.pointerId)return;if(!canvasGeometryGestureCurrent(context)){cancel();return;}const r=canvasOverlay.getBoundingClientRect();delta=Math.round(((horizontal?e.clientY:e.clientX)-origin)*(horizontal?deck.rows/r.height:deck.cols/r.width)*2)/2;moved=displacedConnectorSegment(points,segment,delta);handle.style[horizontal?'top':'left']=((horizontal?(points[segment].y+delta)/deck.rows:(points[segment].x+delta)/deck.cols)*100)+'%';pending=edited();pump();};
+    const cleanup=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);window.removeEventListener('pointercancel',cancel);window.removeEventListener('blur',cancel);if(activeCanvasDrag===token)activeCanvasDrag=null;pending=null};
+    const cancel=e=>{if(e?.pointerId!=null&&e.pointerId!==event.pointerId)return;cleanup();editorMutationPreviewSequence++;if(canvasGeometryGestureCurrent(context)){deck.pages=originalPages;drawFrame();}renderEditorCanvasOverlay()};token.cancel=cancel;
+    const up=async e=>{if(e.pointerId!==event.pointerId)return;cleanup();if(delta){await updateEditorElementByID(element.id,editorElementIndexByID(element.id),edited(),context,element).catch(error=>showEngagementToast(error.message||'Could not move connector bend'));}else{editorMutationPreviewSequence++;if(canvasGeometryGestureCurrent(context))deck.pages=originalPages;}drawFrame();renderEditorCanvasOverlay()};
+    window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);window.addEventListener('pointercancel',cancel);window.addEventListener('blur',cancel);
   }
   function toggleShapeConnecting() {
     if(activeInlineEditor){activeInlineEditor.finish(true).then(toggleShapeConnecting);return;}
@@ -12835,8 +14246,18 @@ if (keynopeAppSurface) {
       svg?.remove();svg=svgTemplate.cloneNode(false);svg.dataset.connectorId=e.id;svg.keynopeConnectorKey=key;svg.style.zIndex=rank;canvasOverlay.append(svg);
       const path=(color,width)=>{const p=document.createElementNS(svg.namespaceURI,'polyline');p.setAttribute('points',points.map(p=>p.x+','+p.y).join(' '));p.setAttribute('fill','none');p.setAttribute('stroke',color);p.setAttribute('stroke-width',width);p.setAttribute('vector-effect','non-scaling-stroke');svg.append(p);return p};
       const hit=path('transparent',Math.max(14,Number(q.get('connector-width')||1)*3));hit.classList.add('keynope-connector-hit');hit.dataset.element=String(index);hit.dataset.id=e.id;hit.style.pointerEvents=shapeConnecting?'none':'stroke';hit.style.cursor='pointer';
-      hit.addEventListener('pointerdown',event=>{event.preventDefault();event.stopPropagation();editorAction({action:'select-element',element:index,name:event.shiftKey?'toggle':'',elementData:{id:e.id}}).catch(()=>{});});
-      hit.addEventListener('dblclick',async event=>{event.preventDefault();event.stopPropagation();editingConnector=e.id;if(q.get('connector-mode')!=='elbow'){const el={...e},v=new URLSearchParams(el.query||'');v.set('connector-mode','elbow');el.query=v.toString();await updateEditorElementByID(e.id,index,el).catch(()=>{});}renderEditorTopbar();renderEditorCanvasOverlay();});
+      const hitContext=canvasGeometryContext();
+      hit.addEventListener('pointerdown',event=>{event.preventDefault();event.stopPropagation();if(!canvasGeometryContextCurrent(hitContext,false))return;editorAction({action:'select-element',element:index,name:event.shiftKey?'toggle':'',elementData:{id:e.id}}).catch(()=>{});});
+      hit.addEventListener('dblclick',async event=>{
+        event.preventDefault();event.stopPropagation();if(!canvasGeometryContextCurrent(hitContext,false))return;const context=canvasGeometryContext();
+        const property=canvasSelectionProperty('line.path'),mode=property?.eligibleIds?.includes(e.id)?property.value:q.get('connector-mode');
+        if(mode!=='elbow'){
+          const el={...e},v=new URLSearchParams(el.query||'');v.set('connector-mode','elbow');el.query=v.toString();
+          try{await updateEditorElementByID(e.id,index,el,context,e);}catch(error){showEngagementToast(error.message||'Could not edit bends');return;}
+        }
+        if(!canvasGeometryContextCurrent(context,false))return;
+        editingConnector=e.id;renderEditorTopbar();renderEditorCanvasOverlay();
+      });
       hit.addEventListener('contextmenu',event=>{event.preventDefault();event.stopPropagation();});
       }
       connectorOrder.push(svg);
@@ -12846,16 +14267,19 @@ if (keynopeAppSurface) {
           const handle=document.createElement('button');handle.type='button';handle.className='keynope-connector-segment';handle.dataset.segment=String(i);handle.setAttribute('aria-label',horizontal?'Move horizontal segment':'Move vertical segment');handle.title=horizontal?'Drag up or down':'Drag left or right';handle.textContent=horizontal?'↕':'↔';
           handle.style.cssText='position:absolute;z-index:4;left:'+((p.x+n.x)/2/deck.cols*100)+'%;top:'+((p.y+n.y)/2/deck.rows*100)+'%;transform:translate(-50%,-50%);width:22px;height:22px;min-width:0;padding:0;background:#15191f;color:#ffd166;border:1px solid #ffd166;pointer-events:auto;cursor:'+(horizontal?'ns-resize':'ew-resize');
           handle.style.zIndex='1000004';handle.setAttribute('aria-keyshortcuts',horizontal?'ArrowUp ArrowDown':'ArrowLeft ArrowRight');handle.addEventListener('pointerdown',event=>beginConnectorSegmentDrag(event,handle,e,points,i));
-          let keyboardRoute=points,keyboardQueue=Promise.resolve();
+          let keyboardRoute=points,keyboardElement=e,keyboardContext=canvasGeometryContext(),keyboardQueue=Promise.resolve();
           handle.addEventListener('keydown',event=>{
             const delta=horizontal?(event.key==='ArrowUp'?-1:event.key==='ArrowDown'?1:0):(event.key==='ArrowLeft'?-1:event.key==='ArrowRight'?1:0);
             if(!delta)return;
             event.preventDefault();event.stopPropagation();
             const amount=delta*(event.shiftKey?2:.5);
             keyboardQueue=keyboardQueue.then(async()=>{
-              keyboardRoute=displacedConnectorSegment(keyboardRoute,i,amount);
-              const edited={...e},values=new URLSearchParams(edited.query||'');values.set('connector-mode','elbow');values.set('connector-route',JSON.stringify(keyboardRoute));edited.query=values.toString();
-              await updateEditorElementByID(e.id,editorElementIndexByID(e.id),edited);
+              if(!canvasGeometryGestureCurrent(keyboardContext))throw Error('The document or view changed; bend edit cancelled.');
+              const nextRoute=displacedConnectorSegment(keyboardRoute,i,amount);
+              const edited={...keyboardElement},values=new URLSearchParams(edited.query||'');values.set('connector-mode','elbow');values.set('connector-route',JSON.stringify(nextRoute));edited.query=values.toString();
+              await updateEditorElementByID(e.id,editorElementIndexByID(e.id),edited,keyboardContext,keyboardElement);
+              if(!canvasGeometryContextCurrent(keyboardContext,false)||editorState.mutationRevision!==keyboardContext.mutationRevision+1)return;
+              keyboardRoute=nextRoute;keyboardElement=canvasElementAt(editorElementIndexByID(e.id));keyboardContext=canvasGeometryContext();
               const replacement=[...canvasOverlay.querySelectorAll('.keynope-connector-segment')].find(node=>node.dataset.segment===String(i));
               replacement?.focus({preventScroll:true});
             }).catch(error=>{if(editorStatus)editorStatus.textContent='Could not move connector segment: '+error.message;});
@@ -12961,7 +14385,7 @@ if (keynopeAppSurface) {
     const retainedHits=new Map();
     for(const child of [...canvasOverlay.children]){
       if(child.classList.contains('keynope-canvas-element'))retainedHits.set(child.dataset.element,child);
-      else if(!child.matches('svg[data-connector-id],.keynope-selection-resize'))child.remove();
+      else if(!child.matches('svg[data-connector-id],.keynope-selection-resize,.keynope-shape-adjustment'))child.remove();
     }
     const authoredElements = editorState.slides[editorState.current].elements || [];
     // Parse once for this projection only. Do not retain mutable query objects
@@ -13018,7 +14442,11 @@ if (keynopeAppSurface) {
       // before the overlay frame runs. Do not replace its focused inputs a
       // second time, discarding edits or interrupting a click on Apply.
       const scene=deck.pages[pageIndex]?.scene;
-      if(!scene||scene!==editorTopbarScene||editorState?.version!==editorTopbarVersion)renderEditorTopbar();
+      // The earlier build can also have cached a panel before its selection
+      // had bounds. Recover that missing form once; never replace a live form.
+      const geometryMissing=editorState?.selectionCapabilities?.commands?.['arrange.geometry']?.enabled&&
+        canvasMemberBounds.has(editorState.selected)&&!ribbonPanels.arrange.querySelector('[aria-label="Object geometry"]');
+      if(geometryMissing||!scene||scene!==editorTopbarScene||editorState?.version!==editorTopbarVersion)renderEditorTopbar();
     });
     const collapsed=new Map();
     for(const [i] of groups){const id=authoredQueries[i].get('group');if(id&&id!==editorState.editingGroup){if(!collapsed.has(id))collapsed.set(id,[]);collapsed.get(id).push(i);}}
@@ -13060,6 +14488,7 @@ if (keynopeAppSurface) {
       hit.keynopeHitKey=hitKey;
       hit.className = 'keynope-canvas-element' + ((index === editorState.selected || (editorState.selection || []).includes(index)) ? ' active' : '');
       hit.dataset.element = String(index);
+      hit.dataset.elementId = authoredElements[index]?.id || '';
       if(bounds.groupID){hit.dataset.group=bounds.groupID;hit.classList.toggle('active',canvasGroupMembers(index).some(i=>(editorState.selection||[]).includes(i)));}
       hit.dataset.color = bounds.color || '';
       hit.style.left = (bounds.minX / deck.cols * 100) + '%';
@@ -13084,7 +14513,7 @@ if (keynopeAppSurface) {
         event.preventDefault();
         event.stopPropagation();
         if(bounds.groupID){editorAction({action:'enter-group',element:index,elementData:{id:authoredElements[index]?.id}}).catch(()=>{});return;}
-        beginInlineEdit(index, hit);
+        beginInlineEdit(index, hit, {x:event.clientX,y:event.clientY});
       });
       hit.addEventListener('contextmenu', event => {
         event.preventDefault();
@@ -13106,21 +14535,29 @@ if (keynopeAppSurface) {
         if(!event.target.closest('.keynope-resize-handle')&&beginCanvasGroupDrag(hit,event,index))return;
         const originX = event.clientX;
         const originY = event.clientY;
-        const start = {...bounds};
+        const start = {...bounds},moveContext=canvasGeometryContext();
         const originalPreviewPages=deck.pages.slice(),gestureSlide=editorState.current;
         const resizeHandle = event.target.closest && event.target.closest('.keynope-resize-handle');
         const resizeCorner = resizeHandle ? resizeHandle.dataset.corner : '';
         const resizing = resizeCorner !== '';
         const sourceElement = {...editorState.slides[editorState.current].elements[index]};
         const sourceElementID = sourceElement.id || '';
+        const movePreview=resizing?null:beginCanvasMovePreview([{index,element:sourceElement,bounds:start}],moveContext);
         const shapeResize = resizing && sourceElement.kind === 'shape';
         const resizeStep = shapeResize ? .5 : 1;
         const fittingText = resizing && ['heading','text','text-image','bullet','code'].includes(sourceElement.kind);
         const resizingObject=deck.pages[pageIndex]?.scene?.objects.find(object=>object.id===sourceElementID);
         const preciseTextResize=fittingText&&resizingObject?.kind==='text'&&!resizingObject.retroText&&!resizingObject.retroLines;
-        const preciseVisualResize=resizing&&['shape','image'].includes(resizingObject?.kind);
+        const preciseVisualResize=resizing&&['shape','image','table','chart'].includes(resizingObject?.kind);
         const snapDrag = value => preciseTextResize||preciseVisualResize?value:Math.round(value / resizeStep) * resizeStep;
-		const resizingVisual = resizing && (sourceElement.kind === 'shape' || sourceElement.kind === 'image');
+        let moveEngaged=false;
+        const pointerDelta=pointerEvent=>{
+          const rect=canvasOverlay.getBoundingClientRect(),x=pointerEvent.clientX-originX,y=pointerEvent.clientY-originY;
+          if(resizing)return {dx:snapDrag(x*deck.cols/Math.max(1,rect.width)),dy:snapDrag(y*deck.rows/Math.max(1,rect.height))};
+          const move=KeynopeWorkspace.pointerMove(x,y,rect.width,rect.height,deck.cols,deck.rows,moveEngaged);moveEngaged=move.engaged;
+          return snappedCanvasMove([{index,element:sourceElement,bounds:start}],start,move.dx,move.dy,pointerEvent);
+        };
+		const resizingVisual = resizing && ['shape','image','table','chart'].includes(sourceElement.kind);
 		if (resizingVisual) keynopeEditorVisualResizeActive = true;
         let pendingFit = null;
         let fitting = false;
@@ -13143,12 +14580,14 @@ if (keynopeAppSurface) {
         }
         hit.setPointerCapture(event.pointerId);
         const releaseDrag = () => {
+          window.removeEventListener('blur',cancel);
           clearCanvasGuides();
           if (activeCanvasDrag === dragToken) activeCanvasDrag = null;
+          if(hit.hasPointerCapture(event.pointerId))hit.releasePointerCapture(event.pointerId);
         };
         const resizedBounds = (dx, dy) => {
           const angle=(start.rotation||0)*Math.PI/180,cos=Math.cos(angle),sin=Math.sin(angle);
-          const aspect=(1080/deck.rows)/(1920/deck.cols);
+          const aspect=KeynopeWorkspace.cellAspect(deck.cols,deck.rows,canvasPhysicalGeometry());
           if(angle){const x=dx,y=dy;dx=snapDrag(cos*x+sin*y*aspect);dy=snapDrag(-sin*x/aspect+cos*y);}
           let minX = start.minX, minY = start.minY, maxX = start.maxX, maxY = start.maxY;
           if (resizeCorner.includes('w')) minX = Math.min(maxX - resizeStep, minX + dx);
@@ -13168,7 +14607,7 @@ if (keynopeAppSurface) {
         const fitElementForBounds = next => {
           const element = {...sourceElement};
           const query = new URLSearchParams(element.query || '');
-          setCanvasObjectOrigin(query,Math.max(0,next.minX),Math.max(0,next.minY));
+          setCanvasObjectOrigin(query,Math.max(0,next.minX),Math.max(0,next.minY),element);
           query.delete('width'); query.delete('height');
           const dimension=value=>Math.max(1,preciseTextResize?Math.round(value*1e10)/1e10:Math.round(value));
           query.set('width', String(dimension(next.maxX - next.minX)));
@@ -13181,11 +14620,11 @@ if (keynopeAppSurface) {
 			const element = {...sourceElement};
 			const query = new URLSearchParams(element.query || '');
 			if (element.kind === 'shape') {
-              setCanvasShapeBounds(query, next);
+              setCanvasShapeBounds(query, next,element);
               element.query = query.toString();
               return element;
             }
-			setCanvasObjectOrigin(query,Math.max(0,next.minX),Math.max(0,next.minY));
+			setCanvasObjectOrigin(query,Math.max(0,next.minX),Math.max(0,next.minY),element);
 			if (element.kind === 'image') {query.delete('scale');query.set('stretch','1');}
           const dimension=value=>Math.max(1,preciseVisualResize?Math.round(value*1e10)/1e10:Math.round(value));
           query.set('width', String(dimension(next.maxX - next.minX)));
@@ -13197,6 +14636,7 @@ if (keynopeAppSurface) {
 			if (visualPreviewing) return;
 			visualPreviewing = true;
 			while (pendingVisualPreview) {
+				if(!canvasGeometryGestureCurrent(moveContext)){pendingVisualPreview=null;break;}
 				const bounds = pendingVisualPreview;
 				pendingVisualPreview = null;
 				await previewCanvasMutation(index, resizedElementForBounds(bounds), false, sourceElement.kind === 'image');
@@ -13215,6 +14655,7 @@ if (keynopeAppSurface) {
           if (fitting) return;
           fitting = true;
           while (pendingFit) {
+            if(!canvasGeometryGestureCurrent(moveContext)){pendingFit=null;break;}
             const task = pendingFit;
             pendingFit = null;
             try {
@@ -13240,14 +14681,14 @@ if (keynopeAppSurface) {
           while (fitting || pendingFit) await new Promise(resolve => fitWaiters.push(resolve));
           return lastFit && lastFit.key === key ? lastFit.element : null;
         };
-        const move = moveEvent => {
+        let pointerMoveFrame=0,pendingPointerMove=null;
+        const paintMove = moveEvent => {
+          if(moveEvent.pointerId!==event.pointerId)return;
+          if(!canvasGeometryGestureCurrent(moveContext)){cancel();return;}
           // Pointer previews mutate this DOM node outside reconciliation.
           // Do not reuse it as if it still displayed its committed bounds.
           hit.keynopeHitKey='';
-          const rect = canvasOverlay.getBoundingClientRect();
-          let dx = snapDrag((moveEvent.clientX - originX) * deck.cols / Math.max(1, rect.width));
-          let dy = snapDrag((moveEvent.clientY - originY) * deck.rows / Math.max(1, rect.height));
-          if(!resizing)({dx,dy}=snappedCanvasMove([{index,element:sourceElement,bounds:start}],start,dx,dy,moveEvent));
+          const {dx,dy}=pointerDelta(moveEvent);
           if (resizing) {
             const next = resizedBounds(dx, dy);
             hit.style.left = (next.minX / deck.cols * 100) + '%';
@@ -13257,14 +14698,20 @@ if (keynopeAppSurface) {
             if (fittingText) queueTextFit(next);
             else if (resizingVisual) queueVisualPreview(next);
           } else {
+            movePreview?.move(dx,dy,true);
             hit.style.left = ((start.minX + dx) / deck.cols * 100) + '%';
             hit.style.top = ((start.minY + dy) / deck.rows * 100) + '%';
-            if(sourceElement.kind==='shape'&&(editorState.slides[editorState.current].elements||[]).some(e=>e.kind==='connector')){
-              queueVisualPreview({minX:Math.max(0,start.minX+dx),minY:Math.max(0,start.minY+dy),maxX:Math.max(0,start.minX+dx)+start.maxX-start.minX,maxY:Math.max(0,start.minY+dy)+start.maxY-start.minY});
-            }
           }
         };
+        const move = moveEvent => {
+          if(moveEvent.pointerId!==event.pointerId)return;
+          if(resizing){paintMove(moveEvent);return;}
+          pendingPointerMove=moveEvent;
+          if(!pointerMoveFrame)pointerMoveFrame=requestAnimationFrame(()=>{pointerMoveFrame=0;const latest=pendingPointerMove;pendingPointerMove=null;if(latest)paintMove(latest);});
+        };
 		const up = async upEvent => {
+          if(upEvent.pointerId!==event.pointerId)return;
+          if(pointerMoveFrame)cancelAnimationFrame(pointerMoveFrame);pointerMoveFrame=0;pendingPointerMove=null;
 			if (resizingVisual) keynopeEditorVisualResizeActive = false;
           hit.removeEventListener('pointermove', move);
           hit.removeEventListener('pointerup', up);
@@ -13273,12 +14720,11 @@ if (keynopeAppSurface) {
           if (visualPreviewFrame) cancelAnimationFrame(visualPreviewFrame);
           visualPreviewFrame = 0;
           pendingVisualPreview = null;
-          const rect = canvasOverlay.getBoundingClientRect();
-          let dx = snapDrag((upEvent.clientX - originX) * deck.cols / Math.max(1, rect.width));
-          let dy = snapDrag((upEvent.clientY - originY) * deck.rows / Math.max(1, rect.height));
-          if(!resizing)({dx,dy}=snappedCanvasMove([{index,element:sourceElement,bounds:start}],start,dx,dy,upEvent));
+          if(!canvasGeometryGestureCurrent(moveContext)){editorMutationPreviewSequence++;scheduleEditorCanvasOverlay();return;}
+          const {dx,dy}=pointerDelta(upEvent);
           clearCanvasGuides();
           if (!dx && !dy) {
+            movePreview?.restore();
             if (resizing) return;
             if (pendingCanvasSelection) clearTimeout(pendingCanvasSelection);
             pendingCanvasSelection = null;
@@ -13291,11 +14737,12 @@ if (keynopeAppSurface) {
           }
           if (fittingText) {
             const fitted = await finishTextFit(resizedBounds(dx, dy));
-            if (fitted) {nextEditorElementPerformanceKind='resize';updateEditorElementByID(sourceElementID, index, fitted).catch(() => {});}
+            if (fitted) {nextEditorElementPerformanceKind='resize';updateEditorElementByID(sourceElementID, index, fitted,moveContext,sourceElement).catch(() => {});}
             return;
           }
           if (!resizing) {
-            await moveCanvasMembers([{index,element:sourceElement,bounds:start}],dx,dy).catch(()=>{});
+            movePreview.move(dx,dy);movePreview.stop(true);
+            try{await moveCanvasMembers([{index,element:sourceElement,bounds:start,context:moveContext}],dx,dy,true);}catch(error){if(editorStatus)editorStatus.textContent=error.message;}finally{movePreview.restore();}
             renderEditorCanvasOverlay();
             return;
           }
@@ -13303,21 +14750,27 @@ if (keynopeAppSurface) {
           const currentIndex = editorElementIndexByID(sourceElementID, index);
 		  previewCanvasMutation(currentIndex, element, false, canvasElementIsGIF(element));
 		  nextEditorElementPerformanceKind='resize';
-		  updateEditorElementByID(sourceElementID, currentIndex, element).catch(() => {});
+		  updateEditorElementByID(sourceElementID, currentIndex, element,moveContext,sourceElement).catch(() => {});
         };
 		hit.addEventListener('pointermove', move);
 		hit.addEventListener('pointerup', up);
-		const cancel = () => {
+		const cancel = cancelEvent => {
+          if(cancelEvent?.pointerId!=null&&cancelEvent.pointerId!==event.pointerId)return;
+          if(pointerMoveFrame)cancelAnimationFrame(pointerMoveFrame);pointerMoveFrame=0;pendingPointerMove=null;
+          movePreview?.restore();
           hit.removeEventListener('pointermove', move);
           hit.removeEventListener('pointerup', up);
+          hit.removeEventListener('pointercancel', cancel);
           if (resizingVisual) keynopeEditorVisualResizeActive = false;
           if(visualPreviewFrame)cancelAnimationFrame(visualPreviewFrame);
           visualPreviewFrame=0;pendingVisualPreview=null;pendingFit=null;
           ++editorMutationPreviewSequence; // Ignore preview replies already in flight.
-          if(editorState.current===gestureSlide){deck.pages=originalPreviewPages;drawFrame();}
+          if(resizing&&canvasGeometryGestureCurrent(moveContext)){deck.pages=originalPreviewPages;drawFrame();}
           releaseDrag();
           scheduleEditorCanvasOverlay();
         };
+        dragToken.cancel=cancel;
+        window.addEventListener('blur',cancel);
         hit.addEventListener('pointercancel', cancel, {once:true});
       });
       if (canvasHitWantsHandles(index,bounds.groupID)) {
@@ -13334,6 +14787,7 @@ if (keynopeAppSurface) {
     }
     appendCanvasConnectors(page);
     refreshCanvasSelectionResize();
+	refreshCanvasShapeAdjustments();
   };
 
   canvasOverlay.addEventListener('pointerdown', event => {
@@ -13356,6 +14810,40 @@ if (keynopeAppSurface) {
     const launcher = slideContextLauncher;
     slideContextLauncher = null;
     if (restoreFocus && launcher?.isConnected) launcher.focus({preventScroll:true});
+  }
+  function appendDeckPageSizeControls(parent) {
+    const details=document.createElement('details'),summary=document.createElement('summary');
+    summary.textContent='Page size (entire deck)';details.append(summary);parent.append(details);
+    const form=document.createElement('form');form.noValidate=true;details.append(form);
+    const owner=editorState.notesSessionId,base=JSON.stringify(editorState.pageSize||null);
+    const current=editorState.pageSize||{width:1920,height:1080};
+    const presets=[['Widescreen (16:9)',1920,1080],['Standard (4:3)',1440,1080],['Portrait (9:16)',1080,1920],['Ultrawide (21:9)',2520,1080]];
+    const label=document.createElement('label');label.className='keynope-editor-field';
+    const caption=document.createElement('span');caption.textContent='Page format';
+    const select=document.createElement('select');select.setAttribute('aria-label','Page format');
+    for(const [name,w,h] of [...presets,['Custom',0,0]]){const option=document.createElement('option');option.textContent=name;option.value=w?String(w)+'x'+h:'custom';select.append(option);}
+    label.append(caption,select);form.append(label);
+    const grid=document.createElement('div');grid.style.cssText='display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px';form.append(grid);
+    const width=editorNumber(grid,'Page width',current.width,{min:320,max:7680,step:1},()=>syncPreset());
+    const height=editorNumber(grid,'Page height',current.height,{min:320,max:7680,step:1},()=>syncPreset());
+    width.style.minWidth=height.style.minWidth='0';width.style.width=height.style.width='100%';
+    const message=document.createElement('p');message.setAttribute('role','status');message.hidden=true;form.append(message);
+    const actions=document.createElement('div');actions.style.cssText='display:flex;gap:8px;flex-wrap:wrap';form.append(actions);
+    const apply=document.createElement('button'),reset=document.createElement('button');apply.type='submit';apply.textContent='Apply page size';reset.type='button';reset.textContent='Reset page size';actions.append(apply,reset);
+    function syncPreset(){select.value=presets.some(([,w,h])=>w===Number(width.value)&&h===Number(height.value))?width.value+'x'+height.value:'custom';}
+    syncPreset();
+    select.addEventListener('change',()=>{const preset=presets.find(([,w,h])=>select.value===w+'x'+h);if(preset){width.value=preset[1];height.value=preset[2];}message.hidden=true;});
+    async function commit(size){
+      message.hidden=true;
+      if(editorState.notesSessionId!==owner||JSON.stringify(editorState.pageSize||null)!==base){message.textContent='Page size changed. Reopen settings to edit the current size.';message.hidden=false;return;}
+      if(size&&(!Number.isInteger(size.width)||!Number.isInteger(size.height)||size.width<320||size.height<320||size.width>7680||size.height>7680||size.width*size.height>33177600||size.width>8*size.height||size.height>8*size.width)){message.textContent='Use whole pixels from 320 to 7680, at most 33,177,600 pixels total, with aspect ratio between 1:8 and 8:1.';message.hidden=false;return;}
+      apply.disabled=reset.disabled=true;
+      try{await editorAction({action:'set-page-size',pageSize:size,notesSessionId:owner,sceneRevision:editorState.version,sceneMaster:!!editorState.masterMode,slide:editorState.current});if(details.isConnected)closeSlideContextMenu(true);}
+      catch(error){if(details.isConnected){message.textContent=error.message||String(error);message.hidden=false;}}
+      finally{apply.disabled=reset.disabled=false;}
+    }
+    form.addEventListener('submit',event=>{event.preventDefault();event.stopPropagation();commit({version:1,width:Number(width.value),height:Number(height.value)});});
+    reset.addEventListener('click',()=>commit(null));
   }
   function showSlideContextMenu(index, clientX, clientY, launcher = document.activeElement) {
     if (!editorState || index < 0 || index >= editorState.slides.length) return;
@@ -13395,6 +14883,7 @@ if (keynopeAppSurface) {
       layoutField.append(caption, select);
       slideContextMenu.appendChild(layoutField);
     }
+    appendDeckPageSizeControls(slideContextMenu);
     editorSelect(slideContextMenu, 'Effect', slide.effect || '', ['none','matrix','stars','plasma','glitch','digital-snow','radar','neural','circuit','data-storm','flame','warp','scanline','fireworks','explosion'], value => { slide.effect = value; slide.effectSet = true; updateSlide(); });
     editorSelect(slideContextMenu, 'Background', slide.background || '', ['none','soft-plasma','aurora','topography','waves','mesh','constellation','ribbons','diagonal-flow','blueprint'], value => { slide.background = value; slide.backgroundSet = true; updateSlide(); });
     editorColor(slideContextMenu, 'Foreground', slide.fg || '', '#f3efe0', value => { slide.fg = value; slide.fgSet = true; updateSlide(); });
@@ -13406,8 +14895,8 @@ if (keynopeAppSurface) {
       removeBackgroundImage.textContent = 'Remove background image';
       removeBackgroundImage.addEventListener('click', () => { slide.backgroundMedia = null; slide.backgroundMediaSet = true; updateSlide(); });
       slideContextMenu.appendChild(removeBackgroundImage);
-      appendSlideBackgroundVisualControls(slideContextMenu, slide, updateSlide);
     }
+    appendSlideBackgroundVisualControls(slideContextMenu, slide, updateSlide, index);
     editorColor(slideContextMenu, 'Header colour', slide.headerFg || '', '#ffffff', value => { slide.headerFg = value; slide.headerFgSet = true; updateSlide(); });
     const defaults=deck.pages.find(page=>page.slide===index)||{};
     const sizeDefault=editorNumber(slideContextMenu,'Font size (TTF)',slide.ttfSize||'',{min:1,max:512,step:1},value=>{if(value!==''&&(!Number.isInteger(Number(value))||Number(value)<1||Number(value)>512))return;slide.ttfSize=Number(value)||0;updateSlide();});
@@ -13452,6 +14941,7 @@ if (keynopeAppSurface) {
     const actions = document.createElement('div');
     actions.className = 'keynope-editor-actions';
     const indices=canvasSelectedIndices(index);
+    appendCanvasStyleTransferTools(actions);
     if(element.kind!=='connector')appendCanvasGroupTools(actions,index);
     if(indices.length>1){
       const groupID=canvasGroupID(slide.elements[indices[0]]);
@@ -13494,29 +14984,13 @@ if (keynopeAppSurface) {
     if (selectedText) actions.appendChild(canvasLinkTool(index, query));
     if (element.kind === 'shape') appendCanvasShapeKindTools(actions, index, query);
     if (element.kind === 'image' && element.assetId) {
-      actions.appendChild(canvasTool('Set as background', '', () => {
-        // Promote rather than duplicate it. The image stays in the element
-        // list (so it can be restored from Objects), but no longer paints as
-        // an ordinary selectable object over its new slide layer.
-        const promoted = JSON.parse(JSON.stringify(element));
-        const promotedQuery = new URLSearchParams(promoted.query || '');
-        const authoredOpacity = Number(promotedQuery.get('modern-opacity'));
-        // Opacity is carried by the background layer; keeping this canvas-only
-        // key as well would apply it twice in the shared scene renderer.
-        promotedQuery.delete('modern-opacity');
-        slide.backgroundMedia = {
-          assetId: element.assetId,
-          fit: 'cover',
-          opacity: Number.isFinite(authoredOpacity) && authoredOpacity > 0 && authoredOpacity <= 1 ? authoredOpacity : 1,
-          query: promotedQuery.toString()
-        };
-        slide.backgroundMediaSet = true;
-        promotedQuery.set('object-hidden', '1');
-        promoted.query = promotedQuery.toString();
-        editorAction({action: 'update-element', element: index, elementData: promoted})
-          .then(() => editorAction({action: 'update-slide', slideData: slide}))
-          .catch(() => {});
-      }));
+      const background=canvasTool('Set as background', '', () => {
+        if(!canvasSelectionCommandAllows('image.background',element.id))return;
+        const context=canvasGeometryContext();
+        editorAction({action:'promote-image-background',objectId:element.id,slide:context.slide,sceneMaster:context.master,sceneRevision:editorState.version})
+          .then(()=>closeSlideContextMenu())
+          .catch(error=>showEngagementToast(error.message||'Could not set background image'));
+      });applyCanvasCommandControl(background,'image.background');actions.appendChild(background);
     }
     if(element.kind!=='connector'){
       actions.appendChild(canvasOutlineTool(index, element, query));
@@ -13598,21 +15072,27 @@ if (keynopeAppSurface) {
   function refreshSlideThumbnails() {
     if(!editorState||draggedMasterButton)return;
     const masterMode=!!editorState.masterMode,revision=editorState.version;
+    const owner=editorState.notesSessionId,previewRevisions=editorState.masterPreviewRevisions;
     const pages=new Map((deck.pages||[]).filter(page=>page.page===0).map(page=>[page.slide,page]));
     const cols=deck.cols,rows=deck.rows;
-    const paint=async(host,index)=>{
+    const pageFor=async index=>{
       let page=pages.get(index);
-      if(masterMode){const response=await fetch('/api/editor/workspace?master='+index+'&revision='+revision+'&cols='+cols+'&rows='+rows,{cache:'no-store'});if(!response.ok)throw new Error('Master preview unavailable');page=(await response.json())[0];}
-      return page?paintSlideThumbnail(host,page,cols,rows):undefined;
+      if(masterMode){
+        const stamp=Array.isArray(previewRevisions)?'&previewRevision='+previewRevisions[index]+'&owner='+encodeURIComponent(owner):'&revision='+revision;
+        const response=await fetch('/api/editor/workspace?master='+index+stamp+'&cols='+cols+'&rows='+rows,{cache:'no-store'});if(!response.ok)throw new Error('Master preview unavailable');page=(await response.json())[0];
+      }
+      return page;
     };
+    const paint=async(host,index)=>{const page=await pageFor(index);return page?paintSlideThumbnail(host,page,cols,rows):undefined;};
     // WASM workspace deltas retain the exact page objects for unchanged
     // slides. Use that ownership identity as the thumbnail revision instead
     // of serialising every complete page on every local edit. A changed slide
     // receives a new object; shared font/theme/master changes already replace
     // every affected page in the workspace cache.
-    const masterKey=masterMode?JSON.stringify([revision,cols,rows,editorState.masters]):null;
-    const key=index=>masterMode?masterKey+':'+index:(pages.get(index)||'missing:'+index);
-    if(slideThumbnails){slideThumbnails.update(paint,key,(update,index)=>!masterMode&&update(pages.get(index),cols,rows));return;}
+    // Session-local master tokens consume actual preview dependencies, not the
+    // global editor revision. Missing tokens retain old-backend compatibility.
+    const key=index=>masterMode?[owner,cols,rows,index,previewRevisions?.[index]??revision].join(':'):(pages.get(index)||'missing:'+index);
+    if(slideThumbnails){slideThumbnails.update(paint,key,(update,index)=>masterMode?pageFor(index).then(page=>!!page&&update(page,cols,rows)):update(pages.get(index),cols,rows));return;}
     slideThumbnails=KeynopeWorkspace.thumbnails(slidesPanel,paint,key);
     for(const button of slidesPanel.querySelectorAll('.keynope-slide-item[data-master-index]')){
       const index=Number(button.dataset.masterIndex);
@@ -13632,6 +15112,7 @@ if (keynopeAppSurface) {
   window.keynopeScheduleThumbnailRefresh=scheduleSlideThumbnailRefresh;
   let slideNavigatorSignature='';
   function renderEditorPanels() {
+    refreshWordPainterNotice();
     const hideQR = !!editorState?.hideActivityQR;
     if(window.keynopeHideActivityQR!==hideQR){
       window.keynopeHideActivityQR=hideQR;
@@ -13777,7 +15258,9 @@ if (keynopeAppSurface) {
         editorStatus.textContent = 'Select an element · double-click text to edit · drag to move';
       }
     }
-    scheduleEditorCanvasOverlay();
+    // Publish authored ordering/selection with its ID-bound hit targets in the
+    // same turn, even while native scene delivery is still being coalesced.
+    renderEditorCanvasOverlay();
     return;
 
     inspector.replaceChildren();
@@ -13825,8 +15308,8 @@ if (keynopeAppSurface) {
       removeBackgroundImage.textContent = 'Remove background image';
       removeBackgroundImage.addEventListener('click', () => { slide.backgroundMedia = null; slide.backgroundMediaSet = true; updateSlide(); });
       slideSection.appendChild(removeBackgroundImage);
-      appendSlideBackgroundVisualControls(slideSection, slide, updateSlide);
     }
+    appendSlideBackgroundVisualControls(slideSection, slide, updateSlide);
     editorColor(slideSection, 'Header colour', slide.headerFg || '', '#ffffff', value => { slide.headerFg = value; slide.headerFgSet = true; updateSlide(); });
     const elementsSection = document.createElement('section');
     elementsSection.className = 'keynope-editor-section';
@@ -13893,7 +15376,7 @@ if (keynopeAppSurface) {
       editorNumber(elementSection, 'Height (rows)', query.get('height') || '', {min: element.kind === 'shape' ? .5 : 1, step: element.kind === 'shape' ? .5 : 1}, value => setQuery('height', value));
       editorNumber(elementSection, 'Scale', query.get('scale') || '1', {min: .1, max: 10, step: .1}, value => setQuery('scale', value));
       if (element.kind === 'shape') {
-        editorSelect(elementSection, 'Shape', query.get('shape') || 'rectangle', ['rectangle','square','circle','triangle','diamond'], value => setQuery('shape', value));
+        editorSelect(elementSection, 'Shape', query.get('shape') || 'square', keynopeShapeCatalog.map(d=>d.id), value => setQuery('shape', value));
       }
       const appearanceHeading = document.createElement('p');
       appearanceHeading.className = 'keynope-editor-subheading';
@@ -13995,10 +15478,12 @@ if (keynopeAppSurface) {
     const poll={epoch:editorDocumentEpoch};
     editorStatePoll=poll;
     poll.promise=(async()=>{try {
-      const response = await fetch('/api/editor/state?version=' + encodeURIComponent(editorStateVersion), {cache: 'no-store',signal:AbortSignal.timeout(12000)});
+      const diagnosticsOwner=editorState&&!editorState.diagnosticsUnchanged?editorState.notesSessionId||'':'';
+      const response = await fetch('/api/editor/state?version=' + encodeURIComponent(editorStateVersion)+'&diagnosticsOwner='+encodeURIComponent(diagnosticsOwner), {cache: 'no-store',signal:AbortSignal.timeout(12000)});
       if (!response.ok || response.status === 204) return;
-      const next = await response.json();
-      if (poll.epoch!==editorDocumentEpoch||!Number.isInteger(next.version)||next.version<=editorStateVersion) return;
+      const next = mergeEditorStateResponse(await response.json());
+      const completesDiagnostics=next.version===editorStateVersion&&editorState?.diagnosticsUnchanged&&!next.diagnosticsUnchanged&&next.notesSessionId===editorState.notesSessionId;
+      if (poll.epoch!==editorDocumentEpoch||!Number.isInteger(next.version)||next.version<editorStateVersion||(next.version===editorStateVersion&&!completesDiagnostics)) return;
       editorState = next;
       keynopeEditorMasterMode = !!editorState.masterMode;
       editorStateVersion = next.version;
@@ -14089,6 +15574,13 @@ if (keynopeAppSurface) {
   };
   window.keynopeReloadWebDocument = async workspace => {
     editorDocumentEpoch++;
+    KeynopeTrueType.clearDocumentCaches();
+    KeynopeBuilds.discardPending();
+    closeKeynopeColourPicker();
+    resetSpeakerNotesDrafts();
+    editorCommandErrorNotice.hidden=true;
+    KeynopeTextStyles.clearPainter();
+    if(canvasStylePainter)stopCanvasStylePainter();
     editorStatePoll=null;
     editorTextPreviewController?.abort();editorTextPreviewController=null;
     editorMutationPreviewController?.abort();editorMutationPreviewController=null;
@@ -14225,6 +15717,7 @@ if (keynopeAppSurface) {
     externalButton.disabled = !!(editorState && editorState.masterMode) || active || currentSlideIsTab() || !externalDisplayAvailable;
     for (const button of slidesPanel.querySelectorAll('button')) button.disabled = active;
     speakerNotesInput.disabled = active;
+    refreshPresenterPreview();
   };
   toolbar.append(timerButton);
   function appToolbarIconButton(label, svg, action) {
@@ -14246,6 +15739,8 @@ if (keynopeAppSurface) {
   async function navigateEditorPage(delta) {
     if (!deck.pages || !deck.pages.length || !editorState || editorState.masterMode) return;
     if (activeInlineEditor) await activeInlineEditor.finish(true);
+    if(remoteBuildCursor){await navigatePresenterBuild(delta>0?'next':'previous');return;}
+    try{const popup=window.keynopeLivePresentationWindow;if(popup&&!popup.closed&&popup.keynopeAdvanceBuild?.(delta))return;}catch(_error){}
     const targetIndex = nextPresentationPage(pageIndex, delta);
     if (targetIndex === pageIndex) return;
     const target = deck.pages[targetIndex];
@@ -14262,9 +15757,25 @@ if (keynopeAppSurface) {
   const presentExternalSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="55" y="300" width="270" height="190" rx="22" fill="none" stroke="#fff" stroke-width="24"/><path d="M38 505h304l35 34c9 9 3 24-10 24H13c-13 0-19-15-10-24Z" fill="#fff"/><path d="M315 265h80M350 220l45 45-45 45" fill="none" stroke="#fff" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/><rect x="430" y="55" width="330" height="330" rx="28" fill="none" stroke="#fff" stroke-width="28"/><path d="m555 145 100 75-100 75Z" fill="#fff" stroke="#fff" stroke-width="8" stroke-linejoin="round"/><path d="M595 385v100M515 500h160" fill="none" stroke="#fff" stroke-width="28" stroke-linecap="round"/></svg>';
 	const engagementRunSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><circle cx="160" cy="285" r="62" fill="none" stroke="#fff" stroke-width="28"/><circle cx="400" cy="175" r="62" fill="none" stroke="#fff" stroke-width="28"/><circle cx="640" cy="285" r="62" fill="none" stroke="#fff" stroke-width="28"/><path d="M90 470c18-105 122-105 140 0M300 455c28-145 172-145 200 0M570 470c18-105 122-105 140 0" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round"/></svg>';
 	const engagementRunButton = appToolbarIconButton('Activities',engagementRunSVG,openEngagementEditor);
+  presentationToolsBar=KeynopePresentationTools.toolbar(toolbar,ensurePresentationTools());
+  syncPresentationTools();
 
   const previousButton = appToolbarIconButton('Previous', previousSlideSVG, () => navigateEditorPage(-1).catch(() => {}));
   const nextButton = appToolbarIconButton('Next', nextSlideSVG, () => navigateEditorPage(1).catch(() => {}));
+  const previewHost=document.createElement('aside');document.body.append(previewHost);
+  const presenterPreview=KeynopeBuilds.presenterPreview(previewHost,{advance:()=>navigateEditorPage(1),previous:()=>navigateEditorPage(-1),onClose:()=>{previewButton.classList.remove('active');previewButton.setAttribute('aria-pressed','false');}});
+  const previewButton=appToolbarIconButton('Next state preview','<svg viewBox="0 0 800 600" aria-hidden="true"><rect x="70" y="110" width="350" height="270" rx="20" fill="none" stroke="#9b9b9b" stroke-width="28"/><rect x="380" y="240" width="350" height="270" rx="20" fill="none" stroke="#fff" stroke-width="28"/><path d="M475 315h160M475 370h130M475 425h160" fill="none" stroke="#fff" stroke-width="22" stroke-linecap="round"/></svg>',()=>{presenterPreview.toggle();refreshPresenterPreview();});
+  previewButton.setAttribute('aria-pressed','false');
+  refreshPresenterPreview=()=>{
+    let position=null;
+    try{const popup=window.keynopeLivePresentationWindow;position=window.KEYNOPE_WEB_EDITOR?(popup&&!popup.closed?popup.keynopePresentationPosition?.():null):remoteBuildCursor?window.keynopePresentationPosition():null;}catch(_error){}
+    if(keynopeEditorMasterMode)position=null;
+    if(position)position={...position,key:[position.previewKey||position.key,window.keynopePresentationDocumentVersion||0].join(':')};
+    presenterPreview.update(deck.pages,position,{navigationEnabled:!presenterTimerMode});
+    previewButton.disabled=!position||!!presenterTimerMode;
+    previewButton.classList.toggle('active',presenterPreview.visible());previewButton.setAttribute('aria-pressed',String(presenterPreview.visible()));
+  };
+  setInterval(refreshPresenterPreview,250);
   const presentButton = appToolbarIconButton('Present on this computer', presentMainSVG, () => {
     const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
     if (handler) handler.postMessage({action: 'show-main'});
@@ -14366,7 +15877,7 @@ if (keynopeAppSurface) {
     if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return false;
     queueEditorOperation(async () => {
       if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return;
-      const selectableKinds = new Set(['heading','text','text-image','bullet','code','shape','image','page-number']);
+      const selectableKinds = new Set(['heading','text','text-image','bullet','code','shape','image','page-number','table']);
       const seenGroups=new Set();
       const indices = (editorState.slides[editorState.current].elements || [])
         .map((element, index) => {
@@ -14387,7 +15898,18 @@ if (keynopeAppSurface) {
     return true;
   }
   addEventListener('keydown', e => {
+    if((e.metaKey||e.ctrlKey)&&e.altKey&&!e.shiftKey&&['c','v'].includes(e.key.toLowerCase())){
+      if(editorClipboardTextTarget(e.target))return;
+      const command=e.key.toLowerCase()==='c'?'copy':'paste';
+      // Unrelated modals own their shortcuts. Do not fall through to the
+      // ordinary object clipboard when a style command is unavailable.
+      if(!editorStyleCommandState()[command])return;
+      e.preventDefault();e.stopImmediatePropagation();
+      editorStyleCommand(command).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;});return;
+    }
     if(e.key==='Escape'&&activeCanvasDrag?.cancel){e.preventDefault();e.stopImmediatePropagation();activeCanvasDrag.cancel();return;}
+	if(e.target?.closest?.('.keynope-shape-adjustment')&&['ArrowLeft','ArrowDown','ArrowRight','ArrowUp','Home','End','Tab'].includes(e.key))return;
+    if(e.target?.closest?.('.keynope-connector-segment')&&!e.metaKey&&!e.ctrlKey&&!e.altKey&&['ArrowLeft','ArrowDown','ArrowRight','ArrowUp','Tab'].includes(e.key))return;
     if (e.target?.closest?.('.kn-portrait-gallery') && e.key !== 'Escape') return;
     if (e.target?.closest?.('[data-keynope-scene-dialog]')) return;
     // Modal surfaces own their complete keyboard contract. Canvas shortcuts
@@ -14423,12 +15945,11 @@ if (keynopeAppSurface) {
       e.preventDefault();
       e.stopImmediatePropagation();
       const save = async () => {
-        if (activeInlineEditor) await activeInlineEditor.finish(true);
-        await flushSpeakerNotes();
+        await window.keynopePrepareDocumentSave();
         const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.keynopePresenter;
         if (handler && editorState && editorState.dirty) handler.postMessage({action: 'save-presentation'});
       };
-      save().catch(() => {});
+      save().catch(showEditorCommandError);
       return;
     }
     // Escape cancels connection mode even while its ribbon button has focus.
@@ -14474,12 +15995,12 @@ if (keynopeAppSurface) {
         return;
       }
     }
-    if ((e.metaKey || e.ctrlKey) && ['c','x','v'].includes(e.key.toLowerCase())) {
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && ['c','x','v'].includes(e.key.toLowerCase())) {
       if (editorClipboardTextTarget(e.target)) return;
       e.preventDefault();
       e.stopImmediatePropagation();
       const command = e.key.toLowerCase() === 'c' ? 'copy' : e.key.toLowerCase() === 'x' ? 'cut' : 'paste';
-      editorClipboardCommand(command).catch(() => {});
+      editorClipboardCommand(command).catch(error => {if(editorStatus)editorStatus.textContent=error.message||'Could not use the clipboard';});
       return;
     }
     if ((e.metaKey || e.ctrlKey) && (e.key.toLowerCase() === 'z' || e.key.toLowerCase() === 'y')) {
@@ -14658,8 +16179,10 @@ func ansiCodeName(code string, background bool) string {
 func splitSlides(text string) []string {
 	var parts []string
 	var cur []string
+	fence := markdownFenceState{}
 	for _, line := range strings.Split(text, "\n") {
-		if strings.TrimSpace(line) == "---" {
+		fence.boundary(line)
+		if fence.width == 0 && strings.TrimSpace(line) == "---" {
 			parts = append(parts, strings.Join(cur, "\n"))
 			cur = nil
 			continue
@@ -14672,8 +16195,7 @@ func splitSlides(text string) []string {
 
 var effectRE = regexp.MustCompile(`<!--\s*effect=([a-zA-Z0-9_-]+)\s*-->`)
 var backgroundRE = regexp.MustCompile(`<!--\s*background=([a-zA-Z0-9_-]+)\s*-->`)
-var backgroundMediaRE = regexp.MustCompile(`<!--\s*keynope-background-media\s+version=1\s+base64:([A-Za-z0-9+/=]+)\s*-->`)
-var notesRE = regexp.MustCompile(`<!--\s*notes=base64:([A-Za-z0-9+/=]+)\s*-->`)
+var notesRE = regexp.MustCompile(`<!--\s*notes=base64:([A-Za-z0-9+/=]*)\s*-->`)
 var trueTypeTextRE = regexp.MustCompile(`<!--\s*truetype-text=base64:([A-Za-z0-9+/=]*)(?:\s+kind=(text|bullet|code|heading|text-image))?(?:\s+level=([12]))?\s*-->`)
 var layoutRE = regexp.MustCompile(`<!--\s*layout=([a-zA-Z0-9_-]+)\s*-->`)
 var pageNumberRE = regexp.MustCompile(`<!--\s*page-number=(show|hide)\s*-->`)
@@ -14685,9 +16207,16 @@ var imageRE = regexp.MustCompile(`!\[[^\]]*\]\(([^)]+)\)`)
 var shapeRE = regexp.MustCompile(`^\[shape(?::([a-zA-Z0-9_-]+))?\]$`)
 
 func parseSlide(text, base string) Slide {
+	slide, _ := parseSlideChecked(text, base)
+	return slide
+}
+
+// The document loader must surface metadata errors before accepting a candidate.
+// parseSlide remains a convenience for existing in-memory valid-text consumers.
+func parseSlideChecked(text, base string) (Slide, error) {
 	slide := Slide{}
 	lines := strings.Split(text, "\n")
-	inCode := false
+	fence := markdownFenceState{}
 	var code []string
 	var paragraph []string
 	pendingQuery := ""
@@ -14695,6 +16224,10 @@ func parseSlide(text, base string) Slide {
 	pendingPlaceholder := false
 	bulletBlock := -1
 	elementExtras := map[int]*jsonExtensions{}
+	compatibleElements := map[int]bool{}
+	slideExtraSeen := false
+	backgroundSeen, engagementSeen, resultSeen, notesSeen := false, false, false, false
+	scalarOwners := map[string]bool{}
 
 	flushParagraph := func() {
 		if len(paragraph) > 0 {
@@ -14723,17 +16256,84 @@ func parseSlide(text, base string) Slide {
 	for lineIndex, raw := range lines {
 		line := strings.TrimRight(raw, "\r")
 		trimmed := strings.TrimSpace(line)
-		if match := slideExtensionsRE.FindStringSubmatch(trimmed); match != nil {
-			if extra, err := decodeExtensionComment(match); err == nil {
-				slide.Extra = extra
+		// Code contents are literal, including metadata-looking comments and
+		// slide separators. Resolve fences before any metadata matcher sees them.
+		if fence.boundary(trimmed) {
+			flushParagraph()
+			bulletBlock = -1
+			if fence.width == 0 {
+				flushCode()
 			}
 			continue
 		}
-		if match := elementExtensionsRE.FindStringSubmatch(trimmed); match != nil {
-			flushParagraph()
-			if extra, err := decodeExtensionComment(match); err == nil {
-				elementExtras[len(slide.Elements)] = extra
+		if fence.width > 0 {
+			code = append(code, line)
+			continue
+		}
+		claimedScalar := false
+		for _, setting := range []scalarMetadataSetting{slideIdentityMetadata, slideTabMetadata, slideLayoutMetadata, slidePageNumberMetadata, slideEffectMetadata, slideBackgroundMetadata} {
+			if !setting.prefix.MatchString(trimmed) {
+				continue
 			}
+			match, remaining, err := setting.read(trimmed)
+			if err != nil {
+				return Slide{}, err
+			}
+			if match == nil || strings.TrimSpace(remaining) != "" {
+				return Slide{}, fmt.Errorf("malformed %s metadata", setting.name)
+			}
+			if scalarOwners[setting.name] {
+				return Slide{}, fmt.Errorf("duplicate %s metadata", setting.name)
+			}
+			scalarOwners[setting.name] = true
+			switch setting.name {
+			case "slide identity":
+				slide.ID = match[1]
+			case "slide tab":
+				slide.TabID = match[1]
+			case "slide layout":
+				slide.LayoutID = match[1]
+			case "page number":
+				slide.PageNumber = match[1]
+			case "slide effect":
+				slide.EffectSet = true
+				if match[1] != "none" {
+					slide.Effect = match[1]
+				}
+			case "slide background":
+				slide.BackgroundSet = true
+				if match[1] != "none" {
+					slide.Background = match[1]
+				}
+			}
+			claimedScalar = true
+			break
+		}
+		if claimedScalar {
+			continue
+		}
+		if slideExtraEnvelope.prefix.MatchString(trimmed) {
+			if slideExtraSeen {
+				return Slide{}, fmt.Errorf("duplicate slide-extra metadata")
+			}
+			extra, err := decodeScopedExtensions(trimmed, slideExtraEnvelope)
+			if err != nil {
+				return Slide{}, err
+			}
+			slide.Extra, slideExtraSeen = extra, true
+			continue
+		}
+		if elementExtraEnvelope.prefix.MatchString(trimmed) {
+			flushParagraph()
+			bulletBlock = -1
+			if _, exists := elementExtras[len(slide.Elements)]; exists {
+				return Slide{}, fmt.Errorf("duplicate element-extra metadata for one object")
+			}
+			extra, err := decodeScopedExtensions(trimmed, elementExtraEnvelope)
+			if err != nil {
+				return Slide{}, err
+			}
+			elementExtras[len(slide.Elements)] = extra
 			continue
 		}
 		bulletLine := strings.HasPrefix(trimmed, "- ")
@@ -14741,52 +16341,37 @@ func parseSlide(text, base string) Slide {
 		if !bulletLine && !bulletContinuation {
 			bulletBlock = -1
 		}
-		if match := effectRE.FindStringSubmatch(trimmed); match != nil {
-			slide.EffectSet = true
-			if match[1] != "none" {
-				slide.Effect = match[1]
+		if backgroundMetadataEnvelope.prefix.MatchString(trimmed) {
+			if backgroundSeen {
+				return Slide{}, fmt.Errorf("duplicate background-media metadata")
 			}
-			continue
-		}
-		if match := backgroundRE.FindStringSubmatch(trimmed); match != nil {
-			slide.BackgroundSet = true
-			if match[1] != "none" {
-				slide.Background = match[1]
+			media, err := decodeBackgroundMetadata(trimmed)
+			if err != nil {
+				return Slide{}, err
 			}
+			slide.BackgroundMedia, slide.BackgroundMediaSet, backgroundSeen = media, true, true
 			continue
 		}
-		if match := backgroundMediaRE.FindStringSubmatch(trimmed); match != nil {
-			if decoded, err := base64.StdEncoding.DecodeString(match[1]); err == nil {
-				var media *slideBackgroundMedia
-				if json.Unmarshal(decoded, &media) == nil {
-					slide.BackgroundMedia = media
-					slide.BackgroundMediaSet = true
-				}
+		if engagementMetadataEnvelope.prefix.MatchString(trimmed) {
+			if engagementSeen {
+				return Slide{}, fmt.Errorf("duplicate engagement metadata")
 			}
-			continue
-		}
-		if match := layoutRE.FindStringSubmatch(trimmed); match != nil {
-			slide.LayoutID = match[1]
-			continue
-		}
-		if match := slideTabRE.FindStringSubmatch(trimmed); match != nil {
-			slide.TabID = match[1]
-			continue
-		}
-		if match := pageNumberRE.FindStringSubmatch(trimmed); match != nil {
-			slide.PageNumber = match[1]
-			continue
-		}
-		if engagementMetaRE.MatchString(trimmed) {
-			if definition, err := decodeEngagementMetadata(trimmed); err == nil {
-				slide.Engagement = definition
+			definition, err := decodeEngagementMetadata(trimmed)
+			if err != nil {
+				return Slide{}, err
 			}
+			slide.Engagement, engagementSeen = definition, true
 			continue
 		}
-		if engagementResultRE.MatchString(trimmed) {
-			if result, err := decodeEngagementResult(trimmed); err == nil {
-				slide.EngagementResult = result
+		if engagementResultsEnvelope.prefix.MatchString(trimmed) {
+			if resultSeen {
+				return Slide{}, fmt.Errorf("duplicate engagement-results metadata")
 			}
+			result, err := decodeEngagementResult(trimmed)
+			if err != nil {
+				return Slide{}, err
+			}
+			slide.EngagementResult, resultSeen = result, true
 			continue
 		}
 		if match := masterSlotRE.FindStringSubmatch(trimmed); match != nil {
@@ -14795,10 +16380,15 @@ func parseSlide(text, base string) Slide {
 			pendingPlaceholder = len(match) > 2 && match[2] == "true"
 			continue
 		}
-		if match := notesRE.FindStringSubmatch(trimmed); match != nil {
-			if decoded, err := base64.StdEncoding.DecodeString(match[1]); err == nil {
-				slide.Notes = string(decoded)
+		if speakerNotesPrefixRE.MatchString(trimmed) {
+			if notesSeen {
+				return Slide{}, fmt.Errorf("duplicate speaker notes metadata")
 			}
+			notes, err := decodeSpeakerNotesComment(trimmed)
+			if err != nil {
+				return Slide{}, err
+			}
+			slide.Notes, notesSeen = notes, true
 			continue
 		}
 		if match := trueTypeTextRE.FindStringSubmatch(trimmed); match != nil {
@@ -14820,26 +16410,31 @@ func parseSlide(text, base string) Slide {
 			pendingQuery, pendingMasterSlot, pendingPlaceholder = "", "", false
 			continue
 		}
-		if nextNonEmptyLine(lines, lineIndex) == "" && applySlideStyle(trimmed, &slide) {
-			continue
+		if nextNonEmptyLine(lines, lineIndex) == "" {
+			applied, err := applySlideStyleChecked(trimmed, &slide, scalarOwners)
+			if err != nil {
+				return Slide{}, err
+			}
+			if applied {
+				continue
+			}
 		}
-		if query, ok := textPlacementComment(trimmed); ok {
+		query, placement, err := textPlacementCommentChecked(trimmed)
+		if err != nil {
+			return Slide{}, err
+		}
+		if placement {
 			flushParagraph()
 			pendingQuery = query
 			continue
 		}
-		if strings.HasPrefix(trimmed, "```") {
+		if compatibleElementPrefixRE.MatchString(trimmed) {
 			flushParagraph()
-			if inCode {
-				flushCode()
-				inCode = false
-			} else {
-				inCode = true
+			if element, _, err := decodeCompatibleElement(trimmed); err == nil {
+				compatibleElements[len(slide.Elements)] = true
+				slide.Elements = append(slide.Elements, element)
 			}
-			continue
-		}
-		if inCode {
-			code = append(code, line)
+			pendingQuery, pendingMasterSlot, pendingPlaceholder = "", "", false
 			continue
 		}
 		if trimmed == "" {
@@ -14868,9 +16463,15 @@ func parseSlide(text, base string) Slide {
 			pendingPlaceholder = false
 			continue
 		}
+		if trimmed == "[table]" || trimmed == "[chart]" {
+			flushParagraph()
+			slide.Elements = append(slide.Elements, Element{Kind: strings.Trim(trimmed, "[]"), Query: pendingQuery, MasterSlotID: pendingMasterSlot, Placeholder: pendingPlaceholder})
+			pendingQuery, pendingMasterSlot, pendingPlaceholder = "", "", false
+			continue
+		}
 		if trimmed == "[connector]" {
 			flushParagraph()
-			slide.Elements = append(slide.Elements, Element{Kind: "connector", Query: pendingQuery})
+			slide.Elements = append(slide.Elements, Element{Kind: "connector", Query: pendingQuery, MasterSlotID: pendingMasterSlot, Placeholder: pendingPlaceholder})
 			pendingQuery, pendingMasterSlot, pendingPlaceholder = "", "", false
 			continue
 		}
@@ -14920,18 +16521,42 @@ func parseSlide(text, base string) Slide {
 	}
 	flushParagraph()
 	flushCode()
+	if _, orphan := elementExtras[len(slide.Elements)]; orphan {
+		return Slide{}, fmt.Errorf("element-extra metadata has no following object")
+	}
+	if err := validateSlidePlacementQueries(slide, "slide"); err != nil {
+		return Slide{}, err
+	}
 	for i := range slide.Elements {
 		if extra := elementExtras[i]; extra != nil {
-			slide.Elements[i].Extra = extra
+			merged := cloneJSONExtensions(slide.Elements[i].Extra)
+			if merged == nil {
+				merged = &jsonExtensions{}
+			}
+			for key, value := range *extra {
+				if _, exists := (*merged)[key]; exists {
+					return Slide{}, fmt.Errorf("ambiguous element extension %q", key)
+				}
+				(*merged)[key] = append(json.RawMessage(nil), value...)
+			}
+			slide.Elements[i].Extra = merged
+		}
+		if compatibleElements[i] {
+			continue
 		}
 		q, _ := url.ParseQuery(slide.Elements[i].Query)
+		if id := q.Get("object-id"); id != "" {
+			slide.Elements[i].ObjectID = id
+			q.Del("object-id")
+			slide.Elements[i].Query = q.Encode()
+		}
 		if id := q.Get("element-id"); id != "" {
 			slide.Elements[i].ID = id
 			q.Del("element-id")
 			slide.Elements[i].Query = q.Encode()
 		}
 	}
-	return slide
+	return slide, nil
 }
 
 func nextNonEmptyLine(lines []string, index int) string {
@@ -15026,41 +16651,82 @@ func applySlideStyle(line string, slide *Slide) bool {
 }
 
 func textPlacementComment(line string) (string, bool) {
+	query, ok, _ := textPlacementCommentChecked(line)
+	return query, ok
+}
+
+func textPlacementCommentChecked(line string) (string, bool, error) {
 	match := commentRE.FindStringSubmatch(line)
 	if match == nil {
-		return "", false
+		return "", false, nil
 	}
 	values := url.Values{}
 	rawValues := url.Values{}
-	if parsed, err := url.ParseQuery(match[1]); err == nil {
-		for key, candidates := range parsed {
-			rawValues[key] = append([]string(nil), candidates...)
-		}
-		for _, key := range []string{"text-align", "text-valign", "group", "modern-font", "modern-line-height", "modern-paragraph-before", "modern-paragraph-after", "modern-size", "modern-width", "element-style", "image-style", "modern-runs", "modern-opacity", "object-rotation", "z-index", "object-hidden", "object-locked"} {
-			for _, value := range parsed[key] {
-				addPlacementValue(values, key, value)
-			}
-		}
-		for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "ttf-size", "ttf-weight", "ttf-width", "font", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "tint", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "link", "slide", "master-clear"} {
-			for _, value := range parsed[key] {
-				addPlacementValue(values, key, value)
-			}
-		}
+	fields := strings.Fields(match[1])
+	// Compact URL-query comments and the human-readable space-separated form
+	// are distinct encodings. Never process the same field through both paths.
+	compact := len(fields) == 1 && strings.Contains(fields[0], "&")
+	if compact {
+		fields = strings.Split(fields[0], "&")
 	}
-	for _, field := range strings.Fields(match[1]) {
+	owners := map[string]bool{}
+	var admissionErr error
+	recognized := false
+	for _, field := range fields {
 		key, value, ok := strings.Cut(field, "=")
 		if !ok {
 			continue
 		}
+		if compact {
+			decoded, err := url.QueryUnescape(key)
+			if err != nil {
+				admissionErr = fmt.Errorf("invalid placement key encoding: %w", err)
+				continue
+			}
+			key = decoded
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		known := placementMetadataKey(key)
+		if known {
+			recognized = true
+			owner := placementFieldOwner(key)
+			if owners[owner] {
+				admissionErr = fmt.Errorf("duplicate placement field %q", owner)
+			}
+			owners[owner] = true
+		}
 		rawValue := strings.Trim(value, `"'`)
-		if decoded, err := url.QueryUnescape(rawValue); err == nil {
+		// These two fields are emitted as literal base64 in the readable form;
+		// its '+' is data, not a query-string space.
+		if compact || key != "shape-label" && key != "modern-runs" {
+			decoded, err := url.QueryUnescape(rawValue)
+			if err != nil {
+				admissionErr = fmt.Errorf("invalid placement field %q encoding: %w", key, err)
+				continue
+			}
 			rawValue = decoded
 		}
+		if known {
+			if !validateConcreteDefaultField(key, rawValue) {
+				admissionErr = fmt.Errorf("invalid concrete style default %q", key)
+				continue
+			}
+			if err := validatePlacementNumber(key, rawValue); err != nil {
+				admissionErr = err
+				continue
+			}
+		}
 		rawValues.Add(key, rawValue)
-		addPlacementValue(values, key, value)
+		addPlacementValue(values, key, rawValue)
+	}
+	if recognized && strings.TrimSpace(line) != match[0] {
+		return "", false, fmt.Errorf("placement metadata must occupy one complete comment")
+	}
+	if recognized && admissionErr != nil {
+		return "", false, admissionErr
 	}
 	if len(values) == 0 {
-		return "", false
+		return "", false, nil
 	}
 	// Once a comment has at least one valid Keynope placement field, retain
 	// syntactically safe fields from newer compatible versions verbatim.
@@ -15075,7 +16741,7 @@ func textPlacementComment(line string) (string, bool) {
 			}
 		}
 	}
-	return values.Encode(), true
+	return values.Encode(), true, nil
 }
 
 func validExtensionMetadataKey(key string) bool {
@@ -15091,7 +16757,22 @@ func validExtensionMetadataKey(key string) bool {
 }
 
 func placementMetadataKey(key string) bool {
+	if concreteDefaultKey(key) {
+		return true
+	}
+	if key == "label-style-inherit" {
+		return true
+	}
+	if strings.HasPrefix(key, "label-") && labelStyleKey(strings.TrimPrefix(key, "label-")) {
+		return true
+	}
 	switch key {
+	case "text-bold", "text-italic", "text-underline":
+		return true
+	case "shape-fill", "shape-stroke", "shape-stroke-width":
+		return true
+	case "object-id", "theme-fg":
+		return true
 	case "top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "ttf-size", "ttf-weight", "ttf-width", "font", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "tint", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "link", "slide", "master-clear", "object-offset-x", "object-offset-y", "participant-inherited", "participant-kind", "text-box", "text-align", "text-valign", "modern-font", "modern-line-height", "modern-paragraph-before", "modern-paragraph-after", "modern-size", "modern-width", "element-style", "image-style", "modern-runs", "modern-opacity", "object-rotation", "z-index", "object-hidden", "object-locked", "shape-offset-x", "shape-offset-y", "group", "shape-label", "element-id", "connector-from", "connector-to", "connector-from-side", "connector-to-side", "connector-mode", "connector-arrows", "connector-width", "connector-arrow-width", "connector-route":
 		return true
 	}
@@ -15101,7 +16782,56 @@ func placementMetadataKey(key string) bool {
 func addPlacementValue(values url.Values, key, value string) {
 	key = strings.ToLower(strings.TrimSpace(key))
 	value = strings.Trim(value, `"'`)
+	if concreteDefaultKey(key) {
+		if validConcreteDefault(key, value) {
+			values.Set(key, value)
+		}
+		return
+	}
+	if strings.HasPrefix(key, "label-") && labelStyleKey(strings.TrimPrefix(key, "label-")) {
+		if len(value) <= 65536 {
+			base := strings.TrimPrefix(key, "label-")
+			inner := url.Values{}
+			if value == "none" && (base == "ttf-weight" || base == "modern-runs") {
+				inner.Set(base, value)
+			} else if base == "text-italic" || base == "text-underline" {
+				if value == "1" || value == "0" {
+					inner.Set(base, value)
+				}
+			} else {
+				addPlacementValue(inner, base, value)
+			}
+			if inner.Has(base) {
+				values.Set(key, inner.Get(base))
+			}
+		}
+		return
+	}
+	if key == "theme-fg" {
+		if validThemeColorToken(value) {
+			values.Set(key, value)
+		}
+		return
+	}
 	switch key {
+	case "label-style-inherit":
+		if value == "1" {
+			values.Set(key, "1")
+		}
+	case "shape-fill":
+		if value == "none" || value == "solid" {
+			values.Set(key, value)
+		}
+	case "shape-stroke":
+		if value == "none" || strings.HasPrefix(value, "theme:") && validThemeColorToken(strings.TrimPrefix(value, "theme:")) {
+			values.Set(key, value)
+		} else if color, ok := normalizeHexColour(value); ok {
+			values.Set(key, color)
+		}
+	case "shape-stroke-width":
+		if width, err := strconv.ParseFloat(value, 64); err == nil && !math.IsNaN(width) && !math.IsInf(width, 0) && width >= 0 && width <= 64 {
+			values.Set(key, strconv.FormatFloat(width, 'f', -1, 64))
+		}
 	case "text-align":
 		if value == "left" || value == "center" || value == "right" || value == "justify" {
 			values.Set(key, value)
@@ -15132,14 +16862,11 @@ func addPlacementValue(values url.Values, key, value string) {
 		}
 		values.Set(key, strconv.FormatFloat(connectorNumber(q, key, fallback, limit), 'f', -1, 64))
 	case "connector-route":
-		if decoded, err := url.QueryUnescape(value); err == nil {
-			value = decoded
-		}
 		if points := decodeConnectorRoute(value); len(points) > 0 {
 			data, _ := json.Marshal(points)
 			values.Set(key, string(data))
 		}
-	case "group", "element-id", "connector-from", "connector-to":
+	case "group", "element-id", "object-id", "connector-from", "connector-to":
 		if len(value) > 0 && len(value) <= 100 && strings.IndexFunc(value, func(r rune) bool {
 			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_')
 		}) < 0 {
@@ -15200,6 +16927,8 @@ func addPlacementValue(values url.Values, key, value string) {
 			values.Set("outline", "1")
 		case "dark", "darkgray", "darkgrey", "gray", "grey":
 			values.Set("outline", "dark")
+		case "light", "none":
+			values.Set("outline", strings.ToLower(value))
 		}
 	case "left_pct", "right_pct":
 		if parsed, err := strconv.ParseFloat(value, 64); err == nil {
@@ -15225,8 +16954,12 @@ func addPlacementValue(values url.Values, key, value string) {
 		if value == "bold" {
 			values.Set(key, value)
 		}
+	case "text-bold", "text-italic", "text-underline":
+		if value == "0" || value == "1" {
+			values.Set(key, value)
+		}
 	case "modern-font":
-		if value == "sans" || value == "mono" || value == "c64" {
+		if value == "sans" || value == "mono" || value == "c64" || value == "theme" {
 			values.Set(key, value)
 		}
 	case "element-style":
@@ -15306,12 +17039,12 @@ func addPlacementValue(values url.Values, key, value string) {
 		}
 	case "gradient-dir":
 		switch strings.ToLower(value) {
-		case "horizontal", "vertical", "diagonal":
+		case "horizontal", "vertical", "diagonal", "none":
 			values.Set("gradient-dir", strings.ToLower(value))
 		}
 	case "shadow":
 		switch strings.ToLower(value) {
-		case "soft", "solid":
+		case "soft", "solid", "none":
 			values.Set("shadow", strings.ToLower(value))
 		}
 	case "shadow-x", "shadow-y":
@@ -15343,9 +17076,6 @@ func addPlacementValue(values url.Values, key, value string) {
 			values.Set("alpha", strconv.Itoa(max(0, min(255, parsed))))
 		}
 	case "link":
-		if decoded, err := url.QueryUnescape(value); err == nil {
-			value = decoded
-		}
 		if link, ok := normalizeLinkValue(value, 0); ok {
 			setLinkValues(values, link)
 		}
@@ -15374,6 +17104,22 @@ func placementCommentText(query string) string {
 		return query
 	}
 	var fields []string
+	for _, key := range []string{"shape-fill", "shape-stroke", "shape-stroke-width"} {
+		if value := values.Get(key); value != "" {
+			fields = append(fields, key+"="+value)
+		}
+	}
+	if value := values.Get("object-id"); value != "" {
+		fields = append(fields, "object-id="+value)
+	}
+	if value := values.Get("theme-fg"); validThemeColorToken(value) {
+		fields = append(fields, "theme-fg="+value)
+	}
+	for _, key := range []string{"text-bold", "text-italic", "text-underline"} {
+		if value := values.Get(key); value == "0" || value == "1" {
+			fields = append(fields, key+"="+value)
+		}
+	}
 	for _, key := range []string{"top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "ttf-size", "ttf-weight", "ttf-width", "font", "fg", "bg", "header", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "tint", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "slide", "link", "master-clear"} {
 		if value := values.Get(key); value != "" {
 			if key == "link" {
@@ -15392,6 +17138,19 @@ func placementCommentText(query string) string {
 		}
 	}
 	var extensionKeys []string
+	for _, key := range []string{"default-font", "default-size", "default-width", "default-line-height", "default-color", "default-fill", "default-stroke", "default-stroke-width"} {
+		if value := values.Get(key); value != "" {
+			fields = append(fields, key+"="+url.QueryEscape(value))
+		}
+	}
+	for _, key := range labelStyleKeys {
+		if value := values.Get("label-" + key); value != "" {
+			fields = append(fields, "label-"+key+"="+url.QueryEscape(value))
+		}
+	}
+	if values.Get("label-style-inherit") == "1" {
+		fields = append(fields, "label-style-inherit=1")
+	}
 	for key := range values {
 		if !placementMetadataKey(key) && validExtensionMetadataKey(key) {
 			extensionKeys = append(extensionKeys, key)
@@ -15503,6 +17262,10 @@ func linkTargetFromQuery(query string, slideCount int) (linkTarget, bool) {
 	if err != nil {
 		return linkTarget{}, false
 	}
+	return linkTargetFromValues(values, slideCount)
+}
+
+func linkTargetFromValues(values url.Values, slideCount int) (linkTarget, bool) {
 	if raw := values.Get("slide"); raw != "" {
 		return parseLinkTarget("#"+raw, slideCount)
 	}
@@ -16625,15 +18388,29 @@ func currentElementHexForElement(element Element) string {
 	return ""
 }
 
+func cloneElement(element Element) Element {
+	element.Extra = cloneJSONExtensions(element.Extra)
+	return element
+}
+
 func cloneSlide(slide Slide) Slide {
 	copySlide := slide
+	copySlide.previewGeometry = nil
+	copySlide.BackgroundMedia = cloneSlideBackgroundMedia(slide.BackgroundMedia)
+	if slide.ShapeStrokeDefaults != nil {
+		defaults := *slide.ShapeStrokeDefaults
+		copySlide.ShapeStrokeDefaults = &defaults
+	}
 	if slide.ThemeColors != nil {
 		colors := *slide.ThemeColors
 		copySlide.ThemeColors = &colors
 	}
-	copySlide.Elements = append([]Element(nil), slide.Elements...)
+	if slide.Elements != nil {
+		copySlide.Elements = make([]Element, len(slide.Elements))
+		copy(copySlide.Elements, slide.Elements)
+	}
 	for index := range copySlide.Elements {
-		copySlide.Elements[index].Extra = cloneJSONExtensions(slide.Elements[index].Extra)
+		copySlide.Elements[index] = cloneElement(slide.Elements[index])
 	}
 	copySlide.Extra = cloneJSONExtensions(slide.Extra)
 	copySlide.Engagement = cloneEngagement(slide.Engagement)
@@ -16642,6 +18419,9 @@ func cloneSlide(slide Slide) Slide {
 }
 
 func cloneSlides(slides []Slide) []Slide {
+	if slides == nil {
+		return nil
+	}
 	out := make([]Slide, len(slides))
 	for i, slide := range slides {
 		out[i] = cloneSlide(slide)
@@ -16798,7 +18578,7 @@ func setQueryValue(query, key, value string) string {
 
 func elementHasOutline(element Element) bool {
 	values, err := url.ParseQuery(element.Query)
-	return err == nil && values.Get("outline") != ""
+	return err == nil && values.Get("outline") != "" && values.Get("outline") != "none"
 }
 
 func elementTransparent(element Element) bool {
@@ -17460,12 +19240,11 @@ func constrainedElementHeight(element Element, height int) int {
 	return height
 }
 
-func renderShapeRows(element Element, maxWidth int) []string {
+func renderShapeRows(element Element, maxWidth int, cellSize ...sceneRect) []string {
 	values, _ := url.ParseQuery(element.Query)
 	if values.Has("shape-label") {
 		maxWidth = max(maxWidth, shapeHalfCells(values, "width", 12)/2+1)
 	}
-	shape := shapeName(element)
 	// Work in half-cell pixels, then pack into quadrant glyphs. Offsets keep
 	// the opposite edge stationary when resizing a north/west corner.
 	w := shapeHalfCells(values, "width", 12)
@@ -17475,12 +19254,34 @@ func renderShapeRows(element Element, maxWidth int) []string {
 	if maxWidth > 0 {
 		w = min(w, max(1, maxWidth*2-ox))
 	}
+	spec := shapeSpecFromValues(values)
+	encoded, err := json.Marshal(spec)
+	cw, ch := 1920.0/245, 1080.0/56
+	if len(cellSize) > 0 {
+		cw, ch = cellSize[0].Width, cellSize[0].Height
+	}
+	aspect := shapeDimension(values, "width", 12) * cw / (shapeDimension(values, "height", 6) * ch)
+	if err != nil {
+		return renderShapeSilhouette(shapeGeometry(spec, aspect), w, h, ox, oy)
+	}
+	return sharedShapeRasters.rows(shapeRasterKey{string(encoded), aspect, w, h, ox, oy}, func() []string {
+		return renderShapeSilhouette(shapeGeometry(spec, aspect), w, h, ox, oy)
+	})
+}
+
+func renderShapeSilhouette(geometry sceneShapeGeometry, w, h, ox, oy int) []string {
 	mask := make([][]bool, h+oy)
 	for y := range mask {
 		mask[y] = make([]bool, w+ox)
-		for x := range mask[y] {
-			if x >= ox && y >= oy {
-				mask[y][x] = shapeCellFilled(shape, x-ox, y-oy, w, h)
+		if y < oy {
+			continue
+		}
+		xs := geometry.rowIntersections((float64(y-oy) + .5) / float64(h))
+		for n := 0; n+1 < len(xs); n += 2 {
+			left := max(0, int(math.Ceil(xs[n]*float64(w)-.5)))
+			right := min(w, int(math.Ceil(xs[n+1]*float64(w)-.5)))
+			for x := left; x < right; x++ {
+				mask[y][x+ox] = true
 			}
 		}
 	}
@@ -17511,29 +19312,8 @@ func shapeCellFilled(shape string, x, y, w, h int) bool {
 	if w <= 0 || h <= 0 {
 		return false
 	}
-	switch shape {
-	case "circle":
-		cx := (float64(w) - 1) / 2
-		cy := (float64(h) - 1) / 2
-		rx := maxFloat(0.5, float64(w)/2)
-		ry := maxFloat(0.5, float64(h)/2)
-		dx := (float64(x) - cx) / rx
-		dy := (float64(y) - cy) / ry
-		return dx*dx+dy*dy <= 1.0
-	case "triangle":
-		if h == 1 {
-			return true
-		}
-		center := (float64(w) - 1) / 2
-		half := (float64(y) / float64(max(1, h-1))) * float64(w) / 2
-		return math.Abs(float64(x)-center) <= half
-	case "diamond":
-		cx := (float64(w) - 1) / 2
-		cy := (float64(h) - 1) / 2
-		return math.Abs(float64(x)-cx)/maxFloat(0.5, float64(w)/2)+math.Abs(float64(y)-cy)/maxFloat(0.5, float64(h)/2) <= 1.0
-	default:
-		return true
-	}
+	g := shapeGeometry(ShapeSpec{Kind: shape}, (float64(w)*1920/245)/(float64(h)*1080/56))
+	return g.contains((float64(x)+.5)/float64(w), (float64(y)+.5)/float64(h))
 }
 
 func shapeName(element Element) string {
@@ -17542,12 +19322,7 @@ func shapeName(element Element) string {
 }
 
 func shapeNameFromValues(values url.Values) string {
-	switch strings.ToLower(values.Get("shape")) {
-	case "circle", "square", "triangle", "diamond":
-		return strings.ToLower(values.Get("shape"))
-	default:
-		return "circle"
-	}
+	return shapeSpecFromValues(values).Kind
 }
 
 func intQueryDefault(values url.Values, key string, fallback int) int {
@@ -17643,6 +19418,27 @@ func layout(slide Slide, width, height int) []Line {
 	slide.Elements = append([]Element(nil), slide.Elements...)
 	fitSlideShapeLabels(&slide, width, height)
 	slide = withTrueTypeDefaults(slide)
+	return layoutPreparedSlide(slide, width, height)
+}
+
+// Shared layout core for an owned projection whose labels and TrueType
+// defaults have already resolved. Read the source only; callers needing the
+// legacy preparation order must continue to use layout.
+func layoutPreparedSlide(slide Slide, width, height int) []Line {
+	return layoutPreparedSlideWithFlow(slide, width, height, nil)
+}
+
+// Scene geometry can prepare independent objects separately while carrying the
+// exact existing flow cursor between them. Ordinary/legacy painted layout still
+// enters through layoutPreparedSlide and owns one complete pass.
+type preparedLayoutFlow struct {
+	row      int
+	hasBlock bool
+}
+
+func layoutPreparedSlideWithFlow(slide Slide, width, height int, flow *preparedLayoutFlow) []Line {
+	canvas := slide.physicalCanvas()
+	shapeCellSize := sceneRect{Width: canvas.Width / float64(max(1, width)), Height: canvas.Height / float64(max(1, height))}
 	type block struct {
 		lines   []Line
 		image   bool
@@ -17659,7 +19455,7 @@ func layout(slide Slide, width, height int) []Line {
 		if isTrueType(e) {
 			values, _ := url.ParseQuery(e.Query)
 			textQueries[elementIndex] = values
-			typedBlocks = append(typedBlocks, block{lines: roleLines(trueTypeLayoutRowsFromValues(e, width, height, values), "truetype", elementIndex, e.Query)})
+			typedBlocks = append(typedBlocks, block{lines: roleLines(trueTypeLayoutRowsFromValues(e, width, height, values, canvas), "truetype", elementIndex, e.Query)})
 			continue
 		}
 		switch e.Kind {
@@ -17676,7 +19472,7 @@ func layout(slide Slide, width, height int) []Line {
 		case "image":
 			typedBlocks = append(typedBlocks, block{image: true, path: e.Path, query: e.Query, element: elementIndex})
 		case "shape":
-			typedBlocks = append(typedBlocks, block{lines: roleLines(layoutElementRows(e, width), "shape", elementIndex, e.Query)})
+			typedBlocks = append(typedBlocks, block{lines: roleLines(renderShapeRows(e, width, shapeCellSize), "shape", elementIndex, e.Query)})
 		case "page-number":
 			typedBlocks = append(typedBlocks, block{lines: roleLines(layoutElementRows(e, width), "body", elementIndex, e.Query)})
 		}
@@ -17696,6 +19492,9 @@ func layout(slide Slide, width, height int) []Line {
 	var frontLines []Line
 	currentRow := 0
 	hasFlowBlock := false
+	if flow != nil {
+		currentRow, hasFlowBlock = flow.row, flow.hasBlock
+	}
 	for _, block := range blocks {
 		if len(block) == 0 {
 			continue
@@ -17821,7 +19620,14 @@ func layout(slide Slide, width, height int) []Line {
 			}
 			if availableWidth < width && block[0].Role != "truetype" {
 				role := block[0].Role
-				block = roleLines(layoutElementRows(slide.Elements[block[0].Element], availableWidth), role, block[0].Element, block[0].Query)
+				element := slide.Elements[block[0].Element]
+				var rows []string
+				if element.Kind == "shape" {
+					rows = renderShapeRows(element, availableWidth, shapeCellSize)
+				} else {
+					rows = layoutElementRows(element, availableWidth)
+				}
+				block = roleLines(rows, role, block[0].Element, block[0].Query)
 				blockHeight = len(block)
 				if boxQuery.Get("text-box") == "1" {
 					blockHeight = max(1, intQueryDefault(boxQuery, "height", blockHeight))
@@ -17856,7 +19662,7 @@ func layout(slide Slide, width, height int) []Line {
 			if elementLink(block[0].Query) != "" {
 				blockHeight++
 			}
-			if label, ok := shapeLabelLine(element, block[0].Element, row, col, width, height); ok {
+			if label, ok := shapeLabelLine(element, block[0].Element, row, col, width, height, slide.physicalCanvas()); ok {
 				*layerLines = append(*layerLines, label)
 			}
 			if !placement.hasVerticalOffset() {
@@ -17864,6 +19670,9 @@ func layout(slide Slide, width, height int) []Line {
 				hasFlowBlock = true
 			}
 		}
+	}
+	if flow != nil {
+		flow.row, flow.hasBlock = currentRow, hasFlowBlock
 	}
 	lines := append(masterBackLines, masterFrontLines...)
 	lines = append(lines, backLines...)
@@ -19494,6 +21303,8 @@ func scaleRows(rows []string, scale int) []string {
 }
 
 type imageASCIIOptions struct {
+	fit        string
+	fitAspect  float64
 	crop       *sceneCrop
 	mask       string
 	glyph      string
@@ -19526,14 +21337,16 @@ type asciiImageFrame struct {
 }
 
 type asciiImageAnimation struct {
-	frames    []asciiImageFrame
-	total     time.Duration
-	opts      imageASCIIOptions
-	width     int
-	height    int
-	cachePath string
-	source    string
-	warming   bool
+	mu         sync.Mutex // Lazy row generation; published source/options remain immutable.
+	runtimeKey string
+	frames     []asciiImageFrame
+	total      time.Duration
+	opts       imageASCIIOptions
+	width      int
+	height     int
+	cachePath  string
+	source     string
+	warming    bool
 }
 
 type diskImageAnimation struct {
@@ -19549,18 +21362,16 @@ type diskImageFrame struct {
 
 const diskImageAnimationVersion = 3
 
-var asciiImageCache = map[string]*asciiImageAnimation{}
-var fastASCIIImageCache = map[string][]string{}
-var decodedStillImageCache = map[string]image.Image{}
-var decodedStillImageCacheMu sync.RWMutex
 var embeddedAnimatedAssets = struct {
 	sync.RWMutex
-	assets map[string]DeckAsset
-}{assets: map[string]DeckAsset{}}
+	assets     map[string]DeckAsset
+	identities map[string]string
+}{assets: map[string]DeckAsset{}, identities: map[string]string{}}
 var embeddedStillAssets = struct {
 	sync.RWMutex
-	assets map[string]DeckAsset
-}{assets: map[string]DeckAsset{}}
+	assets     map[string]DeckAsset
+	identities map[string]string
+}{assets: map[string]DeckAsset{}, identities: map[string]string{}}
 var prewarmingImageCache bool
 var fastImageRender bool
 
@@ -19568,8 +21379,13 @@ func registerEmbeddedAnimatedAsset(id string, asset DeckAsset) {
 	if id == "" || len(asset.Frames) == 0 {
 		return
 	}
+	identity := embeddedImageSourceIdentity(asset)
 	embeddedAnimatedAssets.Lock()
+	if embeddedAnimatedAssets.identities[id] != identity {
+		embeddedImageRegistrationRevision.Add(1)
+	}
 	embeddedAnimatedAssets.assets[id] = asset
+	embeddedAnimatedAssets.identities[id] = identity
 	embeddedAnimatedAssets.Unlock()
 }
 
@@ -19588,8 +21404,13 @@ func registerEmbeddedStillAsset(id string, asset DeckAsset) {
 	if id == "" || len(asset.Data) == 0 || len(asset.Frames) > 0 {
 		return
 	}
+	identity := embeddedImageSourceIdentity(asset)
 	embeddedStillAssets.Lock()
+	if embeddedStillAssets.identities[id] != identity {
+		embeddedImageRegistrationRevision.Add(1)
+	}
 	embeddedStillAssets.assets[id] = asset
+	embeddedStillAssets.identities[id] = identity
 	embeddedStillAssets.Unlock()
 }
 
@@ -19618,11 +21439,12 @@ func renderASCIIImage(path, query string, maxWidth, maxHeight int) []string {
 		return renderFastASCIIImage(path, query, maxWidth, maxHeight)
 	}
 	renderQuery := imageRenderQuery(query)
-	key := fmt.Sprintf("%s?%s@%dx%d", path, renderQuery, maxWidth, maxHeight)
-	animation, ok := asciiImageCache[key]
+	key := fmt.Sprintf("%s?%s@%dx%d", embeddedImageCacheIdentity(path), renderQuery, maxWidth, maxHeight)
+	animation, ok := asciiImageCache.get(key)
 	if !ok {
 		animation = loadASCIIImageAnimation(path, renderQuery, maxWidth, maxHeight)
-		asciiImageCache[key] = animation
+		animation.runtimeKey = key
+		animation = asciiImageCache.put(key, animation, animation.runtimeCost())
 	}
 	if animation == nil || len(animation.frames) == 0 {
 		return nil
@@ -19667,9 +21489,9 @@ func renderFastASCIIImage(path, query string, maxWidth, maxHeight int) []string 
 		return nil
 	}
 	renderQuery := imageRenderQuery(query)
-	key := fmt.Sprintf("fast|%s?%s@%dx%d", path, renderQuery, maxWidth, maxHeight)
-	if rows, ok := fastASCIIImageCache[key]; ok {
-		return rows
+	key := fmt.Sprintf("fast|%s?%s@%dx%d", embeddedImageCacheIdentity(path), renderQuery, maxWidth, maxHeight)
+	if rows, ok := fastASCIIImageCache.get(key); ok {
+		return append([]string(nil), rows...)
 	}
 	img := loadDecodedStillImage(path)
 	if img == nil {
@@ -19677,8 +21499,8 @@ func renderFastASCIIImage(path, query string, maxWidth, maxHeight int) []string 
 	}
 	opts := parseImageASCIIOptions(renderQuery)
 	rows := renderFastASCIIImageRows(img, opts, maxWidth, maxHeight)
-	fastASCIIImageCache[key] = rows
-	return rows
+	rows = fastASCIIImageCache.put(key, rows, imageRowsCost(rows))
+	return append([]string(nil), rows...)
 }
 
 func loadDecodedStillImage(path string) image.Image {
@@ -19686,38 +21508,26 @@ func loadDecodedStillImage(path string) image.Image {
 		if len(asset.Frames) == 0 {
 			return nil
 		}
-		key := "embedded-first|" + path
-		decodedStillImageCacheMu.RLock()
-		cached := decodedStillImageCache[key]
-		decodedStillImageCacheMu.RUnlock()
-		if cached != nil {
+		key := "embedded-first|" + embeddedImageCacheIdentity(path)
+		if cached, ok := decodedStillImageCache.get(key); ok {
 			return cached
 		}
 		img, err := png.Decode(bytes.NewReader(asset.Frames[0].Data))
 		if err != nil {
 			return nil
 		}
-		decodedStillImageCacheMu.Lock()
-		decodedStillImageCache[key] = img
-		decodedStillImageCacheMu.Unlock()
-		return img
+		return decodedStillImageCache.put(key, img, decodedImageCost(img))
 	}
 	if asset, ok := embeddedStillAsset(path); ok {
-		key := "embedded-still|" + path
-		decodedStillImageCacheMu.RLock()
-		cached := decodedStillImageCache[key]
-		decodedStillImageCacheMu.RUnlock()
-		if cached != nil {
+		key := "embedded-still|" + embeddedImageCacheIdentity(path)
+		if cached, ok := decodedStillImageCache.get(key); ok {
 			return cached
 		}
 		img, err := png.Decode(bytes.NewReader(asset.Data))
 		if err != nil {
 			return nil
 		}
-		decodedStillImageCacheMu.Lock()
-		decodedStillImageCache[key] = img
-		decodedStillImageCacheMu.Unlock()
-		return img
+		return decodedStillImageCache.put(key, img, decodedImageCost(img))
 	}
 	info, err := os.Stat(path)
 	stamp := "missing"
@@ -19725,9 +21535,7 @@ func loadDecodedStillImage(path string) image.Image {
 		stamp = fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
 	}
 	key := path + "|" + stamp
-	decodedStillImageCacheMu.RLock()
-	img, ok := decodedStillImageCache[key]
-	decodedStillImageCacheMu.RUnlock()
+	img, ok := decodedStillImageCache.get(key)
 	if ok {
 		return img
 	}
@@ -19740,10 +21548,7 @@ func loadDecodedStillImage(path string) image.Image {
 	if err != nil {
 		return nil
 	}
-	decodedStillImageCacheMu.Lock()
-	decodedStillImageCache[key] = img
-	decodedStillImageCacheMu.Unlock()
-	return img
+	return decodedStillImageCache.put(key, img, decodedImageCost(img))
 }
 
 func renderFastASCIIImageRows(img image.Image, opts imageASCIIOptions, maxWidth, maxHeight int) []string {
@@ -19752,7 +21557,7 @@ func renderFastASCIIImageRows(img image.Image, opts imageASCIIOptions, maxWidth,
 }
 
 func renderUnicodeImage(img image.Image, b image.Rectangle, opts imageASCIIOptions, maxWidth, maxHeight int, lanczos bool) []string {
-	if opts.crop != nil || opts.mask != "" {
+	if opts.crop != nil || opts.mask != "" || opts.fit != "" {
 		// Explicit framing is source-relative, not relative to auto-trimmed alpha.
 		b = img.Bounds()
 		if c := opts.crop; c != nil {
@@ -19766,7 +21571,7 @@ func renderUnicodeImage(img image.Image, b image.Rectangle, opts imageASCIIOptio
 	}
 	targetW := maxWidth
 	targetH := maxHeight
-	if !opts.stretch {
+	if !opts.stretch && opts.fit == "" {
 		aspectScale := 1.0
 		if opts.fixScaling {
 			aspectScale = 2.0
@@ -19783,7 +21588,13 @@ func renderUnicodeImage(img image.Image, b image.Rectangle, opts imageASCIIOptio
 	sampleW := targetW * 2
 	sampleH := targetH * 4
 	var pixels []rgba8
-	if lanczos {
+	if opts.fit != "" {
+		aspect := opts.fitAspect
+		if aspect <= 0 {
+			aspect = float64(sampleW) / float64(sampleH)
+		}
+		pixels = sampleFittedImageAspect(img, b, sampleW, sampleH, aspect, opts.fit, lanczos)
+	} else if lanczos {
 		pixels = resizeLanczosRGBA(img, b, sampleW, sampleH)
 	} else {
 		pixels = resizeNearestRGBA(img, b, sampleW, sampleH)
@@ -19794,7 +21605,7 @@ func renderUnicodeImage(img image.Image, b image.Rectangle, opts imageASCIIOptio
 	if opts.sharpness != 1 {
 		pixels = enhanceSharpnessRGBA(pixels, sampleW, sampleH, opts.sharpness)
 	}
-	applySampledImageMask(pixels, sampleW, sampleH, opts.mask)
+	applySampledImageMaskAspect(pixels, sampleW, sampleH, opts.fitAspect, opts.mask)
 	return renderUnicodeImageRows(pixels, sampleW, sampleH, targetW, targetH, opts)
 }
 
@@ -19835,19 +21646,37 @@ func loadASCIIImageAnimation(path, query string, maxWidth, maxHeight int) *ascii
 }
 
 func (animation *asciiImageAnimation) frameRows(index int) []string {
+	animation.mu.Lock()
 	if index < 0 || index >= len(animation.frames) {
+		animation.mu.Unlock()
 		return nil
 	}
+	built := false
 	if animation.frames[index].rows == nil {
+		built = true
 		animation.frames[index].rows = renderASCIIImageRows(animation.frames[index].image, animation.opts, animation.width, animation.height)
-		if animation.cachePath != "" && animation.allRowsRendered() {
+		if animation.cachePath != "" && animation.allRowsRenderedLocked() {
 			saveDiskASCIIAnimation(animation.cachePath, animation.source, animation)
 		}
 	}
-	return animation.frames[index].rows
+	rows := append([]string(nil), animation.frames[index].rows...)
+	cost := 0
+	if built {
+		cost = animation.runtimeCostLocked()
+	}
+	animation.mu.Unlock()
+	if built {
+		animation.reweigh(cost)
+	}
+	return rows
 }
 
 func (animation *asciiImageAnimation) allRowsRendered() bool {
+	animation.mu.Lock()
+	defer animation.mu.Unlock()
+	return animation.allRowsRenderedLocked()
+}
+func (animation *asciiImageAnimation) allRowsRenderedLocked() bool {
 	for _, frame := range animation.frames {
 		if frame.rows == nil {
 			return false
@@ -19857,7 +21686,9 @@ func (animation *asciiImageAnimation) allRowsRendered() bool {
 }
 
 func (animation *asciiImageAnimation) warmCache() {
-	if animation.allRowsRendered() {
+	animation.mu.Lock()
+	if animation.allRowsRenderedLocked() {
+		animation.mu.Unlock()
 		return
 	}
 	rendered := map[string][]string{}
@@ -19874,9 +21705,12 @@ func (animation *asciiImageAnimation) warmCache() {
 			rendered[imageFrameHash(animation.frames[index].image)] = animation.frames[index].rows
 		}
 	}
-	if animation.cachePath != "" && animation.allRowsRendered() {
+	if animation.cachePath != "" && animation.allRowsRenderedLocked() {
 		saveDiskASCIIAnimation(animation.cachePath, animation.source, animation)
 	}
+	cost := animation.runtimeCostLocked()
+	animation.mu.Unlock()
+	animation.reweigh(cost)
 }
 
 func imageFrameHash(img image.Image) string {
@@ -20215,6 +22049,10 @@ func parseImageASCIIOptions(query string) imageASCIIOptions {
 		return opts
 	}
 	opts.crop = parseModernCrop(values.Get("modern-crop"))
+	opts.fit = imageFit(values.Get("image-fit"))
+	if aspect, err := strconv.ParseFloat(values.Get("keynope-fit-aspect"), 64); err == nil && aspect > 0 && !math.IsInf(aspect, 0) && !math.IsNaN(aspect) {
+		opts.fitAspect = aspect
+	}
 	if mask := values.Get("modern-mask"); mask == "ellipse" || mask == "rounded" {
 		opts.mask = mask
 	}

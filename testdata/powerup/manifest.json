@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "renderer": "production Go scene and shared web/scene.js",
+  "viewport": {"width": 1536, "height": 864},
+  "deviceScaleFactor": 1,
+  "authoredCanvas": {"columns": 245, "rows": 56},
+  "freezeTimeMS": 0,
+  "fonts": "await document.fonts.ready using bundled fonts only",
+  "visualBaselineApproved": false,
+  "decks": [
+    {"file": "themes-and-overrides.md", "pages": 2},
+    {"file": "tables.md", "pages": 6},
+    {"file": "charts.md", "pages": 6},
+    {"file": "diagrams.md", "pages": 1},
+    {"file": "media.md", "pages": 3},
+    {"file": "builds.md", "pages": 1},
+    {"file": "export-layout.md", "pages": 1, "expectedCondition": "intentionally clipped art", "expectedDiagnostics": [{"slide": 0, "objectId": "clipped", "code": "bounds-overflow"}]}
+  ]
+}

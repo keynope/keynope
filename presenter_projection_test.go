@@ -284,9 +284,12 @@ func TestPresenterClientRejectsStaleSnapshotsAndSerializesPolling(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, marker := range []string{
+		"async function refreshPresenterDeck(expectedVersion, current=()=>true, recoverFull=false)",
 		"async function refreshPresenterSlide(slideIndex, expectedVersion)",
 		"snapshot.version < expectedVersion",
-		"snapshot.version < (state.deckVersion || 0)",
+		"slideRefreshed = await refreshPresenterDeck(state.deckVersion || 0,current)",
+		"if(!current())return false;",
+		"if(!current()||state.version<presenterVersion)return;",
 		"let presenterStateSync = null;",
 		"if (presenterStateSync) return presenterStateSync;",
 		"const publicationCurrent = () => {",

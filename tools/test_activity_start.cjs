@@ -1,11 +1,11 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
 const source=fs.readFileSync('main.go','utf8'),noop=()=>{};let now=1000,connections=0,presenting=true;
 const c=vm.createContext({window:{},document:{querySelectorAll:()=>[]},Date:{now:()=>now},crypto:require('node:crypto').webcrypto,
- keynopeEngagementSessions:new Map(),keynopeEngagementRuntime:null,keynopeRunningActivity:null,keynopeEngagementOverlay:null,keynopeEngagementSessionEpoch:0,keynopePairingRoom:null,showEngagementToast:noop,
+ keynopeEngagementSessions:new Map(),keynopeEngagementRuntime:null,keynopeRunningActivity:null,keynopeEngagementOverlay:null,keynopeEngagementSessionEpoch:0,keynopeEngagementFocusGeneration:0,keynopeEngagementOverlayFocus:null,keynopePairingRoom:null,showEngagementToast:noop,
  renderActiveActivityStatus:noop,clearTimeout:noop,confirmRunningActivity:()=>{throw Error('Unexpected conflict')},
  keynopeEngagementCountdownTick:0,keynopeRecentActivityItems:[],keynopeLobbyPresentation:null,keynopeHostedEngagementControllerSurface:true,
  deck:{pages:[]},pageIndex:0,clearInterval:noop,archiveEngagementResult:noop,renderActivityMarker:noop,renderEngagementRuntime:noop,
- publishEngagementRuntime:noop,runEngagementCountdown:noop,publishHostedEngagementState:()=>Promise.resolve(),
+ publishEngagementRuntime:noop,runEngagementCountdown:noop,loadEngagementQRCode:noop,publishHostedEngagementState:()=>Promise.resolve(),
  engagementPresentationActive:()=>presenting,randomActivityCode:()=> 'Test1234',connected:()=>connections++});
 for(const name of ['engagementHasCompleted','engagementIsRunning','engagementRuntimeAlive','detachEngagementRuntime','disposeEngagementRuntimes','onboardingSessionDefinition','engagementSessionFor','currentEngagementDefinition','openEngagementRuntime','activitySubmittedItems','closeEngagementRuntime','startEngagementRuntime','resetEngagementRuntime']){
  const start=source.indexOf('function '+name+'(');vm.runInContext(source.slice(start,source.indexOf('\n}',start)+2),c);
@@ -32,5 +32,5 @@ for(const kind of kinds){
  if(kind!=='onboarding'){c.resetEngagementRuntime();assert.equal(r.phase,0);assert.equal(r.deadlineMs,0);assert.equal(r.startedAt,0);}
  c.closeEngagementRuntime(false);
 }
-c.disposeEngagementRuntimes();c.keynopeEngagementSessions.clear();presenting=false;connections=0;c.deck.pages=[{slide:0,engagement:{id:'preview',kind:'storm'}}];c.openEngagementRuntime(false);c.startEngagementRuntime();assert(c.keynopeEngagementRuntime.localPreview);assert.equal(connections,0);assert.equal(c.keynopeEngagementRuntime.deadlineMs,0);
-console.log(`PASS all ${kinds.length} activities: Ready without timer/connection, explicit Start, double-click safety, resume, reset and local previews.`);
+c.disposeEngagementRuntimes();c.keynopeEngagementSessions.clear();presenting=false;connections=0;c.deck.pages=[{slide:0,engagement:{id:'preview',kind:'storm',timerSeconds:60}}];c.openEngagementRuntime(false);assert(c.keynopeEngagementRuntime.localPreview);assert.equal(connections,0);c.startEngagementRuntime();assert.equal(c.keynopeEngagementRuntime.localPreview,false);assert.equal(connections,1);assert.equal(c.keynopeEngagementRuntime.deadlineMs,now+60000);
+console.log(`PASS all ${kinds.length} activities: Ready without timer/connection, explicit Start, double-click safety, resume, reset and Start without an external presentation window.`);

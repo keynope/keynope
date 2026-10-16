@@ -49,8 +49,10 @@ const KeynopeTrueType = (() => {
     const raster=document.createElement('canvas');raster.width=raster.height=pixels;
     const ctx=raster.getContext('2d');ctx.font=pixels+'px '+font.family;ctx.fillText('\ue000',0,pixels);
     const bytes=pixels*pixels*4;
-    while(emojiRasters.size&&emojiRasterBytes+bytes>32*1024*1024){const first=emojiRasters.keys().next().value,old=emojiRasters.get(first);emojiRasterBytes-=old.width*old.height*4;emojiRasters.delete(first);}
-    emojiRasters.set(cacheKey,raster);emojiRasterBytes+=bytes;return raster;
+    if(bytes<=32*1024*1024){
+      while(emojiRasters.size&&emojiRasterBytes+bytes>32*1024*1024){const first=emojiRasters.keys().next().value,old=emojiRasters.get(first);emojiRasterBytes-=old.width*old.height*4;emojiRasters.delete(first);}
+      emojiRasters.set(cacheKey,raster);emojiRasterBytes+=bytes;
+    }return raster;
   }
   function styledCharacters(text,kind,runs=[]){
     const chars=Array.from(text),result=chars.map(char=>({char,hidden:false,bold:false,color:null}));
@@ -238,10 +240,12 @@ const KeynopeTrueType = (() => {
       target.putImageData(pixels,0,0);
     }
     const bytes=output.width*output.height*4;
-    while(painted.size&&(painted.size>=32||paintedBytes+bytes>16*1024*1024)){
-      const first=painted.keys().next().value,old=painted.get(first);paintedBytes-=old.width*old.height*4;painted.delete(first);
-    }
-    if(fontsReady){painted.set(key,output);paintedBytes+=bytes;}return output;
+    if(fontsReady&&bytes<=16*1024*1024){
+      while(painted.size&&(painted.size>=32||paintedBytes+bytes>16*1024*1024)){
+        const first=painted.keys().next().value,old=painted.get(first);paintedBytes-=old.width*old.height*4;painted.delete(first);
+      }
+      painted.set(key,output);paintedBytes+=bytes;
+    }return output;
   }
   function draw(ctx,line,cellWidth,cellHeight,cols,rows,caret){
     const data=line.trueType;if(!data)return;
@@ -282,5 +286,7 @@ const KeynopeTrueType = (() => {
     ctx.restore();
   }
   ready.then(()=>{painted.clear();paintedBytes=0;});
-  return {is,size,presetSize,widthPercent,layout,metrics,initialBounds,draw,ready,readyFor};
+  const clearDocumentCaches=()=>{painted.clear();paintedBytes=0;emojiRasters.clear();emojiRasterBytes=0;};
+  const cacheStats=()=>({painted:{entries:painted.size,bytes:paintedBytes},emojiRasters:{entries:emojiRasters.size,bytes:emojiRasterBytes}});
+  return {is,size,presetSize,widthPercent,layout,metrics,initialBounds,draw,ready,readyFor,clearDocumentCaches,cacheStats};
 })();

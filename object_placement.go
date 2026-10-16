@@ -34,16 +34,41 @@ func authoredObjectDimension(q url.Values, key string, limit int) (float64, bool
 	return math.Max(1, math.Min(float64(max(1, limit)), v)), true
 }
 
+// The sampled covering layout is page-bounded, but the semantic compositor
+// must retain frames crossing an edge (including padded imported pictures).
+// Use the existing shape dimension envelope, never an unbounded CSS/canvas size.
+func sceneObjectDimension(q url.Values, key string, limit int) (float64, bool) {
+	return authoredObjectDimension(q, key, max(limit, 1000))
+}
+
 // Preserve anchored edges when replacing a covering grid box with a precise
 // text box. Integer-authored boxes retain their historical placement.
 func preciseTextAnchor(q url.Values, width, height, x, y float64, cols, rows int) (float64, float64) {
+	return preciseTextAnchorForFrame(q, width, height, x, y, cols, rows, false)
+}
+
+// Intrinsic frame replacement also re-evaluates integer-grid anchors: its
+// measured width can land on an exact grid unit while the old centre rounded.
+func preciseTextAnchorForFrame(q url.Values, width, height, x, y float64, cols, rows int, resized bool) (float64, float64) {
+	// Covering layout clips negative anchors; physical scene placement must
+	// retain them so off-page artwork is clipped, not shifted into the page.
+	if raw := q.Get("left"); len(raw) > 0 && raw[0] == '-' {
+		if value, err := strconv.Atoi(raw); err == nil {
+			x = float64(value)
+		}
+	}
+	if raw := q.Get("top"); len(raw) > 0 && raw[0] == '-' {
+		if value, err := strconv.Atoi(raw); err == nil {
+			y = float64(value)
+		}
+	}
 	// Integer boxes already have their final anchor from layout. Fractional
 	// boxes need placement rules, but never a query encode/decode round trip.
-	if math.Abs(width-math.Round(width)) <= 1e-9 && math.Abs(height-math.Round(height)) <= 1e-9 {
+	if !resized && math.Abs(width-math.Round(width)) <= 1e-9 && math.Abs(height-math.Round(height)) <= 1e-9 {
 		return x, y
 	}
 	p := imagePlacementFromValues(q)
-	if math.Abs(width-math.Round(width)) > 1e-9 {
+	if resized || math.Abs(width-math.Round(width)) > 1e-9 {
 		switch {
 		case p.leftPct != nil:
 		case p.rightPct != nil:
@@ -57,7 +82,7 @@ func preciseTextAnchor(q url.Values, width, height, x, y float64, cols, rows int
 			x = float64(cols) - width
 		}
 	}
-	if math.Abs(height-math.Round(height)) > 1e-9 {
+	if resized || math.Abs(height-math.Round(height)) > 1e-9 {
 		switch {
 		case p.top != nil:
 		case p.bottom != nil:

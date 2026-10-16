@@ -10,7 +10,9 @@ import (
 // Presets create ordinary editable objects, not a second template format.
 // Colours and typography are intentionally absent so paired theme defaults apply.
 func slidePreset(name string, cols, rows int) (Slide, error) {
-	slide := Slide{}
+	// Even a completely blank authored page needs a persistent marker; without
+	// identity its Markdown section is indistinguishable from whitespace.
+	slide := Slide{ID: newStableID("slide")}
 	if name == "" {
 		return slide, nil
 	}

@@ -1,0 +1,63 @@
+// Production shared inspector: mixed connector subset, typed edits and history.
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),http=require('node:http'),{execFileSync}=require('node:child_process');
+const pw=require(process.env.PLAYWRIGHT_MODULE||'playwright'),{waitForAsync}=require('./wait_for_async.cjs');
+const root=path.resolve(process.env.TEST_SITE||'/tmp/keynope-powerup-site'),engine=process.env.TEST_BROWSER||'webkit',proof='/tmp/keynope-connector-selection-'+engine;
+execFileSync('go',['test','.','-run','^TestConnectorSelectionBrowserFixture$','-count=1'],{env:{...process.env,GOCACHE:process.env.GOCACHE||'/tmp/keynope-go-cache',KEYNOPE_CONNECTOR_SELECTION_PROOF:proof},stdio:'pipe'});
+const server=http.createServer((req,res)=>{let name=new URL(req.url,'http://localhost').pathname;if(name.endsWith('/'))name+='index.html';const file=path.resolve(root,'.'+name);if(!file.startsWith(root+'/')||!fs.existsSync(file)){res.writeHead(404);return res.end();}res.setHeader('Content-Type',({'.js':'text/javascript','.css':'text/css','.html':'text/html','.wasm':'application/wasm'})[path.extname(file)]||'application/octet-stream');res.end(fs.readFileSync(file));});
+(async()=>{
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));const browser=await pw[engine].launch({headless:true,...(engine==='chromium'?{executablePath:process.env.CHROME_PATH}:{})});
+ try{
+  const page=await browser.newPage({viewport:{width:1600,height:1000}}),errors=[];page.on('pageerror',e=>errors.push(e.message));page.on('dialog',d=>d.accept());await page.route(/https?:\/\/(?!127\.0\.0\.1).*/,r=>r.abort());
+  await page.goto('http://127.0.0.1:'+server.address().port+'/editor/');await page.locator('.keynope-web-loading').waitFor({state:'detached',timeout:90000});
+  async function open(name,buffer=fs.readFileSync(path.join(proof,name))){const picker=page.waitForEvent('filechooser');await page.getByRole('button',{name:'Open a Keynope or PowerPoint presentation',exact:true}).click();await(await picker).setFiles({name,mimeType:'text/markdown',buffer:Buffer.from(buffer)});await waitForAsync(page,async name=>(await fetch('/api/editor/state').then(r=>r.json())).path.endsWith(name),name);}
+  const state=()=>page.evaluate(()=>fetch('/api/editor/state').then(r=>r.json()));
+  const select=sourceIndices=>page.evaluate(async ids=>{const s=await fetch('/api/editor/state').then(r=>r.json()),elements=s.slides[0].elements,indices=ids.map(id=>elements.findIndex(e=>e.id===id));if(indices.some(i=>i<0))throw Error('Fixture target missing');await editorAction({action:'select-elements',element:indices[0],elementIndices:indices,elementsData:indices.map(i=>elements[i])});},sourceIndices.map(i=>['from','to','line-a','line-b'][i]));
+  const accepted=(property,value)=>waitForAsync(page,async({property,value})=>{const p=(await fetch('/api/editor/state').then(r=>r.json())).selectionCapabilities?.properties?.[property];return p?.state==='value'&&p.value===value;},{property,value});
+  await open('diagram.md');await select([0,2,3]);await page.getByRole('tab',{name:'Style',exact:true}).click();
+  const width=page.getByRole('spinbutton',{name:'Selection line width',exact:true});await width.waitFor();assert.equal(await width.inputValue(),'');assert.equal(await width.getAttribute('placeholder'),'Mixed');assert.match(await width.locator('..').textContent(),/2 of 3/);
+  const before=await state();await width.fill('4.5');await width.press('Tab');await accepted('line.width',4.5);assert.equal(await width.inputValue(),'4.5');
+  const changed=await state();assert.equal(changed.version,before.version+1);assert.deepEqual(changed.slides[0].elements.filter(e=>e.kind==='shape'),before.slides[0].elements.filter(e=>e.kind==='shape'));
+  await waitForAsync(page,async()=>deck.pages[pageIndex].scene.objects.filter(o=>o.kind==='connector').every(o=>Math.abs(o.paint.strokeWidth-4.5*1920/245)<1e-6));
+  const arrow=page.getByRole('spinbutton',{name:'Selection arrow width',exact:true});await arrow.fill('12.5');await arrow.press('Tab');await accepted('line.arrowWidth',12.5);assert.equal(await arrow.inputValue(),'12.5');
+  await page.getByRole('combobox',{name:'Selection arrowheads',exact:true}).selectOption('both');await accepted('line.arrows','both');
+  await page.getByRole('combobox',{name:'Selection line path',exact:true}).selectOption('straight');await accepted('line.path','straight');assert((await state()).slides[0].elements.filter(e=>e.kind==='connector').every(e=>!new URLSearchParams(e.query).has('connector-route')));
+  await page.evaluate(()=>editorAction({action:'undo'}));assert(new URLSearchParams((await state()).slides[0].elements.find(e=>e.id==='line-a').query).has('connector-route'));
+  await page.evaluate(()=>editorAction({action:'redo'}));await accepted('line.path','straight');
+  await page.getByRole('button',{name:'Inherit line width',exact:true}).click();await accepted('line.width',1);assert.equal(await width.inputValue(),'1');
+  await page.screenshot({path:path.join(proof,'mixed-lines.png')});
+  await select([0]);await page.evaluate(()=>editorAction({action:'set-object-lock',value:1}));await select([0,2,3]);await page.getByRole('tab',{name:'Style',exact:true}).click();assert(await width.isDisabled(),'Locked excluded shape must reject whole command');
+  await select([0]);await page.evaluate(()=>editorAction({action:'set-object-lock',value:0}));await select([2]);await page.getByRole('tab',{name:'Style',exact:true}).click();assert(!(await width.isDisabled()));
+  const saved=await page.evaluate(()=>fetch('/api/editor/document',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:'Saved.md'})}).then(r=>r.json()).then(r=>r.content));await open('Saved.md',saved);await select([2,3]);await page.getByRole('tab',{name:'Style',exact:true}).click();await accepted('line.arrows','both');assert.equal(await width.inputValue(),'1');
+  await open('inherited.md');await select([2]);await page.getByRole('tab',{name:'Style',exact:true}).click();await accepted('line.routing','manual');
+  assert.equal(await page.getByRole('combobox',{name:'Selection routing',exact:true}).inputValue(),'manual');
+  await page.getByRole('tab',{name:'Line',exact:true}).click();
+  const editBends=page.getByRole('button',{name:'Edit bends',exact:true});assert(!(await editBends.isDisabled()),'Inherited elbow line must expose bend editing');
+  const inheritedBefore=await state();await editBends.click();
+  await page.evaluate(()=>{const original=window.fetch;window.bendRequests=[];window.fetch=async(...args)=>{const r=await original(...args);if(['/api/editor/action','/api/editor/preview'].includes(String(args[0])))bendRequests.push({request:JSON.parse(args[1]?.body||'{}'),status:r.status,error:r.ok?'':await r.clone().text()});return r;};});
+  const handles=page.locator('.keynope-connector-segment'),bend=handles.nth(1);await bend.waitFor();
+  const horizontal=(await bend.getAttribute('aria-label')).includes('horizontal'),key=horizontal?'ArrowDown':'ArrowRight';
+  await bend.press(key);await page.evaluate(()=>queueEditorOperation(()=>true));
+  await waitForAsync(page,async()=>new URLSearchParams((await fetch('/api/editor/state').then(r=>r.json())).slides[0].elements.find(e=>e.id==='line-a').query).has('connector-route')).catch(async error=>{console.error('Bend diagnostic',JSON.stringify(await page.evaluate(async()=>({state:await fetch('/api/editor/state').then(r=>r.json()),status:document.querySelector('.keynope-editor-status')?.textContent,alerts:[...document.querySelectorAll('[role="alert"]')].map(n=>n.textContent)}))));throw error;});
+  let bent=await state();assert.equal(bent.mutationRevision,inheritedBefore.mutationRevision+1);assert.deepEqual(bent.masters,inheritedBefore.masters,'Bend changed source master');
+  await page.evaluate(()=>editorAction({action:'undo'}));assert.deepEqual((await state()).slides,inheritedBefore.slides);await page.evaluate(()=>editorAction({action:'redo'}));assert.deepEqual((await state()).slides,bent.slides);
+  const box=await bend.boundingBox();await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+box.width/2+(horizontal?0:20),box.y+box.height/2+(horizontal?20:0),{steps:4});await page.keyboard.press('Escape');await page.mouse.up();await page.evaluate(()=>queueEditorOperation(()=>true));assert.deepEqual((await state()).slides,bent.slides,'Cancelled bend persisted');
+  const pointerBefore=await state(),pointerBox=await bend.boundingBox();assert(await page.evaluate(b=>document.elementFromPoint(b.x+b.width/2,b.y+b.height/2)?.classList.contains('keynope-connector-segment'),pointerBox),'Pointer must hit the bend handle');await page.mouse.move(pointerBox.x+pointerBox.width/2,pointerBox.y+pointerBox.height/2);await page.mouse.down();await page.mouse.move(pointerBox.x+pointerBox.width/2+(horizontal?0:25),pointerBox.y+pointerBox.height/2+(horizontal?25:0),{steps:4});
+  assert.deepEqual((await state()).slides,pointerBefore.slides,'Bend preview mutated document');await page.mouse.up();
+  await waitForAsync(page,async revision=>(await fetch('/api/editor/state').then(r=>r.json())).mutationRevision===revision+1,pointerBefore.mutationRevision).catch(async e=>{console.error('Pointer requests',JSON.stringify(await page.evaluate(()=>bendRequests)));throw e;});await page.evaluate(()=>queueEditorOperation(()=>true));
+  bent=await state();assert.notDeepEqual(bent.slides,pointerBefore.slides);await page.evaluate(()=>editorAction({action:'undo'}));assert.deepEqual((await state()).slides,pointerBefore.slides);await page.evaluate(()=>editorAction({action:'redo'}));assert.deepEqual((await state()).slides,bent.slides);
+  const repeatBefore=await state();await bend.evaluate((n,key)=>{n.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true}));n.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true}));},key);
+  await waitForAsync(page,async revision=>(await fetch('/api/editor/state').then(r=>r.json())).mutationRevision===revision+2,repeatBefore.mutationRevision);await page.evaluate(()=>queueEditorOperation(()=>true));
+  await page.screenshot({path:path.join(proof,'inherited-bends.png')});
+  await bend.evaluate(n=>window.staleConnectorBend=n);
+  await open('inherited.md');await select([2]);const replacement=await state();
+  await page.evaluate(key=>{staleConnectorBend.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true}));},key);await page.evaluate(()=>queueEditorOperation(()=>true));
+  assert.deepEqual((await state()).slides,replacement.slides,'Detached bend handler rewrote replacement deck');assert.equal((await state()).mutationRevision,replacement.mutationRevision);
+  await page.getByRole('tab',{name:'Line',exact:true}).click();await page.getByRole('button',{name:'Auto-route',exact:true}).click();await accepted('line.routing','automatic');
+  let routed=(await state()).slides[0].elements.find(e=>e.id==='line-a');assert(!new URLSearchParams(routed.query).has('connector-route'));assert(new URLSearchParams(routed.query).get('master-clear').split(',').includes('connector-route'));
+  await page.getByRole('tab',{name:'Style',exact:true}).click();await page.getByRole('button',{name:'Inherit routing',exact:true}).click();await accepted('line.routing','manual');
+  await page.getByRole('combobox',{name:'Selection routing',exact:true}).selectOption('automatic');await accepted('line.routing','automatic');
+  await page.evaluate(()=>editorAction({action:'undo'}));await accepted('line.routing','manual');await page.evaluate(()=>editorAction({action:'redo'}));await accepted('line.routing','automatic');
+  const routedSaved=await page.evaluate(()=>fetch('/api/editor/document',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:'Routed.md'})}).then(r=>r.json()).then(r=>r.content));await open('Routed.md',routedSaved);await select([2]);await accepted('line.routing','automatic');
+  assert.deepEqual(errors,[]);console.log('PASS '+engine+': shared mixed-line inspector, inherited bend controls, keyboard repeat, pointer preview/commit/cancel, stale-handler isolation, exact history, Auto-route/inheritance, lock protection and reopen.');
+ }finally{await browser.close();server.close();}
+})().catch(e=>{console.error(e);server.close();process.exitCode=1;});

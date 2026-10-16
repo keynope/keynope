@@ -1,16 +1,48 @@
 package main
 
 import (
+	"fmt"
 	"net/url"
 	"sort"
 	"strconv"
 )
 
+// Legacy callers may omit scope. Shared inspector gestures supply both the
+// request revision/view and the document identity, checked under the write lock
+// before a transaction snapshot or any stack mutation.
+func (s *nativeEditorSession) checkLayerTargetLocked(action nativeEditorAction, master bool) error {
+	if action.Action != "move-object-layer" {
+		return nil
+	}
+	index := s.current
+	if master {
+		index = s.currentMaster
+	}
+	if action.NotesSessionID != "" && action.NotesSessionID != s.notesSessionID || action.SceneRevision != nil && (*action.SceneRevision != s.version || s.masterMode != master || action.SceneMaster != master || action.Slide != index) {
+		return editorFailure("stale-target", "", action.ObjectID, fmt.Errorf("the document or object list changed; retry the layer reorder"))
+	}
+	return nil
+}
+
 func hiddenSlideObjects(slide Slide) map[int]bool {
+	return hiddenSlideObjectsWithQueries(slide, nil)
+}
+
+// Queries are request-owned and read-only. A nil slice retains the standalone
+// callers' behavior; scene projection shares its already parsed metadata.
+func slideElementQuery(slide Slide, queries []url.Values, index int) url.Values {
+	if len(queries) == len(slide.Elements) {
+		return queries[index]
+	}
+	q, _ := url.ParseQuery(slide.Elements[index].Query)
+	return q
+}
+
+func hiddenSlideObjectsWithQueries(slide Slide, queries []url.Values) map[int]bool {
 	hidden := map[int]bool{}
 	ids := map[string]bool{}
 	for i, e := range slide.Elements {
-		q, _ := url.ParseQuery(e.Query)
+		q := slideElementQuery(slide, queries, i)
 		if q.Get("object-hidden") == "1" {
 			hidden[i] = true
 			if e.ID != "" {
@@ -20,7 +52,7 @@ func hiddenSlideObjects(slide Slide) map[int]bool {
 	}
 	for i, e := range slide.Elements {
 		if e.Kind == "connector" {
-			q, _ := url.ParseQuery(e.Query)
+			q := slideElementQuery(slide, queries, i)
 			if ids[q.Get("connector-from")] || ids[q.Get("connector-to")] {
 				hidden[i] = true
 			}
@@ -32,7 +64,7 @@ func hiddenSlideObjects(slide Slide) map[int]bool {
 // Once a stack has been authored, inserting into the Markdown array must not
 // make new objects inherit a coincident rank or perturb existing layer order.
 func preserveInsertedStack(before Slide, after *Slide, action nativeEditorAction) {
-	if action.Action != "add-element" && action.Action != "duplicate-element" && action.Action != "paste-elements" {
+	if action.Action != "add-element" && action.Action != "duplicate-element" && action.Action != "paste-elements" && action.Action != "paste-objects" {
 		return
 	}
 	explicit := false
@@ -100,18 +132,22 @@ func preserveInsertedStack(before Slide, after *Slide, action nativeEditorAction
 // objects retain their existing back/front bands; an explicit reorder assigns
 // every authored object a rank so later spatial sorting cannot change stacking.
 func slidePaintOrder(slide Slide) []int {
+	return slidePaintOrderWithQueries(slide, nil)
+}
+
+func slidePaintOrderWithQueries(slide Slide, queries []url.Values) []int {
 	indices := make([]int, len(slide.Elements))
 	ranks := make([]int, len(indices))
 	for i, e := range slide.Elements {
 		indices[i] = i
 		ranks[i] = i
-		if elementLayer(e) == "front" {
+		q := slideElementQuery(slide, queries, i)
+		if e.Kind != "image" && e.Kind != "shape" || q.Get("layer") == "front" {
 			ranks[i] += len(indices)
 		}
 		if e.Kind == "connector" {
 			ranks[i] += 2 * len(indices)
 		}
-		q, _ := url.ParseQuery(e.Query)
 		if rank, err := strconv.Atoi(q.Get("z-index")); err == nil && rank >= 0 && rank <= 1000000 {
 			ranks[i] = rank
 		}

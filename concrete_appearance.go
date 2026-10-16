@@ -11,11 +11,11 @@ import (
 // vector model. Versions 1 and 2 remain readable so older decks can be opened
 // without changing their presentation before an editor session is created.
 func (d Deck) usesConcreteAppearance() bool {
-	return d.Appearance != nil && d.Appearance.Version >= 3
+	return d.Theme != nil || d.Appearance != nil && d.Appearance.Version >= 3
 }
 
 func concreteTextFont(kind, style string, q url.Values) string {
-	if font := q.Get("modern-font"); font == "c64" || font == "sans" || font == "mono" {
+	if font := q.Get("modern-font"); font == "c64" || font == "sans" || font == "mono" || font == "theme" {
 		return font
 	}
 	if style == "modern" {
@@ -31,6 +31,9 @@ func migrateConcreteElement(element *Element, inheritedStyle string) {
 	if element == nil {
 		return
 	}
+	if !standardElementKind(element.Kind) {
+		return
+	}
 	q, _ := url.ParseQuery(element.Query)
 	style := q.Get("element-style")
 	if !validElementStyle(style) {
@@ -39,7 +42,9 @@ func migrateConcreteElement(element *Element, inheritedStyle string) {
 	q.Del("element-style")
 	switch element.Kind {
 	case "heading", "text", "bullet", "code", "text-image", "page-number":
-		q.Set("modern-font", concreteTextFont(element.Kind, style, q))
+		if q.Has("modern-font") || element.MasterSlotID == "" && !validConcreteDefault("default-font", q.Get("default-font")) {
+			q.Set("modern-font", concreteTextFont(element.Kind, style, q))
+		}
 	case "image":
 		if !validElementStyle(q.Get("image-style")) {
 			q.Set("image-style", style)
@@ -55,7 +60,9 @@ func migrateConcreteElement(element *Element, inheritedStyle string) {
 						labelStyle = style
 					}
 					lq.Del("element-style")
-					lq.Set("modern-font", concreteTextFont("text", labelStyle, lq))
+					if lq.Has("modern-font") || !validConcreteDefault("default-font", lq.Get("default-font")) {
+						lq.Set("modern-font", concreteTextFont("text", labelStyle, lq))
+					}
 					label.Query = lq.Encode()
 					if next, err := json.Marshal(label); err == nil {
 						q.Set("shape-label", base64.StdEncoding.EncodeToString(next))
@@ -87,6 +94,37 @@ func migrateConcreteSlide(slide *Slide, inheritedStyle string) {
 func canonicalizeConcreteAppearance(deck *Deck) {
 	if deck == nil {
 		return
+	}
+	// Portable theme documents retain optional font association. Opening one
+	// must not replace its inherited families with the legacy C64 default.
+	if deck.Theme != nil {
+		markThemeFonts := func(slide *Slide) {
+			for i := range slide.Elements {
+				e := &slide.Elements[i]
+				q, _ := url.ParseQuery(e.Query)
+				switch e.Kind {
+				case "text", "heading", "bullet", "code", "text-image", "page-number":
+					if !q.Has("modern-font") && e.MasterSlotID == "" && !validConcreteDefault("default-font", q.Get("default-font")) {
+						q.Set("modern-font", "theme")
+						e.Query = q.Encode()
+					}
+				case "shape":
+					*e = mapShapeLabelQuery(*e, func(label shapeLabelData, lq url.Values) url.Values {
+						if !lq.Has("modern-font") && !validConcreteDefault("default-font", lq.Get("default-font")) {
+							lq.Set("modern-font", "theme")
+						}
+						return lq
+					})
+				}
+			}
+		}
+		markThemeFonts(&deck.Masters.Base.Slide)
+		for i := range deck.Masters.Layouts {
+			markThemeFonts(&deck.Masters.Layouts[i].Slide)
+		}
+		for i := range deck.Slides {
+			markThemeFonts(&deck.Slides[i])
+		}
 	}
 	deckStyle := deck.AppearanceMode()
 	baseStyle := deck.Masters.Base.Slide.DefaultStyle

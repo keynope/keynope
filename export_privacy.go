@@ -29,7 +29,17 @@ func standaloneExportSlide(slide Slide, index int) Slide {
 				scene.Objects = append(scene.Objects, object)
 			}
 		}
+		if scene.Build != nil {
+			scene.Build = filterSceneBuild(*scene.Build, scene.Objects)
+		}
 		slide.ModernScene = &scene
+		if len(removed) == 0 && slide.previewGeometry != nil {
+			geometry := *slide.previewGeometry
+			geometry.scene = slide.ModernScene
+			slide.previewGeometry = &geometry
+		} else {
+			slide.previewGeometry = nil
+		}
 	}
 	return slide
 }

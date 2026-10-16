@@ -52,7 +52,16 @@ func (c *sceneResponseCache) write(w io.Writer) {
 // View-only actions change command concurrency tokens, not scene appearance.
 // Publish a new immutable entry so concurrent readers keep their old snapshot.
 func (s *nativeEditorSession) retainSceneForViewAction(action string) {
-	if !nativeEditorViewAction(action) || s.sceneResponse == nil || s.sceneResponse.key.revision != s.version {
+	if !nativeEditorViewAction(action) {
+		return
+	}
+	s.retainUnchangedSceneRevision()
+}
+
+// Caller has proved that the accepted edit cannot affect any scene input.
+// Used for view state and private activity result archives, never appearance.
+func (s *nativeEditorSession) retainUnchangedSceneRevision() {
+	if s.sceneResponse == nil || s.sceneResponse.key.revision != s.version {
 		return
 	}
 	entry := *s.sceneResponse

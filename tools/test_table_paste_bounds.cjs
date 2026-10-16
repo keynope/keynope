@@ -1,0 +1,21 @@
+// Production parser admission, without a browser or application launch.
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const ctx=vm.createContext({});vm.runInContext(fs.readFileSync(path.join(__dirname,'../web/tables.js'),'utf8'),ctx);
+const parse=(text,separator='\t')=>JSON.parse(JSON.stringify(ctx.KeynopeTables.parseDelimited(text,separator)));
+const limit=1<<20;
+assert.throws(()=>parse('x'.repeat(limit+1)),/1 MiB/);
+assert.throws(()=>parse('😀'.repeat(limit/4+1)),/1 MiB/);
+assert.throws(()=>parse('中'.repeat(Math.floor(limit/3)+1)),/1 MiB/);
+assert.equal(parse('x'.repeat(limit))[0][0].length,limit);
+assert.equal(parse('😀'.repeat(limit/4))[0][0].length,limit/2);
+assert.throws(()=>parse(Array(101).fill('x').join('\t')),/100 rows and columns/);
+assert.throws(()=>parse(Array(101).fill('x').join('\r\n')),/100 rows and columns/);
+const edge=Array(100).fill(Array(100).fill('x').join('\t')).join('\r\n')+'\r\n';
+assert.equal(parse(edge).length,100);assert.equal(parse(edge)[99].length,100);
+assert.deepEqual(parse('"A,B",C\r\n"D\nE","F""G"',','),[['A,B','C'],['D\nE','F"G']]);
+assert.deepEqual(parse('"a\tb"\t"line 1\r\nline 2"\n'),[['a\tb','line 1\r\nline 2']]);
+assert.deepEqual(parse(''),[['']]);assert.deepEqual(parse('x\t'),[['x','']]);assert.deepEqual(parse('\n'),[['']]);
+assert.throws(()=>parse('"unclosed'),/Unclosed quote/);
+assert.throws(()=>parse('a;b',';'),/separator/);
+assert.throws(()=>parse(null),/text/);
+console.log('PASS: bounded UTF-8 table paste, 100×100 edges, quoted CSV/TSV, multiline/escaped quotes and invalid input.');

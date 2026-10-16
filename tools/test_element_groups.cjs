@@ -1,7 +1,8 @@
+const {waitForAsync}=require("./wait_for_async.cjs");
 // Shared Mac/Web editor grouping, exercised against the real WASM editor.
 const fs=require('node:fs'),path=require('node:path'),http=require('node:http'),assert=require('node:assert/strict');
 const pw=require(process.env.PLAYWRIGHT_MODULE||'playwright');
-const root=path.resolve('terraform/site');
+const root=path.resolve(process.env.TEST_SITE||'/tmp/keynope-site');
 const server=http.createServer((req,res)=>{
  let name=new URL(req.url,'http://localhost').pathname;if(name.endsWith('/'))name+='index.html';
  const file=path.resolve(root,'.'+name);if(!file.startsWith(root+'/')||!fs.existsSync(file)){res.writeHead(404);res.end();return;}
@@ -20,7 +21,7 @@ const server=http.createServer((req,res)=>{
    await page.evaluate(async md=>{const r=JSON.parse(keynopeWasmInit(md,'Groups.md',false));if(r.status!==200)throw Error(r.body);const w=JSON.parse(JSON.parse(keynopeWasmWorkspace()).body);w.current=0;await keynopeReloadWebDocument(w);},fixture);
    const state=()=>page.evaluate(()=>fetch('/api/editor/state').then(r=>r.json()));
    const hit=i=>page.locator('.keynope-canvas-element[data-element="'+i+'"]');
-   const waitSelection=n=>page.waitForFunction(async n=>(await fetch('/api/editor/state').then(r=>r.json())).selection.length===n,n);
+   const waitSelection=n=>waitForAsync(page,async n=>(await fetch('/api/editor/state').then(r=>r.json())).selection.length===n,n);
    const canvas=await page.locator('.keynope-canvas-overlay').boundingBox();
    const point=(x,y)=>({x:canvas.x+x*canvas.width/245,y:canvas.y+y*canvas.height/56});
    const p0=point(2,1),p1=point(80,22),small=point(30,10);
@@ -39,27 +40,27 @@ const server=http.createServer((req,res)=>{
    const canvasBox=await page.locator('#presenter-canvas').boundingBox();
    assert(Math.abs(box.width/canvasBox.width-62/245)<.005,'outer group box spans both members');
    await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+box.width/2+55,box.y+box.height/2+30,{steps:8});await page.mouse.up();
-   await page.waitForFunction(async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.slides[0].elements.filter(e=>new URLSearchParams(e.query).get('group')).every(e=>new URLSearchParams(e.query).has('left'));});
+   await waitForAsync(page,async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.slides[0].elements.filter(e=>new URLSearchParams(e.query).get('group')).every(e=>new URLSearchParams(e.query).has('left'));});
    s=await state();const members=s.slides[0].elements.filter(e=>ids.includes(e.id));
    const q=members.map(e=>new URLSearchParams(e.query));
    assert.equal(Number(q[1].get('top'))-Number(q[0].get('top')),10,'relative vertical spacing');
    assert.equal(Number(q[1].get('left'))-Number(q[0].get('left')),50,'relative horizontal spacing');
    // Arrow moves both, and one undo restores both.
-   await page.keyboard.press('ArrowDown');await page.waitForFunction(async top=>{const s=await fetch('/api/editor/state').then(r=>r.json());return Number(new URLSearchParams(s.slides[0].elements[0].query).get('top'))===top+1;},Number(q[0].get('top')));
+   await page.keyboard.press('ArrowDown');await waitForAsync(page,async top=>{const s=await fetch('/api/editor/state').then(r=>r.json());return Number(new URLSearchParams(s.slides[0].elements[0].query).get('top'))===top+1;},Number(q[0].get('top')));
    await page.getByRole('button',{name:'Undo',exact:true}).click();
    await group().click();await waitSelection(2);
-   await group().dblclick();await page.waitForFunction(async()=>!!(await fetch('/api/editor/state').then(r=>r.json())).editingGroup);
+   await group().dblclick();await waitForAsync(page,async()=>!!(await fetch('/api/editor/state').then(r=>r.json())).editingGroup);
    await group().waitFor({state:'detached'});await page.locator('.keynope-group-edit-boundary').waitFor();
    await hit(0).click();await waitSelection(1);assert.equal(await hit(0).locator('.keynope-resize-handle').count(),4);
    const memberBefore=await state(),memberBox=await hit(0).boundingBox();
    await page.mouse.move(memberBox.x+memberBox.width/2,memberBox.y+memberBox.height/2);await page.mouse.down();await page.mouse.move(memberBox.x+memberBox.width/2+30,memberBox.y+memberBox.height/2+20,{steps:5});await page.mouse.up();
-   await page.waitForFunction(async old=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.slides[0].elements.find(e=>e.id===old.id)?.query!==old.query;},memberBefore.slides[0].elements[0]);
+   await waitForAsync(page,async old=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.slides[0].elements.find(e=>e.id===old.id)?.query!==old.query;},memberBefore.slides[0].elements[0]);
    const memberAfter=await state();assert(memberAfter.editingGroup,'moving a member must retain group editing');assert.equal(memberAfter.selection.length,1);
    assert.equal(memberAfter.slides[0].elements.find(e=>e.id===memberBefore.slides[0].elements[1].id).query,memberBefore.slides[0].elements[1].query,'moving a member leaves its sibling unchanged');
    await hit(1).click();await waitSelection(1);
    const shapeBefore=await hit(1).boundingBox(),textBeforeShapeMove=(await state()).slides[0].elements[0].query;
    await page.mouse.move(shapeBefore.x+shapeBefore.width/2,shapeBefore.y+shapeBefore.height/2);await page.mouse.down();await page.mouse.move(shapeBefore.x+shapeBefore.width/2+canvas.width*5/245,shapeBefore.y+shapeBefore.height/2,{steps:5});await page.mouse.up();
-   await page.waitForFunction(async id=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.editingGroup&&s.selected===s.slides[0].elements.findIndex(e=>e.id===id);},memberBefore.slides[0].elements[1].id);
+   await waitForAsync(page,async id=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.editingGroup&&s.selected===s.slides[0].elements.findIndex(e=>e.id===id);},memberBefore.slides[0].elements[1].id);
    await page.waitForFunction(({left,delta})=>Math.abs(document.querySelector('.keynope-canvas-element[data-element="1"]').getBoundingClientRect().left-left-delta)<1,{left:shapeBefore.x,delta:canvas.width*5/245});
    assert.equal((await state()).slides[0].elements[0].query,textBeforeShapeMove,'individual shape movement leaves text unchanged');
    await page.keyboard.press('Escape');await group().waitFor();await waitSelection(2);
@@ -67,13 +68,13 @@ const server=http.createServer((req,res)=>{
    await group().click({button:'right'});
    await page.locator('.keynope-slide-context.open').getByRole('button',{name:'Pick color',exact:true}).click();
    await page.getByRole('button',{name:'#ff0000',exact:true}).click();
-   await page.waitForFunction(async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.slides[0].elements.slice(0,2).every(e=>new URLSearchParams(e.query).get('fg')==='#ff0000');});
+   await waitForAsync(page,async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.slides[0].elements.slice(0,2).every(e=>new URLSearchParams(e.query).get('fg')==='#ff0000');});
    await group().click({button:'right'});await page.getByRole('button',{name:'Convert to heading 1',exact:true}).last().click();
-   await page.waitForFunction(async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.slides[0].elements[0].kind==='heading';});
+   await waitForAsync(page,async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.slides[0].elements[0].kind==='heading';});
    s=await state();assert.equal(s.slides[0].elements[1].kind,'shape');assert.equal(s.slides[0].elements[2].kind,'text');
    assert.equal(new URLSearchParams(s.slides[0].elements[0].query).get('header'),'#ff0000');
    await group().click({button:'right'});await page.getByRole('button',{name:'Convert to plain text',exact:true}).last().click();
-   await page.waitForFunction(async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.slides[0].elements[0].kind==='text';});
+   await waitForAsync(page,async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.slides[0].elements[0].kind==='text';});
    // Mixed selection menu must not expose tools that silently edit one member.
    await group().click({button:'right'});
    assert.equal(await page.getByRole('button',{name:'Group',exact:true}).count(),0);
@@ -112,7 +113,7 @@ const server=http.createServer((req,res)=>{
    for(const delta of [9,11,8,-12,7,-10,6,-9]){
      const beforeVersion=(await state()).version,b=await group().boundingBox(),r=await page.locator('.keynope-canvas-overlay').boundingBox();
      await page.mouse.move(b.x+b.width/2,b.y+b.height/2);await page.mouse.down();await page.mouse.move(b.x+b.width/2+delta*r.width/245,b.y+b.height/2,{steps:6});await page.mouse.up();
-     await page.waitForFunction(async version=>(await fetch('/api/editor/state').then(r=>r.json())).version>version,beforeVersion);
+     await waitForAsync(page,async version=>(await fetch('/api/editor/state').then(r=>r.json())).version>version,beforeVersion);
      const next=await geometry();
      for(let i=0;i<next.length;i++){
        assert(Math.abs(next[i].x-previous[i].x-delta)<.01,engine+' member '+i+' drifted on '+delta+': '+JSON.stringify({previous:previous[i],next:next[i]}));

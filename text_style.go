@@ -25,9 +25,31 @@ func normalizedFontWidthFactor(font string) float64 {
 	}
 }
 
+// Empty-string commands remove only this authored override. Numeric zero and
+// literal default choices remain explicit values.
+func textPropertyCanInherit(property string) bool {
+	switch property {
+	case "text.size", "text.width", "text.align", "text.vertical", "text.lineHeight", "text.paragraphBefore", "text.paragraphAfter":
+		return true
+	}
+	return false
+}
+
 func resolvedModernFont(deck Deck, element Element, query url.Values) string {
 	if font := query.Get("modern-font"); font == "c64" || font == "mono" || font == "sans" {
 		return font
+	}
+	if !query.Has("modern-font") && validConcreteDefault("default-font", query.Get("default-font")) {
+		return query.Get("default-font")
+	}
+	if deck.Theme != nil {
+		if element.Kind == "heading" {
+			return deck.Theme.Fonts.Heading.FontID
+		}
+		if element.Kind == "code" {
+			return deck.Theme.Fonts.Mono.FontID
+		}
+		return deck.Theme.Fonts.Body.FontID
 	}
 	if deck.usesConcreteAppearance() {
 		return "c64"
@@ -38,12 +60,25 @@ func resolvedModernFont(deck Deck, element Element, query url.Values) string {
 	return "sans"
 }
 
-func normalizeWidthForFontSwitch(query url.Values, oldFont, newFont string) {
+// Authored inheritance is not synonymous with a live theme font: master
+// families and detached defaults can both be inherited concrete choices.
+func fontBindingFromValues(query url.Values) string {
+	if query.Get("modern-font") == "theme" || query.Get("modern-font") == "" && (query.Has("modern-font") || !validConcreteDefault("default-font", query.Get("default-font"))) {
+		return "theme"
+	}
+	return "concrete"
+}
+
+func normalizeWidthForFontSwitch(query url.Values, oldFont, newFont string, source url.Values) {
 	if oldFont == newFont || newFont == "" {
 		return
 	}
 	width := 100.0
-	if parsed, err := strconv.ParseFloat(query.Get("modern-width"), 64); err == nil && parsed >= 1 && parsed <= 200 {
+	raw := source.Get("modern-width")
+	if raw == "" {
+		raw = source.Get("ttf-width")
+	}
+	if parsed, err := strconv.ParseFloat(raw, 64); err == nil && parsed >= 1 && parsed <= 200 {
 		width = parsed
 	}
 	conceptual := width / normalizedFontWidthFactor(oldFont)
@@ -89,7 +124,7 @@ func applyModernTextStyle(deck *Deck, action nativeEditorAction, editingGroup st
 	if size := action.ModernSize; size != nil && (math.IsNaN(*size) || math.IsInf(*size, 0) || *size < 0 || (*size > 0 && *size < 1) || *size > 1024) {
 		return false, fmt.Errorf("Modern size must be 1–1024, or zero to inherit")
 	}
-	if font := action.ModernFont; font != nil && *font != "" && *font != "sans" && *font != "mono" && *font != "c64" {
+	if font := action.ModernFont; font != nil && *font != "" && *font != "sans" && *font != "mono" && *font != "c64" && *font != "theme" {
 		return false, fmt.Errorf("unsupported Modern font")
 	}
 	slide := &deck.Slides[action.Slide]
@@ -98,8 +133,20 @@ func applyModernTextStyle(deck *Deck, action nativeEditorAction, editingGroup st
 		return false, err
 	}
 	updates := map[int]string{}
+	fontSources := map[string]Element{}
+	if action.ModernFont != nil || alignment {
+		// Font switches normalize against visible master/slide typography,
+		// not only the child's sparse authored override query.
+		resolved := withTrueTypeDefaults(deck.ResolveSlide(action.Slide, false))
+		for _, element := range resolved.Elements {
+			if selected[element.ID] {
+				fontSources[element.ID] = element
+			}
+		}
+	}
 	boxes := map[string]sceneRect{}
 	cols, rows := authoredRenderSize(defaultAuthoredTerminalWidth, defaultAuthoredTerminalHeight)
+	canvas := deck.physicalCanvas()
 	if alignment {
 		scene, err := buildMixedSlideScene(*deck, action.Slide, cols, rows)
 		if err != nil {
@@ -127,22 +174,28 @@ func applyModernTextStyle(deck *Deck, action nativeEditorAction, editingGroup st
 		}
 		old := query.Encode()
 		if alignment {
+			frameValues := query
+			if source, ok := fontSources[element.ID]; ok {
+				frameValues = mustQuery(source.Query)
+			}
 			if box, ok := boxes[element.ID]; ok {
-				if !query.Has("width") {
-					query.Set("width", strconv.Itoa(max(1, int(math.Round(box.Width*float64(cols)/1920)))))
+				if action.TextAlign != nil && !frameValues.Has("width") {
+					query.Set("width", strconv.FormatFloat(math.Max(1, box.Width*float64(cols)/canvas.Width), 'f', -1, 64))
 				}
-				if !query.Has("height") {
-					query.Set("height", strconv.Itoa(max(1, int(math.Round(box.Height*float64(rows)/1080)))))
+				if action.TextVertical != nil && !frameValues.Has("height") {
+					query.Set("height", strconv.FormatFloat(math.Max(1, box.Height*float64(rows)/canvas.Height), 'f', -1, 64))
 				}
-				if !query.Has("top") && !query.Has("bottom") && !query.Has("valign") {
-					query.Set("top", strconv.Itoa(int(math.Round(box.Y*float64(rows)/1080))))
+				if action.TextVertical != nil && !frameValues.Has("top") && !frameValues.Has("bottom") && !frameValues.Has("valign") {
+					query.Set("top", strconv.Itoa(int(math.Round(box.Y*float64(rows)/canvas.Height-objectPlacementOffset(query, "y")))))
 				}
-				anchor := query.Get("align")
-				if !query.Has("left") && !query.Has("left_pct") && !query.Has("right") && !query.Has("right_pct") && anchor != "left" && anchor != "center" && anchor != "right" {
-					query.Set("left", strconv.Itoa(int(math.Round(box.X*float64(cols)/1920))))
+				anchor := frameValues.Get("align")
+				if action.TextAlign != nil && !frameValues.Has("left") && !frameValues.Has("left_pct") && !frameValues.Has("right") && !frameValues.Has("right_pct") && anchor != "left" && anchor != "center" && anchor != "right" {
+					query.Set("left", strconv.Itoa(int(math.Round(box.X*float64(cols)/canvas.Width-objectPlacementOffset(query, "x")))))
 				}
 			}
-			query.Set("text-box", "1")
+			if frameValues.Get("text-box") != "1" {
+				query.Set("text-box", "1")
+			}
 			if action.TextAlign != nil {
 				query.Set("text-align", *action.TextAlign)
 			}
@@ -155,7 +208,9 @@ func applyModernTextStyle(deck *Deck, action nativeEditorAction, editingGroup st
 				if value == nil {
 					continue
 				}
-				if *value == 0 {
+				// Paragraph zero is an authored value. Only the legacy line-height
+				// command uses zero as its restore-inheritance sentinel.
+				if key == "modern-line-height" && *value == 0 {
 					query.Del(key)
 				} else {
 					query.Set(key, strconv.FormatFloat(*value, 'f', -1, 64))
@@ -163,12 +218,18 @@ func applyModernTextStyle(deck *Deck, action nativeEditorAction, editingGroup st
 			}
 		}
 		if action.ModernFont != nil && modern {
-			oldFont := resolvedModernFont(*deck, element, query)
+			source := element
+			if effective, ok := fontSources[element.ID]; ok {
+				source = effective
+			}
+			sourceQuery := mustQuery(source.Query)
+			oldFont := resolvedModernFont(*deck, source, sourceQuery)
+			oldTypography := deck.resolveThemeTextValues(source, sourceQuery)
 			if *action.ModernFont == "" {
 				query.Del("modern-font")
 			} else {
 				query.Set("modern-font", *action.ModernFont)
-				normalizeWidthForFontSwitch(query, oldFont, *action.ModernFont)
+				normalizeWidthForFontSwitch(query, oldFont, resolvedModernFont(*deck, source, query), oldTypography)
 			}
 		}
 		if action.ModernSize != nil && modern {
@@ -178,18 +239,36 @@ func applyModernTextStyle(deck *Deck, action nativeEditorAction, editingGroup st
 				query.Set("modern-size", strconv.FormatFloat(*action.ModernSize, 'f', -1, 64))
 			}
 		}
-		if emphasis {
+		if emphasis && element.MasterSlotID != "" {
+			// Sparse whole-text flags leave unrelated master run properties live.
+			// Re-encoding the complete effective run list would freeze them.
+			for key, value := range map[string]*bool{"text-bold": action.TextBold, "text-italic": action.TextItalic, "text-underline": action.TextUnderline} {
+				if value != nil {
+					query.Set(key, emphasisFlag(*value))
+					setMasterQueryClears(query, []string{key}, nil)
+				}
+			}
+		} else if emphasis {
+			for key, value := range map[string]*bool{"text-bold": action.TextBold, "text-italic": action.TextItalic, "text-underline": action.TextUnderline} {
+				if value != nil {
+					query.Del(key) // Detached/copied text may retain sparse flags.
+				}
+			}
 			// Update valid rich runs before changing the fingerprint's weight.
 			// Otherwise toggling bold silently discards italic/underline styles.
-			runs := exportedRichRuns(element)
+			source := element
+			if effective, ok := fontSources[element.ID]; ok {
+				source = effective
+			}
+			runs := exportedRichRuns(source)
 			if runs == nil && (action.TextItalic != nil || action.TextUnderline != nil) {
-				plain := element
+				plain := source
 				if plain.Kind == "bullet" {
 					plain.Kind = "text"
 				}
 				runs = sceneTextFor(plain).Runs
 			}
-			weight := query.Get("ttf-weight")
+			weight := mustQuery(source.Query).Get("ttf-weight")
 			if action.TextBold != nil {
 				if *action.TextBold {
 					weight = "bold"
@@ -203,6 +282,7 @@ func applyModernTextStyle(deck *Deck, action nativeEditorAction, editingGroup st
 				for i := range runs {
 					if action.TextBold != nil {
 						runs[i].Bold = *action.TextBold
+						runs[i].BoldOff = false
 					}
 					if action.TextItalic != nil {
 						runs[i].Italic = *action.TextItalic
@@ -211,7 +291,7 @@ func applyModernTextStyle(deck *Deck, action nativeEditorAction, editingGroup st
 						runs[i].Underline = *action.TextUnderline
 					}
 				}
-				encoded, err := encodeModernRuns(element.Text, weight, element.Kind, runs)
+				encoded, err := encodeTextEmphasisRuns(element.Text, weight, element.Kind, runs)
 				if err != nil {
 					return false, err
 				}
@@ -268,7 +348,23 @@ func applyTextMetricCommand(deck *Deck, action nativeEditorAction, editingGroup 
 		return false, err
 	}
 	resolved := map[string]Element{}
-	for _, element := range deck.ResolveSlide(action.Slide, true).Elements {
+	resolvedSlide := deck.ResolveSlide(action.Slide, true)
+	for _, element := range resolvedSlide.Elements {
+		if !selected[element.ID] {
+			continue
+		}
+		switch element.Kind {
+		case "text", "heading", "bullet", "code", "text-image", "page-number":
+			q, err := url.ParseQuery(element.Query)
+			if err != nil {
+				return false, err
+			}
+			if isTrueType(element) {
+				q = trueTypeValuesWithDefaults(element, resolvedSlide, q)
+			}
+			q = deck.resolveThemeTextValues(element, q)
+			element.Query = q.Encode()
+		}
 		resolved[element.ID] = element
 	}
 	updates := map[int]string{}
@@ -319,7 +415,7 @@ func applyTextMetricCommand(deck *Deck, action nativeEditorAction, editingGroup 
 				key, current = "modern-width", deck.modernSceneText(base).WidthScale*100
 				if deck.usesConcreteAppearance() {
 					q, _ := url.ParseQuery(base.Query)
-					current = 100
+					current = trueTypeWidthWithValues(q)
 					if parsed, err := strconv.ParseFloat(q.Get("modern-width"), 64); err == nil && parsed >= 1 && parsed <= 200 {
 						current = parsed
 					}
@@ -334,22 +430,52 @@ func applyTextMetricCommand(deck *Deck, action nativeEditorAction, editingGroup 
 		if !modern {
 			size = math.Round(size)
 		}
-		if size == current {
-			continue
-		}
 		q, err := url.ParseQuery(element.Query)
 		if err != nil {
 			return false, err
 		}
-		q.Set(key, strconv.FormatFloat(size, 'f', -1, 64))
-		if width && isTrueType(base) {
-			cols, rows := authoredRenderSize(defaultAuthoredTerminalWidth, defaultAuthoredTerminalHeight)
-			w, h := trueTypeBounds(base, cols, rows)
-			if !q.Has("width") {
-				q.Set("width", strconv.Itoa(w))
+		explicit := q.Has(key)
+		if modern {
+			legacyKey := "ttf-size"
+			if width {
+				legacyKey = "ttf-width"
 			}
-			if !q.Has("height") {
-				q.Set("height", strconv.Itoa(h))
+			explicit = explicit || q.Has(legacyKey)
+		}
+		// An absolute choice pins an inherited value, even when it looks the
+		// same today. A zero/clamped delta must not change its inheritance.
+		if size == current && (action.TextSizeDelta != nil || explicit) {
+			continue
+		}
+		q.Set(key, strconv.FormatFloat(size, 'f', -1, 64))
+		if width && isTrueType(base) && size != current {
+			frameValues := mustQuery(base.Query)
+			// A master's frame remains a live inherited frame. Only genuinely
+			// natural dimensions need fixing when font width changes wrapping.
+			fixWidth := !q.Has("width") && !frameValues.Has("width")
+			fixHeight := !q.Has("height") && !frameValues.Has("height")
+			if !fixWidth && !fixHeight {
+				updates[i] = q.Encode()
+				continue
+			}
+			cols, rows := authoredRenderSize(defaultAuthoredTerminalWidth, defaultAuthoredTerminalHeight)
+			w, h := trueTypeBoundsOnCanvas(base, cols, rows, deck.physicalCanvas())
+			physicalW, physicalH := float64(w), float64(h)
+			if modern && (fixWidth || fixHeight) {
+				text := deck.modernSceneText(base)
+				deck.resolveWordFonts(text)
+				nw, nh := sceneTextNaturalSize(text)
+				canvas := deck.physicalCanvas()
+				physicalW, physicalH = nw*float64(cols)/canvas.Width, nh*float64(rows)/canvas.Height
+				if oldWidth, ok := sceneObjectDimension(frameValues, "width", cols); ok {
+					physicalH = sceneTextWrappedHeight(text, oldWidth*canvas.Width/float64(cols)) * float64(rows) / canvas.Height
+				}
+			}
+			if fixWidth {
+				q.Set("width", strconv.FormatFloat(math.Min(1000, physicalW), 'f', -1, 64))
+			}
+			if fixHeight {
+				q.Set("height", strconv.FormatFloat(math.Min(1000, physicalH), 'f', -1, 64))
 			}
 		}
 		updates[i] = q.Encode()
@@ -425,7 +551,7 @@ func applyLabelTypography(deck *Deck, action nativeEditorAction, editingGroup st
 		if len(raw) > 65536 {
 			return false, fmt.Errorf("shape label exceeds its storage limit")
 		}
-		slide.Elements[i].Query = setQueryValue(owner.Query, "shape-label", base64.StdEncoding.EncodeToString(raw))
+		slide.Elements[i].Query = setQueryValue(syncExistingLabelOverrides(owner.Query, data.Query), "shape-label", base64.StdEncoding.EncodeToString(raw))
 		return true, nil
 	}
 	return false, fmt.Errorf("shape no longer exists")

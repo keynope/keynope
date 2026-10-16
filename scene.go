@@ -25,14 +25,21 @@ type sceneRect struct {
 }
 
 type sceneRun struct {
-	Text      string `json:"text"`
-	Bold      bool   `json:"bold,omitempty"`
-	Italic    bool   `json:"italic,omitempty"`
-	Underline bool   `json:"underline,omitempty"`
-	Color     string `json:"color,omitempty"`
+	Text       string  `json:"text"`
+	Bold       bool    `json:"bold,omitempty"`
+	BoldOff    bool    `json:"boldOff,omitempty"` // Explicit normal weight overrides inherited header emphasis.
+	Italic     bool    `json:"italic,omitempty"`
+	Underline  bool    `json:"underline,omitempty"`
+	Color      string  `json:"color,omitempty"`
+	ColorToken string  `json:"colorToken,omitempty"` // Semantic role; Color is the portable RGB fallback.
+	FontID     string  `json:"fontId,omitempty"`
+	FontRole   string  `json:"fontRole,omitempty"` // Theme family role; FontID is a portable fallback.
+	FontSize   float64 `json:"fontSize,omitempty"`
 }
 
 type sceneText struct {
+	FontRoles       map[string]string `json:"fontRoles,omitempty"`   // Resolved used word font roles; never authored.
+	ColorTokens     map[string]string `json:"colorTokens,omitempty"` // Resolved, used word roles only; never authored.
 	SeeThrough      bool              `json:"seeThrough,omitempty"`
 	EmojiTint       string            `json:"emojiTint,omitempty"`
 	EmojiWidthScale float64           `json:"emojiWidthScale,omitempty"`
@@ -58,13 +65,14 @@ type sceneParagraph struct {
 }
 
 type scenePaint struct {
+	NoFill            bool     `json:"noFill,omitempty"` // Shape fill is explicitly off; colour remains available for style editing.
 	Opacity           *float64 `json:"opacity,omitempty"`
 	Color             string   `json:"color"`
 	GradientStart     string   `json:"gradientStart,omitempty"`
 	GradientEnd       string   `json:"gradientEnd,omitempty"`
 	GradientDirection string   `json:"gradientDirection,omitempty"`
 	Stroke            string   `json:"stroke,omitempty"`
-	StrokeWidth       float64  `json:"strokeWidth,omitempty"`
+	StrokeWidth       float64  `json:"strokeWidth"` // Zero is explicit Off, not the renderer's fallback width.
 	ShadowColor       string   `json:"shadowColor,omitempty"`
 	ShadowX           float64  `json:"shadowX,omitempty"`
 	ShadowY           float64  `json:"shadowY,omitempty"`
@@ -72,6 +80,7 @@ type scenePaint struct {
 }
 
 type sceneMedia struct {
+	Fit            string            `json:"fit,omitempty"`
 	Sharpness      float64           `json:"sharpness,omitempty"`
 	SharpnessAfter int               `json:"sharpnessAfter,omitempty"` // Number of colour passes before the spatial pass; tint follows it.
 	Alt            string            `json:"alt,omitempty"`
@@ -127,31 +136,36 @@ type sceneMediaFrame struct {
 }
 
 type sceneObject struct {
-	SampleOffset     *connectorPoint  `json:"sampleOffset,omitempty"` // Translate retained legacy artwork with its continuous bounds.
-	SampleScale      *connectorPoint  `json:"sampleScale,omitempty"`  // Map the sampled shape body onto continuous authored bounds.
-	TextCapabilities []string         `json:"textCapabilities"`
-	Style            string           `json:"style,omitempty"`
-	RetroText        *sceneRetroText  `json:"retroText,omitempty"`
-	RetroLines       *sceneRetroLines `json:"retroLines,omitempty"`
-	EditRuns         []sceneRun       `json:"editRuns,omitempty"` // Editor-only list source with continuation indentation.
-	Editable         bool             `json:"editable,omitempty"`
-	ID               string           `json:"id"`
-	Kind             string           `json:"kind"`
-	Group            string           `json:"group,omitempty"`
-	Bounds           sceneRect        `json:"bounds"`
-	Rotation         float64          `json:"rotation,omitempty"`
-	Paint            scenePaint       `json:"paint"`
-	Text             *sceneText       `json:"text,omitempty"`
-	Shape            string           `json:"shape,omitempty"`
-	Label            *sceneText       `json:"label,omitempty"`
-	LabelPaint       *scenePaint      `json:"labelPaint,omitempty"`
-	LabelStyle       string           `json:"labelStyle,omitempty"`
-	RetroLabel       *sceneRetroText  `json:"retroLabel,omitempty"`
-	Media            *sceneMedia      `json:"media,omitempty"`
-	Points           []connectorPoint `json:"points,omitempty"`
-	Arrows           string           `json:"arrows,omitempty"`
-	ArrowWidth       float64          `json:"arrowWidth,omitempty"`
-	Link             string           `json:"link,omitempty"`
+	Name             string              `json:"name,omitempty"`
+	RetroStroke      []sceneRect         `json:"retroStroke,omitempty"`
+	Chart            *sceneChart         `json:"chart,omitempty"`
+	Table            *sceneTable         `json:"table,omitempty"`
+	SampleOffset     *connectorPoint     `json:"sampleOffset,omitempty"` // Translate retained legacy artwork with its continuous bounds.
+	SampleScale      *connectorPoint     `json:"sampleScale,omitempty"`  // Map the sampled shape body onto continuous authored bounds.
+	TextCapabilities []string            `json:"textCapabilities,omitempty"`
+	Style            string              `json:"style,omitempty"`
+	RetroText        *sceneRetroText     `json:"retroText,omitempty"`
+	RetroLines       *sceneRetroLines    `json:"retroLines,omitempty"`
+	EditRuns         []sceneRun          `json:"editRuns,omitempty"` // Editor-only list source with continuation indentation.
+	Editable         bool                `json:"editable,omitempty"`
+	ID               string              `json:"id"`
+	Kind             string              `json:"kind"`
+	Group            string              `json:"group,omitempty"`
+	Bounds           sceneRect           `json:"bounds"`
+	Rotation         float64             `json:"rotation,omitempty"`
+	Paint            scenePaint          `json:"paint"`
+	Text             *sceneText          `json:"text,omitempty"`
+	Shape            string              `json:"shape,omitempty"`
+	ShapeGeometry    *sceneShapeGeometry `json:"shapeGeometry,omitempty"`
+	Label            *sceneText          `json:"label,omitempty"`
+	LabelPaint       *scenePaint         `json:"labelPaint,omitempty"`
+	LabelStyle       string              `json:"labelStyle,omitempty"`
+	RetroLabel       *sceneRetroText     `json:"retroLabel,omitempty"`
+	Media            *sceneMedia         `json:"media,omitempty"`
+	Points           []connectorPoint    `json:"points,omitempty"`
+	Arrows           string              `json:"arrows,omitempty"`
+	ArrowWidth       float64             `json:"arrowWidth,omitempty"`
+	Link             string              `json:"link,omitempty"`
 }
 
 // Reuse the original text painter, including sampled glyph treatments, rather
@@ -163,6 +177,8 @@ type sceneRetroText struct {
 }
 
 type sceneRetroLines struct {
+	CanvasWidth     float64              `json:"canvasWidth,omitempty"`
+	CanvasHeight    float64              `json:"canvasHeight,omitempty"`
 	ContentOpacity  *float64             `json:"contentOpacity,omitempty"`
 	BackdropOpacity *float64             `json:"backdropOpacity,omitempty"`
 	Frames          []exportContentFrame `json:"frames,omitempty"`
@@ -215,6 +231,20 @@ func applyRetroOpacity(lines *sceneRetroLines, element Element) {
 // A single object's cycle must not be truncated to the multi-animation LCM
 // limit used by whole-slide HTML export. Preserve every imported frame delay.
 func retroObjectFrames(slide Slide, frames []DeckAssetFrame, cols, rows, slideCount int) []exportContentFrame {
+	key, cacheable := sceneAnimationKey(slide, frames, cols, rows, slideCount)
+	if cacheable {
+		if cached, ok := sharedSceneAnimations.get(key); ok {
+			return cached
+		}
+	}
+	result := renderRetroObjectFrames(slide, frames, cols, rows, slideCount)
+	if cacheable {
+		sharedSceneAnimations.put(key, result)
+	}
+	return result
+}
+
+func renderRetroObjectFrames(slide Slide, frames []DeckAssetFrame, cols, rows, slideCount int) []exportContentFrame {
 	exportImageAnimationMu.Lock()
 	defer exportImageAnimationMu.Unlock()
 	previous := exportImageAnimationPosition
@@ -224,7 +254,10 @@ func retroObjectFrames(slide Slide, frames []DeckAssetFrame, cols, rows, slideCo
 	var last []exportLine
 	for index, frame := range frames {
 		exportImageAnimationPosition = &position
-		lines := exportLines(displayLines(slide, cols, rows, 0), slide, cols, rows, slideCount)
+		// Scene callers already supply coordinates in this sampling grid. The
+		// terminal display path fits/scales again against the authored deck and
+		// can shrink every animated frame relative to the still scene geometry.
+		lines := exportLines(layout(slide, cols, rows), slide, cols, rows, slideCount)
 		delay := frame.DelayMS
 		if delay <= 0 {
 			delay = 100
@@ -248,6 +281,8 @@ type sceneDiagnostic struct {
 }
 
 type slideScene struct {
+	SlideID         string                 `json:"slideId,omitempty"`
+	Build           *SlideBuild            `json:"build,omitempty"`
 	DefaultStyle    string                 `json:"defaultStyle,omitempty"`
 	Master          bool                   `json:"master,omitempty"`     // Editor target scope, never audience state.
 	Conversion      *sceneConversionReport `json:"conversion,omitempty"` // Editor-only, on explicit request.
@@ -268,7 +303,7 @@ type slideScene struct {
 type sceneBackgroundMedia struct {
 	sceneMedia
 	Fit        string           `json:"fit,omitempty"`
-	Opacity    float64          `json:"opacity,omitempty"`
+	Opacity    float64          `json:"opacity"`
 	Paint      *scenePaint      `json:"paint,omitempty"`
 	RetroLines *sceneRetroLines `json:"retroLines,omitempty"`
 }
@@ -326,6 +361,9 @@ func scenePaintFromValues(e Element, slide Slide, sx, sy float64, q url.Values, 
 	if e.Kind == "heading" {
 		color = sceneColor(slideHeaderFG(slide))
 	}
+	if queryErr == nil && validConcreteDefault("default-color", q.Get("default-color")) && (e.Kind == "heading" && slide.HeaderFG == "" || e.Kind != "heading" && slide.FG == "") {
+		color = q.Get("default-color")
+	}
 	if q.Has("fg") || (e.Kind == "heading" && q.Has("header")) {
 		if fg := elementFG(e.Query, e.Kind == "heading"); fg != "" {
 			color = sceneColor(fg)
@@ -342,7 +380,7 @@ func scenePaintFromValues(e Element, slide Slide, sx, sy float64, q url.Values, 
 			p.ShadowBlur = 8
 		}
 	}
-	if q.Get("outline") != "" {
+	if q.Get("outline") != "" && q.Get("outline") != "none" {
 		p.Stroke, p.StrokeWidth = "#111111", 2
 		if q.Get("outline") == "light" {
 			p.Stroke = "#ffffff"
@@ -404,7 +442,7 @@ func sceneTextFromValues(e Element, q url.Values) *sceneText {
 	case "c64":
 		result.FontID, result.Family = "c64", "KeynopeC64, monospace"
 	}
-	switch q.Get("text-align") {
+	switch textBoxAlignmentFromValues(q) {
 	case "center":
 		result.Align = "center"
 	case "right":
@@ -457,6 +495,7 @@ func sceneTextFromValues(e Element, q url.Values) *sceneText {
 		result.Runs = []sceneRun{{Text: ""}}
 	}
 	result.Runs = resolvedModernRuns(q.Get("modern-runs"), e.Text, q.Get("ttf-weight"), result.Runs)
+	result.Runs = applyTextEmphasisFlags(q, result.Runs)
 	for _, token := range splitEmojiText(e.Text) {
 		if token.assetKey != "" {
 			if data := emojiFontData(token.assetKey); data != "" {
@@ -539,7 +578,46 @@ func buildStyledSlideScene(deck Deck, resolved Slide, index, cols, rows int, inh
 // projecting unrelated text, media sources and animation frames for a draft.
 // An empty target produces the full scene through the same code path.
 func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, inheritedStyles bool, target string) (slideScene, error) {
-	scene := slideScene{Version: 1, Width: 1920, Height: 1080, Objects: []sceneObject{}, Diagnostics: []sceneDiagnostic{}}
+	return buildStyledSceneTargetMeasured(deck, resolved, index, cols, rows, inheritedStyles, target, nil)
+}
+
+// Opt-in counters are request-owned and never persisted in deck metadata or
+// global mutable state. Tests distinguish semantic reuse from whole-scene work.
+type sceneRenderMetrics struct {
+	DisableLayoutCache    bool // Request-owned cold-parity control, never authored.
+	LayoutBuilds          int
+	LayoutCacheHits       int
+	ObjectLayoutBuilds    []string
+	ObjectLayoutHits      []string
+	ObjectArtworkLayouts  []string
+	SceneBuilds           int
+	TextProjectionBuilds  []string
+	TextProjectionHits    []string
+	TableProjectionBuilds []string
+	TableProjectionHits   []string
+}
+
+func buildStyledSceneTargetMeasured(deck Deck, resolved Slide, index, cols, rows int, inheritedStyles bool, target string, metrics *sceneRenderMetrics) (slideScene, error) {
+	var targets map[string]bool
+	if target != "" {
+		targets = map[string]bool{target: true}
+	}
+	return buildStyledSceneTargetsMeasured(deck, resolved, index, cols, rows, inheritedStyles, targets, metrics)
+}
+
+func buildStyledSceneTargetsMeasured(deck Deck, resolved Slide, index, cols, rows int, inheritedStyles bool, targets map[string]bool, metrics *sceneRenderMetrics) (slideScene, error) {
+	return buildStyledSceneProjection(deck, resolved, index, cols, rows, inheritedStyles, targets, metrics, nil)
+}
+
+func buildStyledSceneProjection(deck Deck, resolved Slide, index, cols, rows int, inheritedStyles bool, targets map[string]bool, metrics *sceneRenderMetrics, attachments **sceneAttachmentGeometry) (slideScene, error) {
+	if metrics != nil {
+		metrics.SceneBuilds++
+	}
+	width, height := deck.pageDimensions()
+	scene := slideScene{Version: 1, Width: width, Height: height, Objects: []sceneObject{}, Diagnostics: []sceneDiagnostic{}}
+	if err := deck.PageSize.Validate(); err != nil {
+		return scene, err
+	}
 	// Sources are immutable within this projection. Repeated instances share
 	// encoding work, but never share their mutable per-object media settings.
 	mediaSources := make(map[string]sceneMedia)
@@ -547,19 +625,36 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 		return scene, fmt.Errorf("invalid scene slide or dimensions")
 	}
 	slide := withTrueTypeDefaults(resolved)
+	slide = deck.withThemeTypography(slide)
+	slide = deck.applyShapeStrokeDefaults(slide)
 	// Scene images rotate as objects, not by resampling their source. Keep
 	// local crop/mask geometry stable in both treatments and rotate once.
 	imageOrientations := make(map[int]string)
 	slide.Elements = append([]Element(nil), slide.Elements...)
+	// Legacy layout fits labels before sampling the shape. Resolve those same
+	// dimensions once on this owned projection so paths, strokes, label regions
+	// and sampled coverage cannot disagree about the expanded frame.
+	fitSlideShapeLabels(&slide, cols, rows)
 	for i, element := range slide.Elements {
 		if element.Kind != "image" {
 			continue
 		}
+		slide.Elements[i].Path = sceneEmbeddedImagePath(deck, element)
 		q, _ := url.ParseQuery(element.Query)
+		if imageFit(q.Get("image-fit")) != "" || q.Get("stretch") == "1" {
+			if w, ok := sceneObjectDimension(q, "width", cols); ok {
+				if h, ok := sceneObjectDimension(q, "height", rows); ok && h > 0 {
+					q.Set("keynope-fit-aspect", strconv.FormatFloat(w*scene.Width/float64(cols)/(h*scene.Height/float64(rows)), 'f', -1, 64))
+				}
+			}
+		}
 		switch orientation := q.Get("orientation"); orientation {
 		case "cw", "ccw", "down", "flip":
 			imageOrientations[i] = orientation
 			q.Del("orientation")
+			slide.Elements[i].Query = q.Encode()
+		}
+		if imageFit(q.Get("image-fit")) != "" || q.Get("stretch") == "1" {
 			slide.Elements[i].Query = q.Encode()
 		}
 	}
@@ -579,7 +674,7 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 					fit = "cover"
 				}
 				opacity := slide.BackgroundMedia.Opacity
-				if opacity <= 0 || opacity > 1 {
+				if opacity < 0 || opacity > 1 || math.IsNaN(opacity) || math.IsInf(opacity, 0) || opacity == 0 && !slide.BackgroundMedia.OpacitySet {
 					opacity = 1
 				}
 				source.Decorative = true
@@ -598,6 +693,10 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 				// never applied twice when the original image is promoted.
 				paint := scenePaintFromValues(Element{Kind: "image", Query: slide.BackgroundMedia.Query}, slide, scene.Width/float64(cols), scene.Height/float64(rows), query, nil)
 				paint.Opacity = &opacity
+				source.Crop = parseModernCrop(query.Get("modern-crop"))
+				if mask := query.Get("modern-mask"); mask == "rounded" || mask == "ellipse" {
+					source.Mask = mask
+				}
 				background := &sceneBackgroundMedia{sceneMedia: source, Fit: fit, Opacity: opacity, Paint: &paint}
 				if query.Get("image-style") == "retro" {
 					background.RetroLines = sceneBackgroundRetroLines(deck, slide, slide.BackgroundMedia.AssetID, asset, slide.BackgroundMedia.Query, cols, rows)
@@ -614,20 +713,46 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 		scene.Diagnostics = append(scene.Diagnostics, sceneDiagnostic{Code: "background-counterpart", Message: "This preview uses the slide base colour. Its animated Retro background/effect is retained, not converted yet."})
 	}
 	sx, sy := scene.Width/float64(cols), scene.Height/float64(rows)
-	lines := layout(slide, cols, rows)
+	lines, geometryOnly := sceneGeometryLayout(slide, cols, rows, metrics, deck.usesConcreteAppearance())
 	retroSlide := slide
 	retroSlide.ThemeColors = deck.themeColors("retro")
 	var retroLayout []Line
 	// Default Retro decks were doing the same expensive layout twice. The
 	// theme is the only difference between these two projections; when equal,
 	// reuse the immutable line set instead of rebuilding it for every object.
-	if slide.ThemeColors == nil && retroSlide.ThemeColors == nil || slide.ThemeColors != nil && retroSlide.ThemeColors != nil && *slide.ThemeColors == *retroSlide.ThemeColors {
+	if !geometryOnly && (slide.ThemeColors == nil && retroSlide.ThemeColors == nil || slide.ThemeColors != nil && retroSlide.ThemeColors != nil && *slide.ThemeColors == *retroSlide.ThemeColors) {
 		retroLayout = lines
 	}
 	var retroByElement map[int][]Line
+	var imageAnchors map[int]int
 	objectRows := func(index int) []Line {
+		if deck.usesConcreteAppearance() && (metrics == nil || !metrics.DisableLayoutCache) && index >= 0 && index < len(retroSlide.Elements) && retroSlide.Elements[index].Kind == "image" {
+			if imageAnchors == nil {
+				imageAnchors = make(map[int]int)
+				for _, line := range lines {
+					if line.Role == "image" {
+						if _, exists := imageAnchors[line.Element]; !exists {
+							imageAnchors[line.Element] = line.Row
+						}
+					}
+				}
+			}
+			var anchor *int
+			if row, exists := imageAnchors[index]; exists {
+				anchor = &row
+			}
+			if own, valid := sceneIsolatedImageRows(retroSlide, index, anchor, cols, rows); valid {
+				if metrics != nil {
+					metrics.ObjectArtworkLayouts = append(metrics.ObjectArtworkLayouts, retroSlide.Elements[index].ID)
+				}
+				return own
+			}
+		}
 		if retroByElement == nil {
 			if retroLayout == nil {
+				if metrics != nil {
+					metrics.LayoutBuilds++
+				}
 				retroLayout = layout(retroSlide, cols, rows)
 			}
 			retroByElement = sceneLinesByElement(retroLayout)
@@ -653,20 +778,33 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 		boxes[line.Element] = b
 	}
 	routes := map[string]shapeConnector{}
-	for _, route := range slideShapeConnectors(slide, lines, cols, rows) {
+	var ports []shapePort
+	if attachments != nil {
+		ports = slideShapePorts(slide, lines, cols, rows)
+	}
+	connectors := slideShapeConnectorsWithPorts(slide, lines, cols, rows, ports)
+	if attachments != nil {
+		*attachments = &sceneAttachmentGeometry{cols: cols, rows: rows, ports: ports, connectors: connectors}
+	}
+	for _, route := range connectors {
 		routes[route.ID] = route
 	}
 	warn := func(id, code, message string) {
 		scene.Diagnostics = append(scene.Diagnostics, sceneDiagnostic{id, code, message})
 	}
-	indices := slidePaintOrder(slide)
-	hidden := hiddenSlideObjects(slide)
+	queries := make([]url.Values, len(slide.Elements))
+	queryErrors := make([]error, len(slide.Elements))
+	for i, element := range slide.Elements {
+		queries[i], queryErrors[i] = url.ParseQuery(element.Query)
+	}
+	indices := slidePaintOrderWithQueries(slide, queries)
+	hidden := hiddenSlideObjectsWithQueries(slide, queries)
 	for _, i := range indices {
 		if hidden[i] {
 			continue
 		}
 		e := slide.Elements[i]
-		if target != "" && e.ID != target {
+		if len(targets) != 0 && !targets[e.ID] {
 			continue
 		}
 		id := e.ID
@@ -674,7 +812,7 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 			id = fmt.Sprintf("legacy-%d-%d", index, i)
 			warn(id, "unstable-id", "Legacy object needs a persistent ID before semantic editing.")
 		}
-		q, queryErr := url.ParseQuery(e.Query)
+		q, queryErr := queries[i], queryErrors[i]
 		treatment := q.Get("element-style")
 		if deck.usesConcreteAppearance() {
 			// Style is concrete in v3: fonts choose typography, only images
@@ -695,25 +833,28 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 		// text shares the shaped surface. objectRows builds the Retro layout
 		// lazily only when a retained-art adapter actually consumes its rows.
 		b, ok := boxes[i]
-		if !ok && e.Kind != "connector" {
+		if !ok && e.Kind != "connector" && e.Kind != "table" && e.Kind != "chart" {
 			warn(id, "missing-layout", "Object has no resolved layout; it has not been deleted.")
 			continue
 		}
-		o := sceneObject{ID: id, Kind: e.Kind, Group: elementGroup(e), Bounds: sceneRect{float64(b.left) * sx, float64(b.top) * sy, float64(b.right-b.left+1) * sx, float64(b.bottom-b.top+1) * sy}}
+		o := sceneObject{ID: id, Kind: e.Kind, Group: q.Get("group"), Bounds: sceneRect{float64(b.left) * sx, float64(b.top) * sy, float64(b.right-b.left+1) * sx, float64(b.bottom-b.top+1) * sy}}
 		cacheText := e.ID != "" && queryErr == nil && q.Get("render") == "truetype" && q.Get("font") == "" && q.Get("glyph") == "" && (e.Kind == "text" || e.Kind == "heading" || e.Kind == "bullet" || e.Kind == "code")
 		var textKey sceneTextObjectKey
+		var cachedText *sceneText
 		if cacheText {
-			textKey = sceneTextObjectKey{element: e, bounds: o.Bounds, style: treatment, theme: deck.themeID(), scale: deck.appearanceTextScale("modern"), fg: slideFG(objectSlide), header: slideHeaderFG(objectSlide), bg: slideBG(objectSlide), index: index, count: len(deck.Slides), cols: cols, rows: rows}
-			if cached, diagnostics, ok := sharedSceneTextObjects.get(textKey); ok {
-				scene.Objects = append(scene.Objects, cached)
-				scene.Diagnostics = append(scene.Diagnostics, diagnostics...)
-				continue
+			textKey = sceneTextDependencyKey(deck, e, treatment, q)
+			if cached, _, ok := sharedSceneTextObjects.get(textKey); ok {
+				cachedText = cached.Text
+				if metrics != nil {
+					metrics.TextProjectionHits = append(metrics.TextProjectionHits, id)
+				}
 			}
 		}
-		diagnosticStart := len(scene.Diagnostics)
 		o.Style = treatment
+		o.Name = objectNameFromValues(q)
 		o.TextCapabilities = textCapabilities(e, treatment)
 		o.Paint = scenePaintFromValues(e, objectSlide, sx, sy, q, queryErr)
+		o.Paint = deck.applyThemeObjectPaint(e, objectSlide, q, o.Paint)
 		orientation := q.Get("orientation")
 		if e.Kind == "image" {
 			orientation = imageOrientations[i]
@@ -726,13 +867,114 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 		case "down", "flip": // Toolbar/legacy decks use down; retain the early scene alias.
 			o.Rotation = 180
 		}
-		if target, ok := linkTargetFromQuery(e.Query, len(deck.Slides)); ok {
-			o.Link = target.Value
+		if queryErr == nil {
+			if target, ok := linkTargetFromValues(q, len(deck.Slides)); ok {
+				o.Link = target.Value
+			}
 		}
 		switch e.Kind {
+		case "chart":
+			w, h := 170.0, 36.0
+			if v, ok := sceneObjectDimension(q, "width", cols); ok {
+				w = v
+			}
+			if v, ok := sceneObjectDimension(q, "height", rows); ok {
+				h = v
+			}
+			x, y := tableSceneAnchor(q, w, h, cols, rows)
+			o.Bounds = sceneRect{x * sx, y * sy, w * sx, h * sy}
+			if deck.Objects == nil {
+				warn(id, "missing-chart", "Chart data is missing.")
+				continue
+			}
+			data, ok := deck.Objects.Charts[e.ObjectID]
+			if !ok {
+				warn(id, "missing-chart", "Chart data is missing.")
+				continue
+			}
+			color := o.Paint.Color
+			if (deck.Theme != nil || data.Options.DefaultColor != "") && !q.Has("fg") && !q.Has("theme-fg") && objectSlide.FG == "" {
+				color = ""
+				if data.Options.DefaultColor != "" {
+					o.Paint.Color = data.Options.DefaultColor
+				}
+			}
+			var err error
+			o.Chart, err = deck.projectChart(data, o.Bounds, color, q.Get("modern-font"))
+			if err != nil {
+				warn(id, "invalid-chart", err.Error())
+				continue
+			}
+		case "table":
+			w, h := 160.0, 30.0
+			if value, ok := sceneObjectDimension(q, "width", cols); ok {
+				w = value
+			}
+			if value, ok := sceneObjectDimension(q, "height", rows); ok {
+				h = value
+			}
+			x, y := tableSceneAnchor(q, w, h, cols, rows)
+			o.Bounds = sceneRect{x * sx, y * sy, w * sx, h * sy}
+			if deck.Objects == nil {
+				warn(id, "missing-table", "Table data is missing.")
+				continue
+			}
+			data, exists := deck.Objects.Tables[e.ObjectID]
+			if !exists {
+				warn(id, "missing-table", "Table data is missing.")
+				continue
+			}
+			var err error
+			tableColor := o.Paint.Color
+			if (deck.Theme != nil || data.Style.Cell.DefaultColor != "") && !q.Has("fg") && !q.Has("header") && !q.Has("theme-fg") && objectSlide.FG == "" {
+				tableColor = ""
+				if data.Style.Cell.DefaultColor != "" {
+					o.Paint.Color = data.Style.Cell.DefaultColor
+				}
+			}
+			var hit bool
+			o.Table, err, hit = sharedSceneTables.project(deck, data, o.Bounds, tableColor)
+			if err != nil {
+				warn(id, "invalid-table", err.Error())
+				continue
+			}
+			if metrics != nil {
+				if hit {
+					metrics.TableProjectionHits = append(metrics.TableProjectionHits, id)
+				} else {
+					metrics.TableProjectionBuilds = append(metrics.TableProjectionBuilds, id)
+				}
+			}
 		case "heading", "text", "bullet", "code", "text-image", "page-number":
 			o.Kind = "text"
-			o.Text = deck.sceneTextForStyleFromValues(e, treatment, q)
+			o.Text = cachedText
+			if o.Text == nil {
+				o.Text = deck.sceneTextForStyleFromValues(e, treatment, q)
+				if metrics != nil {
+					metrics.TextProjectionBuilds = append(metrics.TextProjectionBuilds, id)
+				}
+			}
+			deck.resolveWordColors(o.Text)
+			deck.resolveWordFonts(o.Text)
+			if e.Kind == "page-number" && o.Text != nil {
+				// Automatic page-number boxes must match the resolved theme font,
+				// not the C64 occupancy estimate used by legacy layout. Preserve
+				// the already-resolved right/bottom edges when the box grows.
+				if !q.Has("width") {
+					width := math.Max(1, math.Ceil(chartTextWidth(sceneTextPlain(o.Text), o.Text)+1))
+					if q.Has("right") || q.Has("right_pct") {
+						o.Bounds.X += o.Bounds.Width - width
+					}
+					o.Bounds.Width = width
+				}
+				if !q.Has("height") {
+					height := math.Max(1, math.Ceil(o.Text.Size*o.Text.LineHeight))
+					if q.Has("bottom") {
+						o.Bounds.Y += o.Bounds.Height - height
+					}
+					o.Bounds.Height = height
+				}
+			}
 			sharedText := treatment == "retro" && sharedRetroText(e)
 			if !sharedText && (treatment == "retro" || q.Get("font") != "" || q.Get("glyph") != "") {
 				if treatment == "retro" && o.RetroText == nil {
@@ -746,6 +988,8 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 			}
 		case "shape":
 			o.Shape = shapeName(e)
+			geometry := shapeGeometry(shapeSpecFromValues(q), shapeDimension(q, "width", 12)*sx/(shapeDimension(q, "height", 6)*sy))
+			o.ShapeGeometry = &geometry
 			x, y := preciseShapeAnchor(q, o.Bounds.X/sx, o.Bounds.Y/sy, cols, rows)
 			anchorDX, anchorDY := x*sx-o.Bounds.X, y*sy-o.Bounds.Y
 			o.Bounds.X, o.Bounds.Y = x*sx, y*sy
@@ -765,9 +1009,12 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 					o.LabelStyle = treatment
 				}
 				o.Label = deck.sceneTextForStyleFromValues(label, o.LabelStyle, labelQuery)
+				deck.resolveWordColors(o.Label)
+				deck.resolveWordFonts(o.Label)
 				labelSlide := objectSlide
 				labelSlide.ThemeColors = deck.themeColors(o.LabelStyle)
 				p := scenePaintFor(label, labelSlide, sx, sy)
+				p = deck.applyThemeObjectPaint(label, labelSlide, labelQuery, p)
 				o.LabelPaint = &p
 				if o.LabelStyle == "retro" && !sharedRetroText(label) {
 					for _, line := range retroObjectLines(deck, retroSlide, objectRows(i), i, cols, rows) {
@@ -784,6 +1031,12 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 				var ownLines []Line
 				for _, line := range objectRows(i) {
 					if line.Element == i && line.Role != "shape-label" {
+						if o.Paint.NoFill && line.Role != "outline" {
+							continue
+						}
+						if line.Role == "outline" && (q.Has("shape-stroke") || q.Has("shape-stroke-width")) {
+							continue
+						}
 						ownLines = append(ownLines, line)
 					}
 				}
@@ -799,6 +1052,13 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 					retroSlide.Elements[i].Query = fillQuery.Encode()
 				}
 				o.RetroLines = &sceneRetroLines{Cols: cols, Rows: rows, Lines: exportLines(ownLines, retroSlide, cols, rows, len(deck.Slides))}
+				if o.Paint.Stroke != "" && o.Paint.StrokeWidth > 0 && (q.Has("shape-stroke") || q.Has("shape-stroke-width") || !q.Has("outline")) {
+					var reduced bool
+					o.RetroStroke, reduced = retroShapeStroke(geometry, o.Bounds, o.Paint.StrokeWidth, sx, sy)
+					if reduced {
+						warn(id, "shape-stroke-raster-reduced", "The very large Retro border uses a coarser block grid to bound rendering work.")
+					}
+				}
 				sx := shapeDimension(q, "width", 12) * 2 / float64(shapeHalfCells(q, "width", 12))
 				sy := shapeDimension(q, "height", 6) * 2 / float64(shapeHalfCells(q, "height", 6))
 				if sx != 1 || sy != 1 {
@@ -822,6 +1082,22 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 			o.Arrows = route.Arrows
 			o.Paint.StrokeWidth = connectorNumber(q, "connector-width", 1, 8) * sx
 			o.ArrowWidth = connectorNumber(q, "connector-arrow-width", 6, 20) * sx
+			if treatment != "retro" && len(o.Points) > 0 {
+				// Vector route bounds come from the actual continuous vertices,
+				// not blank cells carried by the legacy sampled layout box.
+				left, right, top, bottom := o.Points[0].X, o.Points[0].X, o.Points[0].Y, o.Points[0].Y
+				for _, point := range o.Points {
+					left = math.Min(left, point.X)
+					right = math.Max(right, point.X)
+					top = math.Min(top, point.Y)
+					bottom = math.Max(bottom, point.Y)
+				}
+				padding := o.Paint.StrokeWidth / 2
+				if o.Arrows != "" && o.Arrows != "none" {
+					padding = math.Max(padding, o.ArrowWidth/2)
+				}
+				o.Bounds = sceneRect{X: left - padding, Y: top - padding, Width: right - left + 2*padding, Height: bottom - top + 2*padding}
+			}
 			if treatment == "retro" {
 				o.RetroLines = &sceneRetroLines{Cols: cols, Rows: rows, Lines: retroObjectLines(deck, retroSlide, objectRows(i), i, cols, rows), Alt: "Connector"}
 			}
@@ -835,12 +1111,12 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 			}
 			// Explicit box sizing is independent of the integer sampling grid.
 			// Aspect-fit imports keep their natural fitted bounds until resized.
-			if q.Get("stretch") == "1" {
+			if q.Get("stretch") == "1" || imageFit(q.Get("image-fit")) != "" {
 				old := o.Bounds
-				if w, ok := authoredObjectDimension(q, "width", cols); ok {
+				if w, ok := sceneObjectDimension(q, "width", cols); ok {
 					o.Bounds.Width = w * sx
 				}
-				if h, ok := authoredObjectDimension(q, "height", rows); ok {
+				if h, ok := sceneObjectDimension(q, "height", rows); ok {
 					o.Bounds.Height = h * sy
 				}
 				x, y := preciseTextAnchor(q, o.Bounds.Width/sx, o.Bounds.Height/sy, old.X/sx, old.Y/sy, cols, rows)
@@ -888,6 +1164,7 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 			media.Alt = q.Get("alt-text")
 			media.Decorative = q.Get("image-decorative") == "1"
 			media.Crop = parseModernCrop(q.Get("modern-crop"))
+			media.Fit = imageFit(q.Get("image-fit"))
 			if mask := q.Get("modern-mask"); mask == "rounded" || mask == "ellipse" {
 				media.Mask = mask
 			}
@@ -907,13 +1184,31 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 			continue
 		}
 		if o.Kind == "text" && o.RetroLines == nil && o.RetroText == nil {
-			if width, ok := authoredObjectDimension(q, "width", cols); ok {
+			naturalWidth := e.Kind != "page-number" && o.Text != nil && !q.Has("width")
+			if naturalWidth {
+				var natural sceneRect
+				if cacheText {
+					natural, _ = sharedSceneTextObjects.naturalSize(textKey, o.Text)
+				} else {
+					natural.Width, natural.Height = sceneTextNaturalSize(o.Text)
+				}
+				o.Bounds = naturalSceneTextBounds(o.Bounds, natural, q)
+			}
+			if width, ok := sceneObjectDimension(q, "width", cols); ok {
 				o.Bounds.Width = width * sx
 			}
-			if height, ok := authoredObjectDimension(q, "height", rows); ok {
+			if height, ok := sceneObjectDimension(q, "height", rows); ok {
 				o.Bounds.Height = height * sy
 			}
-			x, y := preciseTextAnchor(q, o.Bounds.Width/sx, o.Bounds.Height/sy, o.Bounds.X/sx, o.Bounds.Y/sy, cols, rows)
+			autoHeight := q.Has("width") && !q.Has("height") && o.Text != nil && e.Kind != "page-number"
+			if autoHeight {
+				if cacheText {
+					o.Bounds.Height, _ = sharedSceneTextObjects.wrappedHeight(textKey, o.Text, o.Bounds.Width)
+				} else {
+					o.Bounds.Height = sceneTextWrappedHeight(o.Text, o.Bounds.Width)
+				}
+			}
+			x, y := preciseTextAnchorForFrame(q, o.Bounds.Width/sx, o.Bounds.Height/sy, o.Bounds.X/sx, o.Bounds.Y/sy, cols, rows, naturalWidth || autoHeight)
 			o.Bounds.X, o.Bounds.Y = x*sx, y*sy
 		}
 		if treatment == "retro" && o.RetroLines == nil && o.RetroText == nil && !(o.Kind == "text" && sharedRetroText(e)) {
@@ -940,19 +1235,22 @@ func buildStyledSceneTarget(deck Deck, resolved Slide, index, cols, rows int, in
 				o.SampleOffset.Y += dy
 			}
 		}
+		setRetroPageDimensions(o.RetroLines, scene.Width, scene.Height)
 		scene.Objects = append(scene.Objects, o)
-		if cacheText {
-			sharedSceneTextObjects.put(textKey, o, scene.Diagnostics[diagnosticStart:])
+		if cacheText && cachedText == nil {
+			sharedSceneTextObjects.put(textKey, sceneObject{Kind: "text", Text: o.Text}, nil)
 		}
 	}
 	if slide.Engagement != nil {
 		warn("", "activity-preview", "Activity remains attached to this slide; this preview does not start it or expose its private data.")
 	}
+	scene.SlideID = resolved.ID
+	scene.Build = sceneSlideBuild(deck, resolved.ID, scene.Objects)
 	return scene, nil
 }
 
 func sceneMediaSource(asset DeckAsset) sceneMedia {
-	media := sceneMedia{Width: asset.Width, Height: asset.Height}
+	media := sceneMedia{Width: asset.Width, Height: asset.Height, LoopCount: asset.LoopCount}
 	uri := func(mime string, data []byte) string {
 		return sharedSceneSources.uri(mime, data)
 	}
@@ -961,6 +1259,10 @@ func sceneMediaSource(asset DeckAsset) sceneMedia {
 		media.Width, media.Height = asset.Source.Width, asset.Source.Height
 	} else if len(asset.Data) > 0 {
 		media.Source = uri(asset.MIME, asset.Data)
+	}
+	if vector := asset.Vector; vector != nil {
+		media.Source = uri(svgMediaType, vector.Data)
+		media.Width, media.Height = vector.Width, vector.Height
 	}
 	frames := asset.Frames
 	if asset.Source != nil && len(asset.Source.Frames) > 0 {
@@ -973,6 +1275,11 @@ func sceneMediaSource(asset DeckAsset) sceneMedia {
 			delay = 10
 		}
 		media.Frames = append(media.Frames, sceneMediaFrame{uri("image/png", frame.Data), delay})
+	}
+	if media.Source == "" && len(media.Frames) > 0 {
+		// Animated assets may contain frames only. A first-frame source is
+		// required by backgrounds, still fallbacks and interchange consumers.
+		media.Source = media.Frames[0].Source
 	}
 	return media
 }
@@ -995,7 +1302,15 @@ func sceneBackgroundRetroLines(deck Deck, slide Slide, assetID string, asset Dec
 	values.Set("width", strconv.Itoa(cols))
 	values.Set("height", strconv.Itoa(rows))
 	values.Set("stretch", "1")
-	for _, key := range []string{"right", "right_pct", "left_pct", "bottom", "row_delta", "align", "valign", "object-hidden"} {
+	fit := "cover"
+	if slide.BackgroundMedia != nil && imageFit(slide.BackgroundMedia.Fit) != "" {
+		fit = slide.BackgroundMedia.Fit
+	}
+	values.Set("image-fit", fit)
+	// Physical page aspect is independent of the sampling grid's cell aspect.
+	width, height := deck.pageDimensions()
+	values.Set("keynope-fit-aspect", strconv.FormatFloat(width/height, 'f', -1, 64))
+	for _, key := range []string{"right", "right_pct", "left_pct", "bottom", "row_delta", "align", "valign", "object-hidden", "object-offset-x", "object-offset-y", "scale"} {
 		values.Del(key)
 	}
 	// Parsed documents materialize these assets already. Registering here also
@@ -1008,9 +1323,16 @@ func sceneBackgroundRetroLines(deck Deck, slide Slide, assetID string, asset Dec
 	}
 	isolate := slide
 	isolate.ThemeColors = deck.themeColors("retro")
-	isolate.Elements = []Element{{Kind: "image", AssetID: assetID, Path: embeddedAssetPath(assetID, asset), Query: values.Encode()}}
+	ext := ".png"
+	if len(asset.Frames) > 0 || asset.MIME == "image/gif" {
+		ext = ".gif"
+	}
+	// Use the registered compact source on every platform. Rendering an owned
+	// in-memory deck must not depend on a previous disk materialisation pass.
+	isolate.Elements = []Element{{Kind: "image", AssetID: assetID, Path: "keynope-asset:" + assetID + ext, Query: values.Encode()}}
 	lines := exportLines(layout(isolate, cols, rows), isolate, cols, rows, len(deck.Slides))
 	retro := &sceneRetroLines{Cols: cols, Rows: rows, Lines: lines, Decorative: true}
+	setRetroPageDimensions(retro, width, height)
 	if len(asset.Frames) > 1 {
 		retro.Frames = retroObjectFrames(isolate, asset.Frames, cols, rows, len(deck.Slides))
 		retro.LoopCount = asset.LoopCount
@@ -1057,6 +1379,7 @@ func (s *nativeEditorSession) handleScene(w http.ResponseWriter, r *http.Request
 		s.mu.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Keynope-Scene-Cache", "hit")
 		cached.write(w)
 		return
 	}
@@ -1065,6 +1388,10 @@ func (s *nativeEditorSession) handleScene(w http.ResponseWriter, r *http.Request
 	markPhase("snapshot")
 	var scene slideScene
 	var authored []Element
+	var metrics *sceneRenderMetrics
+	if profile {
+		metrics = &sceneRenderMetrics{}
+	}
 	// Document editing must use the same resolved styles as presentation output.
 	// Conversion previews remain explicitly available without modifying the deck.
 	styleRequest := r.URL.Query().Get("styles")
@@ -1074,15 +1401,15 @@ func (s *nativeEditorSession) handleScene(w http.ResponseWriter, r *http.Request
 			http.Error(w, "invalid master", http.StatusBadRequest)
 			return
 		}
-		scene, err = buildStyledSlideScene(deck, masterViewPreview(deck.Masters, index), index, cols, rows, resolvedStyles)
+		scene, err = buildStyledSceneTargetMeasured(deck, masterViewPreview(deck.Masters, index), index, cols, rows, resolvedStyles, "", metrics)
 		authored = masterSlideAt(&deck, index).Elements
 		scene.Master = true
 	} else {
-		if resolvedStyles {
-			scene, err = buildMixedSlideScene(deck, index, cols, rows)
-		} else {
-			scene, err = buildSlideScene(deck, index, cols, rows)
+		if index < 0 || index >= len(deck.Slides) {
+			http.Error(w, "invalid slide", http.StatusBadRequest)
+			return
 		}
+		scene, err = buildStyledSceneTargetMeasured(deck, deck.ResolveSlide(index, false), index, cols, rows, resolvedStyles, "", metrics)
 		if err == nil {
 			authored = deck.Slides[index].Elements
 		}
@@ -1090,6 +1417,18 @@ func (s *nativeEditorSession) handleScene(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if metrics != nil {
+		w.Header().Set("X-Keynope-Scene-Builds", strconv.Itoa(metrics.SceneBuilds))
+		w.Header().Set("X-Keynope-Layout-Builds", strconv.Itoa(metrics.LayoutBuilds))
+		w.Header().Set("X-Keynope-Layout-Cache-Hits", strconv.Itoa(metrics.LayoutCacheHits))
+		w.Header().Set("X-Keynope-Object-Layout-Builds", strconv.Itoa(len(metrics.ObjectLayoutBuilds)))
+		w.Header().Set("X-Keynope-Object-Layout-Cache-Hits", strconv.Itoa(len(metrics.ObjectLayoutHits)))
+		w.Header().Set("X-Keynope-Object-Artwork-Layouts", strconv.Itoa(len(metrics.ObjectArtworkLayouts)))
+		w.Header().Set("X-Keynope-Text-Builds", strconv.Itoa(len(metrics.TextProjectionBuilds)))
+		w.Header().Set("X-Keynope-Text-Cache-Hits", strconv.Itoa(len(metrics.TextProjectionHits)))
+		w.Header().Set("X-Keynope-Table-Builds", strconv.Itoa(len(metrics.TableProjectionBuilds)))
+		w.Header().Set("X-Keynope-Table-Cache-Hits", strconv.Itoa(len(metrics.TableProjectionHits)))
 	}
 	scene.Revision, scene.SlideIndex = &revision, index
 	if r.URL.Query().Get("report") == "deck" {
@@ -1104,7 +1443,9 @@ func (s *nativeEditorSession) handleScene(w http.ResponseWriter, r *http.Request
 	markPhase("annotation")
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Keynope-Scene-Cache", "miss")
 	if profile {
+		w.Header().Set("X-Keynope-Scene-Cache", "bypass")
 		var encoded bytes.Buffer
 		if err := json.NewEncoder(&encoded).Encode(scene); err != nil {
 			http.Error(w, "could not encode scene", http.StatusInternalServerError)
@@ -1147,10 +1488,16 @@ func annotateSceneEditing(scene *slideScene, deck Deck, authored []Element) {
 					object.Label = deck.modernSceneText(label)
 					object.LabelPaint = &scenePaint{Color: "#ffffff"}
 				}
+				if object.Editable && (hasWordColorTokens(sceneTextFor(label)) || hasWordFontRoles(sceneTextFor(label))) {
+					object.EditRuns = sceneTextFor(label).Runs
+				}
+			}
+			if element.Kind == "table" && object.Table != nil || element.Kind == "chart" && object.Chart != nil {
+				object.Editable = true
 			}
 			if element.Kind == "text" || element.Kind == "heading" || element.Kind == "code" || element.Kind == "bullet" {
 				object.Editable = true
-				if element.Kind == "bullet" {
+				if element.Kind == "bullet" || hasWordColorTokens(sceneTextFor(element)) || hasWordFontRoles(sceneTextFor(element)) {
 					element.Kind = "text"
 					object.EditRuns = sceneTextFor(element).Runs
 				}
@@ -1174,10 +1521,15 @@ func sceneEditableShapeLabel(owner Element) (Element, *shapeLabelData, error) {
 		}
 	}
 	values, _ := url.ParseQuery(data.Query)
+	values = shapeLabelStyleValues(owner, values)
 	values.Set("render", "truetype")
-	values.Set("text-align", "center")
-	values.Set("text-valign", "middle")
-	if !values.Has("fg") {
+	if !values.Has("text-align") {
+		values.Set("text-align", "center")
+	}
+	if !values.Has("text-valign") {
+		values.Set("text-valign", "middle")
+	}
+	if !values.Has("fg") && !values.Has("theme-fg") {
 		values.Set("fg", "#ffffff")
 	}
 	return Element{Kind: "text", ID: owner.ID, Text: data.Text, Query: values.Encode()}, data, nil
@@ -1210,7 +1562,7 @@ func applySceneText(deck *Deck, action nativeEditorAction) (bool, error) {
 	if action.ModernLineHeight != nil && (math.IsNaN(*action.ModernLineHeight) || math.IsInf(*action.ModernLineHeight, 0) || *action.ModernLineHeight < .5 || *action.ModernLineHeight > 4) {
 		return false, fmt.Errorf("line spacing must be between 0.5 and 4")
 	}
-	if action.ModernFont != nil && *action.ModernFont != "" && *action.ModernFont != "sans" && *action.ModernFont != "mono" && *action.ModernFont != "c64" {
+	if action.ModernFont != nil && *action.ModernFont != "" && *action.ModernFont != "sans" && *action.ModernFont != "mono" && *action.ModernFont != "c64" && *action.ModernFont != "theme" {
 		return false, fmt.Errorf("unsupported Modern font")
 	}
 	if action.Slide < 0 || action.Slide >= len(deck.Slides) || action.ObjectID == "" || len(action.TextRuns) > 10000 {
@@ -1237,12 +1589,29 @@ func applySceneText(deck *Deck, action nativeEditorAction) (bool, error) {
 		}
 		var labelData *shapeLabelData
 		if element.Kind == "shape" {
-			label, data, err := sceneEditableShapeLabel(element)
+			labelOwner := element
+			for _, candidate := range deck.ResolveSlide(action.Slide, false).Elements {
+				if candidate.ID == element.ID {
+					labelOwner = candidate
+					break
+				}
+			}
+			label, data, err := sceneEditableShapeLabel(labelOwner)
 			if err != nil {
 				return false, err
 			}
 			labelData = data
 			element = label
+		} else if element.MasterSlotID != "" {
+			// Rich-run fingerprints and edit metrics must use the effective
+			// master weight, not the child's sparse authored query. Keep owner
+			// unchanged so committing does not materialize unrelated defaults.
+			for _, candidate := range deck.ResolveSlide(action.Slide, false).Elements {
+				if candidate.ID == element.ID {
+					element = candidate
+					break
+				}
+			}
 		}
 		if protectedActivityElement(owner) || (element.Kind != "text" && element.Kind != "heading" && element.Kind != "code" && element.Kind != "bullet") {
 			return false, errInvalidEditorAction
@@ -1331,11 +1700,7 @@ func applySceneText(deck *Deck, action nativeEditorAction) (bool, error) {
 					if value == nil {
 						continue
 					}
-					if *value == 0 {
-						values.Del(key)
-					} else {
-						values.Set(key, strconv.FormatFloat(*value, 'f', -1, 64))
-					}
+					values.Set(key, strconv.FormatFloat(*value, 'f', -1, 64))
 				}
 				query = values.Encode()
 			}
@@ -1350,6 +1715,12 @@ func applySceneText(deck *Deck, action nativeEditorAction) (bool, error) {
 			}
 			if stylesChanged {
 				values, _ := url.ParseQuery(query)
+				for _, key := range []string{"text-bold", "text-italic", "text-underline"} {
+					values.Del(key)
+				}
+				if labelData == nil && owner.MasterSlotID != "" {
+					setMasterQueryClears(values, []string{"text-bold", "text-italic", "text-underline"}, []string{"text-bold", "text-italic", "text-underline"})
+				}
 				if styles == "" {
 					values.Del("modern-runs")
 				} else {
@@ -1362,11 +1733,9 @@ func applySceneText(deck *Deck, action nativeEditorAction) (bool, error) {
 			}
 			if spacingChanged {
 				values, _ := url.ParseQuery(query)
-				if *action.ModernLineHeight == 1.25 {
-					values.Del("modern-line-height")
-				} else {
-					values.Set("modern-line-height", strconv.FormatFloat(*action.ModernLineHeight, 'f', -1, 64))
-				}
+				// The editor sends the chosen numeric value, not an inheritance
+				// request. Even the default must override a different master value.
+				values.Set("modern-line-height", strconv.FormatFloat(*action.ModernLineHeight, 'f', -1, 64))
 				query = values.Encode()
 			}
 			return query
@@ -1376,7 +1745,20 @@ func applySceneText(deck *Deck, action nativeEditorAction) (bool, error) {
 		}
 		if labelData != nil {
 			labelData.Text = content.String()
-			labelData.Query = updateStyle(labelData.Query)
+			// Inline content edits start from the effective label style, including
+			// sparse owner overrides. Starting from the older nested payload
+			// would silently restore its size/paint when synchronising overrides.
+			labelData.Query = updateStyle(element.Query)
+			if stylesChanged {
+				// The inline editor can create mixed emphasis. Its new rich runs
+				// replace whole-label emphasis flags, which must not force every
+				// edited character back to the previous uniform formatting.
+				ownerValues := mustQuery(grownQuery)
+				for _, key := range []string{"ttf-weight", "text-italic", "text-underline"} {
+					ownerValues.Del("label-" + key)
+				}
+				grownQuery = ownerValues.Encode()
+			}
 			encoded, err := json.Marshal(labelData)
 			if err != nil {
 				return false, err
@@ -1384,10 +1766,21 @@ func applySceneText(deck *Deck, action nativeEditorAction) (bool, error) {
 			if len(encoded) > 65536 {
 				return false, fmt.Errorf("shape label exceeds its storage limit")
 			}
-			deck.Slides[action.Slide].Elements[i].Query = setQueryValue(grownQuery, "shape-label", base64.StdEncoding.EncodeToString(encoded))
+			grownQuery = syncExistingLabelOverrides(grownQuery, labelData.Query)
+			next := setQueryValue(grownQuery, "shape-label", base64.StdEncoding.EncodeToString(encoded))
+			if next == owner.Query {
+				return false, nil
+			}
+			deck.Slides[action.Slide].Elements[i].Query = next
 		} else {
+			next := updateStyle(owner.Query)
+			// Effective inherited runs can differ from their sparse authored
+			// representation without producing any actual document change.
+			if content.String() == owner.Text && next == owner.Query {
+				return false, nil
+			}
 			deck.Slides[action.Slide].Elements[i].Text = content.String()
-			deck.Slides[action.Slide].Elements[i].Query = updateStyle(owner.Query)
+			deck.Slides[action.Slide].Elements[i].Query = next
 		}
 		return true, nil
 	}
@@ -1430,10 +1823,24 @@ func shapeTextGrowthQuery(deck Deck, action nativeEditorAction, owner Element) (
 		}
 		q.Set("left", strconv.Itoa(int(math.Floor(x))))
 		q.Set("top", strconv.Itoa(int(math.Floor(y))))
-		q.Set("shape-offset-x", strconv.FormatFloat(x-math.Floor(x), 'f', 1, 64))
-		q.Set("shape-offset-y", strconv.FormatFloat(y-math.Floor(y), 'f', 1, 64))
-		q.Set("width", strconv.FormatFloat(math.Ceil(b.Width/sx*2-1e-8)/2, 'f', 1, 64))
-		q.Set("height", strconv.FormatFloat(math.Ceil(b.Height/sy*2-1e-8)/2, 'f', 1, 64))
+		for axis, value := range map[string]float64{"x": x, "y": y} {
+			fraction := value - math.Floor(value)
+			half := math.Floor(fraction*2) / 2
+			q.Set("shape-offset-"+axis, strconv.FormatFloat(half, 'f', 1, 64))
+			q.Del("object-offset-" + axis)
+			if remainder := fraction - half; remainder != 0 {
+				q.Set("object-offset-"+axis, strconv.FormatFloat(remainder, 'f', -1, 64))
+			}
+		}
+		// The browser has measured continuous physical extents. Do not quantize
+		// both dimensions to half-cells: a width-only edit must leave the authored
+		// height (including inheritance) untouched, and vice versa.
+		if b.Width > old.Width+.001 {
+			q.Set("width", strconv.FormatFloat(b.Width/sx, 'f', -1, 64))
+		}
+		if b.Height > old.Height+.001 {
+			q.Set("height", strconv.FormatFloat(b.Height/sy, 'f', -1, 64))
+		}
 		return q.Encode(), nil
 	}
 	return "", fmt.Errorf("shape has no measurable scene bounds")

@@ -2,10 +2,84 @@ package main
 
 import (
 	"math"
+	"net/url"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
+
+func TestMasterImageCropReset(t *testing.T) {
+	d := strokeInheritanceFixture()
+	fixture := sceneFixture(t)
+	d.Assets = fixture.Assets
+	var assetID string
+	for _, e := range fixture.Slides[0].Elements {
+		if e.Kind == "image" {
+			assetID = e.AssetID
+			break
+		}
+	}
+	master := &d.Masters.Layouts[0].Slide.Elements[0]
+	master.Kind, master.AssetID = "image", assetID
+	master.Query = "modern-crop=0.2,0.1,0.1,0.2&modern-mask=ellipse&brightness=1.4"
+	e := &d.Slides[0].Elements[0]
+	e.Kind, e.AssetID = "image", assetID
+	mask := ""
+	a := nativeEditorAction{Slide: 0, ObjectID: "instance", Crop: &sceneCrop{}, ModernMask: &mask}
+	changed, err := applySceneCrop(&d, a)
+	if err != nil || !changed {
+		t.Fatalf("reset: %v %v", changed, err)
+	}
+	for _, e := range d.ResolveSlide(0, false).Elements {
+		if e.ID == "instance" {
+			q, _ := url.ParseQuery(e.Query)
+			if q.Get("modern-crop") != "" || q.Get("modern-mask") != "" || q.Get("brightness") != "1.4" {
+				t.Fatal("reset lost to inheritance or changed adjustments", e.Query)
+			}
+		}
+	}
+	if changed, err = applySceneCrop(&d, a); err != nil || changed {
+		t.Fatal("repeated reset must be no-op", changed, err)
+	}
+	path := filepath.Join(t.TempDir(), "Reset.md")
+	data, err := serializeDeck(path, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := parseDeckData(path, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	images := 0
+	for _, image := range loaded.ResolveSlide(0, false).Elements {
+		if image.Kind != "image" {
+			continue
+		}
+		images++
+		q, _ := url.ParseQuery(image.Query)
+		if q.Get("modern-crop") != "" || q.Get("modern-mask") != "" || q.Get("brightness") != "1.4" {
+			t.Fatal("reset did not survive save/reopen", image.Query)
+		}
+	}
+	if images != 1 {
+		t.Fatalf("got %d images after reopen", images)
+	}
+	a.Crop = &sceneCrop{Left: .1}
+	a.ModernMask = nil
+	if _, err = applySceneCrop(&d, a); err != nil {
+		t.Fatal(err)
+	}
+	q, _ := url.ParseQuery(d.Slides[0].Elements[0].Query)
+	if !strings.Contains(","+q.Get("master-clear")+",", ",modern-mask,") || !strings.Contains(","+q.Get("master-clear")+",", ",shadow,") || strings.Contains(q.Get("master-clear"), "modern-crop") {
+		t.Fatal("crop edit lost mask/unrelated clears", q)
+	}
+	for _, key := range []string{"modern-crop", "modern-mask"} {
+		if !isMasterOverrideQueryKey(key) {
+			t.Fatal("suppression not serializable", key)
+		}
+	}
+}
 
 func TestModernCropSourceAndHistory(t *testing.T) {
 	d := sceneFixture(t)

@@ -87,8 +87,8 @@ func TestParticipantJustifiedTextBox(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := exportSlidePages(deck.slideRenderPreview(0, 245, 56), 0, 1, 245, 56)
-			wantLines, _ := json.Marshal(want[0].Scene)
-			gotLines, _ := json.Marshal(got.Pages[0].Scene)
+			wantLines, _ := json.Marshal(publicParityScene(*want[0].Scene))
+			gotLines, _ := json.Marshal(publicParityScene(*got.Pages[0].Scene))
 			if string(wantLines) != string(gotLines) {
 				t.Fatalf("participant glyphs/positions differ from presenter's justified box\nwant %s\ngot %s", wantLines, gotLines)
 			}

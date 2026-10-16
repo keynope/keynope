@@ -33,6 +33,10 @@ func editorWorkspacePages(deck Deck, masterMode bool, currentMaster, cols, rows 
 // presentation or participant payloads.
 func editorSlideWorkspacePages(deck Deck, index, cols, rows int) []exportPage {
 	preview := deck.slideRenderPreview(index, cols, rows)
+	return editorPreviewWorkspacePages(deck, preview, index, cols, rows)
+}
+
+func editorPreviewWorkspacePages(deck Deck, preview Slide, index, cols, rows int) []exportPage {
 	if preview.ModernScene != nil && index >= 0 && index < len(deck.Slides) {
 		annotateSceneEditing(preview.ModernScene, deck, deck.Slides[index].Elements)
 	}

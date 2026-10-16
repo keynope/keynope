@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 )
 
 // Modern run styles accompany the editable Markdown text, never replace it.
@@ -17,6 +19,27 @@ type modernRunStyles struct {
 	Version int        `json:"version"`
 	Source  string     `json:"source"`
 	Runs    []sceneRun `json:"runs"`
+}
+
+func validSceneRun(run sceneRun) bool {
+	if run.Bold && run.BoldOff {
+		return false
+	}
+	if run.FontRole != "" && (!validThemeFontRole(run.FontRole) || !validBundledFont(run.FontID)) {
+		return false
+	}
+	if !utf8.ValidString(run.Text) || run.ColorToken != "" && (!validThemeColorToken(run.ColorToken) || len(run.Color) != 7) || run.FontID != "" && run.FontID != "sans" && run.FontID != "mono" && run.FontID != "c64" || math.IsNaN(run.FontSize) || math.IsInf(run.FontSize, 0) || run.FontSize < 0 || run.FontSize > 1024 {
+		return false
+	}
+	if run.Color != "" {
+		_, ok := normalizeHexColour(run.Color)
+		return ok
+	}
+	return true
+}
+
+func sameSceneRunStyle(a, b sceneRun) bool {
+	return a.Bold == b.Bold && a.BoldOff == b.BoldOff && a.Italic == b.Italic && a.Underline == b.Underline && a.Color == b.Color && a.ColorToken == b.ColorToken && a.FontID == b.FontID && a.FontRole == b.FontRole && a.FontSize == b.FontSize
 }
 
 func modernRunFingerprint(text, weight string) string {
@@ -38,6 +61,9 @@ func decodeModernRuns(value string) *modernRunStyles {
 	}
 	total := 0
 	for _, run := range styles.Runs {
+		if !validSceneRun(run) {
+			return nil
+		}
 		total += len(run.Text)
 		if total > 100000 {
 			return nil
@@ -52,9 +78,76 @@ func decodeModernRuns(value string) *modernRunStyles {
 }
 
 func encodeModernRuns(text, weight, kind string, runs []sceneRun) (string, error) {
+	return encodeModernRunsMetadata(text, weight, runs, kind == "code")
+}
+
+// Whole-text emphasis may start from inherited rich runs whose RGB colour is
+// not present in the child's readable text. Keep that colour even when the
+// final emphasis flag is disabled, but still omit redundant metadata when the
+// same colour is already represented by readable inline markup.
+func encodeTextEmphasisRuns(text, weight, kind string, runs []sceneRun) (string, error) {
+	inline := sceneTextFor(Element{Kind: "text", Text: text}).Runs
+	preserve := kind == "code" || !sameTextRunColours(runs, inline)
+	return encodeModernRunsMetadata(text, weight, runs, preserve)
+}
+
+func emphasisFlag(on bool) string {
+	if on {
+		return "1"
+	}
+	return "0"
+}
+
+func applyTextEmphasisFlags(q url.Values, runs []sceneRun) []sceneRun {
+	if !q.Has("text-bold") && !q.Has("text-italic") && !q.Has("text-underline") {
+		return runs
+	}
+	runs = append([]sceneRun(nil), runs...)
+	for i := range runs {
+		if q.Has("text-bold") {
+			runs[i].Bold, runs[i].BoldOff = q.Get("text-bold") == "1", false
+		}
+		if q.Has("text-italic") {
+			runs[i].Italic = q.Get("text-italic") == "1"
+		}
+		if q.Has("text-underline") {
+			runs[i].Underline = q.Get("text-underline") == "1"
+		}
+	}
+	return runs
+}
+
+func sameTextRunColours(a, b []sceneRun) bool {
+	i, j, x, y := 0, 0, 0, 0
+	for {
+		for i < len(a) && x == len(a[i].Text) {
+			i, x = i+1, 0
+		}
+		for j < len(b) && y == len(b[j].Text) {
+			j, y = j+1, 0
+		}
+		if i == len(a) || j == len(b) {
+			return i == len(a) && j == len(b)
+		}
+		n := min(len(a[i].Text)-x, len(b[j].Text)-y)
+		if a[i].Color != b[j].Color || a[i].Text[x:x+n] != b[j].Text[y:y+n] {
+			return false
+		}
+		x, y = x+n, y+n
+	}
+}
+
+// Labels can have independent nested and sparse run overrides sharing one text
+// source. Retain RGB-only styles in metadata instead of rewriting that text and
+// invalidating the other override's fingerprint. Code uses the same mechanism
+// because inline colour markup is literal code content.
+func encodeModernRunsMetadata(text, weight string, runs []sceneRun, preserveColours bool) (string, error) {
 	needed := false
 	clean := make([]sceneRun, 0, len(runs))
 	for _, run := range runs {
+		if !validSceneRun(run) {
+			return "", fmt.Errorf("invalid text run style")
+		}
 		if run.Text == "" {
 			continue
 		}
@@ -65,8 +158,8 @@ func encodeModernRuns(text, weight, kind string, runs []sceneRun) (string, error
 			}
 			run.Color = color
 		}
-		needed = needed || run.Bold != (weight == "bold") || run.Italic || run.Underline || (kind == "code" && run.Color != "")
-		if len(clean) > 0 && clean[len(clean)-1].Bold == run.Bold && clean[len(clean)-1].Italic == run.Italic && clean[len(clean)-1].Underline == run.Underline && clean[len(clean)-1].Color == run.Color {
+		needed = needed || run.BoldOff || run.Bold != (weight == "bold") || run.Italic || run.Underline || run.ColorToken != "" || run.FontID != "" || run.FontSize != 0 || (preserveColours && run.Color != "")
+		if len(clean) > 0 && sameSceneRunStyle(clean[len(clean)-1], run) {
 			clean[len(clean)-1].Text += run.Text
 		} else {
 			clean = append(clean, run)
@@ -121,6 +214,14 @@ func exportedRichRuns(element Element) []sceneRun {
 // Preserve untouched run styles across a legacy editor's single replacement.
 // New text inherits its neighbour's emphasis; colour tags remain authoritative.
 func preserveRunStyles(before, after Element) Element {
+	after.unresolvedConnectorReference = ""
+	if before.Kind == "connector" && after.Kind == "connector" && before.ID == after.ID {
+		oldQ, oldErr := url.ParseQuery(before.Query)
+		newQ, newErr := url.ParseQuery(after.Query)
+		if oldErr == nil && newErr == nil && before.unresolvedConnectorReference == connectorReferenceSignature(before, oldQ) && connectorReferenceSignature(before, oldQ) == connectorReferenceSignature(after, newQ) {
+			after.unresolvedConnectorReference = before.unresolvedConnectorReference
+		}
+	}
 	if after.Extra == nil {
 		after.Extra = cloneJSONExtensions(before.Extra)
 	}
@@ -193,12 +294,19 @@ func preserveRunStyles(before, after Element) Element {
 			style = old[len(old)-(len(next)-i)]
 		}
 		next[i].Bold, next[i].Italic = style.Bold, style.Italic
+		next[i].BoldOff = style.BoldOff
 		next[i].Underline = style.Underline
+		next[i].FontID, next[i].FontSize = style.FontID, style.FontSize
+		next[i].FontRole = style.FontRole
+		if after.Kind == "code" || strings.EqualFold(next[i].Color, style.Color) {
+			next[i].ColorToken = style.ColorToken
+		}
 		if after.Kind == "code" {
 			next[i].Color = style.Color
 		}
 		if weightChanged {
 			next[i].Bold = newQ.Get("ttf-weight") == "bold"
+			next[i].BoldOff = false
 		}
 	}
 	if encoded, err := encodeModernRuns(after.Text, newQ.Get("ttf-weight"), after.Kind, next); err == nil {

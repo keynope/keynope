@@ -53,13 +53,18 @@ type Report struct {
 	Warnings []Warning `json:"warnings,omitempty"`
 }
 type Warning struct {
-	Slide   int    `json:"slide,omitempty"`
-	Object  string `json:"object,omitempty"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Slide       int    `json:"slide"` // Zero-based; -1 denotes a document-wide diagnostic.
+	Object      string `json:"object,omitempty"`
+	Code        string `json:"code"`
+	Message     string `json:"message"`
+	Feature     string `json:"feature,omitempty"`
+	Severity    string `json:"severity,omitempty"`
+	Fallback    string `json:"fallback,omitempty"`
+	Remediation string `json:"remediation,omitempty"`
 }
 
 type Presentation struct {
+	Theme         *Theme // Optional native palette; imported objects also retain resolved concrete colours/fonts.
 	Width         int64
 	Height        int64
 	Slides        []Slide
@@ -78,51 +83,95 @@ type Slide struct {
 	ID              string
 	Hidden          bool
 	Notes           string
-	Background      string // Resolved solid background colour, when the source supplies one.
+	Background      string // Resolved solid background colour; written as a native slide property.
 	BackgroundImage []byte // Resolved picture background, when the source supplies one.
 	BackgroundMIME  string
 	Objects         []Object
+	Timeline        *Timeline
 }
 type Object struct {
 	ID                  string
-	Kind                string // text, shape, image or line
+	Name                string // User-visible nonvisual name; never a reference identity.
+	Inherited           bool   // Read-only origin: layout/master IDs cannot be slide timing targets.
+	Kind                string // text, shape, image, line or table
 	X, Y, Width, Height float64
 	Rotation            float64
 	Text                string
 	FontFace            string
 	FontSize            float64 // points
 	Color               string  // #RRGGBB
-	Opacity             float64 // 0 means unspecified; otherwise 0..1
+	// Read-time source references; concrete values above/below remain the
+	// rendering/export fallbacks until the import adapter can bind a theme.
+	ColorThemeSlot      string
+	FontThemeRole       string
+	FillThemeSlot       string
+	StrokeThemeSlot     string
+	ColorThemeSource    string
+	FontThemeSource     string
+	FillThemeSource     string
+	StrokeThemeSource   string
+	Opacity             float64 // 0 means unspecified unless OpacitySet; otherwise 0..1
+	OpacitySet          bool    // Explicit alpha, including zero, from the selected paint.
 	Fill                string  // #RRGGBB or empty
 	Stroke              string  // #RRGGBB or empty
 	StrokeWidth         float64 // points
+	LineHead, LineTail  LineEnd
+	LinePoints          []LinePoint // Absolute, unrotated route vertices; empty means a straight line.
+	LineStart, LineEnd  *Connection
+	connectionLoss      bool
+	ConnectionSites     []ConnectionSite
+	Gradient            *ShapeGradient
+	Shadow              *ShapeShadow
+	TextEffects         *TextEffects
 	Shape               string
+	ShapeAdjustments    map[string]int64 // Constant DrawingML adjustment guides.
+	CustomGeometry      *CustomGeometry
+	hasShapeGeometry    bool
+	shapeAdjustmentLoss bool
+	shapePaintLoss      bool
+	textPaintLoss       bool
 	FlipH               bool
 	FlipV               bool
 	Link                string
 	Image               []byte
 	ImageMIME           string
-	CropLeft            float64 // Fractional source insets from a:srcRect.
+	ImageOpacity        *float64 // nil means unchanged source alpha; zero is fully transparent.
+	ImageSVG            []byte   // Passive SVG companion; Image remains the raster fallback.
+	CropLeft            float64  // Fractional source insets from a:srcRect.
 	CropTop             float64
 	CropRight           float64
 	CropBottom          float64
+	FillLeft            float64 // Fractional destination insets from a:fillRect.
+	FillTop             float64
+	FillRight           float64
+	FillBottom          float64
 	TextAlign           string // start, center, end or justify
 	VerticalAlign       string // top, middle or bottom
 	Bold                bool
 	Italic              bool
+	Paragraphs          []TextParagraph // Native DrawingML runs; Text remains the plain-text compatibility view.
+	Table               *Table
+	Chart               *Chart
+	ChartSource         []byte // Recoverable unsupported chart XML; never executed.
 }
 
 // colourResolver holds the presentation theme and the active colour map. It
 // deliberately lives inside the reader: callers receive concrete RGB values
 // rather than theme tokens that would render differently on the Mac and web.
 type colourResolver struct {
-	colours map[string]string
-	mapping map[string]string
+	colours              map[string]string
+	mapping              map[string]string
+	majorFont, minorFont string
+	theme                *Theme
+	parts                *themePartCache
+	textStyles           *node
+	colourPart, fontPart string // Independent effective scheme owners; overrides can replace either one.
 }
 
 type inheritedShape struct {
 	object      Object
 	hasGeometry bool
+	textSources []*node // Read-only master/layout placeholder cascade.
 }
 
 func normaliseLimits(v Limits) Limits {
@@ -213,16 +262,17 @@ func Read(ctx context.Context, source io.ReaderAt, size int64, options Options) 
 	if list == nil {
 		return result, Report{}, nil
 	}
-	resolver, err := readColourResolver(files, rels, limits)
+	resolver, err := readColourResolver(files, rels, limits, root)
 	if err != nil {
 		return Presentation{}, Report{}, err
 	}
+	result.Theme = resolver.theme
 	var report Report
 	for slideIndex, ref := range children(list, "sldId") {
 		if slideIndex >= limits.MaxSlides {
 			return Presentation{}, Report{}, fmt.Errorf("PPTX has more than %d slides", limits.MaxSlides)
 		}
-		relID := attr(ref, "id")
+		relID := relationshipID(ref, list, root)
 		target, ok := rels[relID]
 		if !ok {
 			return Presentation{}, Report{}, fmt.Errorf("slide relationship %q is missing", relID)
@@ -231,15 +281,17 @@ func Read(ctx context.Context, source io.ReaderAt, size int64, options Options) 
 		if err != nil {
 			return Presentation{}, Report{}, fmt.Errorf("read slide %d: %w", slideIndex+1, err)
 		}
-		slide.ID = attr(ref, "id")
-		slide.Hidden = strings.EqualFold(attr(ref, "show"), "0") || strings.EqualFold(attr(ref, "show"), "false")
+		slide.ID = relID
+		// Accept the old Keynope reference flag as a legacy fallback; correct
+		// PresentationML stores show on the slide root, not on p:sldId.
+		slide.Hidden = slide.Hidden || strings.EqualFold(attr(ref, "show"), "0") || strings.EqualFold(attr(ref, "show"), "false")
 		for i := range warnings {
 			warnings[i].Slide = slideIndex
 			report.Warnings = append(report.Warnings, warnings[i])
 		}
 		result.Slides = append(result.Slides, slide)
 	}
-	return result, report, nil
+	return result, report.Normalized(), nil
 }
 
 func readSlide(ctx context.Context, files map[string]*zip.File, part string, limits Limits, resolver colourResolver) (Slide, []Warning, error) {
@@ -255,6 +307,10 @@ func readSlide(ctx context.Context, files map[string]*zip.File, part string, lim
 		return Slide{}, nil, errors.New("invalid slide root")
 	}
 	rels, err := readRelationships(files, part, limits.MaxXMLPart)
+	if err != nil {
+		return Slide{}, nil, err
+	}
+	resolver, err = slideColourResolver(files, part, root, rels, limits, resolver)
 	if err != nil {
 		return Slide{}, nil, err
 	}
@@ -274,6 +330,9 @@ func readSlide(ctx context.Context, files map[string]*zip.File, part string, lim
 		return Slide{}, nil, err
 	}
 	warnings = append(warnings, parentWarnings...)
+	for i := range parentObjects {
+		parentObjects[i].Inherited = true
+	}
 	objects = append(objects, parentObjects...)
 	for _, child := range spTree.Children {
 		if err := ctx.Err(); err != nil {
@@ -282,16 +341,29 @@ func readSlide(ctx context.Context, files map[string]*zip.File, part string, lim
 		var object *Object
 		switch child.Name {
 		case "sp":
-			object = parseShape(child, links, resolver, parents[placeholderKey(child)], false)
+			object, err = parseShape(child, links, resolver, parents[placeholderKey(child)], false)
+			if err != nil {
+				return Slide{}, nil, err
+			}
 		case "pic":
-			object = parsePicture(child, rels, files, mediaCache, limits)
+			object = parsePicture(child, rels, files, mediaCache, limits, resolver)
 		case "cxnSp":
-			object = parseConnector(child, resolver)
+			object = parseConnector(child, resolver, links)
 		case "grpSp":
 			warnings = append(warnings, Warning{Code: "group-flattened", Message: "Nested PowerPoint group was flattened during import."})
-			objects = append(objects, parseGroup(child, rels, links, files, mediaCache, limits, resolver)...)
+			groupObjects, groupWarnings, groupErr := parseGroup(child, rels, links, files, mediaCache, limits, resolver)
+			if groupErr != nil {
+				return Slide{}, nil, groupErr
+			}
+			objects = append(objects, groupObjects...)
+			warnings = append(warnings, groupWarnings...)
 		case "graphicFrame":
-			warnings = append(warnings, Warning{Code: "unsupported-graphic-frame", Message: "A table, chart or other graphic frame was not imported."})
+			var tableWarnings []Warning
+			object, tableWarnings, err = parseGraphicFrame(child, rels, files, mediaCache, limits, resolver)
+			if err != nil {
+				return Slide{}, nil, err
+			}
+			warnings = append(warnings, tableWarnings...)
 		}
 		if object != nil {
 			objects = append(objects, *object)
@@ -307,33 +379,79 @@ func readSlide(ctx context.Context, files map[string]*zip.File, part string, lim
 	if image, mime := partBackgroundImage(root, rels, files, limits); len(image) > 0 {
 		background.Image, background.MIME = image, mime
 	}
-	return Slide{Background: background.Colour, BackgroundImage: background.Image, BackgroundMIME: background.MIME, Objects: objects}, warnings, nil
+	timeline, timingWarnings := readTimeline(ctx, data, root, objects)
+	if err := ctx.Err(); err != nil {
+		return Slide{}, nil, err
+	}
+	warnings = append(warnings, timingWarnings...)
+	for _, object := range objects {
+		if object.connectionLoss {
+			warnings = append(warnings, Warning{Object: object.ID, Code: "connector-attachment-unsupported", Message: "Malformed or out-of-bounds connection references were omitted; the line artwork remains."})
+		}
+		if object.Shape == "custom" && object.CustomGeometry == nil {
+			warnings = append(warnings, Warning{Object: object.ID, Code: "custom-shape-geometry-unsupported", Message: "Custom shape contains unsupported formulas, commands or geometry bounds; its native geometry could not be retained."})
+		}
+		if object.shapePaintLoss {
+			warnings = append(warnings, Warning{Object: object.ID, Code: "shape-paint-approximated", Message: "Unsupported gradient or shadow parameters were approximated or omitted."})
+		}
+		if object.textPaintLoss {
+			warnings = append(warnings, Warning{Object: object.ID, Code: "text-effects-approximated", Message: "Unsupported or differing character gradient/outline parameters were approximated or omitted."})
+		}
+		if object.shapeAdjustmentLoss {
+			warnings = append(warnings, Warning{Object: object.ID, Code: "shape-adjustment-formula-unsupported", Message: "Some shape adjustment guides were unsupported, duplicated or outside the supported limits; supported constants were retained and other guides use preset defaults."})
+		}
+	}
+	return Slide{Hidden: attr(root, "show") == "0" || attr(root, "show") == "false", Background: background.Colour, BackgroundImage: background.Image, BackgroundMIME: background.MIME, Objects: objects, Timeline: timeline}, warnings, nil
 }
 
-func parseGroup(n *node, rels, links map[string]string, files map[string]*zip.File, cache map[string][]byte, limits Limits, resolver colourResolver) []Object {
+func parseGroup(n *node, rels, links map[string]string, files map[string]*zip.File, cache map[string][]byte, limits Limits, resolver colourResolver) ([]Object, []Warning, error) {
 	var objects []Object
+	var warnings []Warning
 	for _, child := range n.Children {
 		switch child.Name {
 		case "sp":
-			if o := parseShape(child, links, resolver, nil, false); o != nil {
+			o, err := parseShape(child, links, resolver, nil, false)
+			if err != nil {
+				return nil, nil, err
+			}
+			if o != nil {
 				objects = append(objects, *o)
 			}
 		case "pic":
-			if o := parsePicture(child, rels, files, cache, limits); o != nil {
+			if o := parsePicture(child, rels, files, cache, limits, resolver); o != nil {
 				objects = append(objects, *o)
 			}
 		case "cxnSp":
-			if o := parseConnector(child, resolver); o != nil {
+			if o := parseConnector(child, resolver, links); o != nil {
 				objects = append(objects, *o)
 			}
 		case "grpSp":
-			objects = append(objects, parseGroup(child, rels, links, files, cache, limits, resolver)...)
+			nested, nestedWarnings, err := parseGroup(child, rels, links, files, cache, limits, resolver)
+			if err != nil {
+				return nil, nil, err
+			}
+			objects = append(objects, nested...)
+			warnings = append(warnings, nestedWarnings...)
+		case "graphicFrame":
+			object, tableWarnings, err := parseGraphicFrame(child, rels, files, cache, limits, resolver)
+			if err != nil {
+				return nil, nil, err
+			}
+			warnings = append(warnings, tableWarnings...)
+			if object != nil {
+				objects = append(objects, *object)
+			}
 		}
 	}
-	return objects
+	transformWarnings, err := applyGroupTransform(n, objects)
+	if err != nil {
+		return nil, nil, err
+	}
+	warnings = append(warnings, transformWarnings...)
+	return objects, warnings, nil
 }
 
-func parseShape(n *node, links map[string]string, resolver colourResolver, inherited *inheritedShape, retainEmpty bool) *Object {
+func parseShape(n *node, links map[string]string, resolver colourResolver, inherited *inheritedShape, retainEmpty bool) (*Object, error) {
 	id := ""
 	if nv := findFirst(n, "cNvPr"); nv != nil {
 		id = attr(nv, "id")
@@ -346,56 +464,115 @@ func parseShape(n *node, links map[string]string, resolver colourResolver, inher
 	shape := "rect"
 	if g := findFirst(n, "prstGeom"); g != nil && attr(g, "prst") != "" {
 		shape = attr(g, "prst")
+	} else if findFirst(n, "custGeom") != nil {
+		shape = "custom"
+	} else if findFirst(n, "custGeom") == nil && inherited != nil && inherited.object.Shape != "" {
+		shape = inherited.object.Shape
 	}
 	// Restrict paint lookup to spPr. A text run can have its own solidFill;
 	// treating that run colour as a shape fill changes a text box into a shape.
 	spPr := findFirst(n, "spPr")
 	fill, opacity := resolvedPaint(findChild(spPr, "solidFill"), resolver)
+	fillThemeSlot := resolvedThemeColourSlot(findChild(spPr, "solidFill"), resolver)
+	fillThemeSource := themeReferenceSource(fillThemeSlot, resolver.colourPart)
+	opacitySet := findFirst(findChild(spPr, "solidFill"), "alpha") != nil
+	gradient, gradientColor, gradientAlpha, gradientAlphaSet, gradientLoss := parseShapeGradient(spPr, resolver)
+	if gradientColor != "" {
+		fill, opacity, opacitySet = gradientColor, gradientAlpha, gradientAlphaSet
+		fillThemeSlot = ""
+		fillThemeSource = ""
+	}
+	shadow, shadowLoss := parseShapeShadow(spPr, resolver)
+	if inherited != nil {
+		parent := inherited.object
+		if !hasExplicitShapeFill(spPr) {
+			fill, opacity, opacitySet = parent.Fill, parent.Opacity, parent.OpacitySet
+			fillThemeSlot = parent.FillThemeSlot
+			fillThemeSource = parent.FillThemeSource
+			if parent.Gradient != nil {
+				value := *parent.Gradient
+				gradient = &value
+			}
+			gradientLoss = parent.shapePaintLoss
+		}
+		if findChild(spPr, "effectLst") == nil && findChild(spPr, "effectDag") == nil {
+			if parent.Shadow != nil {
+				shadow = cloneShapeShadow(parent.Shadow)
+			}
+			shadowLoss = parent.shapePaintLoss
+		}
+	}
 	stroke, strokeOpacity := "", 0.0
+	strokeOpacitySet := false
 	width := 0.0
 	if line := findChild(spPr, "ln"); line != nil {
 		stroke, strokeOpacity = resolvedPaint(findFirst(line, "solidFill"), resolver)
-		if v, _ := strconv.ParseFloat(attr(line, "w"), 64); v > 0 {
+		strokeOpacitySet = findFirst(findFirst(line, "solidFill"), "alpha") != nil
+		// DrawingML's absent line-width default is 0.75 points. An explicit
+		// zero remains zero rather than becoming an arbitrary Keynope outline.
+		if attr(line, "w") == "" && stroke != "" {
+			width = .75
+		} else if v, err := strconv.ParseFloat(attr(line, "w"), 64); err == nil && v >= 0 {
 			width = v / 12700
 		}
 	}
-	fontFace, fontSize, color, textOpacity, bold, italic := textProperties(n, resolver)
+	textStyle, textOpacity := textPropertyRun(n, resolver, inherited)
+	fontFace, fontSize, color, bold, italic := textStyle.FontFace, textStyle.FontSize, textStyle.Color, textStyle.Bold, textStyle.Italic
+	textPaint := findFirst(n, "defRPr")
+	if run := findFirst(n, "rPr"); run != nil {
+		if c, _ := resolvedPaint(findChild(run, "solidFill"), resolver); c != "" {
+			textPaint = run
+		}
+	}
+	textOpacitySet := findFirst(findChild(textPaint, "solidFill"), "alpha") != nil
 	if inherited != nil {
 		if fontFace == "" {
 			fontFace = inherited.object.FontFace
+			textStyle.FontThemeRole = inherited.object.FontThemeRole
+			textStyle.FontThemeSource = inherited.object.FontThemeSource
 		}
 		if fontSize <= 0 {
 			fontSize = inherited.object.FontSize
 		}
 		if color == "" {
 			color = inherited.object.Color
-		}
-		if textOpacity == 0 {
+			if !hasExplicitShapeFill(textPaint) {
+				textStyle.ColorThemeSlot = inherited.object.ColorThemeSlot
+				textStyle.ColorThemeSource = inherited.object.ColorThemeSource
+			}
 			textOpacity = inherited.object.Opacity
+			textOpacitySet = inherited.object.OpacitySet
 		}
-		if !bold {
+		if !bold && len(inherited.textSources) == 0 {
 			bold = inherited.object.Bold
 		}
-		if !italic {
+		if !italic && len(inherited.textSources) == 0 {
 			italic = inherited.object.Italic
 		}
 	}
-	if text == "" && fill == "" && stroke == "" && !retainEmpty {
-		return nil
+	// Our editable no-fill shapes can have neither a border nor label. Honour
+	// DrawingML's explicit shape/textbox distinction before legacy heuristics.
+	markedShape := false
+	switch attr(findFirst(n, "cNvSpPr"), "txBox") {
+	case "0", "false", "off":
+		markedShape = findFirst(n, "prstGeom") != nil || findFirst(n, "custGeom") != nil
+	}
+	if text == "" && fill == "" && stroke == "" && !retainEmpty && !markedShape {
+		return nil, nil
 	}
 	kind := "shape"
-	if text != "" && fill == "" && stroke == "" {
+	if !markedShape && text != "" && fill == "" && stroke == "" && shape != "custom" {
 		kind = "text"
 	}
 	link := ""
 	if hyperlink := findFirst(n, "hlinkClick"); hyperlink != nil {
 		link = links[attr(hyperlink, "id")]
 	}
-	if opacity == 0 {
-		opacity = strokeOpacity
-	}
-	if opacity == 0 {
-		opacity = textOpacity
+	if fill == "" {
+		opacity, opacitySet = strokeOpacity, strokeOpacitySet
+		if stroke == "" {
+			opacity, opacitySet = textOpacity, textOpacitySet
+		}
 	}
 	align, vertical := textAlignment(n)
 	if inherited != nil {
@@ -410,10 +587,78 @@ func parseShape(n *node, links map[string]string, resolver colourResolver, inher
 	if xfrm := findFirst(n, "xfrm"); xfrm != nil {
 		flipH, flipV = drawingMLBool(attr(xfrm, "flipH")), drawingMLBool(attr(xfrm, "flipV"))
 	}
-	return &Object{ID: id, Kind: kind, X: x, Y: y, Width: w, Height: h, Rotation: rotation, Text: text, FontFace: fontFace, FontSize: fontSize, Color: color, Opacity: opacity, Fill: fill, Stroke: stroke, StrokeWidth: width, Shape: shape, FlipH: flipH, FlipV: flipV, Link: link, TextAlign: align, VerticalAlign: vertical, Bold: bold, Italic: italic}
+	object := &Object{ID: id, Kind: kind, X: x, Y: y, Width: w, Height: h, Rotation: rotation, Text: text, FontFace: fontFace, FontSize: fontSize, Color: color, Opacity: opacity, Fill: fill, Stroke: stroke, StrokeWidth: width, Shape: shape, FlipH: flipH, FlipV: flipV, Link: link, TextAlign: align, VerticalAlign: vertical, Bold: bold, Italic: italic}
+	object.OpacitySet = opacitySet
+	object.ColorThemeSlot, object.FontThemeRole = textStyle.ColorThemeSlot, textStyle.FontThemeRole
+	object.ColorThemeSource, object.FontThemeSource = textStyle.ColorThemeSource, textStyle.FontThemeSource
+	object.FillThemeSlot = fillThemeSlot
+	object.FillThemeSource = fillThemeSource
+	object.StrokeThemeSlot = resolvedThemeColourSlot(findChild(findChild(spPr, "ln"), "solidFill"), resolver)
+	object.StrokeThemeSource = themeReferenceSource(object.StrokeThemeSlot, resolver.colourPart)
+	object.Name = attr(findFirst(n, "cNvPr"), "name")
+	object.TextEffects, object.textPaintLoss = parseTextEffects(n, resolver)
+	object.Gradient, object.Shadow, object.shapePaintLoss = gradient, shadow, gradientLoss || shadowLoss
+	object.hasShapeGeometry = findFirst(n, "prstGeom") != nil || findFirst(n, "custGeom") != nil
+	object.ShapeAdjustments, object.shapeAdjustmentLoss = parseShapeAdjustments(findFirst(n, "prstGeom"))
+	if custom := findFirst(n, "custGeom"); custom != nil {
+		object.CustomGeometry, _ = parseCustomGeometry(custom)
+		object.ConnectionSites = parseConnectionSites(custom)
+		object.ShapeAdjustments, object.shapeAdjustmentLoss = parseShapeAdjustments(custom)
+	}
+	if !object.hasShapeGeometry && inherited != nil {
+		object.hasShapeGeometry = inherited.object.hasShapeGeometry
+		object.shapeAdjustmentLoss = inherited.object.shapeAdjustmentLoss
+		object.CustomGeometry = cloneCustomGeometry(inherited.object.CustomGeometry)
+		object.ConnectionSites = append([]ConnectionSite(nil), inherited.object.ConnectionSites...)
+	}
+	if findFirst(n, "prstGeom") == nil && findFirst(n, "custGeom") == nil && inherited != nil && len(inherited.object.ShapeAdjustments) > 0 {
+		object.ShapeAdjustments = make(map[string]int64, len(inherited.object.ShapeAdjustments))
+		for name, value := range inherited.object.ShapeAdjustments {
+			object.ShapeAdjustments[name] = value
+		}
+	}
+	var err error
+	object.Paragraphs, err = parseTextParagraphs(n, resolver, inherited)
+	if err != nil {
+		return nil, err
+	}
+	if len(object.Paragraphs) > 0 {
+		object.Text = paragraphPlainText(object.Paragraphs)
+		if object.Paragraphs[0].Align != "" {
+			object.TextAlign = object.Paragraphs[0].Align
+		}
+		// Keep the paragraph's default separate from a first-word override.
+		// Runs carry their effective style independently, including explicit Off.
+		if defaults := findChild(findChild(findChild(findChild(n, "txBody"), "p"), "pPr"), "defRPr"); defaults != nil {
+			f, s, c, _, b, i := propertiesFromRun(defaults, resolver)
+			if f != "" {
+				object.FontFace = f
+				object.FontThemeRole = latinThemeRole(attr(findChild(defaults, "latin"), "typeface"), resolver)
+				object.FontThemeSource = themeReferenceSource(object.FontThemeRole, resolver.fontPart)
+			}
+			if s > 0 {
+				object.FontSize = s
+			}
+			if c != "" {
+				object.Color = c
+				object.ColorThemeSlot = resolvedThemeColourSlot(findChild(defaults, "solidFill"), resolver)
+				object.ColorThemeSource = themeReferenceSource(object.ColorThemeSlot, resolver.colourPart)
+			}
+			if attr(defaults, "b") != "" {
+				object.Bold = b
+			}
+			if attr(defaults, "i") != "" {
+				object.Italic = i
+			}
+		}
+	}
+	if err := validateObjectText(*object); err != nil {
+		return nil, err
+	}
+	return object, nil
 }
 
-func parsePicture(n *node, rels map[string]string, files map[string]*zip.File, cache map[string][]byte, limits Limits) *Object {
+func parsePicture(n *node, rels map[string]string, files map[string]*zip.File, cache map[string][]byte, limits Limits, resolver colourResolver) *Object {
 	id := ""
 	if nv := findFirst(n, "cNvPr"); nv != nil {
 		id = attr(nv, "id")
@@ -444,10 +689,39 @@ func parsePicture(n *node, rels map[string]string, files map[string]*zip.File, c
 		bottom, _ = strconv.ParseFloat(attr(crop, "b"), 64)
 		left, top, right, bottom = left/100000, top/100000, right/100000, bottom/100000
 	}
-	return &Object{ID: id, Kind: "image", X: x, Y: y, Width: w, Height: h, Rotation: rotation, Image: data, ImageMIME: mimeForPart(target), CropLeft: left, CropTop: top, CropRight: right, CropBottom: bottom}
+	object := &Object{ID: id, Kind: "image", X: x, Y: y, Width: w, Height: h, Rotation: rotation, Image: data, ImageMIME: mimeForPart(target), CropLeft: left, CropTop: top, CropRight: right, CropBottom: bottom}
+	object.Name = attr(findFirst(n, "cNvPr"), "name")
+	object.Shadow, object.shapePaintLoss = parseShapeShadow(findChild(n, "spPr"), resolver)
+	if xfrm := findFirst(n, "xfrm"); xfrm != nil {
+		object.FlipH = attr(xfrm, "flipH") == "1" || attr(xfrm, "flipH") == "true"
+		object.FlipV = attr(xfrm, "flipV") == "1" || attr(xfrm, "flipV") == "true"
+	}
+	if alpha := findFirst(blip, "alphaModFix"); alpha != nil {
+		if value, err := strconv.ParseFloat(attr(alpha, "amt"), 64); err == nil && !math.IsNaN(value) && value >= 0 && value <= 100000 {
+			value /= 100000
+			object.ImageOpacity = &value
+		}
+	}
+	if fill := findFirst(n, "fillRect"); fill != nil {
+		for name, target := range map[string]*float64{"l": &object.FillLeft, "t": &object.FillTop, "r": &object.FillRight, "b": &object.FillBottom} {
+			value, _ := strconv.ParseFloat(attr(fill, name), 64)
+			*target = value / 100000
+		}
+	}
+	if geometry := findFirst(n, "prstGeom"); geometry != nil {
+		object.Shape = attr(geometry, "prst")
+	}
+	if vector := findFirst(blip, "svgBlip"); vector != nil {
+		if part := rels[attr(vector, "embed")]; part != "" && strings.HasSuffix(strings.ToLower(part), ".svg") {
+			if svg, err := readPart(files, part, min(limits.MaxInflatedSize, 2<<20)); err == nil {
+				object.ImageSVG = svg // The application sanitizer owns SVG validation.
+			}
+		}
+	}
+	return object
 }
 
-func parseConnector(n *node, resolver colourResolver) *Object {
+func parseConnector(n *node, resolver colourResolver, linkMaps ...map[string]string) *Object {
 	x, y, w, h, r := transform(n)
 	id := ""
 	if nv := findFirst(n, "cNvPr"); nv != nil {
@@ -461,7 +735,19 @@ func parseConnector(n *node, resolver colourResolver) *Object {
 			width = v / 12700
 		}
 	}
-	return &Object{ID: id, Kind: "line", X: x, Y: y, Width: w, Height: h, Rotation: r, Stroke: stroke, StrokeWidth: width, Opacity: opacity}
+	xfrm := findFirst(n, "xfrm")
+	link := ""
+	points := parseLinePoints(n, x, y, w, h)
+	start, end := parseConnection(findFirst(n, "stCxn")), parseConnection(findFirst(n, "endCxn"))
+	if len(linkMaps) > 0 {
+		link = linkMaps[0][attr(findFirst(n, "hlinkClick"), "id")]
+	}
+	object := &Object{ID: id, Kind: "line", LineStart: start, LineEnd: end, LinePoints: points, X: x, Y: y, Width: w, Height: h, Rotation: r, FlipH: attr(xfrm, "flipH") == "1" || attr(xfrm, "flipH") == "true", FlipV: attr(xfrm, "flipV") == "1" || attr(xfrm, "flipV") == "true", Stroke: stroke, StrokeWidth: width, Opacity: opacity, OpacitySet: findFirst(findFirst(line, "solidFill"), "alpha") != nil, Link: link, LineHead: parseLineEnd(findChild(line, "headEnd")), LineTail: parseLineEnd(findChild(line, "tailEnd"))}
+	object.connectionLoss = findFirst(n, "stCxn") != nil && start == nil || findFirst(n, "endCxn") != nil && end == nil
+	object.Name = attr(findFirst(n, "cNvPr"), "name")
+	object.StrokeThemeSlot = resolvedThemeColourSlot(findChild(line, "solidFill"), resolver)
+	object.StrokeThemeSource = themeReferenceSource(object.StrokeThemeSlot, resolver.colourPart)
+	return object
 }
 
 func transform(n *node) (float64, float64, float64, float64, float64) {
@@ -499,32 +785,48 @@ func placeholderKey(n *node) string {
 	return kind + "|" + attr(ph, "idx")
 }
 
-func textProperties(n *node, resolver colourResolver) (string, float64, string, float64, bool, bool) {
+func textProperties(n *node, resolver colourResolver, parents ...*inheritedShape) (string, float64, string, float64, bool, bool) {
+	style, opacity := textPropertyRun(n, resolver, parents...)
+	return style.FontFace, style.FontSize, style.Color, opacity, style.Bold, style.Italic
+}
+
+func textPropertyRun(n *node, resolver colourResolver, parents ...*inheritedShape) (TextRun, float64) {
 	// A run generally contains only overrides. The layout's defRPr supplies
 	// the actual font, colour and size for ordinary PowerPoint placeholders.
 	base := findFirst(n, "defRPr")
 	run := findFirst(n, "rPr")
-	face, size, colour, opacity, bold, italic := propertiesFromRun(base, resolver)
+	style, opacity, _ := overlayTextRunProperties(TextRun{}, base, resolver)
+	var inherited *inheritedShape
+	if len(parents) > 0 {
+		inherited = parents[0]
+	}
+	body := findChild(n, "txBody")
+	if resolver.textStyles != nil || findChild(body, "lstStyle") != nil || len(inheritedTextSources(inherited)) > 0 {
+		paragraph := findChild(body, "p")
+		properties := findChild(paragraph, "pPr")
+		level, _ := strconv.Atoi(attr(properties, "lvl"))
+		if level < 0 || level > 8 {
+			level = 0
+		}
+		defaults := paragraphRunBase(n, resolver, inherited, level)
+		defaults = overlayTextRun(defaults, findChild(properties, "defRPr"), resolver)
+		style = defaults
+	}
+	if style.FontFace == "" {
+		style.FontFace = shapeThemeFont(n, resolver)
+		if style.FontFace != "" {
+			style.FontThemeRole = attr(findChild(findChild(n, "style"), "fontRef"), "idx")
+			style.FontThemeSource = themeReferenceSource(style.FontThemeRole, resolver.fontPart)
+		}
+	}
 	if run == nil {
-		return face, size, colour, opacity, bold, italic
+		return style, opacity
 	}
-	rFace, rSize, rColour, rOpacity, rBold, rItalic := propertiesFromRun(run, resolver)
-	if rFace != "" {
-		face = rFace
+	style, rOpacity, hasColour := overlayTextRunProperties(style, run, resolver)
+	if hasColour {
+		opacity = rOpacity
 	}
-	if rSize > 0 {
-		size = rSize
-	}
-	if rColour != "" {
-		colour, opacity = rColour, rOpacity
-	}
-	if attr(run, "b") != "" {
-		bold = rBold
-	}
-	if attr(run, "i") != "" {
-		italic = rItalic
-	}
-	return face, size, colour, opacity, bold, italic
+	return style, opacity
 }
 
 func propertiesFromRun(n *node, resolver colourResolver) (string, float64, string, float64, bool, bool) {
@@ -538,7 +840,7 @@ func propertiesFromRun(n *node, resolver colourResolver) (string, float64, strin
 	colour, opacity := resolvedPaint(findChild(n, "solidFill"), resolver)
 	face := ""
 	if latin := findChild(n, "latin"); latin != nil {
-		face = attr(latin, "typeface")
+		face = resolver.typeface(attr(latin, "typeface"))
 	}
 	return face, size, colour, opacity, drawingMLBool(attr(n, "b")), drawingMLBool(attr(n, "i"))
 }
@@ -601,24 +903,39 @@ func resolveInheritedSlideParts(files map[string]*zip.File, slidePart string, sl
 	placeholders := map[string]*inheritedShape{}
 	var fixed []Object
 	var warnings []Warning
-	layoutPart := relationshipTargetContaining(slideRels, "slideLayouts/")
-	if layoutPart == "" {
-		return placeholders, fixed, resolvedBackground{}, warnings, nil
-	}
-	layoutRoot, layoutRels, err := readPartRootAndRelationships(files, layoutPart, limits)
+	layoutPart, err := typedRelationshipTarget(files, slidePart, "slideLayout", limits)
 	if err != nil {
 		return nil, nil, resolvedBackground{}, nil, err
 	}
-	masterPart := relationshipTargetContaining(layoutRels, "slideMasters/")
+	if layoutPart == "" {
+		layoutPart = relationshipTargetContaining(slideRels, "slideLayouts/")
+	}
+	if layoutPart == "" {
+		return placeholders, fixed, resolvedBackground{}, warnings, nil
+	}
+	layoutRoot, layoutRels, err := readThemePart(files, layoutPart, limits, resolver.parts)
+	if err != nil {
+		return nil, nil, resolvedBackground{}, nil, err
+	}
+	masterPart, err := typedRelationshipTarget(files, layoutPart, "slideMaster", limits)
+	if err != nil {
+		return nil, nil, resolvedBackground{}, nil, err
+	}
+	if masterPart == "" {
+		masterPart = relationshipTargetContaining(layoutRels, "slideMasters/")
+	}
 	background := resolvedBackground{}
 	if masterPart != "" {
-		masterRoot, masterRels, err := readPartRootAndRelationships(files, masterPart, limits)
+		masterRoot, masterRels, err := readThemePart(files, masterPart, limits, resolver.parts)
 		if err != nil {
 			return nil, nil, resolvedBackground{}, nil, err
 		}
 		background.Colour = partBackground(masterRoot, resolver)
 		background.Image, background.MIME = partBackgroundImage(masterRoot, masterRels, files, limits)
-		masterPlaceholders, masterFixed, masterWarnings := parseInheritedShapeTree(masterRoot, masterRels, files, cache, limits, resolver)
+		masterPlaceholders, masterFixed, masterWarnings, err := parseInheritedShapeTree(masterRoot, masterRels, files, cache, limits, resolver)
+		if err != nil {
+			return nil, nil, resolvedBackground{}, nil, err
+		}
 		for key, donor := range masterPlaceholders {
 			placeholders[key] = donor
 		}
@@ -631,11 +948,15 @@ func resolveInheritedSlideParts(files map[string]*zip.File, slidePart string, sl
 	if image, mime := partBackgroundImage(layoutRoot, layoutRels, files, limits); len(image) > 0 {
 		background.Image, background.MIME = image, mime
 	}
-	layoutPlaceholders, layoutFixed, layoutWarnings := parseInheritedShapeTree(layoutRoot, layoutRels, files, cache, limits, resolver)
+	layoutPlaceholders, layoutFixed, layoutWarnings, err := parseInheritedShapeTree(layoutRoot, layoutRels, files, cache, limits, resolver)
+	if err != nil {
+		return nil, nil, resolvedBackground{}, nil, err
+	}
 	for key, donor := range layoutPlaceholders {
 		if base := placeholders[key]; base != nil {
 			donor.object = mergeInheritedObject(base.object, donor.object)
 			donor.hasGeometry = donor.hasGeometry || base.hasGeometry
+			donor.textSources = append(append([]*node(nil), base.textSources...), donor.textSources...)
 		}
 		placeholders[key] = donor
 	}
@@ -661,21 +982,26 @@ func readPartRootAndRelationships(files map[string]*zip.File, part string, limit
 }
 
 func relationshipTargetContaining(rels map[string]string, segment string) string {
+	var matches []string
 	for _, target := range rels {
 		if strings.Contains(target, segment) {
-			return target
+			matches = append(matches, target)
 		}
+	}
+	sort.Strings(matches)
+	if len(matches) > 0 {
+		return matches[0]
 	}
 	return ""
 }
 
-func parseInheritedShapeTree(root *node, rels map[string]string, files map[string]*zip.File, cache map[string][]byte, limits Limits, resolver colourResolver) (map[string]*inheritedShape, []Object, []Warning) {
+func parseInheritedShapeTree(root *node, rels map[string]string, files map[string]*zip.File, cache map[string][]byte, limits Limits, resolver colourResolver) (map[string]*inheritedShape, []Object, []Warning, error) {
 	placeholders := map[string]*inheritedShape{}
 	var fixed []Object
 	var warnings []Warning
 	tree := findFirst(root, "spTree")
 	if tree == nil {
-		return placeholders, fixed, warnings
+		return placeholders, fixed, warnings, nil
 	}
 	for _, child := range tree.Children {
 		switch child.Name {
@@ -683,13 +1009,16 @@ func parseInheritedShapeTree(root *node, rels map[string]string, files map[strin
 			// A layout/master placeholder frequently carries only geometry and
 			// default text properties. Retain that otherwise-empty donor so a
 			// slide-local placeholder can inherit its complete appearance.
-			object := parseShape(child, nil, resolver, nil, placeholderKey(child) != "")
+			object, err := parseShape(child, nil, resolver, nil, placeholderKey(child) != "")
+			if err != nil {
+				return nil, nil, nil, err
+			}
 			if object == nil {
 				continue
 			}
 			if key := placeholderKey(child); key != "" {
 				_, _, _, _, _, hasGeometry := transformWithPresence(child)
-				placeholders[key] = &inheritedShape{object: *object, hasGeometry: hasGeometry}
+				placeholders[key] = &inheritedShape{object: *object, hasGeometry: hasGeometry, textSources: []*node{child}}
 				continue
 			}
 			// Parent templates commonly contain empty authoring placeholders.
@@ -698,7 +1027,7 @@ func parseInheritedShapeTree(root *node, rels map[string]string, files map[strin
 				fixed = append(fixed, *object)
 			}
 		case "pic":
-			if object := parsePicture(child, rels, files, cache, limits); object != nil {
+			if object := parsePicture(child, rels, files, cache, limits, resolver); object != nil {
 				fixed = append(fixed, *object)
 			}
 		case "cxnSp":
@@ -707,13 +1036,41 @@ func parseInheritedShapeTree(root *node, rels map[string]string, files map[strin
 			}
 		case "grpSp":
 			warnings = append(warnings, Warning{Code: "inherited-group-flattened", Message: "An inherited PowerPoint group was flattened during import."})
-			fixed = append(fixed, parseGroup(child, rels, nil, files, cache, limits, resolver)...)
+			objects, groupWarnings, err := parseGroup(child, rels, nil, files, cache, limits, resolver)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			fixed = append(fixed, objects...)
+			warnings = append(warnings, groupWarnings...)
+		case "graphicFrame":
+			object, tableWarnings, err := parseGraphicFrame(child, rels, files, cache, limits, resolver)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			warnings = append(warnings, tableWarnings...)
+			if object != nil {
+				fixed = append(fixed, *object)
+			}
 		}
 	}
-	return placeholders, fixed, warnings
+	return placeholders, fixed, warnings, nil
 }
 
 func mergeInheritedObject(base, override Object) Object {
+	if !override.hasShapeGeometry && base.hasShapeGeometry {
+		override.Shape = base.Shape
+		override.hasShapeGeometry = true
+		override.shapeAdjustmentLoss = base.shapeAdjustmentLoss
+		override.CustomGeometry = cloneCustomGeometry(base.CustomGeometry)
+		override.ConnectionSites = append([]ConnectionSite(nil), base.ConnectionSites...)
+		override.ShapeAdjustments = nil
+		if len(base.ShapeAdjustments) > 0 {
+			override.ShapeAdjustments = make(map[string]int64, len(base.ShapeAdjustments))
+			for name, value := range base.ShapeAdjustments {
+				override.ShapeAdjustments[name] = value
+			}
+		}
+	}
 	if override.FontFace == "" {
 		override.FontFace = base.FontFace
 	}
@@ -721,7 +1078,10 @@ func mergeInheritedObject(base, override Object) Object {
 		override.FontSize = base.FontSize
 	}
 	if override.Color == "" {
-		override.Color, override.Opacity = base.Color, base.Opacity
+		override.Color = base.Color
+		if !override.OpacitySet && override.Opacity == 0 && override.Fill == "" && override.Stroke == "" {
+			override.Opacity, override.OpacitySet = base.Opacity, base.OpacitySet
+		}
 	}
 	if override.TextAlign == "" {
 		override.TextAlign = base.TextAlign
@@ -804,8 +1164,139 @@ func paragraphText(n *node) []string {
 
 // Write emits a self-contained, macro-free Transitional PresentationML package.
 func Write(ctx context.Context, target io.Writer, presentation Presentation) (Report, error) {
+	if err := validateTheme(presentation.Theme); err != nil {
+		return Report{}, err
+	}
 	if len(presentation.Slides) == 0 {
 		return Report{}, errors.New("PowerPoint export needs at least one slide")
+	}
+	// Reject malformed semantic payloads before writing even a partial ZIP.
+	for _, slide := range presentation.Slides {
+		if slide.Background != "" {
+			if _, _, _, ok := colourRGB(slide.Background); !ok {
+				return Report{}, fmt.Errorf("invalid slide background colour")
+			}
+		}
+		for _, object := range slide.Objects {
+			// All object writers convert these values to integer DrawingML
+			// coordinates. Reject invalid frames before creating a ZIP, not after
+			// float-to-integer conversion has hidden a NaN/overflow as an integer.
+			for _, value := range []float64{object.X, object.Y, object.Width, object.Height} {
+				if math.IsNaN(value) || math.IsInf(value, 0) || math.Abs(value) > 1e9 {
+					return Report{}, fmt.Errorf("invalid object frame bounds")
+				}
+			}
+			// Connector dimensions are signed endpoint deltas; connectorXML
+			// normalizes them into positive extents plus flip flags.
+			if object.Kind != "line" && (object.Width < 0 || object.Height < 0) {
+				return Report{}, fmt.Errorf("object frame dimensions cannot be negative")
+			}
+			// ST_Angle is a signed 32-bit integer in 1/60000 degree units.
+			angle := object.Rotation * 60000
+			if math.IsNaN(angle) || math.IsInf(angle, 0) || angle < math.MinInt32 || angle > math.MaxInt32 {
+				return Report{}, fmt.Errorf("object rotation exceeds DrawingML angle bounds")
+			}
+			if !validObjectDisplayName(object.Name) {
+				return Report{}, fmt.Errorf("object names must be one line and at most 128 characters")
+			}
+			if err := validateConnections(object); err != nil {
+				return Report{}, err
+			}
+			if object.CustomGeometry != nil && object.Kind != "shape" && object.Kind != "text" {
+				return Report{}, fmt.Errorf("custom geometry requires a shape")
+			}
+			if err := validateCustomGeometry(object.CustomGeometry); err != nil {
+				return Report{}, err
+			}
+			if err := validateTextEffects(object.TextEffects); err != nil {
+				return Report{}, err
+			}
+			if err := validateShapePaint(object); err != nil {
+				return Report{}, err
+			}
+			if object.Kind == "line" {
+				if err := validateLinePoints(object.LinePoints); err != nil {
+					return Report{}, err
+				}
+				if !validLineEnd(object.LineHead) || !validLineEnd(object.LineTail) {
+					return Report{}, fmt.Errorf("invalid line arrowhead")
+				}
+				for _, value := range []float64{object.X, object.Y, object.Width, object.Height, object.Rotation, object.StrokeWidth} {
+					if math.IsNaN(value) || math.IsInf(value, 0) || math.Abs(value) > 1e9 {
+						return Report{}, fmt.Errorf("invalid line geometry")
+					}
+				}
+				if object.StrokeWidth < 0 {
+					return Report{}, fmt.Errorf("invalid line width")
+				}
+			}
+			if math.IsNaN(object.Opacity) || math.IsInf(object.Opacity, 0) || object.Opacity < 0 || object.Opacity > 1 {
+				return Report{}, fmt.Errorf("invalid object opacity")
+			}
+			if err := validateShapeAdjustments(object.ShapeAdjustments); err != nil {
+				return Report{}, err
+			}
+			if object.Kind == "image" {
+				if opacity := object.ImageOpacity; opacity != nil && (math.IsNaN(*opacity) || math.IsInf(*opacity, 0) || *opacity < 0 || *opacity > 1) {
+					return Report{}, fmt.Errorf("invalid image opacity")
+				}
+				for _, inset := range []float64{object.CropLeft, object.CropTop, object.CropRight, object.CropBottom} {
+					if math.IsNaN(inset) || math.IsInf(inset, 0) || math.Abs(inset) > 100 {
+						return Report{}, fmt.Errorf("invalid image crop")
+					}
+				}
+				if object.CropLeft+object.CropRight >= 1 || object.CropTop+object.CropBottom >= 1 {
+					return Report{}, fmt.Errorf("image crop must retain visible source")
+				}
+				for _, inset := range []float64{object.FillLeft, object.FillTop, object.FillRight, object.FillBottom} {
+					if math.IsNaN(inset) || math.IsInf(inset, 0) || math.Abs(inset) > 100 {
+						return Report{}, fmt.Errorf("invalid image destination inset")
+					}
+				}
+				if object.FillLeft+object.FillRight >= 1 || object.FillTop+object.FillBottom >= 1 {
+					return Report{}, fmt.Errorf("image destination must retain visible area")
+				}
+			}
+			if err := validateObjectText(object); err != nil {
+				return Report{}, err
+			}
+			if err := ctx.Err(); err != nil {
+				return Report{}, err
+			}
+			if object.Kind == "chart" {
+				if err := validateChart(object.Chart); err != nil {
+					return Report{}, err
+				}
+				for _, v := range []float64{object.X, object.Y, object.Width, object.Height, object.Rotation} {
+					if math.IsNaN(v) || math.IsInf(v, 0) || math.Abs(v) > 1e8 {
+						return Report{}, fmt.Errorf("invalid chart frame bounds")
+					}
+				}
+				if object.Width <= 0 || object.Height <= 0 {
+					return Report{}, fmt.Errorf("chart frame needs positive dimensions")
+				}
+			}
+			if object.Kind == "table" {
+				if err := validateTable(object.Table); err != nil {
+					return Report{}, err
+				}
+				for _, v := range []float64{object.X, object.Y, object.Width, object.Height, object.Rotation} {
+					if math.IsNaN(v) || math.IsInf(v, 0) || math.Abs(v) > 1e8 {
+						return Report{}, fmt.Errorf("invalid table frame bounds")
+					}
+				}
+				if object.Width <= 0 || object.Height <= 0 {
+					return Report{}, fmt.Errorf("table frame needs positive dimensions")
+				}
+				for _, tracks := range [][]int64{tableEMUTracks(object.Table.Columns, object.Width), tableEMUTracks(object.Table.Rows, object.Height)} {
+					for _, v := range tracks {
+						if v <= 0 {
+							return Report{}, fmt.Errorf("table tracks are too small for PowerPoint precision")
+						}
+					}
+				}
+			}
+		}
 	}
 	if presentation.Width <= 0 {
 		presentation.Width = SlideWidthEMU
@@ -843,6 +1334,12 @@ func Write(ctx context.Context, target io.Writer, presentation Presentation) (Re
 			if _, ok := assets[key]; !ok {
 				assets[key] = mediaPart{Part: fmt.Sprintf("ppt/media/image%d%s", len(assets)+1, extensionForMIME(object.ImageMIME)), Data: object.Image, MIME: object.ImageMIME}
 			}
+			if len(object.ImageSVG) > 0 {
+				vectorKey := "svg:" + base64.RawURLEncoding.EncodeToString(object.ImageSVG)
+				if _, ok := assets[vectorKey]; !ok {
+					assets[vectorKey] = mediaPart{Part: fmt.Sprintf("ppt/media/image%d.svg", len(assets)+1), Data: object.ImageSVG, MIME: "image/svg+xml"}
+				}
+			}
 			_ = objectIndex
 		}
 		_ = slideIndex
@@ -865,7 +1362,7 @@ func Write(ctx context.Context, target io.Writer, presentation Presentation) (Re
 	if err := add("ppt/_rels/presentation.xml.rels", presentationRels(presentation)); err != nil {
 		return report, err
 	}
-	if err := add("ppt/theme/theme1.xml", themeXML()); err != nil {
+	if err := add("ppt/theme/theme1.xml", themeXML(presentation.Theme)); err != nil {
 		return report, err
 	}
 	if err := add("ppt/slideMasters/slideMaster1.xml", masterXML()); err != nil {
@@ -884,13 +1381,31 @@ func Write(ctx context.Context, target io.Writer, presentation Presentation) (Re
 		if err := ctx.Err(); err != nil {
 			return report, err
 		}
-		xmlPart, rels, warnings := slideXML(slide, assets)
+		xmlPart, rels, warnings := slideXML(slide, assets, index)
+		for i := range warnings {
+			warnings[i].Slide = index
+		}
 		report.Warnings = append(report.Warnings, warnings...)
 		if err := add(fmt.Sprintf("ppt/slides/slide%d.xml", index+1), xmlPart); err != nil {
 			return report, err
 		}
 		if err := add(fmt.Sprintf("ppt/slides/_rels/slide%d.xml.rels", index+1), rels); err != nil {
 			return report, err
+		}
+		for objectIndex, object := range slide.Objects {
+			if object.Kind != "chart" {
+				continue
+			}
+			name := chartPartName(index, objectIndex)
+			workbook, err := chartWorkbook(object.Chart)
+			if err != nil {
+				return report, err
+			}
+			for _, part := range [][2]string{{"ppt/charts/" + name + ".xml", chartXML(object.Chart)}, {"ppt/charts/_rels/" + name + ".xml.rels", chartRelationships(name)}, {"ppt/embeddings/" + name + ".xlsx", string(workbook)}} {
+				if err := add(part[0], part[1]); err != nil {
+					return report, err
+				}
+			}
 		}
 	}
 	keys := make([]string, 0, len(assets))
@@ -922,7 +1437,7 @@ func Write(ctx context.Context, target io.Writer, presentation Presentation) (Re
 	if err := zw.Close(); err != nil {
 		return report, err
 	}
-	return report, nil
+	return report.Normalized(), nil
 }
 
 func usableEmbeddedFonts(input []EmbeddedFont) []EmbeddedFont {
@@ -1183,12 +1698,8 @@ func presentationXML(p Presentation) string {
 		b.WriteString(` embedTrueTypeFonts="1" saveSubsetFonts="1"`)
 	}
 	b.WriteString(`><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:sldIdLst>`)
-	for i, slide := range p.Slides {
-		show := ""
-		if slide.Hidden {
-			show = ` show="0"`
-		}
-		fmt.Fprintf(&b, `<p:sldId id="%d" r:id="rId%d"%s/>`, 256+i, i+2, show)
+	for i := range p.Slides {
+		fmt.Fprintf(&b, `<p:sldId id="%d" r:id="rId%d"/>`, 256+i, i+2)
 	}
 	fmt.Fprintf(&b, `</p:sldIdLst><p:sldSz cx="%d" cy="%d" type="screen16x9"/><p:notesSz cx="6858000" cy="9144000"/>`, p.Width, p.Height)
 	if len(p.EmbeddedFonts) > 0 {
@@ -1218,10 +1729,18 @@ func contentTypes(p Presentation, assets map[string]mediaPart) string {
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="jpg" ContentType="image/jpeg"/><Default Extension="jpeg" ContentType="image/jpeg"/><Default Extension="fntdata" ContentType="application/x-fontdata"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>`)
 	for i := range p.Slides {
 		fmt.Fprintf(&b, `<Override PartName="/ppt/slides/slide%d.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>`, i+1)
+		for j, object := range p.Slides[i].Objects {
+			if object.Kind == "chart" {
+				name := chartPartName(i, j)
+				fmt.Fprintf(&b, `<Override PartName="/ppt/charts/%s.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/><Override PartName="/ppt/embeddings/%s.xlsx" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"/>`, name, name)
+			}
+		}
 	}
+	seen := map[string]bool{}
 	for _, asset := range assets {
-		if asset.MIME == "image/gif" {
-			b.WriteString(`<Default Extension="gif" ContentType="image/gif"/>`)
+		if (asset.MIME == "image/gif" || asset.MIME == "image/svg+xml") && !seen[asset.MIME] {
+			seen[asset.MIME] = true
+			fmt.Fprintf(&b, `<Default Extension="%s" ContentType="%s"/>`, strings.TrimPrefix(extensionForMIME(asset.MIME), "."), asset.MIME)
 		}
 	}
 	b.WriteString(`</Types>`)
@@ -1238,29 +1757,86 @@ func masterXML() string {
 func layoutXML() string {
 	return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="blank" preserve="1"><p:cSld name="Blank">` + baseTree() + `</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>`
 }
-func themeXML() string {
+func themeXML(themes ...*Theme) string {
+	var theme *Theme
+	if len(themes) > 0 {
+		theme = themes[0]
+	}
 	// Each format-style list has a schema minimum of three children. Empty
 	// containers are accepted by some readers but trigger repair in PowerPoint.
 	const fill = `<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>`
 	const line = `<a:ln w="9525" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/><a:round/><a:headEnd type="none" w="med" len="med"/><a:tailEnd type="none" w="med" len="med"/></a:ln>`
 	const effect = `<a:effectStyle><a:effectLst/></a:effectStyle>`
-	return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Keynope"><a:themeElements><a:clrScheme name="Keynope"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="1F1F24"/></a:dk2><a:lt2><a:srgbClr val="F4F1E8"/></a:lt2><a:accent1><a:srgbClr val="55AAFF"/></a:accent1><a:accent2><a:srgbClr val="FF55AA"/></a:accent2><a:accent3><a:srgbClr val="55FFAA"/></a:accent3><a:accent4><a:srgbClr val="FFCC55"/></a:accent4><a:accent5><a:srgbClr val="AA55FF"/></a:accent5><a:accent6><a:srgbClr val="55FFFF"/></a:accent6><a:hlink><a:srgbClr val="55AAFF"/></a:hlink><a:folHlink><a:srgbClr val="AA55FF"/></a:folHlink></a:clrScheme><a:fontScheme name="Keynope"><a:majorFont><a:latin typeface="Arial"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Arial"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="Keynope"><a:fillStyleLst>` + fill + fill + fill + `</a:fillStyleLst><a:lnStyleLst>` + line + line + line + `</a:lnStyleLst><a:effectStyleLst>` + effect + effect + effect + `</a:effectStyleLst><a:bgFillStyleLst>` + fill + fill + fill + `</a:bgFillStyleLst></a:fmtScheme></a:themeElements><a:objectDefaults/><a:extraClrSchemeLst/></a:theme>`
+	return themeHeader(theme) + `<a:fmtScheme name="Keynope"><a:fillStyleLst>` + fill + fill + fill + `</a:fillStyleLst><a:lnStyleLst>` + line + line + line + `</a:lnStyleLst><a:effectStyleLst>` + effect + effect + effect + `</a:effectStyleLst><a:bgFillStyleLst>` + fill + fill + fill + `</a:bgFillStyleLst></a:fmtScheme></a:themeElements><a:objectDefaults/><a:extraClrSchemeLst/></a:theme>`
 }
 
-func slideXML(slide Slide, assets map[string]mediaPart) (string, string, []Warning) {
+func slideXML(slide Slide, assets map[string]mediaPart, slideIndexes ...int) (string, string, []Warning) {
+	slideIndex := 0
+	if len(slideIndexes) > 0 {
+		slideIndex = slideIndexes[0]
+	}
 	var b strings.Builder
 	var rels strings.Builder
 	rels.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>`)
-	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld>` + baseTree())
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="p14"`)
+	if slide.Hidden {
+		b.WriteString(` show="0"`)
+	}
+	b.WriteString(`><p:cSld>`)
+	if slide.Background != "" {
+		b.WriteString(`<p:bg><p:bgPr>` + solidFill(slide.Background) + `<a:effectLst/></p:bgPr></p:bg>`)
+	}
+	b.WriteString(baseTree())
 	var warnings []Warning
+	shapeIDs := map[string]int{}
+	connectionIDs, connectionCounts := map[string]int{}, map[string]int{}
+	connectionID := 2
+	for _, object := range slide.Objects {
+		if !hasExportBounds(object) {
+			continue
+		}
+		if object.Kind == "image" {
+			if _, exists := assets[base64.RawURLEncoding.EncodeToString(object.Image)]; !exists {
+				continue
+			}
+		}
+		if _, duplicate := connectionIDs[object.ID]; duplicate {
+			connectionIDs[object.ID] = 0
+		} else {
+			connectionIDs[object.ID] = connectionID
+		}
+		connectionCounts[object.ID] = len(object.ConnectionSites)
+		connectionID++
+	}
 	nextID := 2
 	nextRel := 2
-	for _, o := range slide.Objects {
-		if o.Width <= 0 || o.Height <= 0 {
+	for objectIndex, o := range slide.Objects {
+		if o.Kind == "line" && len(o.LinePoints) > 1 {
+			_, o.X, o.Y, o.Width, o.Height = routedLineGeometry(o.LinePoints)
+		}
+		if o.Kind != "line" && (o.Width <= 0 || o.Height <= 0) || o.Kind == "line" && o.Width == 0 && o.Height == 0 {
 			warnings = append(warnings, Warning{Object: o.ID, Code: "invalid-bounds", Message: "Object with empty bounds was skipped."})
 			continue
 		}
+		if o.Kind == "line" {
+			var loss []Warning
+			o, loss = resolveSlideConnections(o, connectionIDs, connectionCounts)
+			warnings = append(warnings, loss...)
+		}
 		switch o.Kind {
+		case "chart":
+			rid := fmt.Sprintf("rId%d", nextRel)
+			nextRel++
+			fmt.Fprintf(&rels, `<Relationship Id="%s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/%s.xml"/>`, rid, chartPartName(slideIndex, objectIndex))
+			b.WriteString(chartFrameXML(o, nextID, rid))
+			if o.Link != "" {
+				warnings = append(warnings, Warning{Object: o.ID, Code: "chart-link-omitted", Message: "Chart-level hyperlinks were not exported."})
+			}
+		case "table":
+			b.WriteString(tableXML(o, nextID, ""))
+			if o.Link != "" {
+				warnings = append(warnings, Warning{Object: o.ID, Code: "table-link-omitted", Message: "Table-level hyperlinks were not exported."})
+			}
 		case "image":
 			key := base64.RawURLEncoding.EncodeToString(o.Image)
 			asset, ok := assets[key]
@@ -1271,7 +1847,15 @@ func slideXML(slide Slide, assets map[string]mediaPart) (string, string, []Warni
 			rid := fmt.Sprintf("rId%d", nextRel)
 			nextRel++
 			fmt.Fprintf(&rels, `<Relationship Id="%s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/%s"/>`, rid, path.Base(asset.Part))
-			b.WriteString(pictureXML(o, nextID, rid))
+			vectorRID := ""
+			if len(o.ImageSVG) > 0 {
+				if vector, ok := assets["svg:"+base64.RawURLEncoding.EncodeToString(o.ImageSVG)]; ok {
+					vectorRID = fmt.Sprintf("rId%d", nextRel)
+					nextRel++
+					fmt.Fprintf(&rels, `<Relationship Id="%s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/%s"/>`, vectorRID, path.Base(vector.Part))
+				}
+			}
+			b.WriteString(pictureXML(o, nextID, rid, vectorRID))
 		default:
 			linkID := ""
 			if o.Link != "" {
@@ -1285,13 +1869,25 @@ func slideXML(slide Slide, assets map[string]mediaPart) (string, string, []Warni
 			}
 			b.WriteString(shapeXML(o, nextID, linkID))
 		}
+		if _, duplicate := shapeIDs[o.ID]; duplicate {
+			shapeIDs[o.ID] = 0
+		} else {
+			shapeIDs[o.ID] = nextID
+		}
 		nextID++
 	}
-	b.WriteString(`</p:spTree></p:cSld></p:sld>`)
+	b.WriteString(`</p:spTree></p:cSld>`)
+	timing, timingWarnings := timelineXML(slide.Timeline, shapeIDs, slide.Objects)
+	b.WriteString(timing)
+	warnings = append(warnings, timingWarnings...)
+	b.WriteString(`</p:sld>`)
 	rels.WriteString(`</Relationships>`)
 	return b.String(), rels.String(), warnings
 }
 func shapeXML(o Object, id int, linkID string) string {
+	if o.Kind == "line" {
+		return connectorXML(o, id, linkID)
+	}
 	x, y, w, h := emu(o.X), emu(o.Y), emu(o.Width), emu(o.Height)
 	rot := ""
 	if o.Rotation != 0 {
@@ -1306,15 +1902,25 @@ func shapeXML(o Object, id int, linkID string) string {
 	if linkID != "" {
 		link = `<a:hlinkClick r:id="` + linkID + `"/>`
 	}
-	fmt.Fprintf(&b, `<p:sp><p:nvSpPr><p:cNvPr id="%d" name="%s">%s</p:cNvPr><p:cNvSpPr txBox="%d"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm%s><a:off x="%d" y="%d"/><a:ext cx="%d" cy="%d"/></a:xfrm><a:prstGeom prst="%s"><a:avLst/></a:prstGeom>`, id, escapeAttr(o.ID), link, boolNumber(o.Kind == "text"), rot, x, y, w, h, escapeAttr(shape))
-	if o.Fill != "" {
-		b.WriteString(solidFill(o.Fill))
+	fmt.Fprintf(&b, `<p:sp><p:nvSpPr><p:cNvPr id="%d" name="%s">%s</p:cNvPr><p:cNvSpPr txBox="%d"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm%s><a:off x="%d" y="%d"/><a:ext cx="%d" cy="%d"/></a:xfrm>`, id, escapeAttr(objectDisplayName(o)), link, boolNumber(o.Kind == "text"), rot, x, y, w, h)
+	if o.CustomGeometry != nil {
+		b.WriteString(customGeometryXML(o.CustomGeometry, o.ShapeAdjustments, o.ConnectionSites))
+	} else {
+		fmt.Fprintf(&b, `<a:prstGeom prst="%s">%s</a:prstGeom>`, escapeAttr(shape), shapeAdjustmentXML(o.ShapeAdjustments))
+	}
+	if o.Gradient != nil {
+		b.WriteString(gradientFillXML(o))
+	} else if o.Fill != "" {
+		b.WriteString(objectSolidFill(o.Fill, o))
 	} else {
 		b.WriteString(`<a:noFill/>`)
 	}
 	if o.Stroke != "" {
-		fmt.Fprintf(&b, `<a:ln w="%d">%s</a:ln>`, int64(maxFloat(o.StrokeWidth, 1)*12700), solidFill(o.Stroke))
+		fmt.Fprintf(&b, `<a:ln w="%d">%s<a:round/></a:ln>`, int64(maxFloat(o.StrokeWidth, 0)*12700), objectSolidFill(o.Stroke, o))
+	} else {
+		b.WriteString(`<a:ln><a:noFill/></a:ln>`)
 	}
+	b.WriteString(shadowEffectXML(o))
 	b.WriteString(`</p:spPr>`)
 	if o.Text != "" || o.Kind == "text" {
 		b.WriteString(textBody(o))
@@ -1322,15 +1928,39 @@ func shapeXML(o Object, id int, linkID string) string {
 	b.WriteString(`</p:sp>`)
 	return b.String()
 }
-func pictureXML(o Object, id int, rid string) string {
+func pictureXML(o Object, id int, rid string, vectorRID string) string {
+	shape, adjustments := "rect", "<a:avLst/>"
+	if o.Shape == "ellipse" {
+		shape = "ellipse"
+	}
+	if o.Shape == "roundRect" {
+		shape = "roundRect"
+		adjustments = `<a:avLst><a:gd name="adj" fmla="val 12000"/></a:avLst>`
+	}
 	x, y, w, h := emu(o.X), emu(o.Y), emu(o.Width), emu(o.Height)
 	rot := ""
 	if o.Rotation != 0 {
 		rot = ` rot="` + strconv.FormatInt(int64(o.Rotation*60000), 10) + `"`
 	}
-	return fmt.Sprintf(`<p:pic><p:nvPicPr><p:cNvPr id="%d" name="%s"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="%s"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm%s><a:off x="%d" y="%d"/><a:ext cx="%d" cy="%d"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`, id, escapeAttr(o.ID), rid, rot, x, y, w, h)
+	vector := ""
+	crop := ""
+	alpha := ""
+	if o.ImageOpacity != nil {
+		alpha = fmt.Sprintf(`<a:alphaModFix amt="%d"/>`, int64(math.Round(*o.ImageOpacity*100000)))
+	}
+	fill := "<a:fillRect/>"
+	if o.FillLeft != 0 || o.FillTop != 0 || o.FillRight != 0 || o.FillBottom != 0 {
+		fill = fmt.Sprintf(`<a:fillRect l="%d" t="%d" r="%d" b="%d"/>`, int64(math.Round(o.FillLeft*100000)), int64(math.Round(o.FillTop*100000)), int64(math.Round(o.FillRight*100000)), int64(math.Round(o.FillBottom*100000)))
+	}
+	if o.CropLeft != 0 || o.CropTop != 0 || o.CropRight != 0 || o.CropBottom != 0 {
+		crop = fmt.Sprintf(`<a:srcRect l="%d" t="%d" r="%d" b="%d"/>`, int64(math.Round(o.CropLeft*100000)), int64(math.Round(o.CropTop*100000)), int64(math.Round(o.CropRight*100000)), int64(math.Round(o.CropBottom*100000)))
+	}
+	if vectorRID != "" {
+		vector = `<a:extLst><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="` + escapeAttr(vectorRID) + `"/></a:ext></a:extLst>`
+	}
+	return fmt.Sprintf(`<p:pic><p:nvPicPr><p:cNvPr id="%d" name="%s"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="%s">%s</a:blip>%s<a:stretch>%s</a:stretch></p:blipFill><p:spPr><a:xfrm%s><a:off x="%d" y="%d"/><a:ext cx="%d" cy="%d"/></a:xfrm><a:prstGeom prst="%s">%s</a:prstGeom>%s</p:spPr></p:pic>`, id, escapeAttr(objectDisplayName(o)), rid, alpha+vector, crop, fill, rot, x, y, w, h, shape, adjustments, shadowEffectXML(o))
 }
-func textBody(o Object) string {
+func legacyTextBody(o Object) string {
 	face := o.FontFace
 	if face == "" {
 		face = "Arial"
@@ -1369,14 +1999,30 @@ func textBody(o Object) string {
 		paragraphPr = `<a:pPr algn="l"/>`
 	}
 	b.WriteString(`<p:txBody>` + bodyPr + `<a:lstStyle/>`)
+	emphasis := ""
+	if o.Bold {
+		emphasis += ` b="1"`
+	}
+	if o.Italic {
+		emphasis += ` i="1"`
+	}
 	for _, line := range strings.Split(o.Text, "\n") {
-		b.WriteString(`<a:p>` + paragraphPr + `<a:r><a:rPr lang="en-US" sz="` + strconv.Itoa(int(size*100)) + `">` + solidFill(color) + `<a:latin typeface="` + escapeAttr(face) + `"/></a:rPr><a:t>` + escapeText(line) + `</a:t></a:r></a:p>`)
+		b.WriteString(`<a:p>` + paragraphPr + `<a:r><a:rPr lang="en-US" sz="` + strconv.Itoa(int(size*100)) + `"` + emphasis + `>` + textRunPaintXML(color, o) + `<a:latin typeface="` + escapeAttr(face) + `"/></a:rPr><a:t>` + escapeText(line) + `</a:t></a:r></a:p>`)
 	}
 	b.WriteString(`</p:txBody>`)
 	return b.String()
 }
 func solidFill(color string) string {
 	return `<a:solidFill><a:srgbClr val="` + strings.TrimPrefix(strings.ToUpper(color), "#") + `"/></a:solidFill>`
+}
+
+// DrawingML has no shared object alpha for editable shapes. Apply the same
+// alpha to each paint, including run colour overrides, exactly once.
+func objectSolidFill(color string, object Object) string {
+	if !object.OpacitySet && object.Opacity == 0 {
+		return solidFill(color)
+	}
+	return fmt.Sprintf(`<a:solidFill><a:srgbClr val="%s"><a:alpha val="%d"/></a:srgbClr></a:solidFill>`, strings.TrimPrefix(strings.ToUpper(color), "#"), int64(math.Round(object.Opacity*100000)))
 }
 func emu(v float64) int64 { return int64(v*6350 + .5) }
 func boolNumber(v bool) int {
@@ -1401,6 +2047,8 @@ func extensionForMIME(m string) string {
 		return ".jpg"
 	case "image/gif":
 		return ".gif"
+	case "image/svg+xml":
+		return ".svg"
 	default:
 		return ".png"
 	}
@@ -1411,6 +2059,8 @@ func mimeForPart(v string) string {
 		return "image/jpeg"
 	case ".gif":
 		return "image/gif"
+	case ".svg":
+		return "image/svg+xml"
 	default:
 		return "image/png"
 	}
@@ -1554,7 +2204,8 @@ func xmlTag(value string) (string, map[string]string, error) {
 		for i < len(value) && !isXMLSpace(value[i]) && value[i] != '=' {
 			i++
 		}
-		key := xmlLocalName(value[start:i])
+		rawKey := value[start:i]
+		key := xmlLocalName(rawKey)
 		for i < len(value) && isXMLSpace(value[i]) {
 			i++
 		}
@@ -1577,8 +2228,17 @@ func xmlTag(value string) (string, map[string]string, error) {
 		if i >= len(value) {
 			return "", nil, errors.New("unterminated XML attribute")
 		}
-		attrs[key] = stdhtml.UnescapeString(value[start:i])
+		if _, duplicate := attrs[rawKey]; duplicate {
+			return "", nil, errors.New("duplicate XML attribute")
+		}
+		attrs[rawKey] = stdhtml.UnescapeString(value[start:i])
 		i++
+	}
+	for key, value := range attrs {
+		local := xmlLocalName(key)
+		if _, exists := attrs[local]; !exists {
+			attrs[local] = value
+		}
 	}
 	return name, attrs, nil
 }
@@ -1658,57 +2318,36 @@ func colorFrom(n *node) string {
 	return ""
 }
 
-func readColourResolver(files map[string]*zip.File, rels map[string]string, limits Limits) (colourResolver, error) {
-	resolver := colourResolver{colours: map[string]string{}, mapping: map[string]string{
-		"bg1": "lt1", "tx1": "dk1", "bg2": "lt2", "tx2": "dk2",
-	}}
-	var themePart string
-	for name := range files {
-		if strings.HasPrefix(name, "ppt/theme/") && strings.HasSuffix(name, ".xml") {
-			themePart = name
-			break
+func readColourResolver(files map[string]*zip.File, rels map[string]string, limits Limits, root *node) (colourResolver, error) {
+	resolver := defaultColourResolver()
+	resolver.parts = &themePartCache{entries: make(map[string]themePart)}
+	master := ""
+	list := findFirst(root, "sldMasterIdLst")
+	declared := children(list, "sldMasterId")
+	if len(declared) > 0 {
+		master = rels[relationshipID(declared[0], list, root)]
+		if master == "" {
+			return resolver, errors.New("presentation master relationship is missing")
 		}
-	}
-	if themePart != "" {
-		data, err := readPart(files, themePart, limits.MaxXMLPart)
-		if err != nil {
-			return resolver, err
+	} else {
+		// Legacy minimal packages can omit master relationships. Their fallback
+		// is deterministic, never the first entry encountered in a Go map.
+		masters := sortedXMLParts(files, "ppt/slideMasters/")
+		if len(masters) > 0 {
+			master = masters[0]
 		}
-		root, err := parseXML(data, 128)
-		if err != nil {
-			return resolver, err
-		}
-		if scheme := findFirst(root, "clrScheme"); scheme != nil {
-			for _, child := range scheme.Children {
-				if colour, _ := rawColourNode(firstColourChild(child)); colour != "" {
-					resolver.colours[child.Name] = colour
-				}
+		themes := sortedXMLParts(files, "ppt/theme/")
+		if len(themes) > 0 {
+			var err error
+			resolver, err = themeColourResolver(files, themes[0], limits, resolver.parts)
+			if err != nil {
+				return resolver, err
 			}
 		}
 	}
-	// A colour map belongs to the master. The first master is sufficient for
-	// the initial single-master import model; nested layout overrides are still
-	// represented by their explicit RGB values.
-	for name := range files {
-		if !strings.HasPrefix(name, "ppt/slideMasters/") || !strings.HasSuffix(name, ".xml") {
-			continue
-		}
-		data, err := readPart(files, name, limits.MaxXMLPart)
-		if err != nil {
-			return resolver, err
-		}
-		root, err := parseXML(data, 128)
-		if err != nil {
-			return resolver, err
-		}
-		if mapping := findFirst(root, "clrMap"); mapping != nil {
-			for key, value := range mapping.Attr {
-				resolver.mapping[key] = value
-			}
-		}
-		break
+	if master != "" {
+		return masterColourResolver(files, master, limits, resolver)
 	}
-	_ = rels // retained for the relationship-oriented reader signature.
 	return resolver, nil
 }
 
