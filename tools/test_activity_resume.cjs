@@ -8,10 +8,10 @@ const context = vm.createContext({Date:{now:()=>now},clearInterval:noop,crypto:r
   window:{},archiveEngagementResult:noop,engagementPresentationActive:()=>true,keynopeRunningActivity:null,renderActiveActivityStatus:noop,
   document:{querySelectorAll:()=>[]},keynopeEngagementSessions:new Map(),
   deck:{pages:[{slide:0,engagement:{id:'a',kind:'storm',timerSeconds:60}}]},pageIndex:0,
-  keynopeEngagementRuntime:null,keynopeEngagementOverlay:null,keynopeEngagementSessionEpoch:0,
+  keynopeEngagementRuntime:null,keynopeEngagementOverlay:null,keynopeEngagementSessionEpoch:0,keynopeEngagementFocusGeneration:0,keynopeEngagementOverlayFocus:null,
   keynopeEngagementCountdownTick:0,keynopeRecentActivityItems:[],keynopeLobbyPresentation:null,
   renderActivityMarker:noop,renderEngagementRuntime:noop,publishEngagementRuntime:noop,
-  runEngagementCountdown:noop,startHostedEngagement:noop,randomActivityCode:()=> 'abcdefgh',
+  runEngagementCountdown:noop,startHostedEngagement:noop,loadEngagementQRCode:noop,randomActivityCode:()=> 'abcdefgh',
   publishHostedEngagementState:()=>Promise.resolve()});
 for(const name of ['engagementIsRunning','engagementHasCompleted','onboardingSessionDefinition','engagementSessionFor','currentEngagementDefinition','activitySubmittedItems','closeEngagementRuntime','openEngagementRuntime','resetEngagementRuntime']) {
   const start=source.indexOf('function '+name+'(');

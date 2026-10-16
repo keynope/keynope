@@ -1,5 +1,19 @@
 /* Shared Mac/Web workspace. This module owns chrome, never document content. */
 globalThis.KeynopeWorkspace = (() => {
+  if(typeof window!=='undefined'&&typeof document!=='undefined'&&document.documentElement?.dataset&&window.dispatchEvent){
+  const appearanceKey='keynope.interface.appearance';
+  window.keynopeSetInterfaceAppearance=(mode,syncNative=true)=>{
+    if(!['system','light','dark'].includes(mode))return false;
+    document.documentElement.dataset.keynopeInterfaceAppearance=mode;
+    window.KEYNOPE_INTERFACE_APPEARANCE=mode;
+    try{localStorage.setItem(appearanceKey,mode);}catch(_error){}
+    if(syncNative)window.webkit?.messageHandlers?.keynopePresenter?.postMessage({action:'interface-appearance',mode});
+    window.dispatchEvent(new CustomEvent('keynope-interface-appearance',{detail:mode}));return true;
+  };
+  let initialAppearance=window.KEYNOPE_INTERFACE_APPEARANCE;
+  try{initialAppearance ||= localStorage.getItem(appearanceKey);}catch(_error){}
+  window.keynopeSetInterfaceAppearance(['system','light','dark'].includes(initialAppearance)?initialAppearance:'system',false);
+  }
   // Setting an unchanged DOM property can still rewrite its attribute/text
   // nodes and notify observers. Keep retained chrome genuinely incremental.
   function setChromeProperty(node,property,value) {
@@ -611,6 +625,21 @@ globalThis.KeynopeWorkspace = (() => {
       const text=document.createElement('span');text.textContent=label;card.append(diagram,text);card.onclick=async()=>{card.disabled=true;try{await addPreset(id);insertOpen=false;refresh();}catch(error){hint.textContent=error.message||'Could not insert slide';}finally{card.disabled=false;}};presets.append(card);
     }
     if(addPreset)main.prepend(presets);
+    // Keep the actual insertion controls and their listeners. Give each a
+    // visible name and a predictable section instead of an anonymous icon row.
+    const insertSection=(label,className)=>{const section=document.createElement('section');section.className='keynope-insert-section '+className;const heading=document.createElement('h3');heading.textContent=label;section.append(heading);panels.insert.append(section);return section;};
+    const insertControls=[...panels.insert.children];
+    const textSection=insertSection('Text','keynope-insert-text'),mediaSection=insertSection('Media & objects','keynope-insert-media'),defaults=insertSection('New text defaults','keynope-insert-defaults'),other=insertSection('Document','keynope-insert-document');
+    const labels={'Add title':'Title','Add subtitle':'Subtitle','Add text':'Text','Add bullet point':'Bullets','Add code':'Code','Add emoji':'Emoji','Add shape':'Shape','Connect shapes':'Connector','Import image':'Image','Add table':'Table','Add chart':'Chart'};
+    for(const node of insertControls){
+      if(node.classList.contains('keynope-text-metric-control')){defaults.append(node);continue;}
+      if(node.tagName==='BUTTON'&&labels[node.title]){
+        const label=document.createElement('span');label.className='keynope-insert-label';label.textContent=labels[node.title];node.append(label);node.classList.add('keynope-insert-command');
+        (/^Add (title|subtitle|text|bullet point|code)$/.test(node.title)?textSection:mediaSection).append(node);
+      }else other.append(node);
+    }
+    const syncDocumentSection=()=>{const hidden=![...other.children].some(node=>node.tagName!=='H3'&&!node.hidden);if(other.hidden!==hidden)other.hidden=hidden;};
+    new MutationObserver(syncDocumentSection).observe(other,{attributes:true,attributeFilter:['hidden'],subtree:true});syncDocumentSection();
     quick.append(addSlide);
     header.insertBefore(toolbar, header.lastElementChild);
     let context = '', editing = false, visible = true, insertOpen = false, section = 'slide';
@@ -638,7 +667,7 @@ globalThis.KeynopeWorkspace = (() => {
       const name=document.createElement('input');name.type='text';name.value=themeDraft.name||'';name.maxLength=100;name.setAttribute('aria-label','Theme name');name.oninput=()=>themeDraft.name=name.value;row('Name',name);
       const presets=document.createElement('div');presets.className='keynope-theme-presets';
       for(const preset of themePresets?.()||[]){
-        const choice=document.createElement('button');choice.type='button';choice.textContent=preset.name;
+        const choice=document.createElement('button');choice.type='button';choice.textContent=preset.name;choice.dataset.themePreview='';
         choice.style.setProperty('--theme-preview-bg',preset.colors.background);choice.style.setProperty('--theme-preview-fg',preset.colors.heading);
         choice.onclick=()=>{themeDraft=JSON.parse(JSON.stringify(preset));renderThemeDraft();};presets.append(choice);
       }
@@ -708,16 +737,26 @@ globalThis.KeynopeWorkspace = (() => {
       if (control) node.setAttribute('aria-controls', control);
       node.onclick = callback; toolbar.append(node); return node;
     };
-    let navigatorOpen=false;
+    let navigatorOpen=false,navigatorVisible=true;
+    try{navigatorVisible=localStorage.getItem('keynope.workspace.navigator')!=='off';}catch(_error){}
     const narrowNavigator=()=>innerWidth<700;
+    const navigatorShowing=()=>narrowNavigator()?navigatorOpen:navigatorVisible;
     const drawerInspector=()=>innerWidth<1050;
     const slidesToggle=button('Slides',()=>{
-      navigatorOpen=!navigatorOpen;
-      if(navigatorOpen){visible=false;insertOpen=false;}
+      const navigator=document.getElementById('keynope-slide-navigator'),hadFocus=navigator?.contains(document.activeElement)||document.activeElement===navigatorDivider;
+      if(narrowNavigator()){
+        navigatorOpen=!navigatorOpen;
+        if(navigatorOpen){visible=false;insertOpen=false;}
+      }else{
+        navigatorVisible=!navigatorVisible;
+        try{localStorage.setItem('keynope.workspace.navigator',navigatorVisible?'on':'off');}catch(_error){}
+      }
       refresh();
-      if(navigatorOpen)document.querySelector('#keynope-slide-navigator .keynope-slide-item.active, #keynope-slide-navigator .keynope-slide-item')?.focus();
+      if(navigatorShowing())document.querySelector('#keynope-slide-navigator .keynope-slide-item.active, #keynope-slide-navigator .keynope-slide-item')?.focus();
+      else if(hadFocus)slidesToggle.focus({preventScroll:true});
     },'keynope-slide-navigator');
     slidesToggle.className='keynope-slides-toggle';
+    slidesToggle.setAttribute('aria-label','Slide navigator');
     const closeNavigator=(focus=false)=>{if(!navigatorOpen)return;navigatorOpen=false;updateGeometry();if(focus)slidesToggle.focus();};
     const insert = button('Insert', () => {
       insertOpen = !insertOpen; refresh();
@@ -837,28 +876,33 @@ globalThis.KeynopeWorkspace = (() => {
       const target=event.key==='Home'?0:event.key==='End'?items.length-1:(index+(event.key==='ArrowDown'||event.key==='ArrowRight'?1:-1)+items.length)%items.length;
       items[target].focus();
     });
-    let lastGeometry = '';
+    let lastGeometry = '',previewVisible=false,previewHeight=0;
     const updateGeometry = () => {
       if(!narrowNavigator()){navigatorOpen=false;closeMore();}
-      root.dataset.keynopeNavigatorOpen=String(navigatorOpen);
+      const navigatorShown=navigatorShowing();
+      root.dataset.keynopeNavigatorOpen=String(navigatorShown);
       root.dataset.keynopeInspectorDrawer=String(drawerInspector());
       root.dataset.keynopeInspectorOpen=String(visible);
-      slidesToggle.setAttribute('aria-expanded',String(navigatorOpen));
-      slidesToggle.classList.toggle('active',navigatorOpen);
-      slidesToggle.dataset.state=navigatorOpen?'OPEN':'CLOSED';
+      slidesToggle.setAttribute('aria-expanded',String(navigatorShown));
+      slidesToggle.classList.toggle('active',navigatorShown);
+      slidesToggle.dataset.state=navigatorShown?'OPEN':'CLOSED';
       format.dataset.state=visible?'OPEN':'CLOSED';
       inspectorScrim.hidden=!drawerInspector()||!visible;
       inspectorClose.hidden=!drawerInspector();
-      navigatorDivider.hidden=narrowNavigator();
+      navigatorDivider.hidden=narrowNavigator()||!navigatorVisible;
       const width=Math.min(inspectorWidth,Math.max(160,innerWidth-32));
       const navigatorMaximum=Math.min(360,Math.max(160,Math.floor(innerWidth*.28))),navWidth=Math.min(navigatorWidth,navigatorMaximum);
-      const space = visible && innerWidth >= 1050 ? width+'px' : '0px';
-      const geometry = [space,width,navWidth, innerWidth, innerHeight].join(':');
+      const navSpace=!narrowNavigator()&&navigatorVisible?navWidth:0;
+      const space = (visible||previewVisible) && innerWidth >= 1050 ? width+'px' : '0px';
+      const geometry = [space,width,navWidth,navSpace,previewVisible,previewHeight,innerWidth,innerHeight].join(':');
       if (geometry === lastGeometry) return;
       lastGeometry = geometry;
       root.style.setProperty('--keynope-inspector-space', space);
       root.style.setProperty('--keynope-inspector-width',width+'px');
       root.style.setProperty('--keynope-navigator-width',navWidth+'px');
+      root.style.setProperty('--keynope-navigator-space',navSpace+'px');
+      root.style.setProperty('--keynope-preview-height',previewVisible?previewHeight+'px':'0px');
+      root.dataset.keynopePreviewOpen=String(previewVisible);
       navigatorDivider.setAttribute('aria-valuemin','160');navigatorDivider.setAttribute('aria-valuemax',String(navigatorMaximum));navigatorDivider.setAttribute('aria-valuenow',String(navWidth));navigatorDivider.setAttribute('aria-valuetext',navWidth+' pixels');
       const maximum=Math.min(480,Math.max(160,innerWidth-32));
       divider.setAttribute('aria-valuemin',String(Math.min(240,maximum)));divider.setAttribute('aria-valuemax',String(maximum));
@@ -960,7 +1004,7 @@ globalThis.KeynopeWorkspace = (() => {
       setChromeProperty(strokePaint,'hidden',!paintStates['paint.strokeColor']?.eligibleIds?.length);
       setChromeProperty(linePaint,'hidden',!paintStates['line.width']?.eligibleIds?.length);
       setChromeProperty(labelPaint,'hidden',!paintStates['label.size']?.eligibleIds?.length);
-      opacityLabel.hidden=!setObjectOpacity||section==='slide'||(opacityState?!opacityState.eligibleIds.length:!opacityItems.length);
+      opacityLabel.hidden=!setObjectOpacity||section!=='style'||(opacityState?!opacityState.eligibleIds.length:!opacityItems.length);
       opacityInput.disabled=editing||savingOpacity||(opacityState?!opacityState.editable:hasLocked);
       opacityInput.dataset.selectionProperty='paint.opacity';
       opacityInput.title=opacityState?.reason||('Object opacity'+(opacityState?.provenance==='inherited'?' · Inherited':''));
@@ -1023,7 +1067,8 @@ globalThis.KeynopeWorkspace = (() => {
             if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
             event.preventDefault();
             const nodes = [...tabs.children].filter(n => !n.disabled), i = nodes.indexOf(node);
-            const target = event.key === 'Home' ? 0 : event.key === 'End' ? nodes.length - 1 : (i + (event.key === 'ArrowRight' ? 1 : -1) + nodes.length) % nodes.length;
+            const direction=getComputedStyle(tabs).direction==='rtl'?-1:1;
+            const target = event.key === 'Home' ? 0 : event.key === 'End' ? nodes.length - 1 : (i + (event.key === 'ArrowRight' ? direction : -direction) + nodes.length) % nodes.length;
             selectPanel(nodes[target].dataset.ribbonTab, true);
           };
           tabs.append(node);
@@ -1052,6 +1097,38 @@ globalThis.KeynopeWorkspace = (() => {
     topbar.addEventListener('keydown',dismissInsert);
     window.addEventListener('resize', updateGeometry);
     configure('main', false);
+    // Pane focus is navigation, not a document selection or mutation. Share
+    // these commands with the native View menu instead of duplicating logic.
+    const stage=document.getElementById('stage');
+    if(stage){stage.tabIndex=0;stage.setAttribute('aria-label','Slide canvas');}
+    const blocked=()=>[...document.querySelectorAll('dialog[open],[aria-modal="true"],[role="menu"]')].some(node=>node.getClientRects().length);
+    window.keynopeWorkspaceState=()=>({enabled:!blocked(),navigator:navigatorShowing(),format:visible,rulers:rulersOn,snap:snapping});
+    let focusedPane=null;
+    const clearPaneFocus=()=>{focusedPane?.classList.remove('keynope-pane-focus');focusedPane=null;};
+    document.addEventListener('pointerdown',clearPaneFocus,true);
+    document.addEventListener('focusin',event=>{if(focusedPane&&!focusedPane.contains(event.target))clearPaneFocus();});
+    const focusPane=(backwards=false)=>{
+      const candidates=[header,document.getElementById('keynope-slide-navigator'),stage,visible?inspector:null,document.querySelector('.keynope-app-toolbar')].filter(node=>node?.getClientRects().length);
+      if(!candidates.length)return false;
+      const current=candidates.findIndex(node=>node.contains(document.activeElement));
+      const next=current<0?(backwards?candidates.length-1:0):(current+(backwards?-1:1)+candidates.length)%candidates.length;
+      const target=candidates[next];
+      const controls=[...target.querySelectorAll('button,input,select,textarea,[tabindex]')].filter(node=>!node.disabled&&node.tabIndex>=0&&node.getClientRects().length);
+      const control=target===stage?target:controls.find(node=>node.getAttribute('aria-selected')==='true'||node.getAttribute('aria-current')==='page')||controls[0];
+      control?.focus({preventScroll:true});
+      if(!control||document.activeElement!==control)return false;
+      clearPaneFocus();focusedPane=target;target.classList.add('keynope-pane-focus');return true;
+    };
+    window.keynopeWorkspaceCommand=command=>{
+      if(blocked())return false;
+      const commands={insert:()=>insert.click(),format:()=>{format.click();if(visible)tabs.querySelector('[aria-selected="true"]')?.focus();},slide:()=>slide.click(),fit:()=>fit.click(),'zoom-in':()=>setZoom(viewport.zoom+.1),'zoom-out':()=>setZoom(viewport.zoom-.1),rulers:()=>rulers.click(),snap:()=>snap.click(),navigator:()=>slidesToggle.click(),'focus-next':()=>focusPane()};
+      if(!Object.hasOwn(commands,command))return false;
+      return commands[command]()!==false;
+    };
+    window.addEventListener('keydown',event=>{
+      if(event.key!=='F6'||event.ctrlKey||event.altKey||event.metaKey||event.isComposing||blocked())return;
+      event.preventDefault();event.stopImmediatePropagation();focusPane(event.shiftKey);
+    },true);
     function bindCommand(source, label) {
       const mirror = button(label, () => { if (!source.hidden && !source.disabled) source.click(); });
       mirror.classList.add('keynope-workspace-extra');
@@ -1059,7 +1136,8 @@ globalThis.KeynopeWorkspace = (() => {
       new MutationObserver(sync).observe(source, {attributes:true, attributeFilter:['hidden','disabled']});
       sync();
     }
-    return {configure, selectPanel, bindCommand, dismissInsert};
+    const setPreview=(shown,height)=>{const h=Math.ceil(height||0);if(previewVisible===shown&&previewHeight===h)return;previewVisible=shown;previewHeight=h;updateGeometry();};
+    return {configure, selectPanel, bindCommand, dismissInsert,setPreview};
   }
   return {applyScenePagePatches,mount,thumbnails,distribute,snapMove,pointerMove,marqueeSelectionUnits,boxIntersectsRect,marqueeCandidates,sameLayerContext,matchSize,slideKeyboard,toolbarKeyboard,sceneSelectionBounds,cellAspect,visualBounds,clampMove,connectorIndex,rotateSelection,resizeSelection,resizeConnectedSelection,alignmentMoves};
 })();

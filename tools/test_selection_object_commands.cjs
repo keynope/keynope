@@ -34,14 +34,29 @@ const server=http.createServer((req,res)=>{let name=new URL(req.url,'http://loca
     await lock('dense-'+kind,false);
    }
    await select(['alpha','dense-text-0']);await content();let s=await state();const subset=s.selectionCapabilities.commands['image.adjust'];assert(subset.enabled);assert.deepEqual(subset.eligibleIds,['alpha']);assert.equal(subset.totalCount,2);
-   await command('image.adjust').click();const panel=page.getByRole('dialog',{name:'Adjust image',exact:true});await panel.waitFor();assert.match(await panel.textContent(),/1 of 2 objects/);
-   assert(await panel.evaluate(panel=>{const p=panel.getBoundingClientRect(),scope=panel.querySelector('.keynope-command-scope').getBoundingClientRect(),label=panel.querySelector('label').getBoundingClientRect();return scope.width>=p.width-25&&scope.bottom<=label.top+1&&p.left>=0&&p.right<=innerWidth&&p.top>=0&&p.bottom<=innerHeight;}),'Image subset notice broke the popup grid or viewport fit');
+   const panel=page.getByRole('group',{name:'Image adjustments',exact:true});await panel.waitFor();assert.match(await panel.textContent(),/1 of 2 objects/);
+   assert.equal(await page.getByRole('button',{name:'Adjust image',exact:true}).count(),0,'Image controls must not hide behind a popup');
+   assert(await panel.evaluate(panel=>{const p=panel.getBoundingClientRect(),scope=panel.querySelector('.keynope-command-scope').getBoundingClientRect(),label=panel.querySelector('label').getBoundingClientRect(),host=panel.closest('.keynope-workspace-inspector').getBoundingClientRect();return scope.width>=p.width-3&&scope.bottom<=label.top+1&&p.left>=host.left&&p.right<=host.right;}),'Image controls overflowed the sidebar grid');
    const textBefore=s.slides[0].elements.find(element=>element.id==='dense-text-0');
    await panel.getByLabel('Brightness',{exact:true}).evaluate(input=>{input.value='1.3';input.dispatchEvent(new Event('change',{bubbles:true}));});
    await waitForAsync(page,async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return new URLSearchParams(s.slides[0].elements.find(element=>element.id==='alpha').query).get('brightness')==='1.3';});
    assert.deepEqual((await state()).slides[0].elements.find(element=>element.id==='dense-text-0'),textBefore);
    await page.screenshot({path:path.join(output,engine+'-image-subset.png')});
-   await page.keyboard.press('Escape');await lock('dense-text-0',true);await select(['alpha','dense-text-0']);await content();assert(await command('image.adjust').isDisabled());await lock('dense-text-0',false);
+   await lock('dense-text-0',true);await select(['alpha','dense-text-0']);await content();assert(await panel.getByLabel('Brightness',{exact:true}).isDisabled());await lock('dense-text-0',false);
+   // Right-click selects/reveals the inspector, never a second set of actions.
+   await select(['dense-text-0']);s=await state();const imageIndex=s.slides[0].elements.findIndex(element=>element.id==='alpha');
+   await page.locator('.keynope-canvas-element[data-element="'+imageIndex+'"]').dispatchEvent('contextmenu',{clientX:650,clientY:350});
+   await waitForAsync(page,async index=>(await fetch('/api/editor/state').then(r=>r.json())).selected===index,imageIndex);
+   await panel.waitFor();assert.equal(await page.locator('.keynope-slide-context.open').count(),0);
+   await panel.getByLabel('Image style',{exact:true}).selectOption('retro');await panel.getByLabel('Glyph',{exact:true}).waitFor();
+   await panel.getByLabel('Glyph',{exact:true}).selectOption('braille');
+   await waitForAsync(page,async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return new URLSearchParams(s.slides[0].elements.find(element=>element.id==='alpha').query).get('glyph')==='braille';});
+   await panel.getByLabel('Image style',{exact:true}).selectOption('modern');await panel.getByLabel('Glyph',{exact:true}).waitFor({state:'detached'});
+   assert(await command('image.background').isVisible(),'Background promotion belongs in the Image sidebar');
+   await page.screenshot({path:path.join(output,engine+'-image-sidebar.png')});
+   await page.locator('[data-ribbon-tab="style"]').click();const transfer=page.getByRole('group',{name:'Style transfer',exact:true});
+   for(const name of ['Copy style','Paste style','Format painter','Reset style'])assert(await transfer.getByRole('button',{name,exact:true}).isVisible(),name+' missing from sidebar');
+   await transfer.getByRole('button',{name:'Copy style',exact:true}).click();assert(!(await transfer.getByRole('button',{name:'Paste style',exact:true}).isDisabled()));
    await select(['from']);assert(!(await state()).selectionCapabilities.commands['shape.adjust'].enabled,'Collapsed diagram group exposed one child adjustment');
    await action({action:'enter-group',elementData:{id:'from'}});await select(['from']);await content();assert((await state()).selectionCapabilities.commands['shape.adjust'].enabled);await page.locator('.keynope-shape-adjustment').first().waitFor();
    await lock('from',true);await page.locator('.keynope-shape-adjustment').first().waitFor({state:'detached'});assert(!(await state()).selectionCapabilities.commands['shape.adjust'].enabled);await lock('from',false);await action({action:'exit-group'});

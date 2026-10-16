@@ -31,11 +31,13 @@ const server=http.createServer((req,res)=>{
    await page.mouse.move(small.x,small.y,{steps:4});assert.equal(await page.locator('.marquee-candidate').count(),1,'preview removes items outside the shrinking box');
    await page.mouse.move(p1.x,p1.y,{steps:4});await page.screenshot({path:'/tmp/keynope-marquee-'+engine+'.png'});await page.mouse.up();await page.keyboard.up('Shift');await waitSelection(2);
    await hit(0).click({button:'right'});
+   await page.locator('[data-ribbon-tab="arrange"]').click();
    await page.getByRole('button',{name:'Group',exact:true}).last().click();
    await page.locator('.keynope-canvas-element[data-group]').waitFor();
    const group=()=>page.locator('.keynope-canvas-element[data-group]');
+   const groupTarget=()=>group().locator('.keynope-group-member-hit').first();
    let s=await state();assert.equal(s.selection.length,2);const ids=s.slides[0].elements.slice(0,2).map(e=>e.id);
-   assert.equal(await group().locator('.keynope-resize-handle').count(),0,'group must not resize a member');
+   assert.equal(await group().locator('.keynope-resize-handle').count(),4,'resize handles belong to the outer group, not an individual member');
    let box=await group().boundingBox();
    const canvasBox=await page.locator('#presenter-canvas').boundingBox();
    assert(Math.abs(box.width/canvasBox.width-62/245)<.005,'outer group box spans both members');
@@ -48,8 +50,8 @@ const server=http.createServer((req,res)=>{
    // Arrow moves both, and one undo restores both.
    await page.keyboard.press('ArrowDown');await waitForAsync(page,async top=>{const s=await fetch('/api/editor/state').then(r=>r.json());return Number(new URLSearchParams(s.slides[0].elements[0].query).get('top'))===top+1;},Number(q[0].get('top')));
    await page.getByRole('button',{name:'Undo',exact:true}).click();
-   await group().click();await waitSelection(2);
-   await group().dblclick();await waitForAsync(page,async()=>!!(await fetch('/api/editor/state').then(r=>r.json())).editingGroup);
+   await groupTarget().click();await waitSelection(2);
+   await groupTarget().dblclick();await waitForAsync(page,async()=>!!(await fetch('/api/editor/state').then(r=>r.json())).editingGroup);
    await group().waitFor({state:'detached'});await page.locator('.keynope-group-edit-boundary').waitFor();
    await hit(0).click();await waitSelection(1);assert.equal(await hit(0).locator('.keynope-resize-handle').count(),4);
    const memberBefore=await state(),memberBox=await hit(0).boundingBox();
@@ -65,21 +67,22 @@ const server=http.createServer((req,res)=>{
    assert.equal((await state()).slides[0].elements[0].query,textBeforeShapeMove,'individual shape movement leaves text unchanged');
    await page.keyboard.press('Escape');await group().waitFor();await waitSelection(2);
    // Shared colour applies to both text and shape; H1 applies only to text.
-   await group().click({button:'right'});
-   await page.locator('.keynope-slide-context.open').getByRole('button',{name:'Pick color',exact:true}).click();
+   await groupTarget().click({button:'right'});
+   await page.locator('[data-ribbon-tab="style"]').click();
+   await page.getByRole('button',{name:'Selection base colour',exact:true}).click();
    await page.getByRole('button',{name:'#ff0000',exact:true}).click();
    await waitForAsync(page,async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.slides[0].elements.slice(0,2).every(e=>new URLSearchParams(e.query).get('fg')==='#ff0000');});
-   await group().click({button:'right'});await page.getByRole('button',{name:'Convert to heading 1',exact:true}).last().click();
+   await groupTarget().click({button:'right'});await page.getByRole('button',{name:'Convert to heading 1',exact:true}).last().click();
    await waitForAsync(page,async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.slides[0].elements[0].kind==='heading';});
    s=await state();assert.equal(s.slides[0].elements[1].kind,'shape');assert.equal(s.slides[0].elements[2].kind,'text');
    assert.equal(new URLSearchParams(s.slides[0].elements[0].query).get('header'),'#ff0000');
-   await group().click({button:'right'});await page.getByRole('button',{name:'Convert to plain text',exact:true}).last().click();
+   await groupTarget().click({button:'right'});await page.getByRole('button',{name:'Convert to plain text',exact:true}).last().click();
    await waitForAsync(page,async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.slides[0].elements[0].kind==='text';});
-   // Mixed selection menu must not expose tools that silently edit one member.
-   await group().click({button:'right'});
+   // Group actions remain available in Arrange, without a context menu.
+   await groupTarget().click({button:'right'});
+   await page.locator('[data-ribbon-tab="arrange"]').click();
    assert.equal(await page.getByRole('button',{name:'Group',exact:true}).count(),0);
    assert(await page.getByRole('button',{name:'Ungroup',exact:true}).count()>0);
-   await page.keyboard.press('Escape');
    // Reverse-direction, additive selection; Escape cancels without changing state.
    const reverseStart=point(170,35),reverseEnd=point(110,23);
    await page.keyboard.down('Shift');await page.mouse.move(reverseStart.x,reverseStart.y);await page.mouse.down();await page.mouse.move(reverseEnd.x,reverseEnd.y,{steps:6});
@@ -87,36 +90,38 @@ const server=http.createServer((req,res)=>{
    await page.keyboard.press('Escape');await page.mouse.up();await page.keyboard.up('Shift');assert.equal((await state()).selection.length,2);
    await page.locator('.keynope-canvas-marquee').waitFor({state:'detached'});
    await page.keyboard.down('Shift');await page.mouse.move(reverseStart.x,reverseStart.y);await page.mouse.down();await page.mouse.move(reverseEnd.x,reverseEnd.y,{steps:6});await page.mouse.up();await page.keyboard.up('Shift');await waitSelection(3);
-   await group().click({button:'right'});await page.getByRole('button',{name:'Group',exact:true}).last().click();
+   await groupTarget().click({button:'right'});await page.locator('[data-ribbon-tab="arrange"]').click();await page.getByRole('button',{name:'Group',exact:true}).last().click();
    await page.waitForFunction(()=>document.querySelectorAll('.keynope-canvas-element').length===1);
    s=await state();assert.equal(new Set(s.slides[0].elements.map(e=>new URLSearchParams(e.query).get('group'))).size,1);
-   await group().click({button:'right'});await page.getByRole('button',{name:'Ungroup',exact:true}).last().click();
+   await groupTarget().click({button:'right'});await page.locator('[data-ribbon-tab="arrange"]').click();await page.getByRole('button',{name:'Ungroup',exact:true}).last().click();
    await page.waitForFunction(()=>document.querySelectorAll('.keynope-canvas-element').length===3);
    assert((await state()).slides[0].elements.every(e=>!new URLSearchParams(e.query).has('group')));
    await page.getByRole('button',{name:'Undo',exact:true}).click();await group().waitFor();
-   await group().click();await waitSelection(3);await group().click({button:'right'});
-   await page.locator('.keynope-slide-context.open').getByRole('button',{name:'Centre',exact:true}).click();
+   await groupTarget().click();await waitSelection(3);await groupTarget().click({button:'right'});
+   await page.locator('[data-ribbon-tab="arrange"]').click();await page.getByRole('button',{name:'Align centre',exact:true}).click();
    await page.waitForFunction(()=>{const g=document.querySelector('.keynope-canvas-element[data-group]');return g&&Math.abs(parseFloat(g.style.left)*2+parseFloat(g.style.width)-100)<.85;});
    await page.keyboard.press('Escape');
-   await group().click({button:'right'});
+   await groupTarget().click({button:'right'});
    await page.screenshot({path:'/tmp/keynope-groups-'+engine+'.png'});
    await page.keyboard.press('Escape');
    // Measure rendered geometry, not merely query values, over repeated drags.
    const rigid='<!-- keynope width=245 height=56 -->\n\n<!-- top=3 left_pct=0.45 width=30 height=5 text-box=1 render=truetype group=rigid -->\nText\n\n<!-- top=14 left_pct=0.65 width=19.5 height=6.5 shape-offset-x=0.5 shape-offset-y=0.5 shape=square group=rigid -->\n[shape:square]\n\n<!-- top=24 left_pct=0.53 width=35 height=5 text-box=1 render=truetype group=rigid -->\nThird';
    await page.evaluate(async md=>{const r=JSON.parse(keynopeWasmInit(md,'Rigid.md',false));if(r.status!==200)throw Error(r.body);const w=JSON.parse(JSON.parse(keynopeWasmWorkspace()).body);w.current=0;await keynopeReloadWebDocument(w);},rigid);
    const geometry=async()=>{
-     await group().dblclick();await page.locator('.keynope-group-edit-boundary').waitFor();
+     await groupTarget().dblclick();await page.locator('.keynope-group-edit-boundary').waitFor();
      const boxes=await page.locator('.keynope-canvas-element').evaluateAll(hits=>hits.map(h=>({index:Number(h.dataset.element),x:parseFloat(h.style.left)*245/100,y:parseFloat(h.style.top)*56/100,w:parseFloat(h.style.width)*245/100,h:parseFloat(h.style.height)*56/100})).sort((a,b)=>a.index-b.index));
      await hit(0).click();await page.keyboard.press('Escape');await group().waitFor();return boxes;
    };
    let previous=await geometry();
    for(const delta of [9,11,8,-12,7,-10,6,-9]){
-     const beforeVersion=(await state()).version,b=await group().boundingBox(),r=await page.locator('.keynope-canvas-overlay').boundingBox();
-     await page.mouse.move(b.x+b.width/2,b.y+b.height/2);await page.mouse.down();await page.mouse.move(b.x+b.width/2+delta*r.width/245,b.y+b.height/2,{steps:6});await page.mouse.up();
+     const beforeVersion=(await state()).version,b=await groupTarget().boundingBox(),r=await page.locator('.keynope-canvas-overlay').boundingBox();
+     await page.keyboard.down('Alt');await page.mouse.move(b.x+b.width/2,b.y+b.height/2);await page.mouse.down();await page.mouse.move(b.x+b.width/2+delta*r.width/245,b.y+b.height/2,{steps:6});await page.mouse.up();await page.keyboard.up('Alt');
      await waitForAsync(page,async version=>(await fetch('/api/editor/state').then(r=>r.json())).version>version,beforeVersion);
      const next=await geometry();
+     const actualDelta=next[0].x-previous[0].x;
+     assert(Math.abs(actualDelta-delta)<Math.max(.01,.5*245/r.width),'pointer rounding must stay below half a CSS pixel');
      for(let i=0;i<next.length;i++){
-       assert(Math.abs(next[i].x-previous[i].x-delta)<.01,engine+' member '+i+' drifted on '+delta+': '+JSON.stringify({previous:previous[i],next:next[i]}));
+       assert(Math.abs(next[i].x-previous[i].x-actualDelta)<.01,engine+' member '+i+' drifted on '+delta+': '+JSON.stringify({previous:previous[i],next:next[i]}));
        for(const dim of ['y','w','h'])assert(Math.abs(next[i][dim]-previous[i][dim])<.01,'rigid move preserves '+dim+' for member '+i);
      }
      previous=next;

@@ -176,7 +176,8 @@ const KeynopeBuilds=(()=>{
       buttons.forEach((b,index)=>b.disabled=busy||!navigationEnabled||(index===1&&!!descriptor.ended)||!!descriptor.pending);
       host.dataset.nextKind=descriptor.kind||(descriptor.ended?'end':'pending');
       if(!shown)return;
-      if(!descriptor.page?.scene){if(view)clear();status.hidden=false;if(status.textContent!==descriptor.label)status.textContent=descriptor.label;return;}
+      canvas.hidden=!descriptor.page?.scene;
+      if(!descriptor.page?.scene){if(view)clear();status.hidden=!!descriptor.ended;if(status.textContent!==descriptor.label)status.textContent=descriptor.label;return;}
       status.hidden=true;const scene=descriptor.page.scene;
       if(source!==scene){
         epoch++;const expected=epoch;failed=false;canvas.style.visibility='hidden';runtime?.dispose();runtime=null;

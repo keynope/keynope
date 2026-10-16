@@ -6,6 +6,21 @@ import (
 	"strings"
 )
 
+func sceneOnlyEmojiText(text *sceneText) bool {
+	if text == nil || len(text.EmojiFonts) == 0 {
+		return false
+	}
+	found := false
+	for _, token := range splitEmojiText(sceneTextPlain(text)) {
+		if token.assetKey != "" {
+			found = true
+		} else if strings.TrimSpace(token.text) != "" {
+			return false
+		}
+	}
+	return found
+}
+
 // Natural (unwrapped) physical text extents. This is deliberately not a second
 // browser line-breaking implementation: explicit width-bound boxes retain their
 // authored wrapping. Resolve theme/word fonts before measuring this projection.

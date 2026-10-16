@@ -4,6 +4,24 @@ All notable changes to `keynope` are documented in this file.
 
 This project follows semantic versioning.
 
+## 1.8.4
+
+Added:
+
+- System, Light and Dark interface appearance, remembered across launches and shared by editor panels, dialogs and speaker notes without changing slide artwork.
+- Native View menu controls for slide navigation, the Format inspector, zoom, rulers, snapping and keyboard navigation between panes.
+- Searchable activity categories and a confirmed option to remove all training participants.
+
+Changed:
+
+- Redesigned Insert panel with labelled text and media tools, slide-layout previews and default text sizing controls.
+- Consolidated element actions, image adjustments and style-copying tools in the Format inspector.
+- Clearer activity configuration and launch actions, with contextual Add/Update controls and optional participant names for Introduction.
+- Hideable, resizable slide navigation and sidebar-fitted presenter previews.
+- Immediate numeric-control updates and more accurate text and emoji selection bounds, including automatic text-frame growth while editing.
+- More reliable image display when inserting images or switching between Modern and Retro styling.
+- Improved interface contrast, focus indicators, colour-picker accessibility and compact-window layouts.
+
 ## 1.8.3
 
 Added:

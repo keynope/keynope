@@ -344,6 +344,9 @@ globalThis.KeynopeScene = (() => {
     const imageTreatmentRegion=box=>({filterUnits:'userSpaceOnUse',x:-1,y:-1,width:box.width+2,height:box.height+2});
     function frameImage(entry,object){
       renderCounters.imageFrameUpdates++;
+      // Loading can finish after a retained resize/crop. The first-paint
+      // callback must refresh the current frame, not the mount-time geometry.
+      entry.frameObject=object;
       const {image,frame,paintFilter}=entry,box=object.bounds,crop=object.media.crop;
       if(entry.paintSurface){entry.paintSurface.setAttribute('width',box.width);entry.paintSurface.setAttribute('height',box.height);}
       const treatment=entry.treatmentDefinition?.firstElementChild;
@@ -623,7 +626,9 @@ globalThis.KeynopeScene = (() => {
           if(!diagnostics.some(d=>d.objectId===object.id&&d.code==='image-decode'))diagnostics.push({objectId:object.id,code:'image-decode',message:'The embedded image could not be decoded. Replace the image or restore its source.'});
         };
         image.addEventListener('error',failed);
-        image.addEventListener('load',()=>{image.style.visibility='';fallback.style.display='none';imageEntry.paintSurface.style.visibility='';imageEntry.paintSource.setAttribute('href',image.src);});
+        // Source changes are owned by mount/setTime. Reassigning the SVG href
+        // here races its own load/readiness event in a cold WebKit session.
+        image.addEventListener('load',()=>{image.style.visibility='';fallback.style.display='none';imageEntry.paintSurface.style.visibility='';});
         const frame=document.createElement('div');Object.assign(frame.style,{position:'absolute',inset:'0',overflow:'hidden'});
         // Render and export the same SVG image/filter tree. Keep the HTML image
         // only as the shared decoder/animation owner, never a second painter.
@@ -631,14 +636,37 @@ globalThis.KeynopeScene = (() => {
         Object.assign(paintSurface.style,{position:'absolute',left:'0',top:'0',overflow:'visible'});
         frameDefs.append(frameClip,sourceClip);paintFrame.setAttribute('clip-path',`url(#${frameClip.id})`);paintFrame.append(paintSource);paintGroup.append(paintFrame);paintSurface.append(frameDefs,paintGroup);frame.style.display='none';
         const imageEntry={node,image,frame,fallback,paintSurface,paintGroup,paintFrame,paintSource,frameClip,sourceClip,outlineFilter:null};imageViews.set(object.id,imageEntry);
+        // Register the visible SVG and its clip definitions before assigning
+        // the source. Cached/data images can load before a detached SVG ever
+        // gets a render tree in macOS WebKit.
+        frame.append(image);node.append(paintSurface,frame,fallback);
         imageSemantics(imageEntry,object.media);
         paintImage(imageEntry,object);
         frameImage(imageEntry,object);
         const source=object.media.source||object.media.frames?.[0]?.source;
+        let paintReady=Promise.resolve();
         // Scenes only contain embedded media. Never let a document initiate
         // an arbitrary remote request through this renderer.
-        if(source&&/^data:image\/(png|jpeg|gif|webp|svg\+xml);base64,/.test(source)){image.src=source;paintSource.setAttribute('href',source);}
-        frame.append(image);node.append(paintSurface,frame,fallback);media.push({image,media:object.media,current:source,id:object.id,failed});
+        if(source&&/^data:image\/(png|jpeg|gif|webp|svg\+xml);base64,/.test(source)){
+          // The HTML decoder can finish before WebKit's visible SVG image has
+          // loaded. Publishing readiness then leaves the first cold frame blank
+          // until another interaction repaints it. Await the actual painter too.
+          paintReady=new Promise(resolve=>{
+            const done=()=>{paintSource.removeEventListener('load',loaded);paintSource.removeEventListener('error',error);imageEntry.cancelPaint=null;resolve();};
+            const loaded=()=>{
+              // Commit clipping/viewport geometry once the actual SVG image
+              // has loaded. This is the same targeted invalidation a move
+              // previously supplied, without redrawing other slide objects.
+              if(!disposed&&root.contains(node))frameImage(imageEntry,imageEntry.frameObject);
+              done();
+            };
+            const error=()=>{failed();done();};
+            imageEntry.cancelPaint=done;
+            paintSource.addEventListener('load',loaded);paintSource.addEventListener('error',error);
+          });
+          image.src=source;paintSource.setAttribute('href',source);
+        }
+        media.push({image,media:object.media,current:source,id:object.id,failed,paintReady});
       }
     }
     // Reuse the normal image/Retro painters for the background layer. This is
@@ -712,7 +740,11 @@ globalThis.KeynopeScene = (() => {
         return {row:Number(row),column:Number(column),...extent,minWidth};
       });
     }
-    let ready=Promise.all([...backgroundReady,...retroReady.splice(0),...surfaces.map(s=>s.surface.ready()),...media.map(item=>item.image.decode().catch(item.failed))]).then(()=>checkOverflow());
+    // The host may start registering its bundled fonts immediately after
+    // mount(). Do not settle text metrics against fallback fonts before that
+    // shared batch has registered and loaded (a first-resize jump in WebKit).
+    const initialRetroReady=retroReady.splice(0);
+    let ready=Promise.resolve().then(()=>fonts).then(()=>Promise.all([...backgroundReady,...initialRetroReady,...surfaces.map(s=>s.surface.ready()),...media.flatMap(item=>[item.image.decode().catch(item.failed),item.paintReady])])).then(()=>checkOverflow());
     const animationTrack=item=>{
       let duration=0;const ends=item.media.frames.map(frame=>(duration+=Math.max(1,Number(frame.delayMs)||100)));
       return {item,ends,duration};
@@ -1031,7 +1063,7 @@ globalThis.KeynopeScene = (() => {
       backgroundObjectID=nextBackgroundID;
       if(next.background!==retainedBackground){root.style.background=next.background||'';retainedBackground=next.background;}
       const removedDiagnostics=new Set([...removed,...textBoxes.filter(box=>removed.has(box.ownerID)).map(box=>box.id)]);
-      for(const id of removed){activeIDs.delete(id);retainedObjects.delete(id);retainedSources.delete(id);structuredViews.delete(id);shapeViews.delete(id);imageViews.delete(id);sampledViews.delete(id);connectorNodes.get(id)?.path.remove();connectorNodes.get(id)?.defs.remove();connectorNodes.delete(id);}
+      for(const id of removed){activeIDs.delete(id);retainedObjects.delete(id);retainedSources.delete(id);structuredViews.delete(id);shapeViews.delete(id);imageViews.get(id)?.cancelPaint?.();imageViews.delete(id);sampledViews.delete(id);connectorNodes.get(id)?.path.remove();connectorNodes.get(id)?.defs.remove();connectorNodes.delete(id);}
       for(const id of removed){const dialog=chartDataDialogs.get(id);if(dialog){dialog.close();dialog.remove();chartDataDialogs.delete(id);}}
       for(let i=textBoxes.length-1;i>=0;i--){const box=textBoxes[i];if(!removed.has(box.ownerID))continue;for(const surface of box.local)surface.dispose();for(let j=surfaces.length-1;j>=0;j--)if(box.local.includes(surfaces[j].surface))surfaces.splice(j,1);dirtyTextIDs.delete(box.id);textBoxes.splice(i,1);}
       for(let i=readingNodes.length-1;i>=0;i--)if(removed.has(readingNodes[i].object.id)){readingNodes[i].node.remove();readingNodes.splice(i,1);}
@@ -1053,7 +1085,7 @@ globalThis.KeynopeScene = (() => {
         if(imageViews.has(object.id))retainedSources.set(object.id,{source:object.media.source,frames:(object.media.frames||[]).map(frame=>frame.source)});
         for(const box of textBoxes.slice(firstBox))dirtyTextIDs.add(box.id);
         pendingText.push(...retroReady.splice(firstRetro),...surfaces.slice(firstSurface).map(s=>s.surface.ready()));
-        for(const item of media.slice(firstMedia)){pendingText.push(item.image.decode().catch(item.failed));if(item.media.frames?.length)animationTracks.push(animationTrack(item));}
+        for(const item of media.slice(firstMedia)){pendingText.push(item.image.decode().catch(item.failed),item.paintReady);if(item.media.frames?.length)animationTracks.push(animationTrack(item));}
       }
       for(const {box,data,paragraphs,paint,contentChanged,bounds,resized,rebuild}of changedText){
         changedIDs.add(box.ownerID);
@@ -1162,6 +1194,7 @@ globalThis.KeynopeScene = (() => {
     function resourceCounts(){return {objects:readingNodes.length+connectorNodes.size,textSurfaces:surfaces.length,media:media.length,animationTracks:animationTracks.length+retroTracks.length,pendingRasterQueue:retroReady.length};}
     function dispose(){
       if(disposed)return;disposed=true;
+      for(const entry of imageViews.values())entry.cancelPaint?.();
       for(const dialog of chartDataDialogs.values()){dialog.close();dialog.remove();}chartDataDialogs.clear();
       for(const s of surfaces)s.surface.dispose();
       for(const list of [surfaces,textBoxes,media,readingNodes,retroReady,retroTracks,animationTracks])list.length=0;
@@ -1567,7 +1600,19 @@ globalThis.KeynopeScene = (() => {
     };
     paintShapeDraft().catch(e=>{if(!closed)error.textContent=e.message;});
     updateGrowth=model=>{
-      if(!growingShape||editor.isComposing())return;
+      if(editor.isComposing())return;
+      if(!shapeLabel&&inline){
+        const generation=++growthGeneration;
+        growthTask=(async()=>{
+          if(!await editor.ready()||closed||generation!==growthGeneration)return;
+          const changed=model.runs.map(run=>run.text).join('')!==initialText;
+          outerBounds.height=Math.max(object.bounds.height,changed?editor.element.offsetHeight:0);
+          fitInline();
+        })();
+        growthTask.catch(e=>{if(!closed&&generation===growthGeneration)error.textContent=e.message;});
+        return;
+      }
+      if(!growingShape)return;
       const generation=++growthGeneration;
       growthTask=(async()=>{
         const bounds=model.runs.map(run=>run.text).join('')===initialText?shapeOwner.bounds:await grownShapeTextBounds(dialog,shapeOwner,model);

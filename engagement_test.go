@@ -156,9 +156,11 @@ func TestExpandedEngagementKindsNormalize(t *testing.T) {
 	if !draw.Named {
 		t.Fatal("quick draw must always reveal participant names")
 	}
-	introduction, _ := normalizeEngagement(EngagementDefinition{Kind: "introduction"})
-	if !introduction.Named {
-		t.Fatal("introduction must always reveal participant names")
+	for _, named := range []bool{false, true} {
+		introduction, _ := normalizeEngagement(EngagementDefinition{Kind: "introduction", Named: named})
+		if introduction.Named != named {
+			t.Fatal("introduction must respect the presenter’s names preference")
+		}
 	}
 }
 

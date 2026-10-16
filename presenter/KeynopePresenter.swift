@@ -49,6 +49,9 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var shareMenu: NSMenu?
     private var recentDecksMenu: NSMenu?
     private var styleMenu: NSMenu?
+    private var workspaceMenu: NSMenu?
+    private var appearanceMenuItems: [String: NSMenuItem] = [:]
+    private let interfaceAppearanceKey = "keynope.interface.appearance"
     private var styleMenuItems: [String: NSMenuItem] = [:]
     private var saveMenuItem: NSMenuItem?
     private var participantTabsMenuItem: NSMenuItem?
@@ -144,9 +147,12 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Keynope owns one document session, not independently tabbed windows.
+        NSWindow.allowsAutomaticWindowTabbing = false
+        applyInterfaceAppearance(savedInterfaceAppearance)
         #if KEYNOPE_NATIVE_ACCEPTANCE
-        let backgroundStyleTest = ProcessInfo.processInfo.environment["KEYNOPE_NATIVE_STYLE_MENU_ACCEPTANCE"] == "1" && ProcessInfo.processInfo.environment["KEYNOPE_NATIVE_STYLE_MENU_FOREGROUND"] != "1"
-        NSApp.setActivationPolicy(appMode && !backgroundStyleTest ? .regular : .accessory)
+        let backgroundTest = ProcessInfo.processInfo.environment["KEYNOPE_NATIVE_BACKGROUND"] == "1" || ProcessInfo.processInfo.environment["KEYNOPE_NATIVE_STYLE_MENU_ACCEPTANCE"] == "1" && ProcessInfo.processInfo.environment["KEYNOPE_NATIVE_STYLE_MENU_FOREGROUND"] != "1"
+        NSApp.setActivationPolicy(appMode && !backgroundTest ? .regular : .accessory)
         #else
         NSApp.setActivationPolicy(appMode ? .regular : .accessory)
         #endif
@@ -257,6 +263,19 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         qrItem.isEnabled = false
         qrItem.state = .on
         activityQRMenuItem = qrItem
+        settingsMenu.addItem(.separator())
+        let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
+        let appearanceMenu = NSMenu(title: "Appearance")
+        appearanceMenu.autoenablesItems = false
+        for (mode, label) in [("system", "System"), ("light", "Light"), ("dark", "Dark")] {
+            let item = appearanceMenu.addItem(withTitle: label, action: #selector(changeInterfaceAppearance(_:)), keyEquivalent: "")
+            item.target = self
+            item.identifier = NSUserInterfaceItemIdentifier(mode)
+            item.state = savedInterfaceAppearance == mode ? .on : .off
+            appearanceMenuItems[mode] = item
+        }
+        appearanceItem.submenu = appearanceMenu
+        settingsMenu.addItem(appearanceItem)
         settingsItem.submenu = settingsMenu
         applicationMenu.addItem(settingsItem)
         applicationMenu.addItem(NSMenuItem.separator())
@@ -352,6 +371,31 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         editItem.submenu = editMenu
         mainMenu.addItem(editItem)
 
+        let viewItem = NSMenuItem()
+        let viewMenu = NSMenu(title: "View")
+        viewMenu.autoenablesItems = false
+        viewMenu.delegate = self
+        workspaceMenu = viewMenu
+        for (command, title, shortcut, modifiers) in [
+            ("navigator", "Slide Navigator", "1", NSEvent.ModifierFlags([.command, .option])),
+            ("format", "Format Inspector", "i", [.command, .option]),
+            ("fit", "Zoom to Fit", "0", [.command]),
+            ("zoom-in", "Zoom In", "+", [.command]),
+            ("zoom-out", "Zoom Out", "-", [.command]),
+            ("rulers", "Rulers", "r", [.command]),
+            ("snap", "Snap to Alignment Guides", "", []),
+            ("focus-next", "Move Focus to Next Pane", "", [])
+        ] {
+            if command == "fit" || command == "rulers" || command == "focus-next" { viewMenu.addItem(.separator()) }
+            let item = viewMenu.addItem(withTitle: title, action: #selector(performWorkspaceCommand(_:)), keyEquivalent: shortcut)
+            item.target = self
+            item.identifier = NSUserInterfaceItemIdentifier(command)
+            item.keyEquivalentModifierMask = modifiers
+            item.isEnabled = false
+        }
+        viewItem.submenu = viewMenu
+        mainMenu.addItem(viewItem)
+
         let windowItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
@@ -371,9 +415,53 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         presenterURLForSurface("app")
     }
 
+    private var savedInterfaceAppearance: String {
+        let mode = UserDefaults.standard.string(forKey: interfaceAppearanceKey) ?? "system"
+        return ["system", "light", "dark"].contains(mode) ? mode : "system"
+    }
+
+    private func installAppearanceBootstrap(_ controller: WKUserContentController) {
+        let prefix = "window.KEYNOPE_INTERFACE_APPEARANCE = "
+        let otherScripts = controller.userScripts.filter { !$0.source.hasPrefix(prefix) }
+        controller.removeAllUserScripts()
+        otherScripts.forEach { controller.addUserScript($0) }
+        controller.addUserScript(WKUserScript(source: prefix + "'" + savedInterfaceAppearance + "';", injectionTime: .atDocumentStart, forMainFrameOnly: true))
+    }
+
+    private func applyInterfaceAppearance(_ mode: String) {
+        guard ["system", "light", "dark"].contains(mode) else { return }
+        UserDefaults.standard.set(mode, forKey: interfaceAppearanceKey)
+        NSApp.appearance = mode == "system" ? nil : NSAppearance(named: mode == "dark" ? .darkAqua : .aqua)
+        for (key, item) in appearanceMenuItems { item.state = key == mode ? .on : .off }
+        if let view = editorWebView {
+            installAppearanceBootstrap(view.configuration.userContentController)
+            Task { @MainActor [weak view] in
+                _ = try? await view?.callAsyncJavaScript("return window.keynopeSetInterfaceAppearance?.(mode, false)", arguments: ["mode": mode], in: nil, contentWorld: .page)
+            }
+        }
+    }
+
+    @objc private func changeInterfaceAppearance(_ sender: NSMenuItem) {
+        guard let mode = sender.identifier?.rawValue, appearanceMenuItems[mode] === sender else { return }
+        applyInterfaceAppearance(mode)
+    }
+
     @objc private func cutEditorObjects(_ sender: Any?) { editorClipboardCommand("cut") }
     @objc private func copyEditorObjects(_ sender: Any?) { editorClipboardCommand("copy") }
     @objc private func pasteEditorObjects(_ sender: Any?) { editorClipboardCommand("paste") }
+
+    @objc private func performWorkspaceCommand(_ sender: NSMenuItem) {
+        guard appMode, editorWindow?.isKeyWindow == true, let view = editorWebView,
+              let command = sender.identifier?.rawValue, workspaceMenu?.items.contains(sender) == true else { return }
+        Task { @MainActor [weak self, weak view] in
+            guard let self, let view, view === self.editorWebView, self.editorWindow?.isKeyWindow == true else { return }
+            if command == "focus-next" {
+                let focused = self.editorWindow?.firstResponder as? NSView
+                if focused !== view && focused?.isDescendant(of: view) != true { self.editorWindow?.makeFirstResponder(view) }
+            }
+            _ = try? await view.callAsyncJavaScript("return window.keynopeWorkspaceCommand?.(command) ?? false", arguments: ["command": command], in: nil, contentWorld: .page)
+        }
+    }
 
     private func updateEditorStyleCommands(_ flags: [String: Bool] = [:]) {
         let ready = appMode && editorWindow?.isKeyWindow == true
@@ -477,6 +565,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         config.userContentController.add(self, name: "keynopeInput")
         config.userContentController.add(self, name: "keynopePresenter")
         config.userContentController.addScriptMessageHandler(self, contentWorld: .page, name: "keynopeClipboard")
+        installAppearanceBootstrap(config.userContentController)
         if ProcessInfo.processInfo.environment["KEYNOPE_PERFORMANCE"] == "1" {
             config.userContentController.addUserScript(WKUserScript(
                 source: "window.KEYNOPE_PERFORMANCE = true;",
@@ -502,6 +591,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             defer: false
         )
         newWindow.title = versionedAppName
+        newWindow.tabbingMode = .disallowed
         newWindow.contentView = view
         newWindow.isReleasedWhenClosed = false
         newWindow.delegate = self
@@ -1812,6 +1902,22 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === workspaceMenu {
+            let ready = appMode && editorWindow?.isKeyWindow == true
+            for item in menu.items where !item.isSeparatorItem { item.isEnabled = ready }
+            guard ready, let view = editorWebView else { return }
+            view.evaluateJavaScript("window.keynopeWorkspaceState?.() || {enabled:false}") { [weak self, weak view, weak menu] result, _ in
+                MainActor.assumeIsolated {
+                    guard let self, let view, let menu, view === self.editorWebView else { return }
+                    let state = result as? [String: Bool] ?? [:]
+                    for item in menu.items where !item.isSeparatorItem {
+                        item.isEnabled = self.editorWindow?.isKeyWindow == true && state["enabled"] == true
+                        item.state = state[item.identifier?.rawValue ?? ""] == true ? .on : .off
+                    }
+                }
+            }
+            return
+        }
         if menu === styleMenu {
             refreshEditorStyleCommands()
             return
@@ -2154,7 +2260,15 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                   let action = body["action"] as? String else {
                 return
             }
-            if action == "editor-style-commands" {
+            if action == "interface-appearance" {
+                let expected = editorURL()
+                guard appMode, message.webView === editorWebView, message.frameInfo.isMainFrame,
+                      let source = message.frameInfo.request.url,
+                      source.scheme == expected.scheme, source.host == expected.host,
+                      source.port == expected.port, source.path == expected.path,
+                      let mode = body["mode"] as? String else { return }
+                applyInterfaceAppearance(mode)
+            } else if action == "editor-style-commands" {
                 let expected = editorURL()
                 guard appMode, message.webView === editorWebView,
                       message.frameInfo.isMainFrame, let source = message.frameInfo.request.url,
@@ -3622,6 +3736,62 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         try requireNativeAcceptance(clean==true,"native transition navigation and capture do not dirty the document",checks:&checks)
     }
 
+    private func verifyNativeImageFirstPaint(root: URL, checks: inout [String]) async throws {
+        guard let view=editorWebView else {throw NativeAcceptanceError(message:"Missing native image editor")}
+        try requireNativeAcceptance(workspaceMenu?.title == "View" && workspaceMenu?.items.contains(where: { $0.identifier?.rawValue == "format" && $0.action == #selector(performWorkspaceCommand(_:)) }) == true, "native View menu exposes the shared Format inspector command", checks: &checks)
+        try requireNativeAcceptance(!NSWindow.allowsAutomaticWindowTabbing && editorWindow?.tabbingMode == .disallowed && workspaceMenu?.items.contains(where: { $0.action == #selector(NSWindow.toggleTabBar(_:)) || $0.action == #selector(NSWindow.toggleTabOverview(_:)) }) == false, "unsupported document tab bar and tab overview are not offered", checks: &checks)
+        try await waitForNativeJavaScript("cold image editor",in:view,expression:"typeof editorAction==='function' && !!document.querySelector('#stage .keynope-modern-scene')")
+        let originalAppearance = savedInterfaceAppearance
+        defer { applyInterfaceAppearance(originalAppearance) }
+        try requireNativeAcceptance(Set(appearanceMenuItems.keys) == Set(["system", "light", "dark"]), "native Settings exposes System, Light and Dark appearance", checks: &checks)
+        for mode in ["light", "dark", "system"] {
+            guard let item = appearanceMenuItems[mode] else { throw NativeAcceptanceError(message: "Missing appearance menu item") }
+            changeInterfaceAppearance(item)
+            try await waitForNativeJavaScript("native appearance " + mode, in: view, expression: "document.documentElement.dataset.keynopeInterfaceAppearance === '" + mode + "'")
+            let expected: NSAppearance.Name? = mode == "system" ? nil : mode == "dark" ? .darkAqua : .aqua
+            try requireNativeAcceptance(NSApp.appearance?.name == expected && savedInterfaceAppearance == mode && appearanceMenuItems.allSatisfy { $0.value.state == ($0.key == mode ? .on : .off) }, "native " + mode + " appearance updates chrome, preference and menu state", checks: &checks)
+            try requireNativeAcceptance(view.configuration.userContentController.userScripts.contains { $0.source == "window.KEYNOPE_INTERFACE_APPEARANCE = '" + mode + "';" }, "native " + mode + " appearance survives editor reload", checks: &checks)
+        }
+        for kind in ["png", "jpeg"] {
+            let id=try await view.callAsyncJavaScript("""
+            const s=await fetch('/api/editor/state').then(r=>r.json());
+            const prior=new Set(s.slides[s.current].elements.map(e=>e.id));
+            const canvas=document.createElement('canvas');canvas.width=1800;canvas.height=1200;
+            const c=canvas.getContext('2d');c.fillStyle=kind==='png'?'#f52878':'#1982f5';c.fillRect(0,0,1800,1200);
+            const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/'+kind,.92));
+            const transfer=new DataTransfer();transfer.items.add(new File([blob],'cold.'+kind,{type:'image/'+kind}));
+            const input=document.querySelector('input[type="file"][accept^="image/"]');
+            input.files=transfer.files;input.dispatchEvent(new Event('change',{bubbles:true}));
+            const deadline=Date.now()+15000;
+            while(Date.now()<deadline){
+              const state=await fetch('/api/editor/state').then(r=>r.json());
+              const image=state.slides[state.current].elements.find(e=>e.kind==='image'&&!prior.has(e.id));
+              if(image)return image.id;
+              await new Promise(resolve=>setTimeout(resolve,30));
+            }
+            throw Error('Native upload did not finish');
+            """,arguments:["kind":kind],in:nil,contentWorld:.page) as? String
+            guard let id else {throw NativeAcceptanceError(message:"No inserted image")}
+            try await waitForNativeJavaScript("cold \(kind) mounted",in:view,expression:"!!document.querySelector('#stage [data-object-id=\"\(id)\"] img')")
+            _ = try await view.callAsyncJavaScript("""
+            await Promise.race([modernPageView.ready,new Promise((_,reject)=>setTimeout(()=>reject(Error('Cold image readiness timed out')),10000))]);
+            await Promise.race([new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))),new Promise(resolve=>setTimeout(resolve,500))]);
+            return true;
+            """,arguments:[:],in:nil,contentWorld:.page)
+            let capture=try await view.takeSnapshot(configuration:nil)
+            guard let tiff=capture.tiffRepresentation,let bitmap=NSBitmapImageRep(data:tiff),let png=bitmap.representation(using:.png,properties:[:]) else {throw NativeAcceptanceError(message:"Missing native image pixels")}
+            try png.write(to:root.appendingPathComponent("cold-\(kind)-before-interaction.png"))
+            var ink=0
+            for y in stride(from:0,to:bitmap.pixelsHigh,by:2) {
+                for x in stride(from:0,to:bitmap.pixelsWide,by:2) {
+                    guard let color=bitmap.colorAt(x:x,y:y)?.usingColorSpace(.deviceRGB) else {continue}
+                    if kind=="png" ? color.redComponent>0.7 && color.greenComponent<0.4 && color.blueComponent>0.3 : color.redComponent<0.3 && color.greenComponent>0.35 && color.blueComponent>0.8 {ink+=1}
+                }
+            }
+            try requireNativeAcceptance(ink>2000,"native \(kind) paints on insertion without moving, cropping or reselecting (\(ink) sampled pixels)",checks:&checks)
+        }
+    }
+
     private func verifyNativeSVG(root: URL, checks: inout [String]) async throws {
         guard let view=editorWebView else {throw NativeAcceptanceError(message:"Missing native editor")}
         try await waitForNativeJavaScript("SVG editor readiness",in:view,expression:"typeof editorAction==='function' && !!document.querySelector('#stage .keynope-modern-scene')")
@@ -3957,6 +4127,11 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 return
             }
             if ProcessInfo.processInfo.environment["KEYNOPE_NATIVE_PDF_ACCEPTANCE"] == "1" {
+                if ProcessInfo.processInfo.environment["KEYNOPE_NATIVE_IMAGE_FIRST_PAINT_ACCEPTANCE"] == "1" {
+                    try await verifyNativeImageFirstPaint(root:root,checks:&checks)
+                    finishNativePanelAcceptance(root:root,checks:checks,failure:nil)
+                    return
+                }
                 if ProcessInfo.processInfo.environment["KEYNOPE_NATIVE_ACTIVITY_BUILD_ACCEPTANCE"] == "1" {
                     try await verifyNativeActivityBuilds(root:root,checks:&checks)
                     finishNativePanelAcceptance(root:root,checks:checks,failure:nil)

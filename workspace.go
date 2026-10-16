@@ -11,6 +11,9 @@ var workspaceJS string
 //go:embed web/workspace.css
 var workspaceCSS string
 
+//go:embed web/interface.css
+var interfaceCSS string
+
 //go:embed web/conversion-report.js
 var conversionReportJS string
 

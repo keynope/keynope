@@ -1210,6 +1210,21 @@ func buildStyledSceneProjection(deck Deck, resolved Slide, index, cols, rows int
 			}
 			x, y := preciseTextAnchorForFrame(q, o.Bounds.Width/sx, o.Bounds.Height/sy, o.Bounds.X/sx, o.Bounds.Y/sy, cols, rows, naturalWidth || autoHeight)
 			o.Bounds.X, o.Bounds.Y = x*sx, y*sy
+			// Emoji rows have real square artwork, not an invisible text margin.
+			// Old authored frames can be shorter than their line box; include its
+			// full height while preserving the painted top/centre/bottom anchor.
+			if q.Has("height") && sceneOnlyEmojiText(o.Text) {
+				height := sceneTextWrappedHeight(o.Text, o.Bounds.Width)
+				if height > o.Bounds.Height {
+					switch o.Text.Vertical {
+					case "middle":
+						o.Bounds.Y += (o.Bounds.Height - height) / 2
+					case "bottom":
+						o.Bounds.Y += o.Bounds.Height - height
+					}
+					o.Bounds.Height = height
+				}
+			}
 		}
 		if treatment == "retro" && o.RetroLines == nil && o.RetroText == nil && !(o.Kind == "text" && sharedRetroText(e)) {
 			warn(id, "retro-adapter-pending", "This Retro treatment is not supported in the shared scene yet; this preview uses a Modern fallback without changing the authored object.")
@@ -1779,12 +1794,74 @@ func applySceneText(deck *Deck, action nativeEditorAction) (bool, error) {
 			if content.String() == owner.Text && next == owner.Query {
 				return false, nil
 			}
+			// A deliberate frame resize may leave overflow, but committing new
+			// content must not strand its extra lines outside the selection box.
+			// Measure the effective master typography, never the sparse child.
+			if content.String() != element.Text {
+				candidate := element
+				candidate.Text, candidate.Query = content.String(), updateStyle(element.Query)
+				next = growEditedTextFrame(*deck, action.Slide, candidate, treatment, next)
+			}
 			deck.Slides[action.Slide].Elements[i].Text = content.String()
 			deck.Slides[action.Slide].Elements[i].Query = next
 		}
 		return true, nil
 	}
 	return false, fmt.Errorf("the edited object no longer exists")
+}
+
+// Expand only the bottom of an explicitly bounded text object. Natural frames
+// already derive their height from content. This is part of the text transaction
+// (including undo/save), not a render-time mutation or a resize of its font.
+func growEditedTextFrame(deck Deck, slide int, effective Element, treatment, authored string) string {
+	values := mustQuery(effective.Query)
+	if !values.Has("height") || !values.Has("width") {
+		return authored
+	}
+	cols, rows := authoredRenderSize(245, 56)
+	pageW, pageH := deck.pageDimensions()
+	sx, sy := pageW/float64(cols), pageH/float64(rows)
+	width, ok := sceneObjectDimension(values, "width", cols)
+	if !ok {
+		return authored
+	}
+	height, ok := sceneObjectDimension(values, "height", rows)
+	if !ok {
+		return authored
+	}
+	text := deck.sceneTextForStyle(effective, treatment)
+	deck.resolveWordFonts(text)
+	needed := sceneTextWrappedHeight(text, width*sx)
+	if needed <= height*sy+.01 {
+		return authored
+	}
+	// Resolve the old origin before changing height: bottom/centre anchors
+	// would otherwise grow upwards, and flow placement can have no top field.
+	scene, err := buildMixedSlideScene(deck, slide, cols, rows)
+	if err != nil {
+		return authored
+	}
+	for _, object := range scene.Objects {
+		if object.ID != effective.ID || object.Kind != "text" || object.RetroLines != nil || object.RetroText != nil {
+			continue
+		}
+		q := mustQuery(authored)
+		q.Set("height", strconv.FormatFloat(needed/sy, 'f', -1, 64))
+		for _, key := range []string{"bottom", "row_delta", "valign"} {
+			q.Del(key)
+		}
+		y := object.Bounds.Y / sy
+		q.Set("top", strconv.FormatFloat(math.Floor(y), 'f', 0, 64))
+		q.Del("object-offset-y")
+		if offset := y - math.Floor(y); offset > 0 {
+			q.Set("object-offset-y", strconv.FormatFloat(offset, 'f', -1, 64))
+		}
+		if effective.MasterSlotID != "" {
+			setMasterQueryClears(q, []string{"bottom", "row_delta", "valign", "object-offset-y"}, []string{"bottom", "row_delta", "valign"})
+		}
+		return q.Encode()
+	}
+	return authored
 }
 
 // Commit browser-measured label growth with its text. The scene revision is

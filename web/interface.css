@@ -1,0 +1,216 @@
+/* Document artwork never inherits interface appearance. These roles belong
+   only to the editor chrome; the slide, previews and colour wells keep paint. */
+html[data-keynope-workspace="inspector"] {
+  color-scheme:light dark;
+  --ui-surface:#f5f5f7; --ui-panel:#fafafa; --ui-field:#fff;
+  --ui-control:#fff; --ui-hover:#e9eaed; --ui-selected:#e0edff;
+  --ui-text:#202124; --ui-secondary:#595b63; --ui-border:#c5c6cc;
+  --ui-divider:#dcdde1; --ui-accent:#005cc5; --ui-focus:#0071e3;
+  --ui-error:#b42332; --ui-shadow:0 8px 30px #0002;
+  --ui-ready:#8a5700; --ui-running:#16713a; --ui-running-surface:#e4f3e9; --ui-finished:#656970;
+  --keynope-workspace-background:#e2e3e7;
+}
+@media(prefers-color-scheme:dark) {
+  html[data-keynope-workspace="inspector"]:not([data-keynope-interface-appearance="light"]) {
+    --ui-surface:#252628; --ui-panel:#202124; --ui-field:#18191b;
+    --ui-control:#303135; --ui-hover:#3b3d42; --ui-selected:#253e59;
+    --ui-text:#f1f2f5; --ui-secondary:#b1b4bd; --ui-border:#60636c;
+    --ui-divider:#41434a; --ui-accent:#8bc1ff; --ui-focus:#8bc1ff;
+    --ui-error:#ff9da6; --ui-shadow:0 8px 30px #0006;
+    --ui-ready:#ffd166; --ui-running:#8fe3a1; --ui-running-surface:#203c2a; --ui-finished:#aab0ba;
+    --keynope-workspace-background:#17181b;
+  }
+}
+html[data-keynope-workspace="inspector"][data-keynope-interface-appearance="light"] { color-scheme:light; }
+html[data-keynope-workspace="inspector"][data-keynope-interface-appearance="dark"] {
+  color-scheme:dark;
+  --ui-surface:#252628; --ui-panel:#202124; --ui-field:#18191b;
+  --ui-control:#303135; --ui-hover:#3b3d42; --ui-selected:#253e59;
+  --ui-text:#f1f2f5; --ui-secondary:#b1b4bd; --ui-border:#60636c;
+  --ui-divider:#41434a; --ui-accent:#8bc1ff; --ui-focus:#8bc1ff;
+  --ui-error:#ff9da6; --ui-shadow:0 8px 30px #0006;
+  --ui-ready:#ffd166; --ui-running:#8fe3a1; --ui-running-surface:#203c2a; --ui-finished:#aab0ba;
+  --keynope-workspace-background:#17181b;
+}
+html[data-keynope-workspace="inspector"] :is(.keynope-editor-topbar,.keynope-editor-panel,.keynope-app-toolbar,.keynope-workspace-inspector,.keynope-insert-popover,.keynope-workspace-more,.keynope-link-dialog,.keynope-tabs-dialog,.keynope-engagement-dialog,.keynope-emoji-picker,.keynope-colour-picker,.keynope-table-canvas-tools,dialog[class^="keynope-"]) {
+  color:var(--ui-text); background:var(--ui-panel); border-color:var(--ui-divider);
+  font-family:var(--keynope-ui-font,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);
+  font-size:13px; line-height:1.4;
+}
+html[data-keynope-workspace="inspector"] :is(.keynope-editor-topbar,.keynope-app-toolbar) { background:var(--ui-surface); }
+html[data-keynope-workspace="inspector"] .keynope-speaker-notes {
+  color-scheme:inherit;color:var(--ui-text);background:var(--ui-panel);border-color:var(--ui-divider);
+  font-family:var(--keynope-ui-font,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);
+}
+html[data-keynope-workspace="inspector"] .keynope-speaker-notes label { color:var(--ui-secondary); }
+html[data-keynope-workspace="inspector"] .keynope-speaker-notes textarea {
+  color-scheme:inherit;color:var(--ui-text);background:var(--ui-field);border-color:var(--ui-border);
+  font-family:inherit;caret-color:var(--ui-text);
+}
+html[data-keynope-workspace="inspector"] .keynope-speaker-notes textarea::placeholder { color:var(--ui-secondary);opacity:1; }
+html[data-keynope-workspace="inspector"] .keynope-speaker-notes button {
+  color:var(--ui-text);background:var(--ui-control);border:1px solid var(--ui-border);border-radius:6px;padding:4px 8px;min-height:28px;font:inherit;
+}
+html[data-keynope-workspace="inspector"] .keynope-speaker-notes button:hover:not(:disabled) { background:var(--ui-hover); }
+html[data-keynope-workspace="inspector"] .keynope-speaker-notes :is(textarea,button):focus-visible { outline:2px solid var(--ui-focus)!important;outline-offset:2px;box-shadow:none!important; }
+html[data-keynope-workspace="inspector"] .keynope-speaker-notes :disabled { opacity:.55; }
+html[data-keynope-workspace="inspector"] .keynope-speaker-notes [role="status"] { color:var(--ui-error); }
+html[data-keynope-workspace="inspector"] :is(.keynope-editor-topbar,.keynope-editor-panel,.keynope-app-toolbar,.keynope-insert-popover,.keynope-workspace-more,.keynope-link-dialog,.keynope-tabs-dialog,.keynope-engagement-dialog,.keynope-emoji-picker,.keynope-colour-picker,.keynope-table-canvas-tools,dialog[class^="keynope-"]) :is(button,select,input,textarea) {
+  color-scheme:inherit; font-family:inherit; font-size:13px; color:var(--ui-text);
+  border-color:var(--ui-border); accent-color:var(--ui-accent);
+}
+html[data-keynope-workspace="inspector"] :is(.keynope-editor-topbar,.keynope-editor-panel,.keynope-app-toolbar,.keynope-insert-popover,.keynope-workspace-more,.keynope-link-dialog,.keynope-tabs-dialog,.keynope-engagement-dialog,.keynope-colour-picker,.keynope-table-canvas-tools,dialog[class^="keynope-"]) button:where(:not(.keynope-colour-swatch):not(.keynope-theme-color):not([data-theme-preview])) {
+  background:var(--ui-control); border-radius:6px; min-height:28px;
+}
+html[data-keynope-workspace="inspector"] :is(.keynope-editor-topbar,.keynope-editor-panel,.keynope-insert-popover,.keynope-workspace-more,.keynope-link-dialog,.keynope-tabs-dialog,.keynope-engagement-dialog,.keynope-colour-picker,.keynope-table-canvas-tools,dialog[class^="keynope-"]) :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),textarea,select) {
+  box-sizing:border-box; min-height:28px; padding:4px 7px; border:1px solid var(--ui-border); border-radius:5px; background:var(--ui-field);
+}
+html[data-keynope-workspace="inspector"] input[type="number"] { font-variant-numeric:tabular-nums; }
+html[data-keynope-workspace="inspector"] :is(.keynope-editor-topbar,.keynope-editor-panel,.keynope-app-toolbar,.keynope-insert-popover,.keynope-workspace-more,.keynope-link-dialog,.keynope-tabs-dialog,.keynope-engagement-dialog,.keynope-colour-picker,dialog[class^="keynope-"]) button:where(:not(:disabled):not(.keynope-colour-swatch):not(.keynope-theme-color):not([data-theme-preview])):hover { background:var(--ui-hover); }
+html[data-keynope-workspace="inspector"] :is(.keynope-editor-topbar,.keynope-editor-panel,.keynope-app-toolbar,.keynope-insert-popover,.keynope-workspace-more,.keynope-link-dialog,.keynope-tabs-dialog,.keynope-engagement-dialog,.keynope-colour-picker,dialog[class^="keynope-"]) :is(button,input,select,textarea,summary,[tabindex]):focus-visible {
+  outline:2px solid var(--ui-focus)!important; outline-offset:2px; box-shadow:none!important;
+}
+html[data-keynope-workspace="inspector"] :is(.keynope-editor-topbar,.keynope-editor-panel,.keynope-app-toolbar) button:is(.active,[aria-pressed="true"],[aria-selected="true"]) { color:var(--ui-accent); background:var(--ui-selected); border-color:var(--ui-accent); }
+html[data-keynope-workspace="inspector"] :is(.keynope-editor-topbar,.keynope-editor-panel,.keynope-app-toolbar) button:disabled { opacity:.55; cursor:default; }
+html[data-keynope-workspace="inspector"] :is(.keynope-workspace-hint,.keynope-theme-note,.keynope-command-scope,.keynope-topbar-label,.keynope-image-adjustments label,.keynope-image-adjustments label small,.keynope-editor-status,.keynope-group-scope span,.keynope-paint-field small) { color:var(--ui-secondary); }
+html[data-keynope-workspace="inspector"] :is(.keynope-workspace-inspector,.keynope-insert-popover) { scrollbar-gutter:stable; }
+.keynope-workspace-inspector > h2 { font-weight:600; margin-bottom:10px; }
+.keynope-workspace-inspector .keynope-workspace-hint { margin:10px 0 16px; font-size:12px; }
+.keynope-workspace-inspector .keynope-ribbon-tabs { gap:0; padding-bottom:8px; border-bottom:1px solid var(--ui-divider); }
+html[data-keynope-workspace="inspector"] .keynope-workspace-inspector .keynope-ribbon-tab { flex:1; border-radius:5px; padding:6px 4px!important; background:transparent; }
+html[data-keynope-workspace="inspector"] .keynope-workspace-inspector .keynope-ribbon-tab[aria-selected="true"] { background:var(--ui-selected); border-color:var(--ui-accent); }
+html[data-keynope-workspace="inspector"] :is(.keynope-engagement-dialog,dialog[class^="keynope-"]) button:is(.active,[aria-pressed="true"]) { color:var(--ui-accent);background:var(--ui-selected);border-color:var(--ui-accent); }
+html[data-keynope-workspace="inspector"] :is(.keynope-editor-topbar,.keynope-link-dialog,.keynope-tabs-dialog,.keynope-engagement-dialog,dialog[class^="keynope-"]) button.primary { color:var(--ui-accent);background:var(--ui-selected);border-color:var(--ui-accent);font-weight:600; }
+html[data-keynope-workspace="inspector"] :is(.keynope-editor-topbar,.keynope-engagement-dialog,dialog[class^="keynope-"]) button.danger { color:var(--ui-error);border-color:var(--ui-error); }
+.keynope-workspace-inspector .keynope-ribbon-panel { gap:12px 8px; align-items:start; }
+.keynope-inspector-section,.keynope-geometry-controls { width:100%; min-width:0; box-sizing:border-box; margin:0; padding:12px 0; border:0; border-top:1px solid var(--ui-divider); border-radius:0; }
+.keynope-inspector-section { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.keynope-inspector-section legend { font-weight:600; font-size:12px; padding:0 8px 0 0; }
+.keynope-inspector-section > p { flex-basis:100%; }
+.keynope-geometry-controls { gap:10px 12px; }
+.keynope-geometry-controls > p:first-child { font-weight:600; font-size:12px; }
+.keynope-geometry-controls > button { grid-column:auto; }
+.keynope-geometry-controls label { font-size:12px; color:var(--ui-secondary); }
+.keynope-geometry-controls .keynope-geometry-aspect { color:var(--ui-text); }
+.keynope-geometry-status:empty { display:none; }
+html[data-keynope-workspace="inspector"] .keynope-geometry-status { color:var(--ui-secondary); font-size:12px; }
+html[data-keynope-workspace="inspector"] .keynope-selection-paint :is(fieldset,details),
+html[data-keynope-workspace="inspector"] .keynope-image-description { padding:12px 0; border:0; border-top:1px solid var(--ui-divider); border-radius:0; }
+.keynope-selection-paint :is(legend,summary) { font-weight:600; font-size:12px; }
+.keynope-selection-paint summary { min-height:24px; }
+.keynope-paint-field { margin:10px 0; }
+html[data-keynope-workspace="inspector"] .keynope-editor-topbar .keynope-text-size-stack button { min-height:0; }
+html[data-keynope-workspace="inspector"] .keynope-workspace-inspector .keynope-ttf-width-control { color:var(--ui-secondary); }
+.keynope-text-metrics { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px;width:100%;min-width:0; }
+.keynope-text-metrics .keynope-text-metric-control { min-width:0; }
+.keynope-text-metrics .keynope-ttf-width-control { min-width:0;flex:1; }
+.keynope-text-metrics .keynope-text-metric-control input { min-width:0;width:100%; }
+.keynope-text-metrics > button { grid-column:1 / -1;justify-self:end; }
+.keynope-colour-input-label { display:grid;gap:4px;min-width:0;font-size:12px; }
+.keynope-colour-picker-controls { align-items:end; }
+.keynope-colour-picker [role="alert"] { font-size:12px;margin:0; }
+.keynope-colour-swatch[aria-pressed="true"]::after { content:"✓";display:block;color:#fff;text-shadow:0 1px 2px #000,1px 0 2px #000,-1px 0 2px #000;font:700 16px/1 system-ui; }
+.keynope-image-adjustments { padding:12px 0; border-top:1px solid var(--ui-divider); }
+.keynope-image-adjustment-label,.keynope-image-adjustment-value { grid-column:1 / -1; }
+.keynope-image-adjustments .keynope-image-adjustment-value { display:flex;min-width:0;gap:6px; }
+.keynope-image-adjustment-value > :is(input[type="range"],select) { flex:1;min-width:0; }
+.keynope-image-adjustments .keynope-image-adjustment-number { flex:none;width:68px; }
+.keynope-image-adjustment-value > button { flex:none; }
+html[data-keynope-workspace="inspector"] :is(.keynope-theme-error,[role="alert"]) { color:var(--ui-error); }
+html[data-keynope-workspace="inspector"] :is(.keynope-workspace-inspector,.keynope-engagement-dialog,.keynope-tabs-dialog,.keynope-link-dialog,dialog[class^="keynope-"]) :is(h2,h3,h4,label,legend) { color:inherit; }
+html[data-keynope-workspace="inspector"] :is(.keynope-engagement-dialog,.keynope-tabs-dialog,.keynope-link-dialog,dialog[class^="keynope-"]) > p { color:var(--ui-secondary); }
+html[data-keynope-workspace="inspector"] .keynope-theme-presets button[data-theme-preview] { color:var(--theme-preview-fg);background:var(--theme-preview-bg); }
+html[data-keynope-workspace="inspector"] .keynope-theme-form .keynope-theme-color { background:var(--theme-color);box-shadow:inset 0 0 0 4px var(--ui-control); }
+html[data-keynope-workspace="inspector"] :is(.keynope-editor-topbar,.keynope-app-toolbar) :is(.keynope-app-button-tag,.keynope-web-icon-tag) { color:var(--ui-text);background:var(--ui-control);border-color:var(--ui-border);box-shadow:none; }
+html[data-keynope-workspace="inspector"] .keynope-app-toolbar button[data-timer-audience="broadcast"] { color:#193d24;background:#a8dfaf;border-color:#396c46; }
+html[data-keynope-workspace="inspector"] .keynope-app-toolbar button[data-activity-state="clean"] { color:var(--ui-ready);border-color:var(--ui-ready); }
+html[data-keynope-workspace="inspector"] .keynope-app-toolbar button[data-activity-state="running"],
+html[data-keynope-workspace="inspector"] .keynope-app-toolbar button.keynope-active-activity.all-submitted { color:var(--ui-running);border-color:var(--ui-running);background:var(--ui-running-surface); }
+html[data-keynope-workspace="inspector"] .keynope-app-toolbar button[data-activity-state="completed"] { color:var(--ui-finished);border-color:var(--ui-finished); }
+html[data-keynope-workspace="inspector"] :is(.keynope-insert-popover,.keynope-workspace-more,.keynope-link-dialog,.keynope-tabs-dialog,.keynope-engagement-dialog,.keynope-colour-picker,dialog[class^="keynope-"]) { box-shadow:var(--ui-shadow); }
+html[data-keynope-workspace="inspector"] :is(.keynope-workspace-actions,.keynope-ribbon-quick,.keynope-ribbon-trailing,.keynope-app-toolbar) svg [stroke="#fff"],
+html[data-keynope-workspace="inspector"] :is(.keynope-workspace-actions,.keynope-ribbon-quick,.keynope-ribbon-trailing,.keynope-app-toolbar) svg [stroke="#ffffff"] { stroke:currentColor; }
+html[data-keynope-workspace="inspector"] :is(.keynope-ribbon-quick,.keynope-ribbon-trailing,.keynope-app-toolbar) svg [fill="#fff"] { fill:currentColor; }
+html[data-keynope-workspace="inspector"] :is(.keynope-workspace-inspector,.keynope-insert-popover) button:where(:not(.keynope-slide-presets button)) svg :is([stroke="#fff"],[stroke="#ffffff"],[stroke="#d3d3d3"]) { stroke:currentColor; }
+html[data-keynope-workspace="inspector"] :is(.keynope-workspace-inspector,.keynope-insert-popover) button:where(:not(.keynope-slide-presets button)) svg :is([fill="#fff"],[fill="#ffffff"]) { fill:currentColor; }
+html[data-keynope-workspace="inspector"] :is(.keynope-workspace-inspector,.keynope-insert-popover,.keynope-ribbon-quick,.keynope-ribbon-trailing,.keynope-app-toolbar) button svg:is([stroke="#fff"],[stroke="#ffffff"]) { stroke:currentColor; }
+.keynope-workspace-inspector .keynope-style-transfer { margin-top:12px; }
+/* Insertion is a catalogue, not a compressed copy of the formatting toolbar. */
+html[data-keynope-workspace="inspector"] .keynope-insert-popover { display:block; width:min(720px,calc(100vw - var(--keynope-navigator-space,210px) - 30px)); }
+html[data-keynope-workspace="inspector"] .keynope-insert-popover [hidden] { display:none!important; }
+html[data-keynope-workspace="inspector"] .keynope-insert-popover .keynope-ribbon-panel { display:grid;grid-template-columns:1fr 1fr;gap:18px 24px; }
+.keynope-insert-section { display:flex;flex-wrap:wrap;align-content:start;gap:8px;min-width:0; }
+.keynope-insert-section h3 { flex-basis:100%;margin:0;font-size:13px; }
+.keynope-insert-section:is(.keynope-insert-text,.keynope-insert-media) { display:grid;grid-template-columns:repeat(3,minmax(0,1fr)); }
+.keynope-insert-section:is(.keynope-insert-text,.keynope-insert-media) h3 { grid-column:1 / -1; }
+html[data-keynope-workspace="inspector"] .keynope-insert-command { display:flex;flex:1 0 68px;flex-direction:column;align-items:center;justify-content:center;gap:5px;min-height:65px;padding:8px!important;width:auto;height:auto; }
+.keynope-insert-command svg { width:24px;height:24px; }
+.keynope-insert-label { font-size:12px;white-space:nowrap; }
+.keynope-insert-defaults .keynope-text-metric-control { flex:1;min-width:100px; }
+.keynope-insert-defaults .keynope-ttf-width-control { flex:1;min-width:0; }
+.keynope-insert-defaults input { width:100%;min-width:0;box-sizing:border-box; }
+html[data-keynope-workspace="inspector"] .keynope-slide-presets { grid-template-columns:repeat(6,minmax(0,1fr));border-bottom:1px solid var(--ui-divider);padding-bottom:16px; }
+.keynope-insert-document:has(>h3:only-child) { display:none; }
+.keynope-insert-document { align-items:center; }
+.keynope-insert-document:has(.keynope-settings-menu) { overflow:visible; }
+html[data-keynope-workspace="inspector"] .keynope-settings-menu { color:var(--ui-text);font:inherit; }
+html[data-keynope-workspace="inspector"] .keynope-settings-menu summary { color:var(--ui-text);background:var(--ui-control);border-color:var(--ui-border); }
+.keynope-settings-panel { position:fixed;z-index:35;width:220px;box-sizing:border-box;padding:12px;display:grid;gap:10px;color:var(--ui-text);background:var(--ui-panel);border:1px solid var(--ui-border);border-radius:8px;box-shadow:var(--ui-shadow); }
+.keynope-settings-menu:not([open]) .keynope-settings-panel { display:none; }
+.keynope-settings-panel label { display:grid;gap:5px; }
+.keynope-settings-panel button { text-align:left; }
+/* The next build/slide lives in the inspector column, never over artwork. */
+html[data-keynope-workspace="inspector"] .keynope-next-state { right:0;bottom:52px;width:var(--keynope-inspector-width,300px);max-width:calc(100vw - 16px);padding:14px;border-radius:0;border-color:var(--ui-divider);box-shadow:none;background:var(--ui-panel);color:var(--ui-text); }
+html[data-keynope-workspace="inspector"][data-keynope-preview-open="true"] .keynope-workspace-inspector { bottom:calc(52px + var(--keynope-preview-height,0px)); }
+html[data-keynope-workspace="inspector"][data-keynope-preview-open="true"]::after { content:"";position:fixed;top:56px;bottom:52px;right:0;width:var(--keynope-inspector-width,300px);max-width:calc(100vw - 16px);box-sizing:border-box;background:var(--ui-panel);border-left:1px solid var(--ui-divider);z-index:20;pointer-events:none; }
+.keynope-next-state button { color:var(--ui-text);background:var(--ui-control);border-color:var(--ui-border); }
+/* Searchable activity catalogue with a distinct, scrollable configuration. */
+html[data-keynope-workspace="inspector"] .keynope-engagement-dialog.activity-chooser:not(.keynope-group-editor) { width:min(1120px,calc(100vw - 40px));padding:20px;overflow:hidden; }
+.keynope-activity-browser { display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:24px;min-height:0; }
+.keynope-activity-catalogue { min-width:0;display:flex;flex-direction:column; }
+.keynope-activity-catalogue input[type="search"] { flex:none;margin:0 0 12px; }
+.keynope-activity-configuration { min-width:0;max-height:calc(100vh - 170px);overflow:auto;padding:0 4px 0 20px;border-left:1px solid var(--ui-divider); }
+.keynope-activity-configuration .keynope-activity-configure { border:0;padding:0;margin:0 0 16px;color:var(--ui-text); }
+html[data-keynope-workspace="inspector"] .keynope-activity-categories { display:flex;flex-wrap:wrap;gap:0;padding:0 0 4px;margin:0 0 12px;border-color:var(--ui-divider); }
+html[data-keynope-workspace="inspector"] .keynope-engagement-dialog .keynope-activity-categories button { background:transparent;color:var(--ui-secondary);border:0;border-radius:0;min-height:34px;padding:6px 9px;border-bottom:2px solid transparent; }
+html[data-keynope-workspace="inspector"] .keynope-engagement-dialog .keynope-activity-categories button[aria-selected="true"] { color:var(--ui-accent);border-bottom-color:var(--ui-accent);background:transparent;font-weight:600; }
+html[data-keynope-workspace="inspector"] .activity-chooser .keynope-engagement-kind { grid-template-columns:repeat(2,minmax(0,1fr));max-height:calc(100vh - 340px);min-height:120px;overflow:auto;margin:0;gap:8px; }
+html[data-keynope-workspace="inspector"] .keynope-engagement-kind button { text-align:left;display:flex;flex-direction:column;align-items:start;gap:4px;padding:10px;min-height:80px; }
+.keynope-engagement-kind button strong { font-weight:600; }
+.keynope-engagement-kind button span { font-size:11px;line-height:1.4;color:var(--ui-secondary); }
+.keynope-activity-search-status { color:var(--ui-secondary); }
+.keynope-activity-form textarea { min-height:110px; }
+.keynope-engagement-dialog [hidden] { display:none!important; }
+.keynope-engagement-dialog > .keynope-engagement-actions { flex-wrap:wrap;padding-top:14px;border-top:1px solid var(--ui-divider); }
+.keynope-participants-confirmation { padding:12px;border:1px solid var(--ui-error);border-radius:6px; }
+.keynope-participants-confirmation button { margin-right:8px; }
+.keynope-activity-actions-dialog { width:min(600px,calc(100vw - 32px));border:1px solid var(--ui-border);border-radius:10px;padding:20px; }
+.keynope-activity-actions-dialog::backdrop { background:#0008; }
+.keynope-slides-header button[aria-label="Hide slide navigator"] { padding:0!important;width:28px;min-width:28px;min-height:28px;font-size:20px;line-height:1; }
+@media(max-width:760px) {
+  html[data-keynope-workspace="inspector"] .keynope-insert-popover { width:calc(100vw - 20px); }
+  html[data-keynope-workspace="inspector"] .keynope-slide-presets { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .keynope-activity-browser { grid-template-columns:minmax(0,1fr);gap:16px; }
+  .keynope-activity-configuration { max-height:35vh;padding:12px 4px 0;border-left:0;border-top:1px solid var(--ui-divider); }
+  html[data-keynope-workspace="inspector"] .activity-chooser .keynope-engagement-kind { max-height:22vh; }
+  html[data-keynope-workspace="inspector"] .keynope-engagement-dialog.activity-chooser:not(.keynope-group-editor) { max-height:calc(100dvh - 16px);width:calc(100vw - 16px);padding:12px;overflow:auto; }
+}
+/* Focus and pane navigation are visible without depending on selection colour. */
+html[data-keynope-workspace="inspector"] #stage:focus-visible { outline:2px solid var(--ui-focus); outline-offset:-3px; }
+html[data-keynope-workspace="inspector"] .keynope-pane-focus { outline:2px solid var(--ui-focus)!important;outline-offset:-3px; }
+@media(prefers-contrast:more) {
+  html[data-keynope-workspace="inspector"] { --ui-border:currentColor; --ui-divider:currentColor; }
+  html[data-keynope-workspace="inspector"] :is(button:disabled,input:disabled,select:disabled) { opacity:.7; }
+}
+@media(prefers-reduced-motion:reduce) {
+  html[data-keynope-workspace="inspector"] :is(.keynope-editor-topbar,.keynope-editor-panel,.keynope-app-toolbar,.keynope-insert-popover,dialog[class^="keynope-"]) * { animation:none!important; transition:none!important; scroll-behavior:auto!important; }
+  html[data-keynope-workspace="inspector"] button:active { transform:none!important; }
+  html[data-keynope-workspace="inspector"] button:active > :is(svg,span) { translate:none!important; }
+}
+@media(forced-colors:active) {
+  html[data-keynope-workspace="inspector"] { --ui-text:CanvasText; --ui-secondary:CanvasText; --ui-panel:Canvas; --ui-surface:Canvas; --ui-field:Field; --ui-control:ButtonFace; --ui-border:ButtonText; --ui-divider:ButtonText; --ui-accent:Highlight; --ui-focus:Highlight; --ui-selected:Canvas; --ui-hover:Canvas; }
+  .keynope-colour-swatch,.keynope-paint-color::before,.keynope-theme-color { forced-color-adjust:none; }
+}
+@media(pointer:coarse) {
+  .keynope-workspace-inspector :is(button,select,input:not([type="checkbox"]):not([type="radio"])),.keynope-insert-popover button { min-height:36px!important; }
+}

@@ -577,7 +577,7 @@ func normalizeEngagement(definition EngagementDefinition) (EngagementDefinition,
 		}
 		definition.Options, definition.Questions = nil, nil
 	case "questions", "draw", "introduction", "expertise":
-		if definition.Kind == "draw" || definition.Kind == "introduction" {
+		if definition.Kind == "draw" {
 			definition.Named = true
 		}
 		definition.Options, definition.Zones, definition.Cards, definition.Questions = nil, nil, nil, nil

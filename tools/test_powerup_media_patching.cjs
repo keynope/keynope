@@ -62,7 +62,7 @@ const server=http.createServer((req,res)=>{let name=new URL(req.url,'http://loca
     await page.waitForFunction(id=>document.querySelector('#stage [data-object-id="'+id+'"] img')?.complete,prepare.id);
     await page.setViewportSize({width:1500,height:1000});
     const selectedBefore=await page.evaluate(async({index})=>{const s=await fetch('/api/editor/state').then(r=>r.json());await editorAction({action:'select-elements',elementIndices:s.slides[0].elements.map((_,i)=>i),elementsData:s.slides[0].elements,element:index});return s.slides[0].elements.filter(e=>e.kind!=='image');},prepare);
-    await page.getByRole('tab',{name:'Style',exact:true}).click();
+    await page.getByRole('tab',{name:'Edit',exact:true}).click();
     for(const imageStyle of ['retro','modern']){
       await page.getByRole('combobox',{name:'Image style',exact:true}).selectOption(imageStyle);
       await waitForAsync(page,async value=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.selectionCapabilities?.properties['image.style']?.value===value;},imageStyle);
@@ -70,8 +70,7 @@ const server=http.createServer((req,res)=>{let name=new URL(req.url,'http://loca
     await page.getByRole('button',{name:'Inherit image image style',exact:true}).click();
     await waitForAsync(page,async()=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.selectionCapabilities?.properties['image.style']?.provenance==='inherited';});
     await page.getByRole('tab',{name:'Edit',exact:true}).click();
-    await page.getByRole('button',{name:'Adjust image',exact:true}).click();
-    const imageDialog=page.getByRole('dialog',{name:'Adjust image',exact:true});
+    const imageDialog=page.getByRole('group',{name:'Image adjustments',exact:true});
     for(const fit of ['contain','cover','stretch']){
       await imageDialog.getByRole('combobox',{name:'Framing',exact:true}).selectOption(fit);
       await waitForAsync(page,async fit=>{const s=await fetch('/api/editor/state').then(r=>r.json());return s.selectionCapabilities?.properties['image.fit']?.value===fit;},fit);

@@ -23,6 +23,7 @@ globalThis.KeynopeTextLayout = (() => {
   const finite = (value, fallback, min, max) => Number.isFinite(value) ? Math.max(min,Math.min(max,value)) : fallback;
   const colorRoles=['background','surface','text','heading','muted','line',...Array.from({length:6},(_,i)=>'accent-'+(i+1))];
   const fontRoles=['heading','body','mono'],fontIDs=['c64','mono','sans'];
+  const headingMetrics=new Map();let metricContext;
   const runFontID=(model,run)=>run.fontRole?model.fontRoles?.[run.fontRole]||run.fontId:run.fontId;
   const runFamily=(model,run)=>{const id=runFontID(model,run);return id?(id==='c64'?'KeynopeC64, monospace':id==='mono'?'KeynopeModernMono, monospace':'KeynopeModern, sans-serif'):model.family;};
   function normalize(input) {
@@ -47,6 +48,7 @@ globalThis.KeynopeTextLayout = (() => {
       emojiWidthScale:finite(input.emojiWidthScale,1,.01,240),
       emojiTint:/^#[0-9a-f]{6}$/i.test(input.emojiTint||'')?input.emojiTint:'',
       lineHeight:finite(input.lineHeight,1.25,.5,4),
+      trimHeading:input.trimHeading===true||input.role==='heading',
       paragraphBefore:finite(input.paragraphBefore,0,0,4),
       paragraphAfter:finite(input.paragraphAfter,0,0,4),
       // Assigning CSS properties (never HTML) lets browsers validate families.
@@ -230,7 +232,11 @@ globalThis.KeynopeTextLayout = (() => {
         if(run.fontId)span.style.fontFamily=runFamily(model,run);
         if(run.fontSize)span.style.fontSize=run.fontSize+'px';
         if(hidden)span.style.display='none';
-        if(emoji){span.className='keynope-shaped-emoji';Object.assign(span.style,{fontFamily:emoji.family,fontWeight:'400',fontStyle:'normal',fontSize:run.fontSize?run.fontSize*.8+'px':'.8em',paddingInline:'.03125em',whiteSpace:'nowrap',color:'#ffffff',webkitTextStroke:'0px',fontVariantLigatures:'normal'});}
+        // The colour font's ascent is a complete square, unlike a text font's
+        // cap height. Baseline alignment lets its inline box protrude above
+        // the measured text frame (especially with the squeezed C64 face).
+        // Keep the artwork atomic and contained in the enclosing line box.
+        if(emoji){span.className='keynope-shaped-emoji';Object.assign(span.style,{fontFamily:emoji.family,fontWeight:'400',fontStyle:'normal',fontSize:run.fontSize?run.fontSize*.8+'px':'.8em',lineHeight:'1',verticalAlign:'bottom',paddingInline:'.03125em',whiteSpace:'nowrap',color:'#ffffff',webkitTextStroke:'0px',fontVariantLigatures:'normal'});}
         // Keep the same atomic inline box with and without tint: changing a
         // paint property must not alter browser rounding or caret geometry.
         if(emoji)span.style.display='inline-block';
@@ -360,6 +366,26 @@ globalThis.KeynopeTextLayout = (() => {
       const [o,x,y]=probes.map(node=>node.getBoundingClientRect());
       return new DOMMatrix([(x.x-o.x)/probeDistance,(x.y-o.y)/probeDistance,(y.x-o.x)/probeDistance,(y.y-o.y)/probeDistance,o.x,o.y]);
     }
+    function alignHeadingCap(){
+      // A heading's visible cap starts at its authored top, not below the
+      // font's invisible ascender/line-leading space. Measure the bundled face
+      // after loading, and reuse the same offset while its frame is resized.
+      let trim=0;
+      if(model.trimHeading){
+        metricContext??=document.createElement('canvas').getContext('2d');
+        const run=model.runs.find(run=>run.text.trim())||{},size=run.fontSize||model.size;
+        const font=(run.italic?'italic ':'')+(run.bold?'700 ':'400 ')+size+'px '+runFamily(model,run);
+        let metrics=headingMetrics.get(font);
+        if(!metrics){
+          metricContext.font=font;const m=metricContext.measureText('H');
+          metrics={ascent:m.fontBoundingBoxAscent,descent:m.fontBoundingBoxDescent,cap:m.actualBoundingBoxAscent};
+          if(Number.isFinite(metrics.ascent)&&Number.isFinite(metrics.descent)&&metrics.cap>0){if(headingMetrics.size>=256)headingMetrics.clear();headingMetrics.set(font,metrics);}
+        }
+        if(Number.isFinite(metrics.ascent)&&Number.isFinite(metrics.descent)&&metrics.cap>0)
+          trim=Math.max(0,(size*model.lineHeight-metrics.ascent-metrics.descent)/2+metrics.ascent-metrics.cap);
+      }
+      root.style.top=-trim+'px';
+    }
     async function ready() {
       // Font loading may be asynchronous. A stale readiness callback must not
       // commit measurements for a different document revision.
@@ -376,7 +402,7 @@ globalThis.KeynopeTextLayout = (() => {
       await Promise.all([...ownedEmoji.values()].map(entry=>entry.ready));
       await document.fonts.ready;
       const current=!disposed && revision===requested;
-      if(current){justify();if(emojiGradient)refreshEmojiPaint();}
+      if(current){alignHeadingCap();justify();if(emojiGradient)refreshEmojiPaint();}
       return current;
     }
     function measure() {

@@ -210,9 +210,8 @@ func TestWebExportUsesPresentationCanvasRenderer(t *testing.T) {
 		"editorAction({action: 'add-element', kind:'shape', name:shape})",
 		"<svg viewBox=\"-13 80 1050 1040\" aria-hidden=\"true\"><path",
 		"function toggleCanvasMarkdownStyle(index, marker)",
-		"function canvasVisualMenu(index, element)",
-		"keynope-adjust-image-button",
-		"const uploadSVG = importButton.querySelector('svg');",
+		"adjustments.className='keynope-image-adjustments'",
+		"adjustments.setAttribute('aria-label','Image adjustments')",
 		"function canvasTransparencyTool(index, query)",
 		"keynope-see-through-button",
 		"trailingTools.replaceChildren(commitButton,remove);",
@@ -220,11 +219,10 @@ func TestWebExportUsesPresentationCanvasRenderer(t *testing.T) {
 		"function appendCanvasShapeKindTools(container, index, query)",
 		"function canvasDeleteTool(index)",
 		"function appendCanvasVisualControls(panel, index, element)",
-		"visualControls.className = 'keynope-context-visual'",
-		"document.body.appendChild(panel)",
-		"function closeCanvasVisualMenu()",
-		"!selectedIndices.includes(activeCanvasVisualMenu.index)",
-		"function showElementContextMenu(index, clientX, clientY)",
+		"appendCanvasVisualControls(adjustments,adjustmentImageIndex,image)",
+		"canvasTool('Set as background'",
+		"const open = () => selectRibbonTab('content',true)",
+		"appendCanvasStyleTransferTools(style)",
 		"function canvasShapeSelectionBounds(element, pageNumber)",
 		"const bounds = canvasShapeSelectionBounds(element, page.page)",
 		"function cycleCanvasSelection(reverse)",
@@ -366,6 +364,11 @@ func TestWebExportUsesPresentationCanvasRenderer(t *testing.T) {
 	}
 	if strings.Contains(javascript, "tools.className = 'keynope-selection-tools'") {
 		t.Fatal("windowed editor still mounts element controls over the canvas")
+	}
+	for _, obsolete := range []string{"function showElementContextMenu(", "function canvasVisualMenu(", "keynope-adjust-image-button", "activeCanvasVisualMenu"} {
+		if strings.Contains(javascript, obsolete) {
+			t.Fatalf("editor still includes obsolete element menu %q", obsolete)
+		}
 	}
 	for _, removedStyle := range []string{"Style: Half", "Style: Vertical", "['half','Half']"} {
 		if strings.Contains(javascript, removedStyle) {
