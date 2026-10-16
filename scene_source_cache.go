@@ -30,12 +30,25 @@ var sharedSceneSources = sceneSourceCache{limit: 32 << 20}
 func (c *sceneSourceCache) uri(mime string, data []byte) string {
 	key := sceneSourceKey{mime, sha256.Sum256(data)}
 	c.mu.Lock()
+	if entry := c.entries[key]; entry != nil {
+		c.order.MoveToFront(entry)
+		uri := entry.Value.(sceneSourceEntry).uri
+		c.mu.Unlock()
+		return uri
+	}
+	c.mu.Unlock()
+	// Encoding can be large (including original image and animation-frame
+	// sources). Do not block unrelated cache hits or scene projections on it.
+	uri := "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data)
+	c.mu.Lock()
 	defer c.mu.Unlock()
+	// Another projection may have encoded the same source while we were
+	// unlocked. Reuse its entry rather than double-counting the byte budget or
+	// leaving an orphan in the LRU list.
 	if entry := c.entries[key]; entry != nil {
 		c.order.MoveToFront(entry)
 		return entry.Value.(sceneSourceEntry).uri
 	}
-	uri := "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data)
 	// Include MIME key storage, and cap entry count for very small resources.
 	cost := len(uri) + len(mime)
 	if cost > c.limit || c.limit <= 0 {

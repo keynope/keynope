@@ -3,6 +3,34 @@
 globalThis.KeynopeScene = (() => {
   'use strict';
   const NS='http://www.w3.org/2000/svg';
+  function paintTableBorders(table,data){
+    let layer=table.querySelector(':scope > .keynope-table-borders');
+    if(!Array.isArray(data.borders)){layer?.remove();return;}
+    const offsets=tracks=>{const result=[0];for(const size of tracks)result.push(result.at(-1)+size);return result;};
+    const xs=offsets(data.columns),ys=offsets(data.rows),width=xs.at(-1),height=ys.at(-1);
+    if(!layer){layer=document.createElementNS(NS,'svg');layer.classList.add('keynope-table-borders');layer.setAttribute('aria-hidden','true');Object.assign(layer.style,{position:'absolute',inset:'0',width:'100%',height:'100%',pointerEvents:'none',overflow:'hidden'});table.append(layer);}
+    layer.setAttribute('viewBox',`0 0 ${width} ${height}`);
+    const old=new Map([...layer.children].map(node=>[node.dataset.tableBorder,node])),keep=new Set();
+    for(const edge of data.borders){
+      if(!(edge.width>0)||!edge.color||edge.color==='none')continue;
+      const horizontal=edge.axis==='horizontal',along=horizontal?xs:ys,across=horizontal?ys:xs;
+      if(edge.track<0||edge.track>=across.length||edge.from<0||edge.to>=along.length||edge.from>=edge.to)continue;
+      const key=`${edge.axis}:${edge.track}:${edge.from}:${edge.to}`;keep.add(key);
+      let line=old.get(key);if(!line){line=document.createElementNS(NS,'line');line.dataset.tableBorder=key;layer.append(line);}
+      // The outer seam lies wholly inside the table frame. Interior seams
+      // are centred once at their shared track boundary, never on both cells.
+      const half=Math.min(edge.width/2,across.at(-1)/2),at=Math.max(half,Math.min(across.at(-1)-half,across[edge.track]));
+      const attributes={x1:horizontal?along[edge.from]:at,y1:horizontal?at:along[edge.from],x2:horizontal?along[edge.to]:at,y2:horizontal?at:along[edge.to],stroke:edge.color,'stroke-width':edge.width,'stroke-linecap':'butt'};
+      for(const [name,value]of Object.entries(attributes))if(line.getAttribute(name)!==String(value))line.setAttribute(name,String(value));
+    }
+    for(const [key,node]of old)if(!keep.has(key))node.remove();
+  }
+  function tableCellExtent(parent,data,bounds){
+    const present=(data.paragraphs||[{runs:data.runs}]).some(p=>p.runs?.some(r=>r.text.length));
+    const local=[...parent.querySelectorAll('.keynope-shaped-text')].filter(node=>{for(let p=node;p&&p!==parent;p=p.parentElement)if(p.style.visibility==='hidden')return false;return true;});
+    const height=local.reduce((sum,node)=>{const paragraph=node.parentElement.classList.contains('keynope-scene-paragraph')?node.parentElement:null,p=paragraph?getComputedStyle(paragraph):null;return sum+node.offsetHeight+(p?parseFloat(p.paddingTop)+parseFloat(p.paddingBottom):0);},0);
+    return {height,overflow:present&&(height>bounds.height+1||local.some(node=>node.scrollWidth>node.clientWidth+1)),cramped:present&&(bounds.width<data.size*(data.widthScale||1)*.5||bounds.height<data.size*(data.lineHeight||1.25))};
+  }
   let serial=0;
   const pendingTextDrafts=new Set();
   async function commitPendingText(){for(const commit of [...pendingTextDrafts].reverse())await commit();}
@@ -82,7 +110,8 @@ globalThis.KeynopeScene = (() => {
   function shapeTextBox(object) {
     const {width,height}=object.bounds;
     let x=0,y=0,w=width,h=height;
-    if(object.shape==='circle'){w=width/Math.SQRT2;h=height/Math.SQRT2;x=(width-w)/2;y=(height-h)/2;}
+    if(object.shapeGeometry?.textRegion){const r=object.shapeGeometry.textRegion;x=width*r.x;y=height*r.y;w=width*r.width;h=height*r.height;}
+    else if(object.shape==='circle'){w=width/Math.SQRT2;h=height/Math.SQRT2;x=(width-w)/2;y=(height-h)/2;}
     else if(object.shape==='diamond'){w=width/2;h=height/2;x=width/4;y=height/4;}
     else if(object.shape==='triangle'){w=width/3;h=height/3;x=width/3;y=height/3;}
     const pad=Math.min(8,w/4,h/4);
@@ -107,13 +136,14 @@ globalThis.KeynopeScene = (() => {
       const rect=surface.element.getBoundingClientRect();
       const required={width:rect.width,height:surface.element.scrollHeight+(model.paragraphBefore+model.paragraphAfter)*model.size};
       const bounds={...object.bounds};
-      const factor=object.shape==='circle'?1/Math.SQRT2:object.shape==='diamond'?.5:object.shape==='triangle'?1/3:1;
+      const region=object.shapeGeometry?.textRegion;
+      const factorX=region?.width||(object.shape==='circle'?1/Math.SQRT2:object.shape==='diamond'?.5:object.shape==='triangle'?1/3:1),factorY=region?.height||factorX;
       // Padding depends on both dimensions for very small shapes. Re-evaluate
       // after each expansion until both independent constraints are satisfied.
       for(let n=0;n<4;n++){
         const interior=shapeTextBox({...object,bounds});
-        bounds.width+=Math.max(0,required.width-interior.width)/factor;
-        bounds.height+=Math.max(0,required.height-interior.height)/factor;
+        bounds.width+=Math.max(0,required.width-interior.width)/factorX;
+        bounds.height+=Math.max(0,required.height-interior.height)/factorY;
       }
       return bounds;
     }finally{surface?.dispose();host.remove();}
@@ -137,6 +167,8 @@ globalThis.KeynopeScene = (() => {
     if(scene.version!==1||!(scene.width>0)||!(scene.height>0)||!Array.isArray(scene.objects))throw new Error('Unsupported slide scene');
     const root=document.createElement('div'),surfaces=[],textBoxes=[],media=[],readingNodes=[],retroReady=[],retroTracks=[],diagnostics=[...(scene.diagnostics||[])],backgroundReady=[];
     const activeIDs=new Set(scene.objects.map(object=>object.id));
+    const renderCounters={objectMounts:0,textMounts:0,updates:0,textRebuilds:0,textContentUpdates:0,textWidthUpdates:0,textPaintUpdates:0,structuredUpdates:0,tableCellPaintUpdates:0,chartMarkUpdates:0,imageFrameUpdates:0,imageTreatmentUpdates:0,imagePaintUpdates:0,backgroundUpdates:0,backgroundReplacements:0};
+    let lastChangedObjectIDs=[];
     const initialPausedTime=pausedTime();
     root.className='keynope-modern-scene';root.setAttribute('role','region');root.setAttribute('aria-label','Slide preview');
     Object.assign(root.style,{position:'relative',width:scene.width+'px',height:scene.height+'px',
@@ -144,6 +176,7 @@ globalThis.KeynopeScene = (() => {
     parent.append(root);
     const position=(node,b)=>Object.assign(node.style,{position:'absolute',left:b.x+'px',top:b.y+'px',width:b.width+'px',height:b.height+'px'});
     function text(parent,data,b,paint,id,ownerID=id,isLabel=false) {
+      renderCounters.textMounts++;
       const wrapper=document.createElement('div');position(wrapper,b);
       if(data.role==='heading'){wrapper.setAttribute('role','heading');wrapper.setAttribute('aria-level',String(Number.isInteger(data.level)&&data.level>=1&&data.level<=6?data.level:1));}
       else if(data.role==='bullet')wrapper.setAttribute('role','list');
@@ -217,6 +250,66 @@ globalThis.KeynopeScene = (() => {
     }
     const shapeViews=new Map();
     const imageViews=new Map();
+    const chartDataDialogs=new Map();
+    const structuredViews=new Map();
+    let backgroundNode=null,backgroundEntry=null,backgroundObjectID='keynope-background-media';
+    while(scene.objects.some(object=>object.id===backgroundObjectID))backgroundObjectID+='-background';
+    function backgroundObjectFor(value,id){
+      const background=value.backgroundMedia;
+      if(!background||!(background.source||background.frames?.[0]?.source||background.retroLines))return null;
+      const {paint,opacity,retroLines,fit,...media}=background;
+      return {id,kind:'image',bounds:{x:0,y:0,width:value.width,height:value.height},paint:paint||{color:'#ffffff',opacity:Number.isFinite(opacity)?opacity:1},media:{...media,fit:fit||'cover',decorative:true},retroLines:retroLines||null};
+    }
+    const structuredKey=object=>{
+      // Text surfaces own content/font comparisons (including direct binary
+      // font-string comparison). Do not copy their emoji base64 into another
+      // serialized key on every table move or paint-only update.
+      const data=object.table?{...object.table,cells:object.table.cells.map(({text,...cell})=>cell)}:
+        {...object.chart,labels:object.chart.labels.map(({text,...label})=>label)};
+      return JSON.stringify([data,object.bounds.width,object.bounds.height,object.paint]);
+    };
+    function tableCellPaint(td,cell,data){
+      position(td,{...cell.bounds,y:0});
+      Object.assign(td.style,{display:'block',padding:'0',margin:'0',boxSizing:'border-box',overflow:'hidden',background:cell.fill==='none'?'transparent':cell.fill||'transparent',border:cell.borderColor==='none'?'none':(Array.isArray(data.borders)?0:cell.borderWidth)+'px solid '+cell.borderColor});
+    }
+    const tableCellPaintKey=(cell,data)=>JSON.stringify([cell.bounds,cell.fill,cell.borderColor,cell.borderWidth,Array.isArray(data.borders)]);
+    const chartMarkKey=(mark,paint)=>JSON.stringify([mark,paint.stroke,paint.strokeWidth]);
+    function chartMarkPaint(path,mark,paint){
+      for(const [key,value]of Object.entries({d:mark.d,fill:mark.fill||'none',stroke:mark.stroke||paint.stroke||'none','stroke-width':mark.strokeWidth||paint.strokeWidth||1,opacity:mark.opacity??1,'fill-rule':'evenodd','stroke-linejoin':'round','data-chart-series':mark.series}))path.setAttribute(key,String(value));
+    }
+    function patchStructured(entry,object){
+      const key=structuredKey(object);if(key===entry.key)return false;
+      const box=object.bounds,paint=object.paint||{};
+      if(object.table){
+        const data=object.table;
+        Object.assign(entry.table.style,{width:box.width+'px',height:box.height+'px'});
+        let y=0;data.rows.forEach((height,index)=>{position(entry.rows[index],{x:0,y,width:box.width,height});y+=height;});
+        for(const cell of data.cells){
+          const target=entry.cells.get(cell.row+':'+cell.column),next=tableCellPaintKey(cell,data);
+          if(target.key!==next){tableCellPaint(target.node,cell,data);target.key=next;renderCounters.tableCellPaintUpdates++;}
+        }
+        paintTableBorders(entry.table,data);
+      }else{
+        const chart=object.chart;
+        entry.drawing.dataset.chartType=chart.data.type;
+        entry.drawing.setAttribute('viewBox',`0 0 ${box.width} ${box.height}`);
+        entry.drawing.setAttribute('width',String(box.width));entry.drawing.setAttribute('height',String(box.height));
+        const title=chart.data.title||chart.data.type+' chart';entry.drawing.setAttribute('aria-label',title);entry.title.textContent=title;
+        entry.description.textContent=chart.empty?'No values yet.':`${chart.data.categories.length} categories, ${chart.data.series.length} series. Activate View chart data for the full dataset.`;
+        entry.marks.style.filter=paint.shadowColor?`drop-shadow(${shadow(paint)})`:'';
+        for(const [index,mark]of chart.paths.entries()){
+          const target=entry.paths[index],next=chartMarkKey(mark,paint);
+          if(target.key!==next){chartMarkPaint(target.node,mark,paint);target.key=next;renderCounters.chartMarkUpdates++;}
+        }
+        for(const [index,label]of chart.labels.entries())entry.labels[index].title=label.fullText||'';
+        // Accessible data views read the accepted dataset. Close an already
+        // open old dataset rather than leaving its captured paging rows stale.
+        const dataKey=JSON.stringify(chart.data);
+        if(entry.dataKey!==dataKey)chartDataDialogs.get(object.id)?.close();
+        entry.chart=chart;entry.dataKey=dataKey;
+      }
+      entry.key=key;renderCounters.structuredUpdates++;return true;
+    }
     function sampledSemantics(entry,object){
       const retro=object.retroText||object.retroLines,lines=object.retroText?[retro.line]:retro.lines;
       const label=retro.alt||(object.kind==='image'?'Image':lines.filter(l=>l.trueType).map(l=>l.trueType.text).join(' ')||object.text?.runs?.map(r=>r.text).join('')||((object.shape||'Retro')+' shape'));
@@ -231,6 +324,10 @@ globalThis.KeynopeScene = (() => {
       if(entry.semanticKey===key)return;
       entry.semanticKey=key;
       entry.image.alt=media.decorative?'':media.alt||'Slide image';
+      if(entry.paintSurface){
+        if(media.decorative){entry.paintSurface.setAttribute('aria-hidden','true');entry.paintSurface.removeAttribute('role');entry.paintSurface.removeAttribute('aria-label');}
+        else {entry.paintSurface.removeAttribute('aria-hidden');entry.paintSurface.setAttribute('role','img');entry.paintSurface.setAttribute('aria-label',media.alt||'Slide image');}
+      }
       if(media.decorative){
         entry.fallback.setAttribute('aria-hidden','true');
         entry.fallback.removeAttribute('role');entry.fallback.removeAttribute('aria-label');
@@ -240,9 +337,18 @@ globalThis.KeynopeScene = (() => {
       }
     }
     const sampledViews=new Map();
+    // Crop/cover can enlarge the source far beyond its visible frame. An
+    // object-bounding-box treatment filter then allocates that entire backing
+    // surface; OS WebKit can drop large Retina images completely. Limit output
+    // to the frame, with one pixel for the 3x3 correction kernel's neighbours.
+    const imageTreatmentRegion=box=>({filterUnits:'userSpaceOnUse',x:-1,y:-1,width:box.width+2,height:box.height+2});
     function frameImage(entry,object){
-      const {image,frame,outlineFilter}=entry,box=object.bounds,crop=object.media.crop;
-      Object.assign(image.style,{position:'',width:'100%',height:'100%',maxWidth:'',left:'',top:'',objectFit:'fill'});
+      renderCounters.imageFrameUpdates++;
+      const {image,frame,paintFilter}=entry,box=object.bounds,crop=object.media.crop;
+      if(entry.paintSurface){entry.paintSurface.setAttribute('width',box.width);entry.paintSurface.setAttribute('height',box.height);}
+      const treatment=entry.treatmentDefinition?.firstElementChild;
+      if(treatment)for(const [key,value]of Object.entries(imageTreatmentRegion(box)))treatment.setAttribute(key,value);
+      Object.assign(image.style,{position:'',width:'100%',height:'100%',maxWidth:'',left:'',top:'',objectFit:'fill',clipPath:''});
       if(object.media.fit&&!crop){
         const fit=['cover','contain','stretch'].includes(object.media.fit)?object.media.fit:'cover';
         Object.assign(image.style,{position:'absolute',inset:'0',width:'100%',height:'100%',maxWidth:'none',left:'',top:'',objectFit:fit==='stretch'?'fill':fit});
@@ -251,15 +357,91 @@ globalThis.KeynopeScene = (() => {
       if(crop){
         const w=object.media.width,h=object.media.height,cw=1-crop.left-crop.right,ch=1-crop.top-crop.bottom;
         if(w>0&&h>0&&cw>0&&ch>0){
-          const scale=Math.max(box.width/(w*cw),box.height/(h*ch));
-          Object.assign(image.style,{position:'absolute',width:w*scale+'px',height:h*scale+'px',maxWidth:'none',left:-(w*crop.left*scale+(w*cw*scale-box.width)/2)+'px',top:-(h*crop.top*scale+(h*ch*scale-box.height)/2)+'px'});
+          const scale=(object.media.fit==='contain'?Math.min:Math.max)(box.width/(w*cw),box.height/(h*ch));
+          const sx=object.media.fit==='stretch'?box.width/(w*cw):scale,sy=object.media.fit==='stretch'?box.height/(h*ch):scale;
+          Object.assign(image.style,{position:'absolute',width:w*sx+'px',height:h*sy+'px',maxWidth:'none',left:-(w*crop.left*sx+(w*cw*sx-box.width)/2)+'px',top:-(h*crop.top*sy+(h*ch*sy-box.height)/2)+'px',clipPath:'inset('+[crop.top,crop.right,crop.bottom,crop.left].map(v=>v*100+'%').join(' ')+')'});
         }
       }
-      if(outlineFilter){
-        const radius=Math.max(.1,Math.min(64,Number(object.paint.strokeWidth)||1)),rx=radius/box.width,ry=radius/box.height;
-        for(const [key,value]of Object.entries({x:-rx,y:-ry,width:1+2*rx,height:1+2*ry}))outlineFilter.setAttribute(key,value);
-        outlineFilter.querySelector('feMorphology').setAttribute('radius',rx+' '+ry);
+      if(paintFilter){
+        const radius=object.paint?.stroke?Math.max(.1,Math.min(64,Number(object.paint.strokeWidth)||1)):0;
+        for(const [key,value]of Object.entries({x:-radius,y:-radius,width:box.width+2*radius,height:box.height+2*radius}))paintFilter.setAttribute(key,value);
+        paintFilter.querySelector('feMorphology')?.setAttribute('radius',radius+' '+radius);
+        const ramp=paintFilter.querySelector('feImage');if(ramp){ramp.setAttribute('width',box.width);ramp.setAttribute('height',box.height);}
       }
+      if(entry.paintSource){
+        const target=entry.paintSource,x=parseFloat(image.style.left)||0,y=parseFloat(image.style.top)||0;
+        const width=image.style.width.endsWith('%')?box.width:parseFloat(image.style.width)||box.width,height=image.style.height.endsWith('%')?box.height:parseFloat(image.style.height)||box.height;
+        for(const [key,value]of Object.entries({x,y,width,height,preserveAspectRatio:!crop&&['cover','contain'].includes(object.media.fit)?(object.media.fit==='contain'?'xMidYMid meet':'xMidYMid slice'):'none'}))target.setAttribute(key,value);
+        const mask=object.media.mask;
+        entry.frameClip.replaceChildren(mask==='ellipse'?svg('ellipse',{cx:box.width/2,cy:box.height/2,rx:box.width/2,ry:box.height/2}):svg('rect',{width:box.width,height:box.height,rx:mask==='rounded'?Math.min(box.width,box.height)*.12:0}));
+        if(crop){entry.sourceClip.replaceChildren(svg('rect',{x:x+width*crop.left,y:y+height*crop.top,width:width*(1-crop.left-crop.right),height:height*(1-crop.top-crop.bottom)}));target.setAttribute('clip-path',`url(#${entry.sourceClip.id})`);}else target.removeAttribute('clip-path');
+      }
+    }
+    // Source correction and outer compositing are separate consumers. Updating
+    // either must not replace the decoded image, frame, or animation track.
+    function paintImage(entry,object){
+      const {node,image}=entry,paint=object.paint||{},box=object.bounds;
+      const treatmentKey=JSON.stringify([object.media.colourMatrices,object.media.sharpness,object.media.sharpnessAfter]);
+      const {opacity,...outerPaint}=paint,paintKey=JSON.stringify(outerPaint);
+      let changed=false;
+      if(entry.treatmentKey!==treatmentKey){
+        changed=true;renderCounters.imageTreatmentUpdates++;entry.treatmentKey=treatmentKey;
+        entry.treatmentDefinition?.remove();entry.treatmentDefinition=null;
+        const sharpness=Number(object.media.sharpness),sharpen=Number.isFinite(sharpness)&&sharpness>=.2&&sharpness<=2&&sharpness!==1;
+        image.style.filter='';
+        if(object.media.colourMatrices?.length||sharpen){
+          const defs=svg('defs'),id='keynope-scene-colour-'+(++serial);
+          const filter=svg('filter',{id,'color-interpolation-filters':'sRGB',...imageTreatmentRegion(box)});
+          const matrices=object.media.colourMatrices||[],sharpnessAfter=Math.max(0,Math.min(matrices.length,Number(object.media.sharpnessAfter)||0));
+          const addSharpness=()=>{
+            const kernel=Array(9).fill((1-sharpness)/9);kernel[4]+=sharpness;
+            filter.append(svg('feConvolveMatrix',{order:3,kernelMatrix:kernel.join(' '),divisor:1,bias:0,edgeMode:'duplicate',preserveAlpha:'true'}));
+          };
+          for(let index=0;index<=matrices.length;index++){
+            if(sharpen&&index===sharpnessAfter)addSharpness();
+            const matrix=matrices[index];
+            if(Array.isArray(matrix)&&matrix.length===20&&matrix.every(Number.isFinite))filter.append(svg('feColorMatrix',{type:'matrix',values:matrix.join(' ')}));
+          }
+          defs.append(filter);entry.paintSurface.prepend(defs);entry.treatmentDefinition=defs;image.style.filter=`url(#${id})`;
+        }
+        if(entry.paintSource){if(image.style.filter)entry.paintSource.setAttribute('filter',image.style.filter);else entry.paintSource.removeAttribute('filter');}
+      }
+      if(entry.paintKey!==paintKey){
+        changed=true;renderCounters.imagePaintUpdates++;entry.paintKey=paintKey;
+        entry.paintDefinition?.remove();entry.paintDefinition=null;entry.outlineFilter=null;entry.paintFilter=null;
+        const compositing=[];
+        if(paint.stroke||(paint.gradientStart&&paint.gradientEnd)){
+          const id='keynope-image-paint-'+(++serial),defs=svg('defs');
+          const radius=paint.stroke?Math.max(.1,Math.min(64,Number(paint.strokeWidth)||1)):0;
+          const filter=svg('filter',{id,'color-interpolation-filters':'sRGB',filterUnits:'userSpaceOnUse',primitiveUnits:'userSpaceOnUse',x:-radius,y:-radius,width:box.width+2*radius,height:box.height+2*radius});
+          entry.paintFilter=filter;
+          let content='SourceGraphic';
+          if(paint.gradientStart&&paint.gradientEnd){
+            // Replace colour, retaining the cropped/masked source alpha.
+            const ramp=document.createElement('canvas');ramp.width=ramp.height=256;
+            const ctx=ramp.getContext('2d'),vertical=paint.gradientDirection==='vertical',diagonal=paint.gradientDirection==='diagonal';
+            const gradient=ctx.createLinearGradient(0,0,vertical?0:256,vertical||diagonal?256:0);
+            gradient.addColorStop(0,paint.gradientStart);gradient.addColorStop(1,paint.gradientEnd);ctx.fillStyle=gradient;ctx.fillRect(0,0,256,256);
+            filter.append(svg('feImage',{href:ramp.toDataURL(),x:0,y:0,width:box.width,height:box.height,preserveAspectRatio:'none',result:'gradient'}));
+            filter.append(svg('feComposite',{in:'gradient',in2:'SourceAlpha',operator:'in',result:'coloured'}));content='coloured';
+          }
+          if(paint.stroke){
+            entry.outlineFilter=filter;
+            filter.append(svg('feMorphology',{in:'SourceAlpha',operator:'dilate',radius:radius+' '+radius,result:'expanded'}));
+            filter.append(svg('feComposite',{in:'expanded',in2:'SourceAlpha',operator:'arithmetic',k2:1,k3:-1,result:'edge'}));
+            filter.append(svg('feFlood',{'flood-color':paint.stroke,result:'outline-colour'}));
+            filter.append(svg('feComposite',{in:'outline-colour',in2:'edge',operator:'in',result:'outline'}));
+            const merge=svg('feMerge');merge.append(svg('feMergeNode',{in:'outline'}),svg('feMergeNode',{in:content}));filter.append(merge);
+          }
+          defs.append(filter);entry.paintSurface.prepend(defs);entry.paintDefinition=defs;
+          if(entry.paintGroup)entry.paintGroup.setAttribute('filter',`url(#${id})`);
+          else compositing.push(`url(#${id})`);
+        }
+        if(entry.paintGroup&&!entry.paintFilter)entry.paintGroup.removeAttribute('filter');
+        if(paint.shadowColor)compositing.push(`drop-shadow(${shadow(paint)})`);
+        node.style.filter=compositing.join(' ');
+      }
+      return changed;
     }
     function paintShape(drawing,object){
       const box=object.bounds,paint=object.paint||{color:'#ffffff'};
@@ -270,23 +452,31 @@ globalThis.KeynopeScene = (() => {
       else {drawing.setAttribute('role','img');drawing.setAttribute('aria-label',(object.shape||'rectangle')+' shape');}
       const defs=svg('defs');
       let shape;
-      if(object.shape==='circle')shape=svg('ellipse',{cx:box.width/2,cy:box.height/2,rx:box.width/2,ry:box.height/2});
+      if(object.shapeGeometry?.path)shape=svg('path',{d:object.shapeGeometry.path,transform:`scale(${box.width} ${box.height})`,'vector-effect':'non-scaling-stroke','fill-rule':'evenodd'});
+      else if(object.shape==='circle')shape=svg('ellipse',{cx:box.width/2,cy:box.height/2,rx:box.width/2,ry:box.height/2});
       else if(object.shape==='triangle')shape=svg('polygon',{points:`${box.width/2},0 ${box.width},${box.height} 0,${box.height}`});
       else if(object.shape==='diamond')shape=svg('polygon',{points:`${box.width/2},0 ${box.width},${box.height/2} ${box.width/2},${box.height} 0,${box.height/2}`});
       else shape=svg('rect',{width:box.width,height:box.height});
-      shape.setAttribute('fill',fill(defs,paint));
-      if(paint.stroke){shape.setAttribute('stroke',paint.stroke);shape.setAttribute('stroke-width',paint.strokeWidth||1);}
+      shape.setAttribute('fill',paint.noFill?'none':fill(defs,paint));
+      if(paint.stroke){shape.setAttribute('stroke',paint.stroke);shape.setAttribute('stroke-width',paint.strokeWidth??1);shape.setAttribute('stroke-linejoin','round');}
       drawing.style.filter=paint.shadowColor?`drop-shadow(${shadow(paint)})`:'';
       drawing.replaceChildren(defs,shape);
+      for(const path of object.shapeGeometry?.details||[])drawing.append(svg('path',{d:path,transform:`scale(${box.width} ${box.height})`,fill:'none',stroke:paint.stroke||'#202833','stroke-width':paint.stroke?paint.strokeWidth??1.5:1.5,'vector-effect':'non-scaling-stroke'}));
     }
-    function mountObject(object){
+    function objectNameSemantics(node,object){
+      if(object.name){node.title=object.name;node.setAttribute('aria-label',object.name);if(!node.hasAttribute('role')){node.setAttribute('role','group');node.dataset.namedRole='1';}node.dataset.namedLabel='1';}
+      else if(node.dataset.namedLabel){node.removeAttribute('title');node.removeAttribute('aria-label');delete node.dataset.namedLabel;if(node.dataset.namedRole){node.removeAttribute('role');delete node.dataset.namedRole;}}
+    }
+    function mountObject(object,background=false){
       if(object.kind==='connector'&&!object.retroLines)return;
+      renderCounters.objectMounts++;
       const box=object.bounds,paint=object.paint||{color:'#ffffff'},node=document.createElement('div');
-      node.dataset.objectId=object.id;position(node,box);
+      node.dataset.objectId=object.id;position(node,box);objectNameSemantics(node,object);
       // Keep authored paint order explicit so accessible DOM order can follow
       // the slide spatially without changing overlap, alpha or pointer hits.
       node.style.zIndex=String(readingNodes.length+1);
-      readingNodes.push({node,object:objectSnapshot(object)});
+      if(background){backgroundNode=node;backgroundEntry={node,object:objectSnapshot(object)};node.style.zIndex='0';delete node.dataset.objectId;node.classList.add('keynope-scene-background-media');node.setAttribute('aria-hidden','true');}
+      else readingNodes.push({node,object:objectSnapshot(object)});
       if(Number.isFinite(paint.opacity))node.style.opacity=String(Math.max(0,Math.min(1,paint.opacity)));
       if(object.rotation)node.style.transform=`rotate(${object.rotation}deg)`;
       root.append(node);
@@ -302,6 +492,15 @@ globalThis.KeynopeScene = (() => {
         }else text(labelHost,object.label,shapeTextBox(object),object.labelPaint||paint,object.id+':label',object.id,true);
       }
       if(object.retroText||object.retroLines){
+        if(object.retroStroke?.length&&paint.stroke&&paint.strokeWidth>0){
+          const strokeCanvas=document.createElement('canvas'),padding=64;
+          strokeCanvas.className='keynope-scene-retro-stroke';strokeCanvas.setAttribute('aria-hidden','true');
+          strokeCanvas.width=Math.ceil(box.width+padding*2);strokeCanvas.height=Math.ceil(box.height+padding*2);
+          Object.assign(strokeCanvas.style,{position:'absolute',left:-padding+'px',top:-padding+'px',pointerEvents:'none',zIndex:'1'});
+          const ctx=strokeCanvas.getContext('2d');ctx.translate(padding,padding);ctx.fillStyle=paint.stroke;
+          for(const cell of object.retroStroke)ctx.fillRect(cell.x,cell.y,cell.width,cell.height);
+          node.append(strokeCanvas);
+        }
         const retro=object.retroText||object.retroLines,lines=object.retroText?[retro.line]:retro.lines,canvas=document.createElement('canvas'),padding=64;
         canvas.className='keynope-scene-retro-text';canvas.setAttribute('aria-hidden','true');
         canvas.width=Math.ceil(box.width+padding*2);canvas.height=Math.ceil(box.height+padding*2);
@@ -353,6 +552,62 @@ globalThis.KeynopeScene = (() => {
             retroTracks.push({id:object.id,frames,ends,duration,loopCount:Number(retro.loopCount)||0,current:0,paintLines});
           }
         })());
+      }else if(object.kind==='chart'&&object.chart){
+        const chart=object.chart,drawing=svg('svg',{viewBox:`0 0 ${box.width} ${box.height}`,width:box.width,height:box.height,role:'img','aria-label':chart.data.title||chart.data.type+' chart'});
+        drawing.classList.add('keynope-scene-chart');drawing.style.overflow='visible';
+        drawing.dataset.chartType=chart.data.type;
+        const title=svg('title');title.textContent=chart.data.title||chart.data.type+' chart';drawing.append(title);
+        const description=svg('desc');description.textContent=chart.empty?'No values yet.':`${chart.data.categories.length} categories, ${chart.data.series.length} series. Activate View chart data for the full dataset.`;drawing.append(description);
+        const marks=svg('g');if(paint.shadowColor)marks.style.filter=`drop-shadow(${shadow(paint)})`;drawing.append(marks);
+        const entry={drawing,title,description,marks,paths:[],labels:[],chart,dataKey:JSON.stringify(chart.data),key:structuredKey(object)};
+        structuredViews.set(object.id,entry);
+        for(const mark of chart.paths||[]){const path=svg('path');chartMarkPaint(path,mark,paint);marks.append(path);entry.paths.push({node:path,key:chartMarkKey(mark,paint)});}
+        node.append(drawing);
+        for(const [index,label]of (chart.labels||[]).entries()){
+          const host=document.createElement('div');host.className='keynope-chart-label';host.title=label.fullText||'';Object.assign(host.style,{position:'absolute',inset:'0',pointerEvents:'none'});node.append(host);
+          entry.labels.push(host);
+          text(host,label.text,label.bounds,label.paint,object.id+':chart-label:'+index,object.id);
+          textBoxes.at(-1).component={kind:'chart',index};
+        }
+        // Lazy, paged accessible fallback avoids thousands of hidden DOM cells
+        // on every redraw. The full logical dataset remains in the scene.
+        const view=document.createElement('button');view.type='button';view.textContent='View chart data';view.className='keynope-chart-data-access';
+        Object.assign(view.style,{position:'absolute',left:'0',top:'0',clipPath:'inset(50%)',width:'1px',height:'1px',overflow:'hidden'});
+        view.addEventListener('focus',()=>Object.assign(view.style,{clipPath:'none',width:'auto',height:'auto',zIndex:'5'}));view.addEventListener('blur',()=>Object.assign(view.style,{clipPath:'inset(50%)',width:'1px',height:'1px'}));node.append(view);
+        // WebKit normally blurs a keyboard-focused button on mouse-down. This
+        // focus-revealed control would shrink before mouse-up and lose the
+        // click. Retain focus/geometry for the complete pointer activation.
+        view.addEventListener('pointerdown',event=>{event.preventDefault();view.focus({preventScroll:true});});
+        view.addEventListener('click',()=>{
+          const chart=entry.chart;
+          if(chartDataDialogs.has(object.id)){chartDataDialogs.get(object.id).focus();return;}
+          const modal=document.createElement('dialog');modal.setAttribute('aria-label',(chart.data.title||'Chart')+' data');Object.assign(modal.style,{maxWidth:'90vw',maxHeight:'80vh',overflow:'auto',background:'#1d2229',color:'#f0f3f7',padding:'20px',font:'16px system-ui'});
+          const heading=document.createElement('h2');heading.textContent=chart.data.title||'Chart data';const table=document.createElement('table'),navigation=document.createElement('div');let page=0;
+          const draw=()=>{table.replaceChildren();navigation.replaceChildren();const head=document.createElement('thead'),row=document.createElement('tr');for(const name of ['Category',...chart.data.series.map(s=>s.name)]){const th=document.createElement('th');th.scope='col';th.textContent=name;row.append(th);}head.append(row);table.append(head);const body=document.createElement('tbody');for(let i=page*25;i<Math.min((page+1)*25,chart.data.categories.length);i++){const row=document.createElement('tr'),th=document.createElement('th');th.scope='row';th.textContent=chart.data.categories[i];row.append(th);for(const series of chart.data.series){const td=document.createElement('td');td.textContent=String(series.values[i]);row.append(td);}body.append(row);}table.append(body);const status=document.createElement('span');status.textContent=` Categories ${page*25+1}–${Math.min((page+1)*25,chart.data.categories.length)} of ${chart.data.categories.length} `;status.setAttribute('role','status');const prev=document.createElement('button'),next=document.createElement('button');prev.textContent='Previous';next.textContent='Next';prev.disabled=page===0;next.disabled=(page+1)*25>=chart.data.categories.length;prev.onclick=()=>{page--;draw();};next.onclick=()=>{page++;draw();};navigation.append(prev,status,next);};
+          const close=document.createElement('button');close.textContent='Close';close.onclick=()=>modal.close();modal.addEventListener('close',()=>{modal.remove();if(chartDataDialogs.get(object.id)===modal)chartDataDialogs.delete(object.id);if(view.isConnected)view.focus();});modal.addEventListener('keydown',e=>e.stopPropagation());modal.append(heading,table,navigation,close);document.body.append(modal);chartDataDialogs.set(object.id,modal);draw();modal.showModal();close.focus();
+        });
+      }else if(object.kind==='table'&&object.table){
+        const data=object.table,table=document.createElement('table'),body=document.createElement('tbody');
+        table.className='keynope-scene-table';table.setAttribute('role','table');table.setAttribute('aria-label','Table');
+        table.setAttribute('aria-rowcount',String(data.rows.length));table.setAttribute('aria-colcount',String(data.columns.length));
+        Object.assign(table.style,{position:'relative',display:'block',width:box.width+'px',height:box.height+'px',borderCollapse:'collapse',borderSpacing:'0',overflow:'hidden'});
+        Object.assign(body.style,{display:'block',position:'relative',width:'100%',height:'100%'});table.append(body);node.append(table);
+        const entry={table,rows:[],cells:new Map(),key:structuredKey(object)};structuredViews.set(object.id,entry);
+        let y=0;
+        data.rows.forEach((height,row)=>{
+          const tr=document.createElement('tr');tr.setAttribute('role','row');position(tr,{x:0,y,width:box.width,height});tr.style.display='block';body.append(tr);
+          entry.rows.push(tr);
+          for(const cell of data.cells.filter(cell=>cell.row===row)){
+            const td=document.createElement(cell.header?'th':'td');td.setAttribute('role',cell.header?'columnheader':'cell');
+            td.rowSpan=cell.rowSpan;td.colSpan=cell.colSpan;td.setAttribute('aria-rowindex',String(row+1));td.setAttribute('aria-colindex',String(cell.column+1));
+            if(cell.header)td.scope='col';td.dataset.tableCell=row+':'+cell.column;
+            tableCellPaint(td,cell,data);entry.cells.set(row+':'+cell.column,{node:td,key:tableCellPaintKey(cell,data)});
+            tr.append(td);text(td,cell.text,cell.contentBounds,cell.paint,object.id+':cell:'+row+':'+cell.column,object.id);
+            textBoxes.at(-1).component={kind:'table',row,column:cell.column};
+          }
+          y+=height;
+        });
+        paintTableBorders(table,data);
       }else if(object.kind==='text'&&object.text){text(node,object.text,{x:0,y:0,width:box.width,height:box.height},paint,object.id);}
       else if(object.kind==='shape'){
         const drawing=svg('svg');paintShape(drawing,object);node.append(drawing);
@@ -364,100 +619,62 @@ globalThis.KeynopeScene = (() => {
         const failed=()=>{
           if(disposed||!root.contains(node))return;
           image.style.visibility='hidden';fallback.style.display='grid';
+          if(imageEntry.paintSurface)imageEntry.paintSurface.style.visibility='hidden';
           if(!diagnostics.some(d=>d.objectId===object.id&&d.code==='image-decode'))diagnostics.push({objectId:object.id,code:'image-decode',message:'The embedded image could not be decoded. Replace the image or restore its source.'});
         };
         image.addEventListener('error',failed);
-        image.addEventListener('load',()=>{image.style.visibility='';fallback.style.display='none';});
+        image.addEventListener('load',()=>{image.style.visibility='';fallback.style.display='none';imageEntry.paintSurface.style.visibility='';imageEntry.paintSource.setAttribute('href',image.src);});
         const frame=document.createElement('div');Object.assign(frame.style,{position:'absolute',inset:'0',overflow:'hidden'});
-        const imageEntry={image,frame,fallback,outlineFilter:null};imageViews.set(object.id,imageEntry);
+        // Render and export the same SVG image/filter tree. Keep the HTML image
+        // only as the shared decoder/animation owner, never a second painter.
+        const paintSurface=svg('svg',{width:box.width,height:box.height}),paintGroup=svg('g'),paintFrame=svg('g'),paintSource=svg('image'),frameClip=svg('clipPath',{id:'image-frame-'+(++serial)}),sourceClip=svg('clipPath',{id:'image-source-'+serial}),frameDefs=svg('defs');
+        Object.assign(paintSurface.style,{position:'absolute',left:'0',top:'0',overflow:'visible'});
+        frameDefs.append(frameClip,sourceClip);paintFrame.setAttribute('clip-path',`url(#${frameClip.id})`);paintFrame.append(paintSource);paintGroup.append(paintFrame);paintSurface.append(frameDefs,paintGroup);frame.style.display='none';
+        const imageEntry={node,image,frame,fallback,paintSurface,paintGroup,paintFrame,paintSource,frameClip,sourceClip,outlineFilter:null};imageViews.set(object.id,imageEntry);
         imageSemantics(imageEntry,object.media);
+        paintImage(imageEntry,object);
         frameImage(imageEntry,object);
         const source=object.media.source||object.media.frames?.[0]?.source;
         // Scenes only contain embedded media. Never let a document initiate
         // an arbitrary remote request through this renderer.
-        if(source&&/^data:image\/(png|jpeg|gif|webp);base64,/.test(source))image.src=source;
-        const filters=[];
-        const sharpness=Number(object.media.sharpness),sharpen=Number.isFinite(sharpness)&&sharpness>=.2&&sharpness<=2&&sharpness!==1;
-        if(object.media.colourMatrices?.length||sharpen){
-          const definitions=svg('svg',{width:0,height:0,'aria-hidden':'true'}),defs=svg('defs'),id='keynope-scene-colour-'+(++serial);
-          definitions.style.position='absolute';
-          const filter=svg('filter',{id,'color-interpolation-filters':'sRGB',x:0,y:0,width:'100%',height:'100%'});
-          const matrices=object.media.colourMatrices||[],sharpnessAfter=Math.max(0,Math.min(matrices.length,Number(object.media.sharpnessAfter)||0));
-          const addSharpness=()=>{
-            const kernel=Array(9).fill((1-sharpness)/9);kernel[4]+=sharpness;
-            // Match Retro's box-blur interpolation, duplicate edge samples and
-            // preserve original alpha. Apply to each displayed animation frame.
-            filter.append(svg('feConvolveMatrix',{order:3,kernelMatrix:kernel.join(' '),divisor:1,bias:0,edgeMode:'duplicate',preserveAlpha:'true'}));
-          };
-          for(let index=0;index<=matrices.length;index++){
-            if(sharpen&&index===sharpnessAfter)addSharpness();
-            const matrix=matrices[index];
-            if(Array.isArray(matrix)&&matrix.length===20&&matrix.every(Number.isFinite))filter.append(svg('feColorMatrix',{type:'matrix',values:matrix.join(' ')}));
-          }
-          defs.append(filter);definitions.append(defs);node.append(definitions);filters.push(`url(#${id})`);
-        }
-        const compositing=[];
-        if(paint.stroke||(paint.gradientStart&&paint.gradientEnd)){
-          const id='keynope-image-paint-'+(++serial),definitions=svg('svg',{width:0,height:0}),defs=svg('defs');
-          const radius=paint.stroke?Math.max(.1,Math.min(64,Number(paint.strokeWidth)||1)):0;
-          const rx=radius/box.width,ry=radius/box.height;
-          const filter=svg('filter',{id,'color-interpolation-filters':'sRGB',filterUnits:'objectBoundingBox',primitiveUnits:'objectBoundingBox',x:-rx,y:-ry,width:1+2*rx,height:1+2*ry});
-          let content='SourceGraphic';
-          if(paint.gradientStart&&paint.gradientEnd){
-          // The gradient replaces colour but retains the post-crop alpha, as
-          // Retro gradients replace sampled ink without altering its shape.
-          const ramp=document.createElement('canvas');ramp.width=ramp.height=256;
-          const ctx=ramp.getContext('2d'),vertical=paint.gradientDirection==='vertical',diagonal=paint.gradientDirection==='diagonal';
-          const gradient=ctx.createLinearGradient(0,0,vertical?0:256,vertical||diagonal?256:0);
-          gradient.addColorStop(0,paint.gradientStart);gradient.addColorStop(1,paint.gradientEnd);ctx.fillStyle=gradient;ctx.fillRect(0,0,256,256);
-          filter.append(svg('feImage',{href:ramp.toDataURL(),x:0,y:0,width:1,height:1,preserveAspectRatio:'none',result:'gradient'}));
-          filter.append(svg('feComposite',{in:'gradient',in2:'SourceAlpha',operator:'in',result:'coloured'}));content='coloured';
-          }
-          if(paint.stroke){
-          imageEntry.outlineFilter=filter;
-          // Outline the cropped/masked alpha, not the image's rectangular box.
-          // This outer pass runs after source adjustments, and before shadow.
-          filter.append(svg('feMorphology',{in:'SourceAlpha',operator:'dilate',radius:rx+' '+ry,result:'expanded'}));
-          filter.append(svg('feComposite',{in:'expanded',in2:'SourceAlpha',operator:'arithmetic',k2:1,k3:-1,result:'edge'}));
-          filter.append(svg('feFlood',{'flood-color':paint.stroke,result:'outline-colour'}));
-          filter.append(svg('feComposite',{in:'outline-colour',in2:'edge',operator:'in',result:'outline'}));
-          const merge=svg('feMerge');merge.append(svg('feMergeNode',{in:'outline'}),svg('feMergeNode',{in:content}));filter.append(merge);
-          }
-          defs.append(filter);definitions.append(defs);Object.assign(definitions.style,{position:'absolute',pointerEvents:'none'});node.append(definitions);
-          compositing.push(`url(#${id})`);
-        }
-        if(paint.shadowColor)compositing.push(`drop-shadow(${shadow(paint)})`);
-        node.style.filter=compositing.join(' ');
-        image.style.filter=filters.join(' ');
-        frame.append(image,fallback);node.append(frame);media.push({image,media:object.media,current:source,id:object.id,failed});
+        if(source&&/^data:image\/(png|jpeg|gif|webp|svg\+xml);base64,/.test(source)){image.src=source;paintSource.setAttribute('href',source);}
+        frame.append(image);node.append(paintSurface,frame,fallback);media.push({image,media:object.media,current:source,id:object.id,failed});
       }
     }
     // Reuse the normal image/Retro painters for the background layer. This is
     // intentionally not included in scene.objects: it has no canvas selection
     // or z-order affordance, yet brightness, tint, sharpness, animation and
     // ASCII/Braille treatment remain identical to an ordinary image.
-    if(scene.backgroundMedia?.source||scene.backgroundMedia?.retroLines){
-      const background=scene.backgroundMedia;
-      mountObject({id:'keynope-background-media',kind:'image',bounds:{x:0,y:0,width:scene.width,height:scene.height},paint:background.paint||{color:'#ffffff',opacity:Number(background.opacity)||1},media:{...background,fit:background.fit||'cover',decorative:true},retroLines:background.retroLines||null});
-    }
+    const initialBackgroundObject=backgroundObjectFor(scene,backgroundObjectID);
+    if(initialBackgroundObject){activeIDs.add(backgroundObjectID);mountObject(initialBackgroundObject,true);}
     for(const object of scene.objects)mountObject(object);
     // Routes are above shape bodies, as are terminating heads. Geometry comes
     // from the shared route solver rather than a separate modern routing pass.
     const connectorNodes=new Map();
     const connectors=svg('svg',{width:scene.width,height:scene.height,viewBox:`0 0 ${scene.width} ${scene.height}`});
     Object.assign(connectors.style,{position:'absolute',inset:'0',pointerEvents:'none',overflow:'visible'});
+    function trimConnectorShaft(path,object){
+      const head=object.arrowWidth||16,start=['start','both'].includes(object.arrows)?head:0,end=['end','both'].includes(object.arrows)?head:0;
+      if(!start&&!end){path.removeAttribute('stroke-dasharray');return;}
+      const points=object.points||[];let length=0;for(let i=1;i<points.length;i++)length+=Math.hypot(points[i].x-points[i-1].x,points[i].y-points[i-1].y);
+      // Markers keep the unmodified endpoint route. Only the shaft is dashed
+      // away under the heads, avoiding a full-width bar over each pointed tip.
+      path.setAttribute('stroke-dasharray',length<=start+end?`0 ${length+1}`:`0 ${start} ${length-start-end} ${end}`);
+    }
     function mountConnector(object){
       if(!object.points?.length)return;
+      renderCounters.objectMounts++;
       const paint=object.paint,defs=svg('defs');connectors.append(defs);
       const path=svg('polyline',{points:object.points.map(p=>`${p.x},${p.y}`).join(' '),fill:'none',stroke:fill(defs,paint),'stroke-width':paint.strokeWidth||2,'stroke-linejoin':'round'});
-      path.setAttribute('role','img');path.setAttribute('aria-label','Connector'+(object.arrows==='both'?', arrows at both ends':object.arrows==='start'?', arrow at start':object.arrows==='end'?', arrow at end':''));
+      path.setAttribute('role','img');path.setAttribute('aria-label',object.name||'Connector'+(object.arrows==='both'?', arrows at both ends':object.arrows==='start'?', arrow at start':object.arrows==='end'?', arrow at end':''));
       const id='keynope-scene-arrow-'+(++serial),w=object.arrowWidth||16;
       const marker=svg('marker',{id,viewBox:'0 0 10 10',refX:10,refY:5,markerWidth:w,markerHeight:w,orient:'auto-start-reverse',markerUnits:'userSpaceOnUse'});
       marker.append(svg('path',{d:'M0 0 L10 5 L0 10 Z',fill:paint.color}));defs.append(marker);
       if(['end','both'].includes(object.arrows))path.setAttribute('marker-end',`url(#${id})`);
       if(['start','both'].includes(object.arrows))path.setAttribute('marker-start',`url(#${id})`);
+      trimConnectorShaft(path,object);
       path.dataset.objectId=object.id;connectors.append(path);
-      connectorNodes.set(object.id,{path,defs,points:path.getAttribute('points')});
+      connectorNodes.set(object.id,{path,defs,points:path.getAttribute('points'),opacity:paint.opacity,arrows:object.arrows,arrowWidth:object.arrowWidth});
       if(Number.isFinite(paint.opacity))path.style.opacity=String(Math.max(0,Math.min(1,paint.opacity)));
     }
     for(const object of scene.objects.filter(o=>o.kind==='connector'&&!o.retroLines))mountConnector(object);
@@ -471,13 +688,29 @@ globalThis.KeynopeScene = (() => {
     let disposed=false;
     let readinessRevision=0;
     const dirtyTextIDs=new Set();
+    const overflowConsumers=new WeakMap();
     function checkOverflow(affected=null){
       if(disposed)return diagnostics;
-      for(let i=diagnostics.length-1;i>=0;i--)if(diagnostics[i].code==='text-overflow'&&(!affected||affected.has(diagnostics[i].objectId)))diagnostics.splice(i,1);
-      for(const {wrapper,b,id,local}of textBoxes)if((!affected||affected.has(id))&&(wrapper.scrollHeight>b.height+1||local.some(s=>s.element.scrollWidth>s.element.clientWidth+1))){
-        diagnostics.push({objectId:id,code:'text-overflow',message:'Text exceeds its original box. Fit Text, Grow Box or layout editing is required.'});
+      for(let i=diagnostics.length-1;i>=0;i--)if(['text-overflow','table-cell-overflow','table-cell-cramped'].includes(diagnostics[i].code)&&(!affected||affected.has(overflowConsumers.get(diagnostics[i])||diagnostics[i].objectId)||affected.has(diagnostics[i].objectId)))diagnostics.splice(i,1);
+      for(const {wrapper,b,id,local,data,ownerID}of textBoxes){
+        if(affected&&!affected.has(id)&&!affected.has(ownerID))continue;
+        const cell=id.match(/:cell:(\d+):(\d+)$/);
+        if(cell){const extent=tableCellExtent(wrapper,data,b);if(extent.overflow||extent.cramped){let column='',n=Number(cell[2])+1;for(;n;n=Math.floor((n-1)/26))column=String.fromCharCode(65+(n-1)%26)+column;const finding={objectId:ownerID,code:extent.overflow?'table-cell-overflow':'table-cell-cramped',message:'Cell '+column+(Number(cell[1])+1)+': '+(extent.overflow?'text is clipped.':'less than one text line is available.')+' Fit table to content or enlarge the cell; font sizes are unchanged.'};overflowConsumers.set(finding,id);diagnostics.push(finding);}}
+        else if(wrapper.scrollHeight>b.height+1||local.some(s=>s.element.scrollWidth>s.element.clientWidth+1))diagnostics.push({objectId:id,code:'text-overflow',message:'Text exceeds its original box. Fit Text, Grow Box or layout editing is required.'});
       }
       return diagnostics;
+    }
+    // Read natural content dimensions after font readiness, not clipped client
+    // bounds or transformed screen pixels. Fit Table reuses the painted text
+    // surfaces, including rich runs and owned emoji, rather than average widths.
+    function tableContentMetrics(id,{minimumWidth=false}={}){
+      return textBoxes.filter(box=>box.ownerID===id&&/:cell:\d+:\d+$/.test(box.id)).map(box=>{
+        const [,row,column]=box.id.match(/:cell:(\d+):(\d+)$/);
+        const extent=tableCellExtent(box.wrapper,box.data,box.b);
+        let minWidth=0;
+        if(minimumWidth)for(const surface of box.local)minWidth=Math.max(minWidth,surface.minimumWidth());
+        return {row:Number(row),column:Number(column),...extent,minWidth};
+      });
     }
     let ready=Promise.all([...backgroundReady,...retroReady.splice(0),...surfaces.map(s=>s.surface.ready()),...media.map(item=>item.image.decode().catch(item.failed))]).then(()=>checkOverflow());
     const animationTrack=item=>{
@@ -499,7 +732,7 @@ globalThis.KeynopeScene = (() => {
       for(const {item,ends,duration} of animationTracks){
         const frames=item.media.frames,index=animationFrameAt(ends,duration,Number(item.media.loopCount)||0,elapsed);
         const source=frames[index].source;
-        if(item.current!==source&&/^data:image\/png;base64,/.test(source)){item.image.src=source;item.current=source;}
+        if(item.current!==source&&/^data:image\/png;base64,/.test(source)){item.image.src=source;imageViews.get(item.id)?.paintSource?.setAttribute('href',source);item.current=source;}
       }
     }
     // Export callers own an isolated mount with no live playback clock. Await
@@ -514,17 +747,36 @@ globalThis.KeynopeScene = (() => {
       if(disposed)throw new Error('Cannot snapshot a disposed scene');
       return diagnostics;
     }
+    // Export through the same decoded frame, framing and SVG filters as the
+    // live image. No DOM/foreignObject screenshot or system font dependency.
+    async function imageArtwork(id){
+      await ready;
+      const entry=imageViews.get(id),object=scene.objects.find(o=>o.id===id);
+      if(disposed||!entry||!object)throw Error('Image artwork is unavailable');
+      const {image}=entry,b=object.bounds,w=Math.ceil(b.width+128),h=Math.ceil(b.height+128);
+      if(w>8192||h>8192||w*h>16000000)throw Error('Image artwork exceeds capture limits');
+      await image.decode();
+      entry.paintSource.setAttribute('href',image.src);
+      const drawing=entry.paintSurface.cloneNode(true),outer=svg('g',{transform:'translate(64 64)'});
+      drawing.setAttribute('width',w);drawing.setAttribute('height',h);drawing.setAttribute('viewBox',`0 0 ${w} ${h}`);drawing.removeAttribute('style');
+      for(const child of [...drawing.children])if(child.tagName.toLowerCase()!=='defs')outer.append(child);
+      drawing.append(outer);
+      const rendered=new Image();rendered.src='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent(new XMLSerializer().serializeToString(drawing))));await rendered.decode();
+      if(disposed)throw Error('Cannot capture a disposed scene');
+      const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;canvas.getContext('2d').drawImage(rendered,0,0);return canvas;
+    }
     function objectSnapshot(object){
       // Retain only the values consumed by geometry/paint reconciliation.
       // Never retain caller-owned bounds or copy embedded media payloads.
       return {id:object.id,kind:object.kind,shape:object.shape,bounds:{...object.bounds},rotation:object.rotation,
+        shapeGeometryKey:JSON.stringify(object.shapeGeometry),
         paint:{opacity:object.paint?.opacity},labelPaint:{opacity:object.labelPaint?.opacity},
-        paintKey:JSON.stringify(object.paint),media:{mask:object.media?.mask,cropKey:JSON.stringify(object.media?.crop)}};
+        paintKey:JSON.stringify(object.paint),media:{frameKey:JSON.stringify([object.bounds.width,object.bounds.height,object.media?.crop,object.media?.mask,object.media?.fit,object.paint?.stroke,object.paint?.strokeWidth])}};
     }
     function textContent(data){const {emojiFonts,...content}=data;return JSON.stringify(content);}
     // Direction and language are shaped-surface updates, not paragraph-tree
     // changes. Preserve owners and markers when switching these properties.
-    function textStructure(data){const {runs,paragraphs,emojiFonts,direction,locale,...format}=data;return JSON.stringify({...format,...(paragraphs?{paragraphs:paragraphs.map(({runs,...paragraph})=>paragraph)}:{})});}
+    function textStructure(data){const {runs,paragraphs,emojiFonts,colorTokens,fontRoles,direction,locale,...format}=data;return JSON.stringify({...format,...(paragraphs?{paragraphs:paragraphs.map(({runs,...paragraph})=>paragraph)}:{})});}
     function textSnapshot(data,paint){
       // Snapshot the last painted values, not caller-owned references. Besides
       // avoiding repeated serialization of the old paragraph on every move,
@@ -542,8 +794,11 @@ globalThis.KeynopeScene = (() => {
         const {editable,textCapabilities,editRuns,group,link,...renderObject}=object;
         object=renderObject;
         if(object.kind==='connector'&&!object.retroLines){
-          const {points,bounds,...rest}=object;
-          return {...rest,hasRoute:!!points?.length};
+          const {points,bounds,paint,...rest}=object;
+          // Group opacity is independent of route/marker resources. Retain the
+          // SVG owner and update the compositing value, just as ordinary nodes.
+          const {opacity,...routePaint}=paint||{};
+          return {...rest,paint:routePaint,hasRoute:!!points?.length};
         }
         if(object.kind==='connector')return object;
         const {rotation,sampleOffset,...rest}=object;
@@ -584,12 +839,13 @@ globalThis.KeynopeScene = (() => {
           return {...rest,sampleScale:undefined,bounds:{...object.bounds,x:0,y:0,width:Math.round(object.bounds.width/(object.sampleScale?.x||1)*1e8)/1e8,height:Math.round(object.bounds.height/(object.sampleScale?.y||1)*1e8)/1e8}};
         }
         if(object.kind==='image'&&object.media&&!object.retroText&&!object.retroLines){
-          const {crop,mask,source,frames,alt,decorative,...media}=object.media;
+          const {crop,mask,source,frames,alt,decorative,colourMatrices,sharpness,sharpnessAfter,fit,...media}=object.media;
           if(frames)media.frames=frames.map(({source,...frame})=>frame);
+          delete rest.paint;
           return {...rest,media,bounds:{...object.bounds,x:0,y:0,width:0,height:0}};
         }
         if(object.kind==='shape'&&!object.retroLabel&&!object.retroText&&!object.retroLines){
-          delete rest.paint;delete rest.shape;
+          delete rest.paint;delete rest.shape;delete rest.shapeGeometry;
           delete rest.labelPaint;delete rest.editRuns;
           if(object.label)rest.label=true;
           return {...rest,bounds:{...object.bounds,x:0,y:0,width:0,height:0}};
@@ -600,31 +856,108 @@ globalThis.KeynopeScene = (() => {
           delete rest.editRuns;
           return {...rest,bounds:{...object.bounds,x:0,y:0,width:0,height:0}};
         }
+        if(object.kind==='table'&&object.table&&!object.retroText&&!object.retroLines){
+          const {rows,columns,cells,borders,header,banded,...table}=object.table;
+          // Track count and visible cell/span/header topology own the DOM.
+          // Track lengths, paint and text are reconciled without replacing it.
+          rest.table={...table,rows:rows.map(()=>0),columns:columns.map(()=>0),cells:cells.map(({text,paint,bounds,contentBounds,fill,borderColor,borderWidth,...cell})=>cell)};
+          delete rest.paint;
+          return {...rest,bounds:{...object.bounds,x:0,y:0,width:0,height:0}};
+        }
+        if(object.kind==='chart'&&object.chart&&!object.retroText&&!object.retroLines){
+          const {data,plot,paths,labels,empty,seriesColors,categoryColors,...chart}=object.chart;
+          // Mark/label topology changes retain the conservative replacement
+          // path; compatible geometry/style/data changes patch live children.
+          rest.chart={...chart,paths:paths.map(({d,fill,stroke,strokeWidth,opacity,...path})=>path),labels:labels.map(({text,bounds,paint,fullText,...label})=>label)};
+          delete rest.paint;
+          return {...rest,bounds:{...object.bounds,x:0,y:0,width:0,height:0}};
+        }
         return {...rest,bounds:{...object.bounds,x:0,y:0}};
     }
     // Revision is command-concurrency metadata, not paint. Background colour
     // is a root property and need not invalidate every object on the slide.
-    const sceneEnvelope=value=>{const {objects,background,revision,defaultStyle,diagnostics,...envelope}=value;return JSON.stringify(envelope);};
+    const sceneEnvelope=value=>{const {objects,background,backgroundMedia,revision,defaultStyle,diagnostics,...envelope}=value;return JSON.stringify(envelope);};
     let retainedBackground=scene.background;
     let sourceDiagnostics=new Set(scene.diagnostics||[]);
     const retainedEnvelope=sceneEnvelope(scene);
-    const retainedObjects=new Map(scene.objects.map(object=>[object.id,JSON.stringify(retainedObjectProjection(object))]));
-    const retainedSources=new Map(scene.objects.filter(object=>imageViews.has(object.id)).map(object=>[object.id,{source:object.media.source,frames:(object.media.frames||[]).map(frame=>frame.source)}]));
+    const initialObjects=[...scene.objects,...(initialBackgroundObject?[initialBackgroundObject]:[])];
+    const retainedObjects=new Map(initialObjects.map(object=>[object.id,JSON.stringify(retainedObjectProjection(object))]));
+    const retainedSources=new Map(initialObjects.filter(object=>imageViews.has(object.id)).map(object=>[object.id,{source:object.media.source,frames:(object.media.frames||[]).map(frame=>frame.source)}]));
+    function reconcileReadingOrder(structural=false){
+      const compare=(a,b)=>a.object.bounds.y-b.object.bounds.y||a.object.bounds.x-b.object.bounds.x||String(a.object.id).localeCompare(String(b.object.id));
+      const outOfOrder=readingNodes.some((entry,index)=>index>0&&compare(readingNodes[index-1],entry)>0);
+      if(outOfOrder)readingNodes.sort(compare);
+      if(outOfOrder||structural){
+        let previous=backgroundNode?.isConnected?backgroundNode:null;
+        for(const {node}of readingNodes){
+          const expected=previous?previous.nextSibling:root.firstChild;
+          if(expected!==node)root.insertBefore(node,expected);
+          previous=node;
+        }
+      }
+    }
+    // A deliberately narrow preview command, not a reference-equality cache.
+    // The caller can change only absolute x/y and optional vector route points,
+    // never content, style, markers or size. Sampled routes use normal update.
+    // Normal update() still validates every input, including in-place mutations.
+    // All positions are admitted before touching any node or painted snapshot.
+    function previewPositions(positions,routes=[]){
+      if(disposed||!Array.isArray(positions)||!Array.isArray(routes))return false;
+      const entries=new Map(readingNodes.map(entry=>[entry.object.id,entry])),seen=new Set(),moves=[],paths=[];
+      for(const value of positions){
+        if(!value||seen.has(value.id)||!Number.isFinite(value.x)||!Number.isFinite(value.y))return false;
+        const entry=entries.get(value.id);
+        if(!entry||entry.object.kind==='connector')return false;
+        seen.add(value.id);moves.push({entry,x:value.x,y:value.y});
+      }
+      for(const route of routes){
+        if(!route||seen.has(route.id)||!Array.isArray(route.points)||route.points.length<2||route.points.length>4096||route.points.some(p=>!p||!Number.isFinite(p.x)||!Number.isFinite(p.y)))return false;
+        const entry=connectorNodes.get(route.id);
+        if(!entry)return false;
+        seen.add(route.id);paths.push({entry,id:route.id,points:route.points,value:route.points.map(p=>`${p.x},${p.y}`).join(' ')});
+      }
+      const changed=[];
+      for(const {entry,x,y}of moves){
+        if(entry.object.bounds.x===x&&entry.object.bounds.y===y)continue;
+        entry.node.style.left=x+'px';entry.node.style.top=y+'px';
+        entry.object={...entry.object,bounds:{...entry.object.bounds,x,y}};
+        changed.push(entry.object.id);
+      }
+      if(changed.length)reconcileReadingOrder();
+      for(const {entry,id,points,value}of paths){
+        if(entry.points===value)continue;
+        entry.path.setAttribute('points',value);
+        trimConnectorShaft(entry.path,{points,arrows:entry.arrows,arrowWidth:entry.arrowWidth});
+        entry.points=value;changed.push(id);
+      }
+      renderCounters.updates++;lastChangedObjectIDs=changed;
+      return true;
+    }
     function updateTransforms(next,replaceIncompatible=false){
       if(disposed||next.version!==1||!Array.isArray(next.objects)||sceneEnvelope(next)!==retainedEnvelope)return false;
-      const byID=new Map(),added=[],replaced=new Set();
+      let nextBackgroundID=backgroundObjectID;while(next.objects.some(object=>object.id===nextBackgroundID))nextBackgroundID+='-background';
+      const nextBackgroundObject=backgroundObjectFor(next,nextBackgroundID),nextObjects=[...next.objects,...(nextBackgroundObject?[nextBackgroundObject]:[])];
+      const byID=new Map(),added=[],replaced=new Set(),changedIDs=new Set();
       // Compare one stable-ID projection at a time; avoid sorting and building
       // a second serialized copy of the complete scene on every interaction.
       // Do not cache by JS reference: callers may mutate an input object.
-      for(const object of next.objects){
+      for(const object of nextObjects){
         if(!object||!object.id||byID.has(object.id))return false;
+        const rect=box=>box&&['x','y','width','height'].every(key=>Number.isFinite(box[key]))&&box.width>=0&&box.height>=0;
+        if(object.table){
+          const data=object.table;
+          if(!Array.isArray(data.rows)||!Array.isArray(data.columns)||!Array.isArray(data.cells)||
+            [...data.rows,...data.columns].some(v=>!Number.isFinite(v)||v<=0)||
+            data.cells.some(cell=>!rect(cell.bounds)||!rect(cell.contentBounds)||!Number.isInteger(cell.row)||cell.row<0||cell.row>=data.rows.length||!Number.isInteger(cell.column)||cell.column<0||cell.column>=data.columns.length||!cell.text))return false;
+        }
+        if(object.chart&&(!Array.isArray(object.chart.paths)||!Array.isArray(object.chart.labels)||!object.chart.data||!Array.isArray(object.chart.data.categories)||!Array.isArray(object.chart.data.series)||object.chart.labels.some(label=>!rect(label.bounds)||!label.text)))return false;
         const sources=retainedSources.get(object.id);
         const incompatible=retainedObjects.has(object.id)&&(JSON.stringify(retainedObjectProjection(object))!==retainedObjects.get(object.id)||sources&&(object.media?.source!==sources.source||(object.media?.frames||[]).length!==sources.frames.length||(object.media?.frames||[]).some((frame,index)=>frame.source!==sources.frames[index])));
         if(incompatible&&!replaceIncompatible)return false;
         if(!retainedObjects.has(object.id)||incompatible){
-          if(!['text','shape','image','connector'].includes(object.kind))return false;
+          if(!['text','shape','image','table','chart','connector'].includes(object.kind))return false;
           try{
-            for(const data of [!object.retroText&&!object.retroLines?object.text:null,!object.retroLabel?object.label:null].filter(Boolean)){
+            for(const data of [!object.retroText&&!object.retroLines?object.text:null,!object.retroLabel?object.label:null,...(object.table?.cells||[]).map(cell=>cell.text),...(object.chart?.labels||[]).map(label=>label.text)].filter(Boolean)){
               for(const paragraph of data.paragraphs||[{runs:data.runs}])KeynopeTextLayout.normalize({...data,runs:paragraph.runs});
             }
           }catch(_error){return false;}
@@ -634,10 +967,21 @@ globalThis.KeynopeScene = (() => {
         byID.set(object.id,object);
       }
       if(next.objects.some(object=>!object.bounds||!['x','y','width','height'].every(key=>Number.isFinite(object.bounds[key]))||object.bounds.width<0||object.bounds.height<0))return false;
-      for(const object of next.objects)if(object.kind==='image'&&object.media&&!object.retroLines&&!object.retroText){
+      for(const object of nextObjects)if(object.kind==='image'&&object.media&&!object.retroLines&&!object.retroText){
         if(object.bounds.width<=0||object.bounds.height<=0)return false;
         const crop=object.media.crop;
         if(crop&&(!['left','right','top','bottom'].every(key=>Number.isFinite(crop[key])&&crop[key]>=0)||crop.left+crop.right>=1||crop.top+crop.bottom>=1))return false;
+        const matrices=object.media.colourMatrices,paint=object.paint||{};
+        if(object.media.fit&&!['contain','cover','stretch'].includes(object.media.fit))return false;
+        if(matrices&&(!Array.isArray(matrices)||matrices.length>8||matrices.some(matrix=>!Array.isArray(matrix)||matrix.length!==20||!matrix.every(Number.isFinite))))return false;
+        if(['gradientStart','gradientEnd','stroke','shadowColor'].some(key=>paint[key]!=null&&paint[key]!==''&&!CSS.supports('color',paint[key])))return false;
+        if(['strokeWidth','shadowX','shadowY','shadowBlur'].some(key=>paint[key]!=null&&!Number.isFinite(paint[key])))return false;
+        if(paint.shadowBlur<0)return false;
+        if(paint.gradientStart&&paint.gradientEnd&&[paint.gradientStart,paint.gradientEnd].some(value=>!/^#[\da-f]{6}$/i.test(value))){
+          // CSS accepts variables/currentColor that a Canvas colour stop may
+          // reject. Preflight before removing any live filter definitions.
+          try{const gradient=document.createElement('canvas').getContext('2d').createLinearGradient(0,0,1,1);gradient.addColorStop(0,paint.gradientStart);gradient.addColorStop(1,paint.gradientEnd);}catch(_error){return false;}
+        }
       }
       // Preflight every path before modifying anything. Style, markers and
       // route presence are included in the signature and cannot change here.
@@ -647,9 +991,11 @@ globalThis.KeynopeScene = (() => {
         if(!byID.has(id)||replaced.has(id))continue;
         const points=byID.get(id)?.points;
         if(!Array.isArray(points)||!points.length||points.some(p=>!Number.isFinite(p.x)||!Number.isFinite(p.y)))return false;
-        routes.push({entry,value:points.map(p=>`${p.x},${p.y}`).join(' ')});
+        routes.push({id,entry,object:byID.get(id),value:points.map(p=>`${p.x},${p.y}`).join(' '),opacity:byID.get(id).paint?.opacity});
       }
       const changedText=[];
+      const structuredCells=new Map();
+      for(const object of next.objects)if(object.table&&!replaced.has(object.id))structuredCells.set(object.id,new Map(object.table.cells.map(cell=>[cell.row+':'+cell.column,cell])));
       // Embedded colour fonts are immutable binary resources, not paragraph
       // structure. Compare their strings directly: stringifying them on every
       // pointer update copies large base64 payloads for all untouched objects.
@@ -660,21 +1006,33 @@ globalThis.KeynopeScene = (() => {
       for(const box of textBoxes){
         const object=byID.get(box.ownerID);
         if(!object||replaced.has(object.id)||object.retroText||object.retroLines||object.retroLabel)continue;
-        const data=box.isLabel?object.label:object.text;
+        const component=box.component;
+        const cell=component?.kind==='table'?structuredCells.get(object.id)?.get(component.row+':'+component.column):null;
+        const label=component?.kind==='chart'?object.chart?.labels[component.index]:null;
+        const data=cell?.text||label?.text||(box.isLabel?object.label:object.text);
         if(!data)continue;
-        const bounds=box.isLabel?shapeTextBox(object):{...box.b,width:object.bounds.width,height:object.bounds.height};
+        const bounds=cell?.contentBounds||label?.bounds||(box.isLabel?shapeTextBox(object):{...box.b,width:object.bounds.width,height:object.bounds.height});
         const paragraphs=data.paragraphs||[{runs:data.runs}];
         const resized=['x','y','width','height'].some(key=>bounds[key]!==box.b[key]);
-        const paint=(box.isLabel?object.labelPaint:null)||object.paint||{color:'#ffffff'},repaint=JSON.stringify(paint)!==box.paintKey;
+        const paint=cell?.paint||label?.paint||(box.isLabel?object.labelPaint:null)||object.paint||{color:'#ffffff'},repaint=JSON.stringify(paint)!==box.paintKey;
         const contentChanged=!sameFonts(data.emojiFonts,box.fontSources)||textContent(data)!==box.contentKey;
-        if(resized||repaint||contentChanged)changedText.push({box,data,paragraphs,paint,contentChanged,bounds,resized,rebuild:textStructure(data)!==box.structureKey});
+        if(resized||repaint||contentChanged){
+          try{for(const paragraph of paragraphs)KeynopeTextLayout.normalize({...data,runs:paragraph.runs});}catch(_error){return false;}
+          changedText.push({box,data,paragraphs,paint,contentChanged,bounds,resized,rebuild:textStructure(data)!==box.structureKey});
+        }
       }
       // All surviving objects have passed preflight. Remove only deleted
       // owners and their resources; unrelated playback/layout stays intact.
       const removed=new Set([...retainedObjects.keys()].filter(id=>!byID.has(id)||replaced.has(id)));
+      for(const id of removed)changedIDs.add(id);
+      const oldBackgroundID=backgroundObjectID;
+      const hadBackground=!!backgroundEntry;
+      if(removed.has(oldBackgroundID)&&backgroundNode){backgroundNode.remove();backgroundNode=null;backgroundEntry=null;}
+      backgroundObjectID=nextBackgroundID;
       if(next.background!==retainedBackground){root.style.background=next.background||'';retainedBackground=next.background;}
       const removedDiagnostics=new Set([...removed,...textBoxes.filter(box=>removed.has(box.ownerID)).map(box=>box.id)]);
-      for(const id of removed){activeIDs.delete(id);retainedObjects.delete(id);retainedSources.delete(id);shapeViews.delete(id);imageViews.delete(id);sampledViews.delete(id);connectorNodes.get(id)?.path.remove();connectorNodes.get(id)?.defs.remove();connectorNodes.delete(id);}
+      for(const id of removed){activeIDs.delete(id);retainedObjects.delete(id);retainedSources.delete(id);structuredViews.delete(id);shapeViews.delete(id);imageViews.delete(id);sampledViews.delete(id);connectorNodes.get(id)?.path.remove();connectorNodes.get(id)?.defs.remove();connectorNodes.delete(id);}
+      for(const id of removed){const dialog=chartDataDialogs.get(id);if(dialog){dialog.close();dialog.remove();chartDataDialogs.delete(id);}}
       for(let i=textBoxes.length-1;i>=0;i--){const box=textBoxes[i];if(!removed.has(box.ownerID))continue;for(const surface of box.local)surface.dispose();for(let j=surfaces.length-1;j>=0;j--)if(box.local.includes(surfaces[j].surface))surfaces.splice(j,1);dirtyTextIDs.delete(box.id);textBoxes.splice(i,1);}
       for(let i=readingNodes.length-1;i>=0;i--)if(removed.has(readingNodes[i].object.id)){readingNodes[i].node.remove();readingNodes.splice(i,1);}
       for(let i=retroTracks.length-1;i>=0;i--)if(removed.has(retroTracks[i].id))retroTracks.splice(i,1);
@@ -687,9 +1045,10 @@ globalThis.KeynopeScene = (() => {
       sourceDiagnostics=new Set(next.diagnostics||[]);diagnostics.push(...sourceDiagnostics);
       const pendingText=[];
       for(const object of added){
+        changedIDs.add(object.id);
         activeIDs.add(object.id);
         const firstRetro=retroReady.length,firstSurface=surfaces.length,firstMedia=media.length,firstBox=textBoxes.length;
-        if(object.kind==='connector'&&!object.retroLines)mountConnector(object);else mountObject(object);
+        if(object.kind==='connector'&&!object.retroLines)mountConnector(object);else mountObject(object,object.id===nextBackgroundID);
         retainedObjects.set(object.id,JSON.stringify(retainedObjectProjection(object)));
         if(imageViews.has(object.id))retainedSources.set(object.id,{source:object.media.source,frames:(object.media.frames||[]).map(frame=>frame.source)});
         for(const box of textBoxes.slice(firstBox))dirtyTextIDs.add(box.id);
@@ -697,25 +1056,30 @@ globalThis.KeynopeScene = (() => {
         for(const item of media.slice(firstMedia)){pendingText.push(item.image.decode().catch(item.failed));if(item.media.frames?.length)animationTracks.push(animationTrack(item));}
       }
       for(const {box,data,paragraphs,paint,contentChanged,bounds,resized,rebuild}of changedText){
+        changedIDs.add(box.ownerID);
         // Paint effects do not change the shaped text or wrapping box. Keep
         // existing overflow findings and avoid forced layout/font readiness
         // for colour/gradient/outline/shadow-only updates.
         if(contentChanged||resized||rebuild)dirtyTextIDs.add(box.id);
         if(rebuild){
+          renderCounters.textRebuilds++;
           const parent=box.wrapper.parentNode;
           for(const surface of box.local)surface.dispose();
           box.wrapper.remove();
           for(let i=surfaces.length-1;i>=0;i--)if(box.local.includes(surfaces[i].surface))surfaces.splice(i,1);
           textBoxes.splice(textBoxes.indexOf(box),1);
           text(parent,data,bounds,paint,box.id,box.ownerID,box.isLabel);
+          textBoxes.at(-1).component=box.component;
           pendingText.push(...textBoxes[textBoxes.length-1].local.map(surface=>surface.ready()));
           continue;
         }
         if(resized){
+          renderCounters.textWidthUpdates++;
           position(box.wrapper,bounds);box.b=bounds;
           for(const entry of surfaces)if(entry.id===box.id)entry.b=bounds;
           if(!contentChanged)paragraphs.forEach((paragraph,index)=>box.local[index].setWidth(Math.max(1,bounds.width-(paragraph.bullet?data.size*1.1:0))));
         }
+        if(contentChanged)renderCounters.textContentUpdates++;
         if(contentChanged)paragraphs.forEach((paragraph,index)=>{
           const indent=paragraph.bullet?data.size*1.1:0;
           box.local[index].element.parentElement.dir=data.direction||'auto';
@@ -726,6 +1090,7 @@ globalThis.KeynopeScene = (() => {
         box.paint=paint;
         Object.assign(box,textSnapshot(data,paint));
         applyTextPaint(box,paint);
+        renderCounters.textPaintUpdates++;
         if(contentChanged||resized)pendingText.push(...box.local.map(surface=>surface.ready()));
       }
       if(pendingText.length||added.length){
@@ -740,13 +1105,15 @@ globalThis.KeynopeScene = (() => {
       const paintOrder=new Map();let layer=0;
       const connectorLayer=String(readingNodes.length+1);if(connectors.style.zIndex!==connectorLayer)connectors.style.zIndex=connectorLayer;
       for(const object of next.objects)if(!connectorNodes.has(object.id))paintOrder.set(object.id,++layer);
-      for(const entry of readingNodes){
+      for(const entry of [...readingNodes,...(backgroundEntry?[backgroundEntry]:[])]){
         const object=byID.get(entry.object.id);
+        objectNameSemantics(entry.node,object);
         const snapshot=objectSnapshot(object);
-        const z=String(object.kind==='connector'?readingNodes.length+1:paintOrder.get(object.id));
+        const z=String(object.id===nextBackgroundID?0:object.kind==='connector'?readingNodes.length+1:paintOrder.get(object.id));
+        if(entry.node.style.zIndex!==z||['x','y','width','height'].some(key=>object.bounds[key]!==entry.object.bounds[key])||(object.rotation||0)!==(entry.object.rotation||0)||snapshot.paintKey!==entry.object.paintKey)changedIDs.add(object.id);
         if(entry.node.style.zIndex!==z)entry.node.style.zIndex=z;
         const image=imageViews.get(object.id);
-        if(image)imageSemantics(image,object.media);
+        if(image){imageSemantics(image,object.media);if(paintImage(image,object))changedIDs.add(object.id);}
         const sampled=sampledViews.get(object.id);
         if(sampled){
           sampledSemantics(sampled,object);
@@ -754,13 +1121,15 @@ globalThis.KeynopeScene = (() => {
           const transform=x===1&&y===1?'':`scale(${x},${y})`;
           if(sampled.canvas.style.transform!==transform)Object.assign(sampled.canvas.style,{transform,transformOrigin:'0 0',left:-sampled.padding*x+'px',top:-sampled.padding*y+'px'});
         }
-        if(image&&(object.bounds.width!==entry.object.bounds.width||object.bounds.height!==entry.object.bounds.height||object.media.mask!==entry.object.media.mask||snapshot.media.cropKey!==entry.object.media.cropKey))frameImage(image,object);
+        if(image&&snapshot.media.frameKey!==entry.object.media.frameKey){frameImage(image,object);changedIDs.add(object.id);}
         if(object.label&&!object.retroLabel){
           const opacity=object.labelPaint?.opacity,oldOpacity=entry.object.labelPaint?.opacity;
           if(opacity!==oldOpacity)entry.node.querySelector('.keynope-scene-label').style.opacity=Number.isFinite(opacity)?String(Math.max(0,Math.min(1,opacity))):'';
         }
         const drawing=shapeViews.get(object.id);
-        if(drawing&&(object.shape!==entry.object.shape||object.bounds.width!==entry.object.bounds.width||object.bounds.height!==entry.object.bounds.height||snapshot.paintKey!==entry.object.paintKey))paintShape(drawing,object);
+        const structured=structuredViews.get(object.id);
+        if(structured&&patchStructured(structured,object))changedIDs.add(object.id);
+        if(drawing&&(snapshot.shapeGeometryKey!==entry.object.shapeGeometryKey||object.shape!==entry.object.shape||object.bounds.width!==entry.object.bounds.width||object.bounds.height!==entry.object.bounds.height||snapshot.paintKey!==entry.object.paintKey))paintShape(drawing,object);
         if(object.bounds.x!==entry.object.bounds.x){entry.node.style.left=object.bounds.x+'px';readingOrderDirty=true;}
         if(object.bounds.y!==entry.object.bounds.y){entry.node.style.top=object.bounds.y+'px';readingOrderDirty=true;}
         if(object.bounds.width!==entry.object.bounds.width)entry.node.style.width=object.bounds.width+'px';
@@ -769,39 +1138,42 @@ globalThis.KeynopeScene = (() => {
         if(object.paint?.opacity!==entry.object.paint?.opacity)entry.node.style.opacity=Number.isFinite(object.paint?.opacity)?String(Math.max(0,Math.min(1,object.paint.opacity))):'';
         entry.object=snapshot;
       }
-      for(const {entry,value}of routes)if(entry.points!==value){entry.path.setAttribute('points',value);entry.points=value;}
+      for(const {id,entry,value,opacity,object}of routes){
+        entry.arrows=object.arrows;entry.arrowWidth=object.arrowWidth;
+        entry.path.setAttribute('aria-label',object.name||'Connector'+(object.arrows==='both'?', arrows at both ends':object.arrows==='start'?', arrow at start':object.arrows==='end'?', arrow at end':''));
+        if(entry.points!==value){changedIDs.add(id);entry.path.setAttribute('points',value);trimConnectorShaft(entry.path,object);entry.points=value;}
+        if(entry.opacity!==opacity){changedIDs.add(id);entry.path.style.opacity=Number.isFinite(opacity)?String(Math.max(0,Math.min(1,opacity))):'';entry.opacity=opacity;}
+      }
       // SVG paths share a foreground overlay; their sibling order is their
       // relative stacking order. Definitions stay reusable throughout reorders.
       const paths=next.objects.filter(object=>connectorNodes.has(object.id)).map(object=>connectorNodes.get(object.id).path);
       const currentPaths=[...connectors.children].filter(node=>node.hasAttribute('data-object-id'));
       if(paths.some((node,index)=>node!==currentPaths[index]))for(const node of paths)connectors.append(node);
-      if(readingOrderDirty){
-        const compare=(a,b)=>a.object.bounds.y-b.object.bounds.y||a.object.bounds.x-b.object.bounds.x||String(a.object.id).localeCompare(String(b.object.id));
-        // Most moves do not cross another object's reading position. Avoid
-        // sorting and walking DOM siblings until the spatial order changes.
-        const outOfOrder=readingNodes.some((entry,index)=>index>0&&compare(readingNodes[index-1],entry)>0);
-        if(outOfOrder)readingNodes.sort(compare);
-        if(outOfOrder||added.length||removed.size){
-          let previous=null;
-          for(const {node}of readingNodes){
-            const expected=previous?previous.nextSibling:root.firstChild;
-            if(expected!==node)root.insertBefore(node,expected);
-            previous=node;
-          }
-        }
-      }
+      if(readingOrderDirty)reconcileReadingOrder(added.length>0||removed.size>0);
+      renderCounters.updates++;
+      if(hadBackground&&changedIDs.has(oldBackgroundID)||nextBackgroundObject&&changedIDs.has(nextBackgroundID)){renderCounters.backgroundUpdates++;if(removed.has(oldBackgroundID)||added.some(object=>object.id===nextBackgroundID))renderCounters.backgroundReplacements++;}
+      // Background is a real renderer consumer, never an authored/selectable
+      // scene object. Keep its counters separate from foreground target IDs.
+      if(!next.objects.some(object=>object.id===oldBackgroundID))changedIDs.delete(oldBackgroundID);
+      changedIDs.delete(nextBackgroundID);
+      lastChangedObjectIDs=[...changedIDs];
       return true;
     }
     function resourceCounts(){return {objects:readingNodes.length+connectorNodes.size,textSurfaces:surfaces.length,media:media.length,animationTracks:animationTracks.length+retroTracks.length,pendingRasterQueue:retroReady.length};}
     function dispose(){
       if(disposed)return;disposed=true;
+      for(const dialog of chartDataDialogs.values()){dialog.close();dialog.remove();}chartDataDialogs.clear();
       for(const s of surfaces)s.surface.dispose();
       for(const list of [surfaces,textBoxes,media,readingNodes,retroReady,retroTracks,animationTracks])list.length=0;
-      for(const map of [shapeViews,imageViews,sampledViews,connectorNodes,retainedObjects,retainedSources])map.clear();
+      for(const map of [shapeViews,imageViews,sampledViews,structuredViews,connectorNodes,retainedObjects,retainedSources])map.clear();
       activeIDs.clear();dirtyTextIDs.clear();sourceDiagnostics.clear();
+      backgroundNode=null;backgroundEntry=null;
       root.replaceChildren();root.remove();
     }
-    return {element:root,get ready(){return ready;},setTime,snapshotAt,updateTransforms,update:next=>updateTransforms(next,true),diagnostics,resourceCounts,dispose};
+    // Runtime-only diagnostic counters, not document/scene metadata. Callers
+    // receive a fresh copy so profiling cannot alter renderer bookkeeping.
+    const renderStats=()=>({...renderCounters,lastChangedObjectIDs:[...lastChangedObjectIDs]});
+    return {element:root,get ready(){return ready;},setTime,snapshotAt,imageArtwork,updateTransforms,previewPositions,update:next=>updateTransforms(next,true),diagnostics,tableContentMetrics,resourceCounts,renderStats,dispose};
   }
   function editImage(object,commit,{renderDraft=null}={}) {
     const previous=document.activeElement;
@@ -845,7 +1217,7 @@ globalThis.KeynopeScene = (() => {
     const sourceStage=document.createElement('div'),sourceFrame=document.createElement('div'),sourceImage=document.createElement('img'),selection=document.createElement('div');
     Object.assign(sourceStage.style,{position:'relative',height:'260px',overflow:'hidden',background:'#0c1117'});Object.assign(sourceFrame.style,{position:'absolute',touchAction:'none'});
     sourceFrame.dataset.cropSource='';sourceImage.alt='Original image';sourceImage.draggable=false;Object.assign(sourceImage.style,{width:'100%',height:'100%',pointerEvents:'none',display:'block'});
-    const original=object.media.source||object.media.frames?.[0]?.source;if(original&&/^data:image\/(png|jpeg|gif|webp);base64,/.test(original))sourceImage.src=original;
+    const original=object.media.source||object.media.frames?.[0]?.source;if(original&&/^data:image\/(png|jpeg|gif|webp|svg\+xml);base64,/.test(original))sourceImage.src=original;
     selection.tabIndex=0;selection.setAttribute('role','button');selection.setAttribute('aria-label','Move crop selection');Object.assign(selection.style,{position:'absolute',boxSizing:'border-box',border:'2px solid #ffdf66',boxShadow:'0 0 0 1000px #0008',cursor:'move',touchAction:'none'});sourceFrame.append(sourceImage,selection);sourceStage.append(sourceFrame);
     for(const corner of ['top-left','top-right','bottom-left','bottom-right']){const handle=document.createElement('button');handle.type='button';handle.dataset.cropCorner=corner;handle.setAttribute('aria-label','Crop '+corner+' corner');Object.assign(handle.style,{position:'absolute',width:'14px',height:'14px',padding:0,border:'2px solid #182028',background:'#ffdf66',borderRadius:'2px',touchAction:'none',cursor:corner==='top-left'||corner==='bottom-right'?'nwse-resize':'nesw-resize',[corner.includes('left')?'left':'right']:'-8px',[corner.includes('top')?'top':'bottom']:'-8px'});selection.append(handle);handles.push(handle);}
     const sync=()=>{Object.assign(selection.style,{left:crop.left*100+'%',top:crop.top*100+'%',width:(1-crop.left-crop.right)*100+'%',height:(1-crop.top-crop.bottom)*100+'%'});for(const side of Object.keys(inputs)){inputs[side].value=crop[side]*100;numbers[side].value=Number((crop[side]*100).toFixed(6));outputs[side].textContent='%';}};
@@ -933,9 +1305,10 @@ globalThis.KeynopeScene = (() => {
     const reset=button('Reset crop',()=>{preset.value='source';crop={...blank};for(const side of Object.keys(inputs)){inputs[side].value=0;outputs[side].textContent='0%';}draw();}),cancel=button('Cancel',close),apply=button('Apply crop',async()=>{
       if(pending)return;
       for(const number of Object.values(numbers)){number.required=true;if(!number.reportValidity())return;}
-      if(JSON.stringify(crop)===JSON.stringify(initial)&&mask===initialMask){close();return;}
+      const cropChanged=JSON.stringify(crop)!==JSON.stringify(initial),maskChanged=mask!==initialMask;
+      if(!cropChanged&&!maskChanged){close();return;}
       pending=true;updateHistoryButtons();for(const input of [...Object.values(inputs),...Object.values(numbers),preset,maskSelect,reset,cancel,apply])input.disabled=true;status.textContent='';
-      try{await commit(crop,mask);pending=false;close();}catch(error){status.textContent=error.message||'Could not apply crop';}finally{pending=false;updateHistoryButtons();for(const input of [...Object.values(inputs),...Object.values(numbers),preset,maskSelect,reset,cancel,apply])input.disabled=false;}
+      try{await commit(cropChanged?crop:undefined,maskChanged?mask:undefined);pending=false;close();}catch(error){status.textContent=error.message||'Could not apply crop';}finally{pending=false;updateHistoryButtons();for(const input of [...Object.values(inputs),...Object.values(numbers),preset,maskSelect,reset,cancel,apply])input.disabled=false;}
     });apply.style.background='#245c91';
     actions.style.flexWrap='wrap';actions.append(undo,redo,reset,cancel,apply);const hint=document.createElement('p');hint.textContent='Drag corners to crop; drag inside to move. Arrow keys adjust the focused handle (Shift for larger steps). Cropping is non-destructive and retained when changing style.'+(object.retroLines&&!renderDraft?' This preview shows the source; the slide applies your Retro glyph treatment.':'');
     if(animated){playback=button(previewPlaying?'Pause preview':'Play preview',()=>{previewPlaying=!previewPlaying;resetPreviewClock();playback.textContent=previewPlaying?'Pause preview':'Play preview';});actions.prepend(playback);}
@@ -945,7 +1318,7 @@ globalThis.KeynopeScene = (() => {
     const observer=new ResizeObserver(fit);document.body.append(dialog);dialog.showModal();beginTextPause();draw();observer.observe(preview);observer.observe(sourceStage);handles[0].focus();
     resetPreviewClock();
   }
-  async function editText(object,commit,{canvasScene=null,inspectorHost=null,onOutsideCommit=null,renderShapeDraft=null}={}) {
+  async function editText(object,commit,{canvasScene=null,inspectorHost=null,onOutsideCommit=null,renderShapeDraft=null,styleClipboard=null,styleTransfer=null,painterScope=null,styleAvailable=()=>true}={}) {
     const previous=document.activeElement;
     // Text uses the shared shaped surface and object transform; list markers
     // decorate editable paragraphs without becoming authored characters.
@@ -1105,14 +1478,14 @@ globalThis.KeynopeScene = (() => {
       editor.setEmojiGradient(paint.gradientStart,paint.gradientEnd,paint.gradientDirection);
       if(paint.shadowColor)node.style.filter=`drop-shadow(${shadow(paint)})`;
     };
-    let updateGrowth=()=>{};
+    let updateGrowth=()=>{},wordStyles=null;
     const commitFromKeyboard=()=>{if(!pending&&!confirmation&&!closed)return submit(false);};
     const resolveEmojiFonts=async text=>{
       const response=await fetch('/api/editor/emoji-text-fonts?'+new URLSearchParams({text}));
       if(!response.ok)throw new Error('Could not load emoji font');
       return response.json();
     };
-    const editor=KeynopeTextLayout.createEditor(inline?inlineContent:area,{...object.text,runs:object.editRuns||object.text.runs,width:object.bounds.width,color:object.paint.color},{resolveEmojiFonts,bullet:object.text.role==='bullet',onCommit:commitFromKeyboard,onChange:model=>{font.value=model.fontId;spacing.value=model.lineHeight;size.value=model.size;width.value=Number((model.widthScale*100/widthBaseline).toFixed(6));paragraphInputs[0].value=model.paragraphBefore;paragraphInputs[1].value=model.paragraphAfter;updateFormattingState();updatePreview(model);styleInline(model);updateGrowth(model);},onError:e=>{error.textContent=e.message;}});
+    const editor=KeynopeTextLayout.createEditor(inline?inlineContent:area,{...object.text,runs:object.editRuns||object.text.runs,width:object.bounds.width,color:object.paint.color},{resolveEmojiFonts,bullet:object.text.role==='bullet',onCommit:commitFromKeyboard,onChange:model=>{font.value=model.fontId;spacing.value=model.lineHeight;size.value=model.size;width.value=Number((model.widthScale*100/widthBaseline).toFixed(6));paragraphInputs[0].value=model.paragraphBefore;paragraphInputs[1].value=model.paragraphAfter;updateFormattingState();wordStyles?.refresh();updatePreview(model);styleInline(model);updateGrowth(model);},onError:e=>{error.textContent=e.message;}});
     const keyboardHelp=document.createElement('p');keyboardHelp.id='keynope-text-keys-'+(++serial);
     keyboardHelp.textContent=(object.text.role==='bullet'?'Enter: new bullet; empty bullet: apply. Shift-Enter: continuation. ':'Enter: new line; empty line: apply. Shift-Enter: keep a new line. ')+'Tab: indent. Shift-Tab: formatting controls. ⌘/Ctrl-Enter: apply. Escape: close.';
     Object.assign(keyboardHelp.style,{font:'12px/1.5 system-ui',color:'#c4cdd5',margin:'8px 0'});
@@ -1136,6 +1509,7 @@ globalThis.KeynopeScene = (() => {
     const applyRunStyle=style=>{if(pending||editor.isComposing())return;const s=selectedRange();if(s.start===s.end){error.textContent='Select text to format.';return;}editor.select(s.start,s.end);error.textContent='';editor.format(style);};
     const toggleRunStyle=key=>{
       if(pending||editor.isComposing())return;
+      if(wordStyles)return wordStyles.toggleProperty('text.'+key);
       const s=selectedRange(),start=Math.min(s.start,s.end),end=Math.max(s.start,s.end);
       if(start===end){error.textContent='Select text to format.';return;}
       let offset=0,all=true;for(const run of editor.value().runs){if(offset<end&&offset+run.text.length>start)all=all&&!!run[key];offset+=run.text.length;}
@@ -1153,6 +1527,7 @@ globalThis.KeynopeScene = (() => {
     updateFormattingState=()=>{
       const start=Math.min(savedSelection.start,savedSelection.end),end=Math.max(savedSelection.start,savedSelection.end);
       for(const [key,button]of emphasisButtons){let offset=0,on=false,off=false;
+        if(wordStyles){wordStyles.refreshToggle(button,'text.'+key);continue;}
         for(const run of editor.value().runs){if(offset<end&&offset+run.text.length>start){if(run[key])on=true;else off=true;}offset+=run.text.length;}
         const state=on?(off?'mixed':'true'):'false';button.setAttribute('aria-pressed',state);
         button.style.background=state==='true'?'#245c91':state==='mixed'?'#504622':'#29323b';button.style.color='#fff';button.style.border='1px '+(state==='mixed'?'dashed #ffdf66':'solid #65717a');
@@ -1214,6 +1589,7 @@ globalThis.KeynopeScene = (() => {
       for(const control of [apply,inheritSize,cancel,font,spacing,size,width,...paragraphInputs,...formatButtons])control.disabled=value;
       area.inert=value;editor.element.contentEditable=String(!value);
       if(value)dialog.setAttribute('aria-busy','true');else dialog.removeAttribute('aria-busy');
+      wordStyles?.refresh();
     };
     fit.onclick=async()=>{
       if(pending||closed||confirmation||editor.isComposing())return;
@@ -1225,7 +1601,7 @@ globalThis.KeynopeScene = (() => {
       }catch(e){error.textContent=e.message||'Could not fit text';}
       finally{setPending(false);editor.element.focus();editor.select(selection.start,selection.end);}
     };
-    const close=()=>{if(pending||closed)return;closed=true;++growthGeneration;for(const record of shapeDrafts.values())if(!record.done)record.controller.abort();shapeDrafts.clear();shapeView?.dispose();pendingTextDrafts.delete(commitForSave);++previewGeneration;previewObserver.disconnect();inlineObserver?.disconnect();window.removeEventListener('resize',fitInline);if(inlineSource)inlineSource.style.visibility=inlineSourceVisibility;previewView?.dispose();document.removeEventListener('selectionchange',rememberSelection);endTextPause();editor.dispose();dialog.close();dialog.remove();if(previous?.isConnected)previous.focus({preventScroll:true});};
+    const close=(keepPainter=false)=>{if(pending||closed)return;closed=true;wordStyles?.dispose({keepPainter});++growthGeneration;for(const record of shapeDrafts.values())if(!record.done)record.controller.abort();shapeDrafts.clear();shapeView?.dispose();pendingTextDrafts.delete(commitForSave);++previewGeneration;previewObserver.disconnect();inlineObserver?.disconnect();window.removeEventListener('resize',fitInline);if(inlineSource)inlineSource.style.visibility=inlineSourceVisibility;previewView?.dispose();document.removeEventListener('selectionchange',rememberSelection);endTextPause();editor.dispose();dialog.close();dialog.remove();if(previous?.isConnected)previous.focus({preventScroll:true});};
     const requestClose=()=>{
       if(pending||closed||confirmation||editor.isComposing())return;
       if(initial===snapshot()){close();return;}
@@ -1236,7 +1612,7 @@ globalThis.KeynopeScene = (() => {
       const explanation=document.createElement('p');explanation.textContent='Keep your edits, or revert to the text before you started editing.';
       const choices=document.createElement('div');Object.assign(choices.style,{display:'flex',flexWrap:'wrap',gap:'8px',justifyContent:'flex-end'});
       const dismiss=()=>{confirmation.close();confirmation.remove();confirmation=null;dialog.inert=false;editor.element.contentEditable='true';editor.element.focus();editor.select(savedSelection.start,savedSelection.end);};
-      for(const [label,action]of [['Keep editing',()=>{}],['Revert',close],['Keep changes',()=>submit(false)]]){
+      for(const [label,action]of [['Keep editing',()=>{}],['Revert',()=>close()],['Keep changes',()=>submit(false)]]){
         const button=document.createElement('button');button.type='button';button.textContent=label;
         Object.assign(button.style,{font:'inherit',padding:'8px 12px',background:'#29323b',color:'#ffffff',border:'1px solid #65717a',borderRadius:'5px'});
         button.onclick=()=>{dismiss();action();};choices.append(button);
@@ -1258,20 +1634,22 @@ globalThis.KeynopeScene = (() => {
         event.preventDefault();event.stopPropagation();globalThis.webkit?.messageHandlers?.keynopePresenter?.postMessage({action:'save-presentation'});
       }
     },true);
-    dialog.addEventListener('keydown',event=>{if(event.isComposing||editor.isComposing())return;if((event.metaKey||event.ctrlKey)&&['b','i','u'].includes(event.key.toLowerCase())){event.preventDefault();event.stopPropagation();toggleRunStyle(event.key.toLowerCase()==='b'?'bold':event.key.toLowerCase()==='i'?'italic':'underline');}},true);
+    dialog.addEventListener('keydown',event=>{if(wordStyles||event.isComposing||editor.isComposing())return;if((event.metaKey||event.ctrlKey)&&!event.altKey&&!event.shiftKey&&['b','i','u'].includes(event.key.toLowerCase())){event.preventDefault();event.stopPropagation();toggleRunStyle(event.key.toLowerCase()==='b'?'bold':event.key.toLowerCase()==='i'?'italic':'underline');}},true);
     const submit=async resetSize=>{
+      if(wordStyles?.pending())await wordStyles.pending();
       if(pending||editor.isComposing())return;
       if(!spacing.checkValidity()){spacing.reportValidity();return;}
       if(!size.checkValidity()){size.reportValidity();return;}
       if(!width.checkValidity()){width.reportValidity();return;}
       for(const input of paragraphInputs)if(!input.checkValidity()){input.reportValidity();return;}
-      if(initial===snapshot()&&!resetSize){close();return;}
+      if(initial===snapshot()&&!resetSize){close(true);return;}
       setPending(true);error.textContent='';
-      try{await growthTask;await commit(editor.value().runs,editor.value().fontId,editor.value().lineHeight,resetSize?0:editor.value().size===object.text.size?undefined:editor.value().size,editor.value().paragraphBefore,editor.value().paragraphAfter,editor.value().widthScale===(object.text.widthScale||1)?undefined:editor.value().widthScale*100,growingShape&&(outerBounds.width!==shapeOwner.bounds.width||outerBounds.height!==shapeOwner.bounds.height)?{...outerBounds}:undefined);pending=false;close();}
+      try{await growthTask;await commit(editor.value().runs,editor.value().fontId,editor.value().lineHeight,resetSize?0:editor.value().size===object.text.size?undefined:editor.value().size,editor.value().paragraphBefore,editor.value().paragraphAfter,editor.value().widthScale===(object.text.widthScale||1)?undefined:editor.value().widthScale*100,growingShape&&(outerBounds.width!==shapeOwner.bounds.width||outerBounds.height!==shapeOwner.bounds.height)?{...outerBounds}:undefined);pending=false;close(true);}
       catch(e){error.textContent=e.message||'Could not apply text';}
       finally{setPending(false);if(!closed)editor.element.focus();}
     };
     apply.onclick=()=>submit(false);inheritSize.onclick=()=>submit(true);
+    if(styleTransfer){wordStyles=KeynopeTextStyles.attach(typography,dialog,editor,{styleClipboard,styleTransfer,painterScope,onStateChange:()=>updateFormattingState(),available:()=>!pending&&!closed&&!confirmation&&styleAvailable()});updateFormattingState();}
     commitForSave=async()=>{
       if(confirmation)throw Error('Finish the text changes confirmation before saving.');
       if(pending||editor.isComposing())throw Error('Finish the current text input before saving.');
@@ -1391,5 +1769,59 @@ globalThis.KeynopeScene = (() => {
       refreshPlayback();
     }catch(error){if(!closed)status.textContent='Could not prepare preview: '+error.message;}
   }
-  return Object.freeze({mount,preview,editText,editImage,ensureFonts,fittedTextSize,grownShapeTextBounds,blockGlyphMask,drawBlockGlyph,commitPendingText,isEditing:()=>textEditors>0});
+  async function fittedTable(parent,scene,object,source){
+    if(object?.kind!=='table'||!object.table)throw Error('Select an editable table first.');
+    const candidate=structuredClone(object),data=structuredClone(source),host=document.createElement('div');
+    const cells=new Map(candidate.table.cells.map(cell=>[cell.row+':'+cell.column,cell]));
+    host.setAttribute('aria-hidden','true');Object.assign(host.style,{position:'fixed',left:'-100000px',top:'0',visibility:'hidden'});parent.append(host);
+    const grow=(values,start,span,required)=>{const current=values.slice(start,start+span).reduce((n,v)=>n+v,0),extra=Math.max(0,required-current);if(extra<=.001)return;for(let i=start;i<start+span;i++)values[i]+=extra*values[i]/current;};
+    const reframe=()=>{const table=candidate.table,offsets=values=>{let n=0;return values.map(v=>{const p=n;n+=v;return p;});},xs=offsets(table.columns),ys=offsets(table.rows);candidate.bounds.width=table.columns.reduce((n,v)=>n+v,0);candidate.bounds.height=table.rows.reduce((n,v)=>n+v,0);for(const cell of table.cells){const width=table.columns.slice(cell.column,cell.column+cell.colSpan).reduce((n,v)=>n+v,0),height=table.rows.slice(cell.row,cell.row+cell.rowSpan).reduce((n,v)=>n+v,0);cell.bounds={x:xs[cell.column],y:ys[cell.row],width,height};cell.contentBounds={...cell.contentBounds,width:Math.max(1,width-2*cell.contentBounds.x),height:Math.max(1,height-2*cell.contentBounds.y)};}};
+    const measure=async minimumWidth=>{const view=mount(host,{...scene,backgroundMedia:null,objects:[candidate],diagnostics:[]});try{await view.ready;return view.tableContentMetrics(candidate.id,{minimumWidth});}finally{view.dispose();}};
+    try{
+      for(const metric of await measure(true)){const cell=cells.get(metric.row+':'+metric.column);grow(candidate.table.columns,cell.column,cell.colSpan,metric.minWidth+2*cell.contentBounds.x+2*cell.borderWidth+1);}
+      reframe();
+      if(candidate.bounds.x+candidate.bounds.width>scene.width+.01)throw Error('The table needs more width than this slide has. Reduce padding or font size, or move the table left.');
+      for(const metric of await measure(false)){const cell=cells.get(metric.row+':'+metric.column);grow(candidate.table.rows,cell.row,cell.rowSpan,metric.height+2*cell.contentBounds.y+2*cell.borderWidth+1);}
+      reframe();
+      if(candidate.bounds.y+candidate.bounds.height>scene.height+.01)throw Error('The table needs more height than this slide has. Widen the table, reduce padding or font size, or move it up.');
+      const changed=candidate.bounds.width>object.bounds.width+.001||candidate.bounds.height>object.bounds.height+.001;
+      if(!changed)return {data:structuredClone(source),bounds:{...object.bounds},changed:false};
+      data.columns.forEach((c,i)=>c.width=candidate.table.columns[i]);data.rows.forEach((r,i)=>r.height=candidate.table.rows[i]);
+      return {data,bounds:candidate.bounds,changed:true};
+    }finally{host.remove();}
+  }
+  async function capturePPTX({signal}={}){
+    const check=()=>{if(signal?.aborted)throw new DOMException('Export cancelled','AbortError');};
+    const wait=async promise=>{
+      check();let timer,onAbort;
+      const stopped=new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('PowerPoint artwork took too long to render.')),30000);onAbort=()=>reject(new DOMException('Export cancelled','AbortError'));signal?.addEventListener('abort',onAbort,{once:true});});
+      try{return await Promise.race([promise,stopped]);}finally{clearTimeout(timer);signal?.removeEventListener('abort',onAbort);}
+    };
+    check();
+    const response=await fetch('/api/editor/pptx-captures',{method:'POST',signal});
+    if(!response.ok)throw Error(await response.text());
+    const manifest=await response.json(),captures=[];let encodedBytes=0;
+    for(const item of manifest.items){
+      check();const object=item.object,host=document.createElement('div');
+      host.dataset.keynopePptxCapture='';
+      host.inert=true;
+      host.setAttribute('aria-hidden','true');host.style.cssText='position:fixed;left:-10000px;top:0;opacity:0;pointer-events:none';document.body.append(host);
+      let view;
+      try{
+        view=mount(host,{version:1,width:item.width||1920,height:item.height||1080,objects:[object]});await wait(view.ready);check();
+        const retroCanvas=host.querySelector('.keynope-scene-retro-text');
+        const frames=[];
+        for(const time of item.times){
+          check();await wait(view.snapshotAt(time));check();
+          const canvas=retroCanvas||await wait(view.imageArtwork(object.id));check();
+          const source=canvas.toDataURL('image/png');encodedBytes+=source.length;
+          if(encodedBytes>96*1024*1024)throw Error('PowerPoint artwork exceeds capture limits; reduce image dimensions or frames.');
+          frames.push(source);await new Promise(resolve=>setTimeout(resolve,0));
+        }
+        captures.push({slide:item.slide,objectId:object.id,frames});
+      }finally{view?.dispose();host.remove();}
+    }
+    check();return {owner:manifest.owner,version:manifest.version,captures};
+  }
+  return Object.freeze({mount,preview,editText,editImage,ensureFonts,fittedTextSize,fittedTable,tableCellExtent,paintTableBorders,grownShapeTextBounds,blockGlyphMask,drawBlockGlyph,commitPendingText,capturePPTX,isEditing:()=>textEditors>0});
 })();

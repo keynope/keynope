@@ -23,13 +23,13 @@ const trueTypeDefaultSize = 97
 const trueTypeMaxSize = 512
 
 // Only the obsolete envelope remains recognised; its contents are discarded.
-var keynopeFontsEnvelopeRE = regexp.MustCompile(`(?m)^<!--\s*keynope-fonts\b[^\r\n]*(?:\r?\n|$)`)
-var trueTypeEnvelopeRE = regexp.MustCompile(`(?m)^<!--\s*truetype-text\b[^\r\n]*(?:\r?\n|$)`)
+var keynopeFontsEnvelopeRE = metadataNamespaceEnvelopeRE("keynope-fonts")
+var trueTypeEnvelopeRE = metadataNamespaceEnvelopeRE("truetype-text")
 var trueTypePayloadRE = regexp.MustCompile(`\bbase64:([A-Za-z0-9+/=]*)`)
 
 func recoverTrueTypeEnvelopes(text string) (string, bool) {
 	malformed := false
-	recovered := trueTypeEnvelopeRE.ReplaceAllStringFunc(text, func(envelope string) string {
+	recovered := rewriteDocumentMetadata(text, trueTypeEnvelopeRE, func(envelope string) string {
 		match := trueTypeTextRE.FindStringSubmatch(strings.TrimSpace(envelope))
 		if match == nil {
 			malformed = true
@@ -88,6 +88,16 @@ type exportTrueType struct {
 }
 
 func isTrueType(element Element) bool { return textRenderMode(element.Query) == "truetype" }
+
+// The text archive accepts only text kinds. A compatible shape/image query can
+// retain a rendering hint, but that must never change the object's kind on save.
+func canEncodeTrueTypeText(element Element) bool {
+	switch element.Kind {
+	case "text", "heading", "bullet", "code", "text-image":
+		return isTrueType(element)
+	}
+	return false
+}
 
 // Upgrade text at document/editor boundaries. Custom bitmap/FIGlet faces and
 // sampled text are retired; media and protected QR artwork remain independent.
@@ -210,26 +220,44 @@ func withTrueTypeDefaults(slide Slide) Slide {
 			continue
 		}
 		q, _ := url.ParseQuery(element.Query)
-		if !q.Has("ttf-size") && slide.TTFSize > 0 {
-			size := int(math.Round(float64(trueTypeSizeWithValues(element, q)) * float64(slide.TTFSize) / 97))
-			q.Set("ttf-size", strconv.Itoa(max(1, min(512, size))))
-		}
-		if !q.Has("ttf-width") && slide.TTFWidth > 0 {
-			q.Set("ttf-width", strconv.FormatFloat(slide.TTFWidth, 'f', -1, 64))
-		}
+		q = trueTypeValuesWithDefaults(element, slide, q)
 		slide.Elements[i].Query = q.Encode()
 	}
 	return slide
 }
 
+// Share slide/master defaults with selection projection without resolving or
+// cloning unrelated objects. Borrow until a missing field needs a value.
+func trueTypeValuesWithDefaults(element Element, slide Slide, q url.Values) url.Values {
+	size := !q.Has("ttf-size") && slide.TTFSize > 0
+	width := !q.Has("ttf-width") && slide.TTFWidth > 0
+	if !size && !width {
+		return q
+	}
+	q = cloneQueryValues(q)
+	if size {
+		value := int(math.Round(float64(trueTypeSizeWithValues(element, q)) * float64(slide.TTFSize) / 97))
+		q.Set("ttf-size", strconv.Itoa(max(1, min(512, value))))
+	}
+	if width {
+		q.Set("ttf-width", strconv.FormatFloat(slide.TTFWidth, 'f', -1, 64))
+	}
+	return q
+}
+
 // Explicit bounds keep layout, sorting, hit testing and terminal fallback stable.
-// Font sizes are in reference pixels on a 1920x1080 slide, independent of screen.
+// Font sizes are physical design pixels, independent of page and screen size.
 func trueTypeBounds(element Element, cols, rows int) (int, int) {
 	values, _ := url.ParseQuery(element.Query)
 	return trueTypeBoundsFromValues(element, cols, rows, values)
 }
 
-func trueTypeBoundsFromValues(element Element, cols, rows int, values url.Values) (int, int) {
+func trueTypeBoundsOnCanvas(element Element, cols, rows int, canvas sceneRect) (int, int) {
+	values, _ := url.ParseQuery(element.Query)
+	return trueTypeBoundsFromValues(element, cols, rows, values, canvas)
+}
+
+func trueTypeBoundsFromValues(element Element, cols, rows int, values url.Values, canvas ...sceneRect) (int, int) {
 	// Authored boxes already define wrapping space. Measuring their contents
 	// cannot affect either dimension, and needlessly scans emoji/text on every
 	// scene projection. Invalid or incomplete bounds still use content sizing.
@@ -252,13 +280,17 @@ func trueTypeBoundsFromValues(element Element, cols, rows int, values url.Values
 		}
 		longest = math.Max(longest, width)
 	}
-	w := int(math.Ceil(longest * float64(cols) / 1920))
-	h := int(math.Ceil(float64(strings.Count(element.Text, "\n")+1) * size * 1.2 * float64(rows) / 1080))
+	cw, ch := pptxCanvasDimensions(canvas)
+	w := int(math.Ceil(longest * float64(cols) / cw))
+	h := int(math.Ceil(float64(strings.Count(element.Text, "\n")+1) * size * 1.2 * float64(rows) / ch))
 	if width, ok := authoredObjectDimension(values, "width", cols); ok {
 		w = int(math.Ceil(width))
 	}
 	if height, ok := authoredObjectDimension(values, "height", rows); ok {
 		h = int(math.Ceil(height))
+	} else if width, ok := sceneObjectDimension(values, "width", cols); ok && len(canvas) > 0 {
+		text := (Deck{Appearance: &DeckAppearance{Version: 3}}).modernSceneTextFromValues(element, values)
+		h = int(math.Ceil(sceneTextWrappedHeight(text, width*cw/float64(max(1, cols))) * float64(rows) / ch))
 	}
 	return max(1, min(cols, w)), max(1, min(rows, h))
 }
@@ -268,12 +300,13 @@ func trueTypeLayoutRows(element Element, cols, rows int) []string {
 	return trueTypeLayoutRowsFromValues(element, cols, rows, values)
 }
 
-func trueTypeLayoutRowsFromValues(element Element, cols, rows int, values url.Values) []string {
-	w, h := trueTypeBoundsFromValues(element, cols, rows, values)
+func trueTypeLayoutRowsFromValues(element Element, cols, rows int, values url.Values, canvas ...sceneRect) []string {
+	w, h := trueTypeBoundsFromValues(element, cols, rows, values, canvas...)
 	out := make([]string, h)
 	text := strings.Split(element.Text, "\n")
+	blank := strings.Repeat(" ", w)
 	for i := range out {
-		out[i] = strings.Repeat(" ", w)
+		out[i] = blank
 		// A readable, bounded fallback for terminal clients; no TTF installation needed.
 		if i < len(text) {
 			out[i] = padRight(crop(text[i], w), w)

@@ -74,7 +74,8 @@ func TestLocalSlideUpdatesRetainUnrelatedAnimationCaches(t *testing.T) {
 		"function invalidateEffectSlides(slides)",
 		"invalidateContentAnimationSlides(workspace.replaceSlides)",
 		"invalidateEffectSlides(workspace.replaceSlides)",
-		"invalidateContentAnimationSlides([slideIndex])",
+		"invalidateContentAnimationSlides(indices)",
+		"invalidateEffectSlides(indices)",
 		"invalidateContentAnimationSlides([slide])",
 	} {
 		if !strings.Contains(text, marker) {
@@ -158,7 +159,7 @@ func TestUnifiedWorkspaceSkipsDetachedLegacyInspectorRebuild(t *testing.T) {
 	for _, required := range []string{
 		"renderEditorTopbar();",
 		"renderSpeakerNotes(activeSlide)",
-		"scheduleEditorCanvasOverlay();",
+		"renderEditorCanvasOverlay();",
 		"return;",
 	} {
 		if !strings.Contains(between, required) {
@@ -177,20 +178,25 @@ func TestContextualRibbonRetainsControlsForEquivalentState(t *testing.T) {
 		"editorTopbarPanelSignature = ''",
 		"function editorTopbarElementSnapshot(element)",
 		"const panelMemberIndices=slide?[...new Set(selectedIndices.flatMap(candidate=>canvasGroupMembers(candidate)))]:[]",
-		"if(panelSignature===editorTopbarPanelSignature)return;",
+		"if(panelSignature===editorTopbarPanelSignature){",
+		"!arrange.querySelector('[aria-label=\"Object geometry\"]')",
+		"const geometry=canvasGeometryControls(index);if(geometry)arrange.prepend(geometry);",
 		"editorTopbarPanelSignature=panelSignature;",
 	} {
 		if !strings.Contains(text, marker) {
 			t.Fatalf("contextual-ribbon retention omitted %q", marker)
 		}
 	}
-	early := strings.Index(text, "if(panelSignature===editorTopbarPanelSignature)return;")
+	early := strings.Index(text, "if(panelSignature===editorTopbarPanelSignature){")
 	if early < 0 {
 		t.Fatal("contextual ribbon retention guard is missing")
 	}
 	rebuild := strings.Index(text[early:], "ribbonPanels[id].replaceChildren()")
 	if rebuild < 0 {
 		t.Fatal("contextual ribbon does not guard its panel rebuild")
+	}
+	if !strings.Contains(text[early:early+rebuild], "return;") {
+		t.Fatal("equivalent-state geometry recovery falls through to full panel replacement")
 	}
 	signatureStart := strings.Index(text, "const panelSignature=JSON.stringify({")
 	signatureEnd := strings.Index(text[signatureStart:], "});")
@@ -228,10 +234,10 @@ func TestNativeEditorPerformanceInstrumentationIsOptInAndBounded(t *testing.T) {
 		"performanceKind:'rotate'",
 		"performanceKind:'crop'",
 		"performanceKind:'typing'",
-		"if (fitted) {nextEditorElementPerformanceKind='resize';updateEditorElementByID(sourceElementID, index, fitted)",
+		"if (fitted) {nextEditorElementPerformanceKind='resize';updateEditorElementByID(sourceElementID, index, fitted,moveContext,sourceElement)",
 		"nextEditorElementPerformanceKind='resize';",
 		"}, 'rotate');",
-		"updated.query=q.toString();},'treatment')",
+		"slide:context.slide,performanceKind:'treatment'",
 	} {
 		if !strings.Contains(mainText, marker) {
 			t.Fatalf("editor instrumentation omitted %q", marker)

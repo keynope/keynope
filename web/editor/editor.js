@@ -53,13 +53,20 @@
   let workspaceSnapshot = null;
 
   function readWorkspace() {
-    let envelope = JSON.parse(window.keynopeWasmWorkspace(workspaceSnapshot?.revision || 0));
+    let envelope = JSON.parse(window.keynopeWasmWorkspace(workspaceSnapshot?.revision || 0,false,true));
     if (envelope.status !== 200) throw Error(envelope.body || 'Could not refresh workspace');
     let next = JSON.parse(envelope.body);
     if (next.baseRevision && (!workspaceSnapshot || next.baseRevision !== workspaceSnapshot.revision || next.cols !== workspaceSnapshot.cols || next.rows !== workspaceSnapshot.rows)) {
       envelope = JSON.parse(window.keynopeWasmWorkspace());
       if (envelope.status !== 200) throw Error(envelope.body || 'Could not resynchronise workspace');
       next = JSON.parse(envelope.body);
+    }
+    if (next.baseRevision) {
+      try { next.pages=KeynopeWorkspace.applyScenePagePatches(next.pages,workspaceSnapshot.pages); }
+      catch(error) {
+        envelope=JSON.parse(window.keynopeWasmWorkspace());if(envelope.status!==200)throw Error(envelope.body||'Could not resynchronise scene');
+        next=JSON.parse(envelope.body);
+      }
     }
     if (next.baseRevision) {
       const replaced = new Set(next.replaceSlides || []);
@@ -138,7 +145,7 @@
     const envelope = typeof raw === 'string' ? JSON.parse(raw) : raw;
     return new Response([204,205,304].includes(envelope.status) ? null : (envelope.body || ''), {
       status: envelope.status || 500,
-      headers: {'Content-Type': envelope.contentType || 'text/plain; charset=utf-8'}
+      headers: {...(envelope.headers || {}), 'Content-Type': envelope.contentType || 'text/plain; charset=utf-8'}
     });
   }
 
@@ -220,6 +227,7 @@
   }
 
   const stateOnlyEditorActions = new Set([
+	'copy-object-style',
     'set-engagement-result',
     'select-element',
     'select-elements',
@@ -251,13 +259,14 @@
       raw = window.keynopeWasmUpload(new Uint8Array(await file.arrayBuffer()));
     } else {
       const body = typeof init.body === 'string' ? init.body : '';
-      raw = window.keynopeWasmRequest(method, target.pathname + target.search, body);
+      const requestHeaders = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+      raw = window.keynopeWasmRequest(method, target.pathname + target.search, body, requestHeaders.get('Accept') || '');
     }
     const envelope = JSON.parse(raw);
     let actionName = '';
     let refresh = target.pathname === '/api/editor/upload' ||
       (target.pathname === '/api/editor/state' && !workspaceLoaded);
-    if (target.pathname === '/api/editor/action') {
+    if (target.pathname === '/api/editor/action' || target.pathname === '/api/editor/paste-clipboard') {
       try {
         const action = JSON.parse(typeof init.body === 'string' ? init.body : '{}').action || '';
         actionName = action;
@@ -353,16 +362,14 @@
   }
 
   function conversionNotice(report, verb) {
-    const warnings = Array.isArray(report && report.warnings) ? report.warnings : [];
-    const suffix = warnings.length ? ' · ' + warnings.length + ' item' + (warnings.length === 1 ? '' : 's') + ' approximated' : '';
-    window.showEngagementToast?.(verb + suffix);
+    KeynopeConversionReport.show(report, verb);
   }
 
   async function exportPPTX() {
     await runtimeReady;
-    await window.keynopePrepareDocumentSave?.();
+    const artwork = await window.keynopePreparePPTXExport();
     const baseName = (currentName || 'Untitled.md').replace(/\.[^.]+$/, '') || 'Keynope';
-    const response = await window.fetch('/api/editor/export-pptx', {method: 'POST'});
+    const response = await window.fetch('/api/editor/export-pptx', {method: 'POST',headers:{'Content-Type':'application/json'},body:artwork});
     if (!response.ok) throw new Error((await response.text()).trim() || 'Could not export PowerPoint presentation');
     const payload = await response.json();
     await saveBlob(new Blob([base64Bytes(payload.content)], {
@@ -410,6 +417,23 @@
     if (window.keynopeDidExport) window.keynopeDidExport();
   }
 
+  async function exportPDF(printWindow) {
+    try {
+      if (!printWindow) throw new Error('Allow pop-up windows to open the PDF print view.');
+      await runtimeReady;
+      await window.keynopePrepareDocumentSave?.();
+      const response=await window.fetch('/api/editor/export-pdf',{method:'POST'});
+      if(!response.ok)throw new Error((await response.text()).trim()||'Could not prepare PDF export');
+      const payload=await response.json();
+      const url=URL.createObjectURL(new Blob([payload.content],{type:'text/html;charset=utf-8'}));
+      printWindow.opener=null;
+      printWindow.location.replace(url+'#print');
+      // The loaded document owns its resources after navigation. Do not
+      // revoke an in-flight Blob URL while fonts/pages are still preparing.
+      setTimeout(()=>URL.revokeObjectURL(url),60000);
+    } catch(error) { if(printWindow&&!printWindow.closed)printWindow.close();throw error; }
+  }
+
   async function autosaveDraft(revision = draftRevision) {
     if (!dirty || revision !== draftRevision) return;
     try {
@@ -439,9 +463,12 @@
   }
 
   async function newPresentation() {
+    const template = await window.keynopeChooseTemplate();
+    if (!template) return;
     if (dirty && !confirm('Discard the unsaved changes and create a new presentation?')) return;
-    const response = await nativeFetch(assetURL('Welcome.md'), {cache:'no-store'});
-    await loadDocument(await response.text(), 'Untitled.md', true);
+    const response = await fetch('/api/editor/templates?id='+encodeURIComponent(template));
+    if (!response.ok) throw Error(await response.text());
+    await loadDocument((await response.json()).content, 'Untitled.md', true);
     dirty = true;
     const revision = ++draftRevision;
     await autosaveDraft(revision);
@@ -451,10 +478,15 @@
     if (dirty && !confirm('Discard the unsaved changes and open another presentation?')) return;
     const input = document.createElement('input');
     input.type = 'file';
+    // Keep the chooser's owner alive until selection/cancellation completes.
+    // A detached input can otherwise be collected between opening the native
+    // picker and its change event (notably after repeated rejected opens).
+    input.hidden = true;
     input.accept = '.md,.markdown,.pptx,text/markdown,text/plain,application/vnd.openxmlformats-officedocument.presentationml.presentation';
+    input.oncancel = () => input.remove();
     input.onchange = async () => {
       const file = input.files && input.files[0];
-      if (!file) return;
+      if (!file) { input.remove(); return; }
       try {
         if (/\.pptx$/i.test(file.name)) {
           await importPPTX(file);
@@ -466,8 +498,11 @@
         }
       } catch (error) {
         alert('Could not open presentation\n\n' + (error.message || error));
+      } finally {
+        input.remove();
       }
     };
+    document.body.append(input);
     input.click();
   }
 
@@ -517,7 +552,16 @@
     pptxButton.title = 'Export PowerPoint presentation';
     pptxButton.setAttribute('aria-label', pptxButton.title);
     pptxButton.onclick = () => exportPPTX().catch(error => reportFailure('Could not export PowerPoint presentation', error));
-    controls.append(newButton, openButton, pptxButton);
+    const pdfButton=document.createElement('button');
+    pdfButton.type='button';pdfButton.className='keynope-web-icon-button';
+    pdfButton.innerHTML='<svg viewBox="0 0 64 64" aria-hidden="true"><path d="M14 5h25l11 12v42H14Z M39 5v12h11" fill="none" stroke="#fff" stroke-width="3"/><path d="M22 29h20M22 37h20M22 45h14" fill="none" stroke="#9b9b9b" stroke-width="3"/></svg><span class="keynope-web-icon-tag">PDF</span>';
+    pdfButton.title='Print / Save as PDF';pdfButton.setAttribute('aria-label',pdfButton.title);
+    pdfButton.onclick=()=>{
+      const popup=window.open('','_blank');
+      if(popup){popup.document.title='Preparing PDF…';popup.document.body.textContent='Preparing your presentation for printing…';}
+      exportPDF(popup).catch(error=>reportFailure('Could not prepare PDF export',error));
+    };
+    controls.append(newButton, openButton, pptxButton,pdfButton);
     (topbar.querySelector('.keynope-ribbon-quick') || topbar.querySelector('[data-ribbon="insert"]')).prepend(controls);
     return true;
   }

@@ -105,7 +105,8 @@ func TestEditorClientMergesActionStateBeforeUse(t *testing.T) {
 	source := exportHTMLSuffix()
 	for _, marker := range []string{
 		"function mergeEditorStateResponse(next)",
-		"const nextState = mergeEditorStateResponse(await response.json())",
+		"const responseState = await response.json()",
+		"const nextState = mergeEditorStateResponse(responseState)",
 		"window.keynopeNavigateWebWorkspace = (current,state) => {\n    state=mergeEditorStateResponse(state);",
 		"window.keynopeLoadWebWorkspace = async (workspace,state) => {\n    if (!workspace || !Array.isArray(workspace.pages)) return;\n    state=mergeEditorStateResponse(state);",
 	} {
@@ -149,7 +150,12 @@ func TestEditorStateMetadataWithoutRendering(t *testing.T) {
 		}
 	}
 	payload, err := json.Marshal(state)
-	if err != nil || bytes.Contains(payload, []byte(`"fonts":`)) {
+	var root map[string]json.RawMessage
+	if err == nil {
+		err = json.Unmarshal(payload, &root)
+	}
+	// Theme typography tokens are not the retired custom glyph-font archive.
+	if err != nil || root["fonts"] != nil || root["fontData"] != nil {
 		t.Fatal("editor state still transports retired glyph fonts")
 	}
 }

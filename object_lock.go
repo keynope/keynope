@@ -33,7 +33,7 @@ func editableObjectIndices(slide Slide, ids []string) ([]int, error) {
 		}
 		seen[element.ID] = true
 		if element.Inherited || objectLocked(element) || protectedActivityElement(element) {
-			return nil, fmt.Errorf("object %s is inherited, locked or protected", element.ID)
+			return nil, editorFailure("locked-target", "", element.ID, fmt.Errorf("object %s is inherited, locked or protected", element.ID))
 		}
 		if _, err := url.ParseQuery(element.Query); err != nil {
 			return nil, err
@@ -41,7 +41,7 @@ func editableObjectIndices(slide Slide, ids []string) ([]int, error) {
 		indices = append(indices, i)
 	}
 	if len(seen) != len(targets) {
-		return nil, fmt.Errorf("selected object no longer exists")
+		return nil, editorFailure("missing-reference", "", "", fmt.Errorf("selected object no longer exists"))
 	}
 	return indices, nil
 }
@@ -63,7 +63,7 @@ func checkObjectLocks(slide Slide, action nativeEditorAction, selection map[int]
 			index = nativeEditorElementIndex(slide.Elements, index, action.ElementData.ID)
 		}
 		targets[index] = true
-	case "set-scene-text", "set-scene-crop", "move-object-layer":
+	case "set-chart-data", "set-chart-options", "set-chart-series-style", "set-table", "set-scene-text", "set-scene-crop", "move-object-layer", "promote-image-background", "restore-background-image":
 		for i, element := range slide.Elements {
 			if element.ID == action.ObjectID {
 				targets[i] = true
@@ -86,13 +86,13 @@ func checkObjectLocks(slide Slide, action nativeEditorAction, selection map[int]
 		}
 		element := slide.Elements[index]
 		if objectLocked(element) {
-			return fmt.Errorf("object is locked; unlock it in Objects before editing")
+			return editorFailure("locked-target", "", element.ID, fmt.Errorf("object is locked; unlock it in Objects before editing"))
 		}
 		group := elementGroup(element)
 		if group != "" && (group != editingGroup || action.Action == "group-elements" || action.Action == "ungroup-elements") {
 			for _, member := range slide.Elements {
 				if elementGroup(member) == group && objectLocked(member) {
-					return fmt.Errorf("group contains a locked object; unlock it in Objects before editing")
+					return editorFailure("locked-target", "", member.ID, fmt.Errorf("group contains a locked object; unlock it in Objects before editing"))
 				}
 			}
 		}

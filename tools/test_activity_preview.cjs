@@ -6,10 +6,10 @@ const context=vm.createContext({window:{KEYNOPE_PRESENTER:true},keynopeAppSurfac
   keynopeEngagementControllerSurface:true,document:{documentElement:{getAttribute:()=>mode},querySelectorAll:()=>[]},
   Date,crypto:require('node:crypto').webcrypto,clearInterval:noop,
   deck:{pages:[{slide:0,engagement:{id:'a',kind:'storm',timerSeconds:0}}]},pageIndex:0,
-  keynopeEngagementRuntime:null,keynopeRunningActivity:null,keynopeEngagementOverlay:null,keynopeEngagementSessionEpoch:0,renderActiveActivityStatus:noop,
+  keynopeEngagementRuntime:null,keynopeRunningActivity:null,keynopeEngagementOverlay:null,keynopeEngagementSessionEpoch:0,keynopeEngagementFocusGeneration:0,keynopeEngagementOverlayFocus:null,renderActiveActivityStatus:noop,
   keynopeEngagementCountdownTick:0,keynopeEngagementSessions:new Map(),keynopeRecentActivityItems:[],keynopeLobbyPresentation:null,
   keynopePairingRoom:{epoch:'live-group'},keynopeEngagementPublishChain:Promise.resolve(),
-  archiveEngagementResult:noop,renderActivityMarker:noop,renderEngagementRuntime:noop,runEngagementCountdown:noop,
+  archiveEngagementResult:noop,renderActivityMarker:noop,renderEngagementRuntime:noop,runEngagementCountdown:noop,loadEngagementQRCode:noop,
   randomActivityCode:()=> 'AbCd1234',fetch:async()=>{writes++;return {ok:true}},
   keynopeActivityConnector:()=>{connections++;throw Error('Preview must not connect');}});
 for(const name of ['engagementIsRunning','engagementPresentationActive','engagementHasCompleted','onboardingSessionDefinition','engagementSessionFor','currentEngagementDefinition','openEngagementRuntime','activitySubmittedItems','closeEngagementRuntime','startHostedEngagement','publishEngagementRuntime','publishHostedEngagementState','replacePairingRoom']){

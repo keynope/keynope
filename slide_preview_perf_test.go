@@ -9,7 +9,8 @@ import (
 
 func TestSlideThumbnailInvalidationUsesRetainedPageIdentity(t *testing.T) {
 	for _, marker := range []string{
-		"const key=index=>masterMode?masterKey+':'+index:(pages.get(index)||'missing:'+index)",
+		"previewRevisions?.[index]??revision",
+		"previewRevision='+previewRevisions[index]",
 		"WASM workspace deltas retain the exact page objects",
 	} {
 		if !strings.Contains(exportHTMLSuffix(), marker) {
@@ -18,6 +19,9 @@ func TestSlideThumbnailInvalidationUsesRetainedPageIdentity(t *testing.T) {
 	}
 	if strings.Contains(exportHTMLSuffix(), "JSON.stringify([cols,rows,masterMode?editorState.masters:pages.get(index)") {
 		t.Fatal("thumbnail invalidation still serialises every full page")
+	}
+	if strings.Contains(exportHTMLSuffix(), "JSON.stringify([revision,cols,rows,editorState.masters])") {
+		t.Fatal("master previews still depend on every global revision")
 	}
 }
 
@@ -42,7 +46,7 @@ func TestSlideThumbnailRefreshIsTurnCoalesced(t *testing.T) {
 	}
 }
 
-func TestEditorCanvasOverlayRefreshIsFrameCoalesced(t *testing.T) {
+func TestEditorCanvasOverlayRefreshKeepsPaintAndHitsCoherent(t *testing.T) {
 	source := exportHTMLSuffix()
 	for _, marker := range []string{
 		"let editorCanvasOverlayFrame = 0;",
@@ -50,7 +54,7 @@ func TestEditorCanvasOverlayRefreshIsFrameCoalesced(t *testing.T) {
 		"if (editorCanvasOverlayFrame) return;",
 		"editorCanvasOverlayFrame = requestAnimationFrame(() =>",
 		"cancelAnimationFrame(editorCanvasOverlayFrame);",
-		"if (keynopeAppSurface) scheduleEditorCanvasOverlay();",
+		"if (keynopeAppSurface) renderEditorCanvasOverlay();",
 	} {
 		if !strings.Contains(source, marker) {
 			t.Fatalf("editor canvas-overlay coalescing omitted %q", marker)
@@ -74,6 +78,7 @@ func TestSingleSlideRenderPreview(t *testing.T) {
 			}
 			want.ModernScene = &scene
 			got := deck.slideRenderPreview(index, 245, 56)
+			got.previewGeometry = nil // Ephemeral transfer optimization, not slide/scene content.
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("%s slide %d changed projection", style, index)
 			}

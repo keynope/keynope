@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
-	"regexp"
+	"strings"
 )
 
 // Results belong to the presenter's document, never to participant slide exports.
@@ -28,6 +28,15 @@ func (r EngagementResult) MarshalJSON() ([]byte, error) {
 }
 
 func (r *EngagementResult) UnmarshalJSON(data []byte) error {
+	fields, err := decodeMetadataJSONObject(data, "version", "activityId", "kind", "definition", "state")
+	if err != nil {
+		return err
+	}
+	if raw := fields["state"]; len(raw) > 0 {
+		if _, err := decodeMetadataJSONObject(raw); err != nil {
+			return err
+		}
+	}
 	type stored EngagementResult
 	var value stored
 	if err := json.Unmarshal(data, &value); err != nil {
@@ -43,8 +52,6 @@ func (r *EngagementResult) UnmarshalJSON(data []byte) error {
 }
 
 const maxEngagementResultBytes = 1 << 20
-
-var engagementResultRE = regexp.MustCompile(`<!--\s*keynope-engagement-results\s+version=1\s+base64:([A-Za-z0-9+/=]+)\s*-->`)
 
 var engagementResultFields = map[string]bool{
 	"phase": true, "counts": true, "ideas": true, "assignments": true,
@@ -64,7 +71,9 @@ func cloneEngagementResult(result *EngagementResult) *EngagementResult {
 	copy := *result
 	copy.Extra = cloneJSONExtensions(result.Extra)
 	copy.Definition = cloneEngagement(result.Definition)
-	copy.State = make(map[string]json.RawMessage, len(result.State))
+	if result.State != nil {
+		copy.State = make(map[string]json.RawMessage, len(result.State))
+	}
 	for key, value := range result.State {
 		copy.State[key] = append(json.RawMessage(nil), value...)
 	}
@@ -120,11 +129,7 @@ func encodeEngagementResult(result *EngagementResult) (string, error) {
 }
 
 func decodeEngagementResult(comment string) (*EngagementResult, error) {
-	match := engagementResultRE.FindStringSubmatch(comment)
-	if match == nil || len(match[1]) > maxEngagementResultBytes*2 {
-		return nil, fmt.Errorf("invalid activity results metadata")
-	}
-	data, err := base64.StdEncoding.DecodeString(match[1])
+	data, err := engagementResultsEnvelope.decodeComment(strings.TrimSpace(comment))
 	if err != nil {
 		return nil, err
 	}
@@ -132,10 +137,10 @@ func decodeEngagementResult(comment string) (*EngagementResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer reader.Close()
 	data, err = io.ReadAll(io.LimitReader(reader, maxEngagementResultBytes+1))
-	if err != nil || len(data) > maxEngagementResultBytes {
-		return nil, fmt.Errorf("activity result exceeds size limit")
+	closeErr := reader.Close()
+	if err != nil || closeErr != nil || len(data) > maxEngagementResultBytes {
+		return nil, fmt.Errorf("activity result is corrupt or exceeds size limit")
 	}
 	var result EngagementResult
 	if err := json.Unmarshal(data, &result); err != nil {
@@ -175,6 +180,7 @@ func (s *nativeEditorSession) applyEngagementResult(action nativeEditorAction) e
 				}
 			}
 		}
+		s.retainUnchangedSceneRevision()
 		s.version++
 		return nil
 	}

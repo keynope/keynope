@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -39,7 +38,6 @@ func (t *DeckTab) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-var deckTabsRE = regexp.MustCompile(`(?m)^<!--\s*keynope-tabs version=1 base64:([A-Za-z0-9+/=]+)\s*-->\s*`)
 var activityQRSettingRE = regexp.MustCompile(`(?m)^<!--\s*keynope-activity-qr=(on|off)\s*-->\s*`)
 var slideTabRE = regexp.MustCompile(`<!--\s*keynope-tab=([a-zA-Z0-9_-]{1,80})\s*-->`)
 
@@ -133,17 +131,19 @@ func validateDeckTabs(tabs []DeckTab) error {
 			return fmt.Errorf("choose a page number")
 		}
 	}
+	if encoded, err := json.Marshal(tabs); err != nil || len(encoded) > maxTabMetadataBytes {
+		return fmt.Errorf("tabs metadata is invalid or exceeds %d bytes", maxTabMetadataBytes)
+	}
 	return nil
 }
 
 func decodeDeckTabs(text string) ([]DeckTab, string, error) {
-	m := deckTabsRE.FindStringSubmatch(text)
-	if m == nil {
-		return nil, text, nil
-	}
-	data, err := base64.StdEncoding.DecodeString(m[1])
-	if err != nil {
+	data, remaining, err := tabMetadataEnvelope.decode(text)
+	if err != nil || data == nil {
 		return nil, text, err
+	}
+	if !strings.HasPrefix(strings.TrimSpace(string(data)), "[") {
+		return nil, text, fmt.Errorf("tabs metadata needs a JSON array")
 	}
 	var tabs []DeckTab
 	if err = json.Unmarshal(data, &tabs); err != nil {
@@ -152,7 +152,7 @@ func decodeDeckTabs(text string) ([]DeckTab, string, error) {
 	if err = validateDeckTabs(tabs); err != nil {
 		return nil, text, err
 	}
-	return tabs, deckTabsRE.ReplaceAllString(text, ""), nil
+	return tabs, remaining, nil
 }
 
 func deckHasActivities(deck Deck) bool {

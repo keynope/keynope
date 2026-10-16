@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
-	"regexp"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,9 +28,10 @@ const (
 	pageNumberHide      = "hide"
 )
 
-var masterDeckMetaRE = regexp.MustCompile(`(?m)^<!--\s*keynope-masters\s+version=([0-9]+)\s+base64:([A-Za-z0-9+/=]+)\s*-->\s*`)
-
 type Deck struct {
+	PageSize       *DeckPageSize
+	Theme          *DeckTheme
+	Objects        *DeckObjects
 	Appearance     *DeckAppearance
 	Diagnostics    []documentDiagnostic `json:"-"`
 	HideActivityQR bool
@@ -42,6 +43,8 @@ type Deck struct {
 }
 
 type DeckAsset struct {
+	Extra     *jsonExtensions  `json:"-"`
+	Vector    *DeckAssetVector `json:"vector,omitempty"`
 	Source    *DeckAssetSource `json:"source,omitempty"`
 	MIME      string           `json:"mime"`
 	Width     int              `json:"width"`
@@ -55,6 +58,7 @@ type DeckAsset struct {
 // compact derivative used for retro sampling. Keeping its encoded bytes avoids
 // turning a compact JPEG into an enormous lossless PNG on deck import.
 type DeckAssetSource struct {
+	Extra  *jsonExtensions  `json:"-"`
 	MIME   string           `json:"mime"`
 	Width  int              `json:"width"`
 	Height int              `json:"height"`
@@ -63,8 +67,9 @@ type DeckAssetSource struct {
 }
 
 type DeckAssetFrame struct {
-	Data    []byte `json:"data"`
-	DelayMS int64  `json:"delayMs"`
+	Extra   *jsonExtensions `json:"-"`
+	Data    []byte          `json:"data"`
+	DelayMS int64           `json:"delayMs"`
 }
 
 type MasterDeck struct {
@@ -187,13 +192,15 @@ func (deck *Deck) EnsureDefaultMasters() {
 	if deck == nil {
 		return
 	}
-	if len(deck.Masters.Layouts) == 0 {
+	// An empty named-layout list is valid authored data, not a missing archive.
+	// Never replace a user's Base, its appearance/content or future metadata.
+	if !deckHasMasterData(deck.Masters) {
 		deck.Masters = defaultMasterDeck()
 	}
 }
 
 func deckHasMasterData(masters MasterDeck) bool {
-	return masters.Version != 0 || masters.Base.ID != "" || len(masters.Base.Slide.Elements) > 0 || len(masters.Layouts) > 0
+	return masters.Version != 0 || len(masters.Layouts) > 0 || !reflect.DeepEqual(masters.Base, MasterLayout{}) || masters.Extra != nil && len(*masters.Extra) > 0
 }
 
 func (masters *MasterDeck) Normalize() {
@@ -308,7 +315,7 @@ func normalizeMasterSlide(slide *Slide, prefix string) {
 			element.ID = newStableID(prefix + "-element")
 		}
 		seen[element.ID] = true
-		if element.PlaceholderRole != "" {
+		if standardElementKind(element.Kind) && element.PlaceholderRole != "" {
 			if element.SlotID == "" {
 				element.SlotID = element.ID
 			}
@@ -343,6 +350,9 @@ func encodeMasterDeckMetadata(masters MasterDeck) (string, error) {
 	payload, err := json.Marshal(masters)
 	if err != nil {
 		return "", err
+	}
+	if len(payload) > maxMasterMetadataBytes {
+		return "", fmt.Errorf("masters metadata exceeds %d bytes", maxMasterMetadataBytes)
 	}
 	return fmt.Sprintf("<!-- keynope-masters version=%d base64:%s -->", masterDeckVersion, base64.StdEncoding.EncodeToString(payload)), nil
 }
@@ -389,17 +399,12 @@ func visitMasterImages(masters *MasterDeck, transform func(string) string) {
 }
 
 func decodeMasterDeckMetadata(text string) (MasterDeck, string, error) {
-	match := masterDeckMetaRE.FindStringSubmatch(text)
-	if match == nil {
-		return MasterDeck{}, text, nil
+	payload, remaining, err := masterMetadataEnvelope.decode(text)
+	if err != nil || payload == nil {
+		return MasterDeck{}, text, err
 	}
-	version := 0
-	if _, err := fmt.Sscanf(match[1], "%d", &version); err != nil || version != masterDeckVersion {
-		return MasterDeck{}, text, fmt.Errorf("unsupported master deck version %q", match[1])
-	}
-	payload, err := base64.StdEncoding.DecodeString(match[2])
-	if err != nil {
-		return MasterDeck{}, text, fmt.Errorf("decode master deck: %w", err)
+	if strings.TrimSpace(string(payload)) == "null" {
+		return MasterDeck{}, text, fmt.Errorf("master deck needs a JSON object")
 	}
 	var masters MasterDeck
 	if err := json.Unmarshal(payload, &masters); err != nil {
@@ -409,7 +414,7 @@ func decodeMasterDeckMetadata(text string) (MasterDeck, string, error) {
 		return MasterDeck{}, text, fmt.Errorf("unsupported master deck payload version %d", masters.Version)
 	}
 	masters.Normalize()
-	return masters, masterDeckMetaRE.ReplaceAllString(text, ""), nil
+	return masters, remaining, nil
 }
 
 func (masters MasterDeck) Layout(id string) (MasterLayout, bool) {
@@ -435,7 +440,9 @@ func (masters MasterDeck) Clone() MasterDeck {
 	out.Extra = cloneJSONExtensions(masters.Extra)
 	out.Base.Extra = cloneJSONExtensions(masters.Base.Extra)
 	out.Base.Slide = cloneSlide(masters.Base.Slide)
-	out.Layouts = make([]MasterLayout, len(masters.Layouts))
+	if masters.Layouts != nil {
+		out.Layouts = make([]MasterLayout, len(masters.Layouts))
+	}
 	for index, layout := range masters.Layouts {
 		out.Layouts[index] = layout
 		out.Layouts[index].Extra = cloneJSONExtensions(layout.Extra)
@@ -455,13 +462,7 @@ func cloneDeckForRender(deck Deck) Deck {
 	if len(assets) > 0 {
 		out.Assets = make(map[string]DeckAsset, len(assets))
 		for id, asset := range assets {
-			asset.Frames = append([]DeckAssetFrame(nil), asset.Frames...)
-			if asset.Source != nil {
-				source := *asset.Source
-				source.Frames = append([]DeckAssetFrame(nil), source.Frames...)
-				asset.Source = &source
-			}
-			out.Assets[id] = asset
+			out.Assets[id] = cloneDeckAssetContent(asset, false)
 		}
 	}
 	return out
@@ -485,36 +486,72 @@ func cloneDeckForScene(deck Deck) Deck {
 	return cloneDeckForRender(deck)
 }
 
+func cloneDeckAsset(asset DeckAsset) DeckAsset {
+	return cloneDeckAssetContent(asset, true)
+}
+
+// Render snapshots borrow immutable pixels, but own every mutable metadata
+// container. History/clipboard snapshots own both pixels and metadata.
+func cloneDeckAssetContent(asset DeckAsset, copyPixels bool) DeckAsset {
+	asset.Extra = cloneJSONExtensions(asset.Extra)
+	if asset.Vector != nil {
+		vector := *asset.Vector
+		vector.Extra = cloneJSONExtensions(vector.Extra)
+		if copyPixels {
+			vector.Data = append([]byte(nil), vector.Data...)
+		}
+		asset.Vector = &vector
+	}
+	if asset.Source != nil {
+		source := *asset.Source
+		source.Extra = cloneJSONExtensions(source.Extra)
+		if copyPixels {
+			source.Data = append([]byte(nil), source.Data...)
+		}
+		source.Frames = append([]DeckAssetFrame(nil), source.Frames...)
+		for i := range source.Frames {
+			source.Frames[i].Extra = cloneJSONExtensions(source.Frames[i].Extra)
+			if copyPixels {
+				source.Frames[i].Data = append([]byte(nil), source.Frames[i].Data...)
+			}
+		}
+		asset.Source = &source
+	}
+	if copyPixels {
+		asset.Data = append([]byte(nil), asset.Data...)
+	}
+	if len(asset.Frames) > 0 {
+		asset.Frames = append([]DeckAssetFrame(nil), asset.Frames...)
+		for i := range asset.Frames {
+			asset.Frames[i].Extra = cloneJSONExtensions(asset.Frames[i].Extra)
+			if copyPixels {
+				asset.Frames[i].Data = append([]byte(nil), asset.Frames[i].Data...)
+			}
+		}
+	}
+	return asset
+}
+
 func cloneDeck(deck Deck) Deck {
 	out := Deck{Slides: cloneSlides(deck.Slides), Masters: deck.Masters.Clone()}
+	out.PageSize = deck.PageSize.Clone()
+	out.Objects = deck.Objects.Clone()
+	out.Theme = deck.Theme.Clone()
 	out.Appearance = deck.Appearance.Clone()
 	out.Diagnostics = append([]documentDiagnostic(nil), deck.Diagnostics...)
 	out.HideActivityQR = deck.HideActivityQR
-	out.Tabs = append([]DeckTab(nil), deck.Tabs...)
+	if deck.Tabs != nil {
+		out.Tabs = make([]DeckTab, len(deck.Tabs))
+		copy(out.Tabs, deck.Tabs)
+	}
 	for index := range out.Tabs {
 		out.Tabs[index].Extra = cloneJSONExtensions(deck.Tabs[index].Extra)
 	}
 	out.Extra = cloneJSONExtensions(deck.Extra)
-	if len(deck.Assets) > 0 {
+	if deck.Assets != nil {
 		out.Assets = make(map[string]DeckAsset, len(deck.Assets))
 		for id, asset := range deck.Assets {
-			if asset.Source != nil {
-				source := *asset.Source
-				source.Data = append([]byte(nil), source.Data...)
-				source.Frames = append([]DeckAssetFrame(nil), source.Frames...)
-				for index := range source.Frames {
-					source.Frames[index].Data = append([]byte(nil), source.Frames[index].Data...)
-				}
-				asset.Source = &source
-			}
-			asset.Data = append([]byte(nil), asset.Data...)
-			if len(asset.Frames) > 0 {
-				asset.Frames = append([]DeckAssetFrame(nil), asset.Frames...)
-				for index := range asset.Frames {
-					asset.Frames[index].Data = append([]byte(nil), asset.Frames[index].Data...)
-				}
-			}
-			out.Assets[id] = asset
+			out.Assets[id] = cloneDeckAsset(asset)
 		}
 	}
 	return out
@@ -533,17 +570,28 @@ func (deck Deck) ResolvedSlides() []Slide {
 // makes each keystroke pay for unrelated slides and their media conversions.
 func (deck Deck) slideRenderPreview(index, cols, rows int) Slide {
 	preview := deck.ResolveSlide(index, false)
-	if scene, err := buildDocumentSlideScene(deck, index, cols, rows); err == nil {
+	return deck.resolvedSlideRenderPreview(preview, index, cols, rows)
+}
+
+// The workspace has already resolved this owned slide to test dependencies.
+// Reuse it instead of cloning and merging the same masters a second time.
+func (deck Deck) resolvedSlideRenderPreview(preview Slide, index, cols, rows int) Slide {
+	if index < 0 || index >= len(deck.Slides) {
+		return preview
+	}
+	if scene, err := buildStyledSceneProjection(deck, preview, index, cols, rows, true, nil, nil, &preview.previewGeometry); err == nil {
 		preview.ModernScene = &scene
+		preview.previewGeometry.scene = preview.ModernScene
 	}
 	return preview
 }
 
 func (deck Deck) masterRenderPreview(index, cols, rows int) Slide {
-	preview := masterViewPreview(deck.Masters, index)
+	preview := deck.applyShapeStrokeDefaults(masterViewPreview(deck.Masters, index))
 	preview.ThemeColors = deck.themeColors(deck.AppearanceMode())
-	if scene, err := buildStyledSlideScene(deck, preview, index, cols, rows, true); err == nil {
+	if scene, err := buildStyledSceneProjection(deck, preview, index, cols, rows, true, nil, nil, &preview.previewGeometry); err == nil {
 		preview.ModernScene = &scene
+		preview.previewGeometry.scene = preview.ModernScene
 	}
 	return preview
 }
@@ -560,23 +608,31 @@ func (deck Deck) ResolveSlide(index int, includePlaceholders bool) Slide {
 	if index < 0 || index >= len(deck.Slides) {
 		return Slide{}
 	}
-	source := cloneSlide(deck.Slides[index])
+	return deck.resolveSlideSource(deck.Slides[index], index, includePlaceholders)
+}
+
+// Resolve an owned source without manufacturing unrelated slide entries.
+// Preserve the original index for derived page-number identity and text.
+func (deck Deck) resolveSlideSource(slide Slide, index int, includePlaceholders bool) Slide {
+	source := cloneSlide(slide)
 	source.DefaultStyle = deck.slideDefaultStyle(source)
 	if source.LayoutID == "" {
 		if source.PageNumber == pageNumberShow {
 			source.Elements = append(source.Elements, resolvedPageNumberElement(deck.Masters, "", index))
 		}
-		return deck.applyActivityQRSetting(source)
+		return deck.applyShapeStrokeDefaults(deck.applyActivityQRSetting(source))
 	}
 	layout, ok := deck.Masters.Layout(source.LayoutID)
 	if !ok {
-		return deck.applyActivityQRSetting(source)
+		return deck.applyShapeStrokeDefaults(deck.applyActivityQRSetting(source))
 	}
 	resolved := inheritedSlideStyle(deck.Masters, source.LayoutID)
 	applySourceStyle(&resolved, source)
 	resolved.LayoutID = source.LayoutID
+	resolved.ID = source.ID
 	resolved.TabID = source.TabID
 	resolved.Notes = source.Notes
+	resolved.Extra = cloneJSONExtensions(source.Extra)
 	resolved.Engagement = cloneEngagement(source.Engagement)
 	resolved.EngagementResult = cloneEngagementResult(source.EngagementResult)
 	bound := map[string]Element{}
@@ -587,6 +643,9 @@ func (deck Deck) ResolveSlide(index int, includePlaceholders bool) Slide {
 	}
 	appendMasterElements := func(elements []Element) {
 		for _, masterElement := range elements {
+			// Effective views are mutable drafts. Never lend a master's opaque
+			// metadata buffers to callers that may edit or detach this projection.
+			masterElement = cloneElement(masterElement)
 			if masterElement.Kind == "page-number" {
 				continue
 			}
@@ -623,6 +682,9 @@ func (deck Deck) ResolveSlide(index int, includePlaceholders bool) Slide {
 				continue
 			}
 			effective := masterElement
+			// Unknown instance fields belong to the authored child, not the
+			// template. Do not infer inheritance semantics for opaque metadata.
+			effective.Extra = cloneJSONExtensions(override.Extra)
 			effective.ID = override.ID
 			effective.MasterSlotID = slotID
 			effective.Placeholder = override.Placeholder
@@ -665,7 +727,7 @@ func (deck Deck) ResolveSlide(index int, includePlaceholders bool) Slide {
 			resolved.Elements = append(resolved.Elements, element)
 		}
 	}
-	return deck.applyActivityQRSetting(resolved)
+	return deck.applyShapeStrokeDefaults(deck.applyActivityQRSetting(resolved))
 }
 
 func (deck Deck) effectivePageNumberMode(source Slide) string {
@@ -688,8 +750,12 @@ func resolvedPageNumberElement(masters MasterDeck, layoutID string, slideIndex i
 		template, _ = pageNumberElement(masters.Base.Slide)
 	}
 	if template.Kind == "" {
-		template = defaultPageNumberElement("")
+		// Fallback artwork is a derived consumer, not a newly authored object.
+		// A fresh random ID on every resolution made otherwise identical pages
+		// change identity and defeated cache/cold parity on detached slides.
+		template = defaultPageNumberElement("keynope-default-page-number-" + strconv.Itoa(slideIndex+1))
 	}
+	template = cloneElement(template)
 	template.Text = strconv.Itoa(slideIndex + 1)
 	template.Placeholder = false
 	template.PlaceholderRole = ""
@@ -818,6 +884,9 @@ func (deck *Deck) StoreResolvedSlide(index int, effective Slide) {
 	if deck == nil || index < 0 || index >= len(deck.Slides) {
 		return
 	}
+	// Outline defaults belong to this projection, not the authored slide or
+	// its undo snapshots. They will be resolved from the current theme again.
+	effective.ShapeStrokeDefaults = nil
 	source := deck.Slides[index]
 	if source.LayoutID == "" {
 		var local []Element
@@ -855,7 +924,7 @@ func (deck *Deck) StoreResolvedSlide(index int, effective Slide) {
 			continue
 		}
 		overrideQuery := queryDifference(masterElement.Query, element.Query)
-		if element.Placeholder && overrideQuery == "" {
+		if element.Placeholder && overrideQuery == "" && element.Extra == nil && element.AssetID == "" && element.ObjectID == "" {
 			continue
 		}
 		override := Element{
@@ -867,6 +936,9 @@ func (deck *Deck) StoreResolvedSlide(index int, effective Slide) {
 			MasterSlotID: element.MasterSlotID,
 			Query:        overrideQuery,
 			Placeholder:  element.Placeholder,
+			AssetID:      element.AssetID,
+			ObjectID:     element.ObjectID,
+			Extra:        cloneJSONExtensions(element.Extra),
 		}
 		if override.ID == "" {
 			override.ID = newStableID("slide-element")
@@ -929,7 +1001,7 @@ func sameSlideBackgroundMedia(a, b *slideBackgroundMedia) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	return a.AssetID == b.AssetID && a.Fit == b.Fit && a.Opacity == b.Opacity
+	return a.AssetID == b.AssetID && a.Fit == b.Fit && a.Opacity == b.Opacity && a.OpacitySet == b.OpacitySet && a.Query == b.Query
 }
 
 func (deck Deck) masterSlotMap(layoutID string) map[string]Element {
@@ -991,10 +1063,8 @@ func (deck *Deck) RebindSlideLayout(index int, layoutID string) bool {
 	newSlots := deck.masterSlots(layoutID)
 	byID := map[string]Element{}
 	byRole := map[string][]Element{}
-	var local []Element
 	for _, element := range source.Elements {
 		if element.MasterSlotID == "" {
-			local = append(local, element)
 			continue
 		}
 		if oldMaster, ok := oldSlots[element.MasterSlotID]; ok {
@@ -1036,10 +1106,20 @@ func (deck *Deck) RebindSlideLayout(index int, layoutID string) bool {
 		candidate.Level = slot.Level
 		rebound = append(rebound, candidate)
 	}
-	for oldID, element := range byID {
+	var local []Element
+	// Preserve authored local/unmatched order. Map iteration would randomise
+	// overlapping objects' paint order and the next saved Markdown document.
+	for _, original := range source.Elements {
+		oldID := original.MasterSlotID
+		if oldID == "" {
+			local = append(local, original)
+			continue
+		}
 		if used[oldID] {
 			continue
 		}
+		element := byID[oldID]
+		used[oldID] = true
 		element.MasterSlotID = ""
 		local = append(local, element)
 	}
@@ -1087,6 +1167,25 @@ func mergeQueries(base, override string) string {
 		}
 	}
 	overrideValues.Del("master-clear")
+	// Legacy justify is paragraph formatting, unlike left/centre/right which
+	// are placement anchors. Let it override a master's newer text-align key.
+	if overrideValues.Get("align") == "justify" && !overrideValues.Has("text-align") {
+		baseValues.Del("text-align")
+	}
+	// A child's outline preset and a master's arbitrary stroke are competing
+	// representations of one edge, not independent decorations. Resolve older
+	// authored overrides too, even when they predate explicit master-clear keys.
+	// A child width remains independent and is overlaid below as usual.
+	if overrideValues.Has("outline") {
+		baseValues.Del("shape-stroke")
+		baseValues.Del("shape-stroke-width")
+	}
+	if overrideValues.Has("shape-stroke") {
+		baseValues.Del("outline")
+	}
+	if overrideValues.Get("label-style-inherit") == "1" && baseValues.Get("shape-label") != "" && overrideValues.Get("shape-label") != "" {
+		overrideValues.Set("shape-label", mergeShapeLabelMetadata(baseValues.Get("shape-label"), overrideValues.Get("shape-label")))
+	}
 	for key, values := range overrideValues {
 		baseValues.Del(key)
 		for _, value := range values {
@@ -1155,8 +1254,29 @@ func encodeQueryStable(values url.Values) string {
 }
 
 func isMasterOverrideQueryKey(key string) bool {
+	// Style and geometry suppression must survive the same Markdown round trip
+	// as their values. These keys were added after the original legacy list;
+	// dropping their clear markers silently restores master values on reopen.
+	for _, styleKey := range objectStyleKeys {
+		if styleKey != "" && key == styleKey {
+			return true
+		}
+	}
+	if key == "label-style-inherit" {
+		return true
+	}
+	if strings.HasPrefix(key, "label-") && labelStyleKey(strings.TrimPrefix(key, "label-")) {
+		return true
+	}
 	switch key {
-	case "text-align", "text-valign", "ttf-size", "ttf-weight":
+	case "object-offset-x", "object-offset-y", "shape-offset-x", "shape-offset-y",
+		"object-rotation", "text-box", "modern-runs", "theme-fg", "element-style", "image-style", "image-fit", "modern-crop", "modern-mask":
+		return true
+	case "text-align", "text-valign", "ttf-size", "ttf-weight", "text-bold":
+		return true
+	case "shape-stroke", "shape-stroke-width":
+		return true
+	case "connector-mode", "connector-route":
 		return true
 	case "top", "bottom", "left", "right", "left_pct", "right_pct", "row_delta", "align", "valign", "width", "height", "stretch", "transparent", "orientation", "render", "source", "scale", "text-size", "ttf-width", "font", "fg", "bg", "header", "color", "glyph", "shape", "outline", "brightness", "contrast", "saturation", "tint", "sharpness", "alpha", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y", "link", "slide":
 		return true

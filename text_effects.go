@@ -43,6 +43,9 @@ func parseElementTextGradient(query string) (textGradient, bool) {
 }
 
 func textGradientFromValues(values url.Values) (textGradient, bool) {
+	if values.Get("gradient-dir") == "none" {
+		return textGradient{}, false
+	}
 	start, startOK := parseRGBHex(values.Get("gradient-start"))
 	end, endOK := parseRGBHex(values.Get("gradient-end"))
 	if !startOK || !endOK {

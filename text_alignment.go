@@ -8,6 +8,10 @@ import (
 // align/valign place the box; text-align/text-valign place its contents.
 func textBoxAlignment(element Element) string {
 	q, _ := url.ParseQuery(element.Query)
+	return textBoxAlignmentFromValues(q)
+}
+
+func textBoxAlignmentFromValues(q url.Values) string {
 	if value := q.Get("text-align"); value != "" {
 		return value
 	}

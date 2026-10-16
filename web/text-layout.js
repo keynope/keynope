@@ -21,16 +21,28 @@ globalThis.KeynopeTextLayout = (() => {
   }
   function releaseEmoji(data){const entry=emojiFaces.get(data);if(entry&&--entry.owners===0){document.fonts.delete(entry.face);emojiFaces.delete(data);}}
   const finite = (value, fallback, min, max) => Number.isFinite(value) ? Math.max(min,Math.min(max,value)) : fallback;
+  const colorRoles=['background','surface','text','heading','muted','line',...Array.from({length:6},(_,i)=>'accent-'+(i+1))];
+  const fontRoles=['heading','body','mono'],fontIDs=['c64','mono','sans'];
+  const runFontID=(model,run)=>run.fontRole?model.fontRoles?.[run.fontRole]||run.fontId:run.fontId;
+  const runFamily=(model,run)=>{const id=runFontID(model,run);return id?(id==='c64'?'KeynopeC64, monospace':id==='mono'?'KeynopeModernMono, monospace':'KeynopeModern, sans-serif'):model.family;};
   function normalize(input) {
     if (!input || !Array.isArray(input.runs)) throw new Error('Text requires an array of styled runs');
     if (input.runs.length > 10000) throw new Error('Too many text runs');
     const runs = input.runs.map(run => {
       if (typeof run.text !== 'string') throw new Error('Text run content must be a string');
+      if(run.colorToken&&(!colorRoles.includes(run.colorToken)||!/^#[0-9a-f]{6}$/i.test(run.color||'')))throw new Error('Invalid word colour role or RGB fallback');
+      if(run.bold&&run.boldOff)throw new Error('Conflicting word bold overrides');
+      if(run.fontRole&&(!fontRoles.includes(run.fontRole)||!fontIDs.includes(run.fontId)))throw new Error('Invalid word font role or fallback');
       return {text:run.text, bold:!!run.bold, italic:!!run.italic, underline:!!run.underline,
-        color:/^#[0-9a-f]{6}$/i.test(run.color||'') ? run.color : null};
+        ...(run.boldOff?{boldOff:true}:{}),
+        color:/^#[0-9a-f]{6}$/i.test(run.color||'') ? run.color : null,
+        ...(run.colorToken?{colorToken:run.colorToken}:{}),
+        ...(['c64','mono','sans'].includes(run.fontId)?{fontId:run.fontId}:{}),
+        ...(run.fontRole?{fontRole:run.fontRole}:{}),
+        ...(Number.isFinite(run.fontSize)&&run.fontSize>0&&run.fontSize<=1024?{fontSize:run.fontSize}:{})};
     });
     if (runs.reduce((n,run)=>n+run.text.length,0)>100000) throw new Error('Text exceeds layout limit');
-    return {runs, emojiFonts:input.emojiFonts&&typeof input.emojiFonts==='object'?input.emojiFonts:{}, bullet:!!input.bullet, width:finite(input.width,640,1,20000), size:finite(input.size,32,1,1024),
+    return {runs, ...(input.fontRoles?{fontRoles:Object.fromEntries(Object.entries(input.fontRoles).filter(([role,id])=>fontRoles.includes(role)&&fontIDs.includes(id)))}:{}), ...(input.colorTokens?{colorTokens:Object.fromEntries(Object.entries(input.colorTokens).filter(([key,value])=>colorRoles.includes(key)&&/^#[0-9a-f]{6}$/i.test(value)))}:{}), emojiFonts:input.emojiFonts&&typeof input.emojiFonts==='object'?input.emojiFonts:{}, bullet:!!input.bullet, width:finite(input.width,640,1,20000), size:finite(input.size,32,1,1024),
       widthScale:finite(input.widthScale,1,.004167,2),
       emojiWidthScale:finite(input.emojiWidthScale,1,.01,240),
       emojiTint:/^#[0-9a-f]{6}$/i.test(input.emojiTint||'')?input.emojiTint:'',
@@ -60,7 +72,7 @@ globalThis.KeynopeTextLayout = (() => {
     for(const run of runs) {
       if(!run.text)continue;
       const last=result.at(-1);
-      if(last&&last.bold===run.bold&&last.italic===run.italic&&last.underline===run.underline&&last.color===run.color)last.text+=run.text;
+      if(last&&last.bold===run.bold&&!!last.boldOff===!!run.boldOff&&last.italic===run.italic&&last.underline===run.underline&&last.color===run.color&&last.colorToken===run.colorToken&&last.fontId===run.fontId&&last.fontRole===run.fontRole&&last.fontSize===run.fontSize)last.text+=run.text;
       else result.push({...run});
     }
     return result;
@@ -91,10 +103,13 @@ globalThis.KeynopeTextLayout = (() => {
     const model=normalize(input),text=model.runs.map(run=>run.text).join('');
     if(start===end)return model;
     const a=boundary(text,Math.min(start,end)),b=boundary(text,Math.max(start,end),true);
-    const patch={};
-    for(const key of ['bold','italic','underline','color'])if(Object.hasOwn(style,key))patch[key]=style[key];
+    const patch=run=>{const value=typeof style==='function'?style(run):style,result={};for(const key of ['bold','boldOff','italic','underline','color','colorToken','fontId','fontRole','fontSize'])if(Object.hasOwn(value,key))result[key]=value[key];if(value.bold===true)result.boldOff=undefined;if(Object.hasOwn(value,'color')&&!Object.hasOwn(value,'colorToken'))result.colorToken=undefined;if(Object.hasOwn(value,'fontId')&&!Object.hasOwn(value,'fontRole'))result.fontRole=undefined;return result;};
     return normalize({...model,runs:compact([...slice(model.runs,0,a),
-      ...slice(model.runs,a,b).map(run=>({...run,...patch})),...slice(model.runs,b,text.length)])});
+      ...slice(model.runs,a,b).map(run=>({...run,...patch(run)})),...slice(model.runs,b,text.length)])});
+  }
+  function textRange(input,start,end){
+    const model=normalize(input),text=model.runs.map(r=>r.text).join('');
+    const a=boundary(text,Math.min(start,end));return {start:a,end:start===end?a:boundary(text,Math.max(start,end),true)};
   }
   function create(parent,input) {
     const document=parent.ownerDocument, root=document.createElement('div');
@@ -103,7 +118,9 @@ globalThis.KeynopeTextLayout = (() => {
     Object.assign(root.style,{position:'relative',boxSizing:'border-box',padding:'0',margin:'0',
       border:'0',whiteSpace:'pre-wrap',overflowWrap:'anywhere',wordBreak:'normal',
       fontKerning:'normal',fontVariantLigatures:'normal',letterSpacing:'normal',
-      textRendering:'optimizeLegibility',minHeight:'1em'});
+      // A bounded flex host may clip text, but must not compress its natural
+      // line-box height (WebKit otherwise hides table overflow diagnostics).
+      textRendering:'optimizeLegibility',minHeight:'1em',flexShrink:'0'});
     parent.append(root);
     // Zero-size probes recover the actual accumulated scene transform,
     // including ancestor zoom and rotation, without depending on getBoxQuads
@@ -208,9 +225,12 @@ globalThis.KeynopeTextLayout = (() => {
         if(run.bold)span.style.fontWeight='700';
         if(run.italic)span.style.fontStyle='italic';
         if(run.underline)span.style.textDecorationLine='underline';
-        if(run.color)span.style.color=run.color;
+        const color=run.colorToken?model.colorTokens?.[run.colorToken]||run.color:run.color;
+        if(color)span.style.color=color;
+        if(run.fontId)span.style.fontFamily=runFamily(model,run);
+        if(run.fontSize)span.style.fontSize=run.fontSize+'px';
         if(hidden)span.style.display='none';
-        if(emoji){span.className='keynope-shaped-emoji';Object.assign(span.style,{fontFamily:emoji.family,fontWeight:'400',fontStyle:'normal',fontSize:'.8em',paddingInline:'.03125em',whiteSpace:'nowrap',color:'#ffffff',webkitTextStroke:'0px',fontVariantLigatures:'normal'});}
+        if(emoji){span.className='keynope-shaped-emoji';Object.assign(span.style,{fontFamily:emoji.family,fontWeight:'400',fontStyle:'normal',fontSize:run.fontSize?run.fontSize*.8+'px':'.8em',paddingInline:'.03125em',whiteSpace:'nowrap',color:'#ffffff',webkitTextStroke:'0px',fontVariantLigatures:'normal'});}
         // Keep the same atomic inline box with and without tint: changing a
         // paint property must not alter browser rounding or caret geometry.
         if(emoji)span.style.display='inline-block';
@@ -228,7 +248,17 @@ globalThis.KeynopeTextLayout = (() => {
         nodes.push({node,start:offset,end:offset+run.text.length});offset+=run.text.length;
       };
       const appendRuns=(runs,parent)=>{
-        const parts=model.align==='justify'?runs.flatMap(run=>run.text.split(/( )/).filter(Boolean).map(text=>({...run,text}))):runs;
+        // Source roles remain distinct in model.runs for editing/history, but
+        // equal resolved paint must shape as one browser text run. Otherwise a
+        // live role next to an identical literal changes Chromium glyph hints
+        // merely by introducing an inline boundary.
+        const painted=[];let previousKey='';
+        for(const run of runs){
+          const key=JSON.stringify([!!run.bold,!!run.italic,!!run.underline,(run.colorToken?model.colorTokens?.[run.colorToken]||run.color:run.color||model.color).toLowerCase(),runFamily(model,run),run.fontSize||model.size]);
+          if(painted.length&&key===previousKey)painted.at(-1).text+=run.text;
+          else{painted.push({...run});previousKey=key;}
+        }
+        const parts=model.align==='justify'?painted.flatMap(run=>run.text.split(/( )/).filter(Boolean).map(text=>({...run,text}))):painted;
         for(const run of parts)if(run.text){
           let plain='';
           for(const {segment}of segmenter.segment(run.text)){
@@ -338,7 +368,7 @@ globalThis.KeynopeTextLayout = (() => {
       // in-flight/completed batch until content or typography is updated.
       // Failed loads must remain retryable rather than poisoning the surface.
       if(!fontReadiness){
-        const batch=Promise.all(model.runs.map(run=>document.fonts.load((run.italic?'italic ':'')+(run.bold?'700 ':'400 ')+model.size+'px '+model.family,run.text)));
+        const batch=Promise.all(model.runs.map(run=>document.fonts.load((run.italic?'italic ':'')+(run.bold?'700 ':'400 ')+(run.fontSize||model.size)+'px '+runFamily(model,run),run.text)));
         fontReadiness=batch;
         batch.catch(()=>{if(fontReadiness===batch)fontReadiness=null;});
       }
@@ -355,6 +385,15 @@ globalThis.KeynopeTextLayout = (() => {
         text:part.segment,rects:rectangles(part.index,part.index+part.segment.length)}));
       return {revision,text,width:model.width,height:parseFloat(getComputedStyle(root).height),clusters,
         overflow:root.scrollWidth>root.clientWidth+1};
+    }
+    function minimumWidth(){
+      if(disposed)throw new Error('Text surface has been disposed');
+      const seen=new Set(),inverse=transform().inverse();let width=0;
+      // Repeated text must not create a DOM Range for every character during
+      // Fit Table. Measure each grapheme/run-style combination once, through
+      // the same browser-shaped ranges used for selection and hit testing.
+      for(const part of segments){const start=point(part.index),style=start.node.parentElement?.style.cssText||'',key=part.segment+'\u0000'+style;if(seen.has(key))continue;seen.add(key);for(const rect of rectangles(part.index,part.index+part.segment.length,inverse))width=Math.max(width,rect.width);}
+      return width;
     }
     function hitTest(x,y) {
       const client=transform().transformPoint({x,y}),clientX=client.x,clientY=client.y;
@@ -389,7 +428,7 @@ globalThis.KeynopeTextLayout = (() => {
       if(emojiGradient)refreshEmojiPaint();
       return api;
     }
-    const api={element:root,update,setWidth,setEmojiOutline,setEmojiGradient,ready,measure,rectangles,hitTest,select,snap,
+    const api={element:root,update,setWidth,setEmojiOutline,setEmojiGradient,ready,measure,minimumWidth,rectangles,hitTest,select,snap,
       dispose(){disposed=true;root.remove();nodes=[];for(const data of ownedEmoji.keys())releaseEmoji(data);ownedEmoji.clear();}};
     return update(input);
   }
@@ -571,7 +610,12 @@ globalThis.KeynopeTextLayout = (() => {
       setSize(size){if(composing||disposed||!Number.isFinite(size)||size<1||size>1024)return;const s=selection();restore({...model,size},s.end);surface.select(s.start,s.end);},
       setWidthScale(widthScale){if(composing||disposed||!Number.isFinite(widthScale)||widthScale<.004167||widthScale>2)return;const s=selection();restore({...model,widthScale},s.end);surface.select(s.start,s.end);},
       format(style){if(composing||disposed)return;const s=selection();restore(format(model,s.start,s.end,style),Math.max(s.start,s.end));surface.select(s.start,s.end);},
+      applyStyledRuns(runs,range=selection(),colorTokens=undefined,fontRoles=undefined){
+        if(composing||disposed)throw Error('Finish the current text input first.');
+        const next=normalize({...model,runs,...(colorTokens?{colorTokens:{...model.colorTokens,...colorTokens}}: {}),...(fontRoles?{fontRoles:{...model.fontRoles,...fontRoles}}:{})});if(plain(next)!==plain(model))throw Error('Word formatting cannot replace text.');
+        restore(next,range.end,true,range);surface.select(range.start,range.end);
+      },
       dispose(){disposed=true;for(const [name,handler]of Object.entries(listeners))root.removeEventListener(name,handler);surface.dispose();}};
   }
-  return Object.freeze({create,createEditor,normalize,replace,format});
+  return Object.freeze({create,createEditor,normalize,replace,format,textRange});
 })();

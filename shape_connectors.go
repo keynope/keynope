@@ -123,9 +123,14 @@ func connectorPath(e Element, a, b shapePort) []connectorPoint {
 }
 
 func slideShapeConnectors(slide Slide, lines []Line, width, height int) []shapeConnector {
+	return slideShapeConnectorsWithPorts(slide, lines, width, height, nil)
+}
+
+func slideShapeConnectorsWithPorts(slide Slide, lines []Line, width, height int, ports []shapePort) []shapeConnector {
 	var result []shapeConnector
 	var portIndex connectorPortIndex
 	var routing connectorRoutingPass
+	routing.canvas = slide.physicalCanvas()
 	routingReady := false
 	for _, e := range slide.Elements {
 		if e.Kind != "connector" {
@@ -134,7 +139,10 @@ func slideShapeConnectors(slide Slide, lines []Line, width, height int) []shapeC
 		// Ordinary slides need no attachment projection. Dangling connectors
 		// need ports for validation, but no routing obstacle construction.
 		if portIndex == nil {
-			portIndex = indexConnectorPorts(slideShapePorts(slide, lines, width, height))
+			if ports == nil {
+				ports = slideShapePorts(slide, lines, width, height)
+			}
+			portIndex = indexConnectorPorts(ports)
 		}
 		q, _ := url.ParseQuery(e.Query)
 		a, b, ok := portIndex.endpoints(q)
@@ -164,14 +172,15 @@ func rotateShapePorts(ports []shapePort, element Element, x, y float64, width, h
 	return rotateShapePortsFromValues(ports, q, x, y, width, height)
 }
 
-func rotateShapePortsFromValues(ports []shapePort, q url.Values, x, y float64, width, height int) []shapePort {
+func rotateShapePortsFromValues(ports []shapePort, q url.Values, x, y float64, width, height int, canvas ...sceneRect) []shapePort {
 	angle, err := strconv.ParseFloat(q.Get("object-rotation"), 64)
 	if err != nil || math.IsNaN(angle) || math.IsInf(angle, 0) || width <= 0 || height <= 0 {
 		return ports
 	}
 	radians := math.Mod(angle, 360) * math.Pi / 180
 	c, s := math.Cos(radians), math.Sin(radians)
-	sx, sy := 1920/float64(width), 1080/float64(height)
+	cw, ch := pptxCanvasDimensions(canvas)
+	sx, sy := cw/float64(width), ch/float64(height)
 	cx := x + shapeSubcellOffset(q, "shape-offset-x") + objectPlacementOffset(q, "x") + shapeDimension(q, "width", 12)/2
 	cy := y + shapeSubcellOffset(q, "shape-offset-y") + objectPlacementOffset(q, "y") + shapeDimension(q, "height", 6)/2
 	for i := range ports {
@@ -212,7 +221,8 @@ func shapePorts(element Element, x, y float64) []shapePort {
 	return shapePortsFromValues(element.ID, q, x, y)
 }
 
-func shapePortsFromValues(id string, q url.Values, x, y float64) []shapePort {
+// Optional cell size supplies physical pixels per grid cell, not page axes.
+func shapePortsFromValues(id string, q url.Values, x, y float64, cellSize ...sceneRect) []shapePort {
 	w, h := shapeHalfCells(q, "width", 12), shapeHalfCells(q, "height", 6)
 	sx, sy := shapeDimension(q, "width", 12)/float64(w), shapeDimension(q, "height", 6)/float64(h)
 	x += shapeSubcellOffset(q, "shape-offset-x") + objectPlacementOffset(q, "x")
@@ -220,9 +230,14 @@ func shapePortsFromValues(id string, q url.Values, x, y float64) []shapePort {
 	cx, cy := (w-1)/2, (h-1)/2
 	// The silhouette is constant during this scan. Resolving its name parses
 	// metadata, so do it once rather than for every candidate edge pixel.
-	name := shapeNameFromValues(q)
+	cw, ch := 1920.0/245, 1080.0/56
+	if len(cellSize) > 0 {
+		cw, ch = cellSize[0].Width, cellSize[0].Height
+	}
+	geometry := shapeGeometry(shapeSpecFromValues(q), shapeDimension(q, "width", 12)*cw/(shapeDimension(q, "height", 6)*ch))
 	var result []shapePort
 	for _, side := range []string{"top", "right", "bottom", "left"} {
+		before := len(result)
 		for step := 0; step < max(w, h); step++ {
 			px, py := cx, cy
 			switch side {
@@ -238,7 +253,7 @@ func shapePortsFromValues(id string, q url.Values, x, y float64) []shapePort {
 			if px < 0 || py < 0 || px >= w || py >= h {
 				break
 			}
-			if !shapeCellFilled(name, px, py, w, h) {
+			if !geometry.contains((float64(px)+.5)/float64(w), (float64(py)+.5)/float64(h)) {
 				continue
 			}
 			port := shapePort{ID: id, Side: side, X: x + float64(w)*sx/2, Y: y + float64(h)*sy/2}
@@ -254,6 +269,34 @@ func shapePortsFromValues(id string, q url.Values, x, y float64) []shapePort {
 			}
 			result = append(result, port)
 			break
+		}
+		if len(result) == before {
+			// A brace pair has no ink on its vertical centre axis. Attach to
+			// the nearest boundary, never an invisible point in the label area.
+			target := connectorPoint{.5, .5}
+			switch side {
+			case "top":
+				target.Y = 0
+			case "bottom":
+				target.Y = 1
+			case "left":
+				target.X = 0
+			case "right":
+				target.X = 1
+			}
+			best := target
+			distance := math.Inf(1)
+			for _, contour := range geometry.Contours {
+				for _, p := range contour {
+					d := math.Hypot(p.X-target.X, p.Y-target.Y)
+					if d < distance {
+						best, distance = p, d
+					}
+				}
+			}
+			if !math.IsInf(distance, 1) {
+				result = append(result, shapePort{ID: id, Side: side, X: x + best.X*float64(w)*sx, Y: y + best.Y*float64(h)*sy})
+			}
 		}
 	}
 	return result
@@ -273,7 +316,12 @@ func slideShapePorts(slide Slide, lines []Line, width, height int) []shapePort {
 		e := slide.Elements[line.Element]
 		q, _ := url.ParseQuery(e.Query)
 		x, y := preciseShapeAnchor(q, float64(line.Col), float64(line.Row), width, height)
-		ports = append(ports, rotateShapePortsFromValues(shapePortsFromValues(e.ID, q, x, y), q, x, y, width, height)...)
+		canvas := slide.physicalCanvas()
+		// The silhouette aspect depends on physical pixels per grid cell.
+		cellSize := sceneRect{Width: canvas.Width / float64(max(1, width)), Height: canvas.Height / float64(max(1, height))}
+		local := shapePortsFromValues(e.ID, q, x, y, cellSize)
+		local = shapePortsAtStrokeBoundary(local, q, x, y, resolvedShapeStrokeWidth(slide, e, q, width, height), width, height, canvas)
+		ports = append(ports, rotateShapePortsFromValues(local, q, x, y, width, height, canvas)...)
 	}
 	return ports
 }
@@ -337,7 +385,7 @@ func shapeConnectorLines(slide Slide, lines []Line, width, height int) []Line {
 	ports := slideShapePorts(slide, lines, width, height)
 	portIndex := indexConnectorPorts(ports)
 	obstacles := connectorObstacles(slide, lines, width, height)
-	routing := connectorRoutingPass{obstacles: obstacles}
+	routing := connectorRoutingPass{obstacles: obstacles, canvas: slide.physicalCanvas()}
 	var result []Line
 	for index, e := range slide.Elements {
 		if e.Kind != "connector" {
@@ -438,6 +486,19 @@ func connectorPathLines(e Element, index int, points []connectorPoint, bounds ..
 	// Half-cells are twice as tall as wide. Quantize each brush dimension
 	// once, rather than rounding several overlapping samples into extra rows.
 	strokeCols, strokeRows := max(1, int(math.Ceil(lineWidth*2))), max(1, int(math.Ceil(lineWidth)))
+	arrows := q.Get("connector-arrows")
+	headLength := math.Max(3, arrowWidth*1.5)
+	trimStart, trimEnd, routeLength := 0.0, 0.0, 0.0
+	if arrows == "start" || arrows == "both" {
+		trimStart = headLength
+	}
+	if arrows == "end" || arrows == "both" {
+		trimEnd = headLength
+	}
+	for i := 1; i < len(points); i++ {
+		routeLength += math.Hypot(points[i].X-points[i-1].X, 2*(points[i].Y-points[i-1].Y))
+	}
+	travelled := 0.0
 	for i := 1; i < len(points); i++ {
 		p, n := points[i-1], points[i]
 		if p == n {
@@ -453,10 +514,15 @@ func connectorPathLines(e Element, index int, points []connectorPoint, bounds ..
 			}
 		}
 		steps := max(1, int(math.Ceil(math.Max(math.Abs(p.X-n.X), math.Abs(p.Y-n.Y))*4)))
+		segmentLength := math.Hypot(n.X-p.X, 2*(n.Y-p.Y))
 		previous := p
 		for step := 0; step <= steps; step++ {
 			t := float64(step) / float64(steps)
 			x, y := p.X+(n.X-p.X)*t, p.Y+(n.Y-p.Y)*t
+			if distance := travelled + segmentLength*t; distance < trimStart || distance > routeLength-trimEnd {
+				previous = connectorPoint{x, y}
+				continue
+			}
 			for col := 0; col < strokeCols; col++ {
 				for row := 0; row < strokeRows; row++ {
 					ox, oy := float64(col-strokeCols/2)/2, float64(row-strokeRows/2)/2
@@ -467,6 +533,7 @@ func connectorPathLines(e Element, index int, points []connectorPoint, bounds ..
 			}
 			previous = connectorPoint{x, y}
 		}
+		travelled += segmentLength
 	}
 	arrow := func(tip, previous connectorPoint) {
 		// Canvas cells are roughly twice as tall as wide. Work in square
@@ -545,7 +612,7 @@ func (s *nativeEditorSession) handleConnectorPreview(w http.ResponseWriter, r *h
 	s.mu.RUnlock()
 	var slide Slide
 	if masterMode {
-		slide = masterViewPreview(deck.Masters, currentMaster)
+		slide = deck.applyShapeStrokeDefaults(masterViewPreview(deck.Masters, currentMaster))
 	} else if current >= 0 && current < len(deck.Slides) {
 		slide = deck.ResolvedSlides()[current]
 	} else {
@@ -554,7 +621,7 @@ func (s *nativeEditorSession) handleConnectorPreview(w http.ResponseWriter, r *h
 	}
 	lines := displayLines(slide, request.Cols, request.Rows, request.Page)
 	obstacles := connectorObstacles(slide, lines, request.Cols, request.Rows)
-	points := routedConnectorPath(request.Element, request.From, request.To, obstacles, request.Cols, request.Rows)
+	points := routedConnectorPath(request.Element, request.From, request.To, obstacles, request.Cols, request.Rows, slide.physicalCanvas())
 	raster := connectorPathLines(request.Element, -1, points, connectorRasterBounds{request.From, request.To, obstacles, request.Cols, request.Rows})
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(struct {
@@ -565,7 +632,12 @@ func (s *nativeEditorSession) handleConnectorPreview(w http.ResponseWriter, r *h
 
 func freshPastedConnectorIDs(elements []Element) {
 	ids := map[string]string{}
+	preserved := map[int]bool{}
 	for i := range elements {
+		if e := elements[i]; e.Kind == "connector" && e.unresolvedConnectorReference != "" {
+			q, err := url.ParseQuery(e.Query)
+			preserved[i] = err == nil && e.unresolvedConnectorReference == connectorReferenceSignature(e, q)
+		}
 		old := elements[i].ID
 		elements[i].ID = newStableID(elements[i].Kind)
 		if old != "" {
@@ -581,6 +653,9 @@ func freshPastedConnectorIDs(elements []Element) {
 				}
 			}
 			elements[i].Query = q.Encode()
+			if preserved[i] {
+				elements[i].unresolvedConnectorReference = connectorReferenceSignature(elements[i], q)
+			}
 		}
 	}
 }

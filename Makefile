@@ -27,7 +27,7 @@ KEYNOPE_APP_ICON_INFO := $(BIN_DIR)/KeynopeAppIconInfo.plist
 KEYNOPE_EMOJI_ASSETS := assets/emoji/keynope-emoji-glyphs.bin.gz assets/emoji/keynope-emoji-fonts.zip assets/emoji/emoji-test.txt assets/emoji/OFL.txt assets/emoji/NOTICE.txt assets/emoji/NOTO-REGION-FLAGS-LICENSE.txt assets/emoji/UNICODE-LICENSE.txt
 KEYNOPE_VERSION := $(shell awk '/^\#\# [0-9]/{print $$2; exit}' CHANGELOG.md)
 PRESENTER_ICON := assets/KeynopeMenuTemplate.png
-PRESENTER_SRC := presenter/KeynopePresenter.swift presenter/ScreenShare.swift presenter/EmbeddedIcon.swift presenter/SlideExport.swift
+PRESENTER_SRC := presenter/KeynopePresenter.swift presenter/ScreenShare.swift presenter/EmbeddedIcon.swift presenter/SlideExport.swift presenter/SlideExportWriter.swift
 PRESENTER_FRAMEWORKS := -framework Cocoa -framework WebKit -framework AVFoundation -framework ScreenCaptureKit -framework PDFKit
 GO_SRC := $(filter-out %_test.go,$(wildcard *.go))
 GO_SRC += $(shell find internal -type f -name '*.go')
@@ -36,9 +36,15 @@ GO_SRC += web/activity-design.js
 GO_SRC += web/truetype.js assets/keynope-c64.ttf.base64
 GO_SRC += web/participant-transfer.js
 GO_SRC += web/workspace.js web/workspace.css
+GO_SRC += web/templates.js $(wildcard assets/templates/*.md)
 GO_SRC += web/text-layout.js
 GO_SRC += web/scene.js
+GO_SRC += web/tables.js web/charts.js web/builds.js
+GO_SRC += web/print.js
 GO_SRC += assets/fonts/GO-FONT-LICENSE.txt
+GO_SRC += $(wildcard assets/licenses/*.txt)
+TEMPLATE_PREVIEWS := assets/templates/previews.json
+GO_SRC += $(TEMPLATE_PREVIEWS)
 
 .DEFAULT_GOAL := all
 
@@ -54,6 +60,9 @@ build: app
 web-editor:
 	./tools/build_web_editor.sh
 
+$(TEMPLATE_PREVIEWS): $(filter-out $(TEMPLATE_PREVIEWS),$(GO_SRC)) main_sitegen.go
+	$(GO) run -tags keynope_sitegen . --template-previews $@
+
 app: $(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources
 
 $(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE_APP_INFO) $(KEYNOPE_APP_ENTITLEMENTS) $(KEYNOPE_APP_ENGINE_ENTITLEMENTS) $(KEYNOPE_APP_PRIVACY) $(KEYNOPE_APP_WELCOME) $(KEYNOPE_APP_ICON_FILES) $(KEYNOPE_APP_ICON_FALLBACK) $(PRESENTER_ICON) $(KEYNOPE_EMOJI_ASSETS) $(GO_SRC) sandbox_bridge_darwin.m go.mod go.sum CHANGELOG.md LICENSE.txt
@@ -61,7 +70,7 @@ $(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE
 	@mkdir -p $(KEYNOPE_APP)/Contents/MacOS $(KEYNOPE_APP)/Contents/Helpers $(KEYNOPE_APP)/Contents/Resources
 	cp $(KEYNOPE_APP_INFO) $(KEYNOPE_APP)/Contents/Info.plist
 	$(PLUTIL) -replace CFBundleShortVersionString -string "$(KEYNOPE_VERSION)" $(KEYNOPE_APP)/Contents/Info.plist
-	$(ACTOOL) $(KEYNOPE_APP_ICON) --compile $(KEYNOPE_APP)/Contents/Resources --platform macosx --minimum-deployment-target $(MACOSX_DEPLOYMENT_TARGET) --app-icon KeynopeApp --output-partial-info-plist $(KEYNOPE_APP_ICON_INFO)
+	$(ACTOOL) $(abspath $(KEYNOPE_APP_ICON)) --compile $(abspath $(KEYNOPE_APP))/Contents/Resources --platform macosx --minimum-deployment-target $(MACOSX_DEPLOYMENT_TARGET) --app-icon KeynopeApp --output-partial-info-plist $(abspath $(KEYNOPE_APP_ICON_INFO))
 	cp $(KEYNOPE_APP_ICON_FALLBACK) $(KEYNOPE_APP)/Contents/Resources/KeynopeApp.icns
 	cp $(PRESENTER_ICON) $(KEYNOPE_APP)/Contents/Resources/KeynopeMenuTemplate.png
 	cp $(KEYNOPE_APP_PRIVACY) $(KEYNOPE_APP)/Contents/Resources/PrivacyInfo.xcprivacy
@@ -69,6 +78,7 @@ $(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE
 	@mkdir -p $(KEYNOPE_APP)/Contents/Resources/EmojiLicenses
 	cp assets/emoji/OFL.txt assets/emoji/NOTICE.txt assets/emoji/*-LICENSE.txt $(KEYNOPE_APP)/Contents/Resources/EmojiLicenses/
 	cp assets/fonts/GO-FONT-LICENSE.txt $(KEYNOPE_APP)/Contents/Resources/EmojiLicenses/
+	cp assets/licenses/*.txt $(KEYNOPE_APP)/Contents/Resources/EmojiLicenses/
 	cp LICENSE.txt $(KEYNOPE_APP)/Contents/Resources/EmojiLicenses/Keynope-LICENSE.txt
 	$(GO) build -o $(KEYNOPE_APP_ENGINE) .
 	$(SWIFTC) $(SWIFTFLAGS) -target $(SWIFT_TARGET) -O $(PRESENTER_FRAMEWORKS) $(PRESENTER_SRC) -o $(KEYNOPE_APP_EXECUTABLE)

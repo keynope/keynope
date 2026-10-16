@@ -9,5 +9,8 @@ import _ "embed"
 //go:embed web/text-layout.js
 var shapedTextJS string
 
+//go:embed web/text-styles.js
+var textStyleToolsJS string
+
 //go:embed web/scene.js
 var sceneJS string

@@ -1,0 +1,14 @@
+{
+  "hidden": true,
+  "objectIds": ["2", "3", "4", "5", "6"],
+  "timeline": {
+    "transition": {"effect": "push", "direction": "up", "durationMs": 1750},
+    "steps": [
+      {"targetIds": ["2"], "effect": "appear", "direction": "left", "durationMs": 100, "advance": "after", "delayMs": 200},
+      {"targetIds": ["3", "6"], "effect": "fade", "direction": "left", "durationMs": 500, "advance": "click", "delayMs": 0},
+      {"targetIds": ["4"], "effect": "wipe", "direction": "right", "durationMs": 350, "advance": "after", "delayMs": 150},
+      {"targetIds": ["5"], "effect": "zoom", "direction": "left", "durationMs": 600, "advance": "after", "delayMs": 80}
+    ]
+  },
+  "warningCodes": []
+}

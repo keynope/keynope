@@ -5,12 +5,28 @@ package main
 // Internal HTML generation for web builds and the hosted renderer. This entry
 // point is not included in the distributed Mac app or exposed as a public CLI.
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 )
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "--template-previews" {
+		data, err := generateTemplatePreviews()
+		if err != nil {
+			panic(err)
+		}
+		data = append(data, '\n')
+		previous, _ := os.ReadFile(os.Args[2])
+		if !bytes.Equal(previous, data) {
+			if err := os.WriteFile(os.Args[2], data, 0644); err != nil {
+				panic(err)
+			}
+		}
+		fmt.Println("Generated portable template previews")
+		return
+	}
 	if len(os.Args) != 3 {
 		panic("site generator requires a source deck and output directory")
 	}

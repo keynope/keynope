@@ -1,0 +1,113 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),http=require('node:http');
+const playwright=require(process.env.PLAYWRIGHT_MODULE||'playwright'),root=path.resolve(process.env.TEST_SITE||'/tmp/keynope-powerup-site'),output=path.resolve(process.env.KEYNOPE_BUILD_EVIDENCE||'/tmp/keynope-build-proof');
+const server=http.createServer((req,res)=>{let name=new URL(req.url,'http://localhost').pathname;if(name.endsWith('/'))name+='index.html';const base=name.startsWith('/proof/')?output:root,file=path.resolve(base,'.'+(name.startsWith('/proof/')?name.slice(6):name));if(!file.startsWith(base+'/')||!fs.existsSync(file)){res.writeHead(404);return res.end();}res.setHeader('Content-Type',({'.js':'text/javascript','.html':'text/html','.css':'text/css','.wasm':'application/wasm'})[path.extname(file)]||'application/octet-stream');res.end(fs.readFileSync(file));});
+(async()=>{
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const engine=process.env.TEST_BROWSER||'chromium',browser=await playwright[engine].launch({headless:true,...(engine==='webkit'?{}:{executablePath:process.env.CHROME_PATH})});
+ try{
+  const context=await browser.newContext({viewport:{width:1500,height:1000}});await context.route(/https?:\/\/(?!127\.0\.0\.1).*/,r=>r.abort());const page=await context.newPage(),errors=[];page.setDefaultTimeout(20000);page.on('pageerror',e=>errors.push(e.message));page.on('dialog',d=>d.accept());const origin='http://127.0.0.1:'+server.address().port;
+  await page.goto(origin+'/editor/');await page.locator('.keynope-web-loading').waitFor({state:'detached',timeout:90000});
+  const chooser=page.waitForEvent('filechooser');await page.getByRole('button',{name:'Open a Keynope or PowerPoint presentation',exact:true}).click();await(await chooser).setFiles(path.join(output,'builds.md'));
+  await page.waitForFunction(()=>!!document.querySelector('#stage [data-object-id="first"]'));
+  const state=()=>page.evaluate(()=>fetch('/api/editor/state').then(r=>r.json()));const action=data=>page.evaluate(data=>editorAction(data),data);
+  const initial=await state();await action({action:'select-element',element:initial.slides[0].elements.findIndex(e=>e.id==='first')});
+  await page.getByRole('button',{name:'Slide',exact:true}).click();await page.getByRole('button',{name:'Edit slide builds',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Slide builds',exact:true});await dialog.waitFor();await dialog.getByRole('button',{name:'Add build for selected objects',exact:true}).click();
+  await dialog.getByRole('combobox',{name:'Build effect',exact:true}).selectOption('fade');await dialog.getByRole('spinbutton',{name:'Build duration (ms)',exact:true}).fill('350');await dialog.getByRole('spinbutton',{name:'Build duration (ms)',exact:true}).press('Tab');
+  await dialog.getByRole('button',{name:'Add build for selected objects',exact:true}).click();await dialog.getByRole('checkbox',{name:'Build object Then the next idea',exact:true}).check();await dialog.getByRole('combobox',{name:'Build effect',exact:true}).selectOption('wipe');
+  await dialog.getByRole('combobox',{name:'Transition effect',exact:true}).selectOption('fade');await dialog.getByRole('spinbutton',{name:'Transition duration (ms)',exact:true}).fill('400');await dialog.getByRole('spinbutton',{name:'Transition duration (ms)',exact:true}).press('Tab');
+  const beforePreview=await state();const preview=dialog.locator('.keynope-build-preview');await preview.locator('[data-object-id="first"]').waitFor({state:'attached'});
+  assert.equal(await preview.locator('[data-object-id="first"]').evaluate(n=>getComputedStyle(n).visibility),'hidden');assert.equal(await preview.locator('[data-object-id="heading"]').evaluate(n=>getComputedStyle(n).visibility),'visible');
+  await dialog.getByRole('button',{name:'Next build',exact:true}).click();await page.waitForTimeout(400);assert.equal(await preview.locator('[data-object-id="first"]').evaluate(n=>getComputedStyle(n).visibility),'visible');assert.equal(await preview.locator('[data-object-id="second"]').evaluate(n=>getComputedStyle(n).visibility),'hidden');
+  await dialog.getByRole('button',{name:'Next build',exact:true}).click();await page.waitForTimeout(550);assert.equal(await preview.locator('[data-object-id="second"]').evaluate(n=>getComputedStyle(n).visibility),'visible');
+  await page.screenshot({path:path.join(output,'build-editor.png')});await dialog.getByRole('button',{name:'Previous build',exact:true}).click();assert.equal(await preview.locator('[data-object-id="second"]').evaluate(n=>getComputedStyle(n).visibility),'hidden');assert.equal((await state()).version,beforePreview.version,'Preview dirtied the deck');
+  await dialog.getByRole('button',{name:'Move build 2 earlier',exact:true}).click();await dialog.getByRole('button',{name:'Next build',exact:true}).click();assert.equal(await preview.locator('[data-object-id="second"]').evaluate(n=>getComputedStyle(n).visibility),'visible');
+  await dialog.getByRole('button',{name:'Undo edit',exact:true}).click();await dialog.getByRole('button',{name:'Apply',exact:true}).click();await dialog.waitFor({state:'detached'});
+  const applied=await state();assert.equal(applied.version,beforePreview.version+1);assert.deepEqual(applied.slideBuild.steps.map(s=>s.targetIds),[['first'],['second']]);assert.equal(applied.slideBuild.transition.effect,'fade');
+  await action({action:'undo'});assert.equal((await state()).slideBuild.steps?.length||0,0);await action({action:'redo'});assert.equal((await state()).slideBuild.steps.length,2);
+  if(!await page.getByRole('button',{name:'Edit slide builds',exact:true}).isVisible())await page.getByRole('button',{name:'Slide',exact:true}).click();await page.getByRole('button',{name:'Edit slide builds',exact:true}).click();await dialog.waitFor();const cancelVersion=(await state()).version;await dialog.getByRole('combobox',{name:'Build effect',exact:true}).selectOption('zoom');await dialog.getByRole('button',{name:'Cancel',exact:true}).click();assert.equal((await state()).version,cancelVersion);
+  const saved=await page.evaluate(()=>fetch('/api/editor/document',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:'Builds.md'})}).then(r=>r.json()));assert.ok(saved.content.includes('keynope-objects'));
+  const previewVersion=(await state()).version,popupEvent=page.waitForEvent('popup');
+  await page.getByRole('button',{name:'Present on this computer',exact:true}).click();const popup=await popupEvent;
+  await popup.waitForFunction(()=>document.querySelector('[data-object-id="first"]')?.dataset.buildPending==='true');
+  const upcoming=page.getByRole('region',{name:'Next presentation state',exact:true});await upcoming.waitFor({state:'visible'});
+  await upcoming.locator('[data-object-id="first"]').waitFor({state:'visible'});
+  assert.equal(await upcoming.locator('[data-object-id="second"]').getAttribute('data-build-pending'),'true');
+  assert.equal(await popup.locator('[data-object-id="first"]').getAttribute('data-build-pending'),'true','Presenter preview advanced the audience');
+  const retainedPreview=await upcoming.locator('[data-object-id="first"]').elementHandle();
+  await upcoming.getByRole('button',{name:'Next presentation state',exact:true}).click();
+  await popup.waitForFunction(()=>document.querySelector('[data-object-id="first"]')?.dataset.buildPending==='false');
+  await upcoming.locator('[data-object-id="second"]').waitFor({state:'visible'});
+  assert.ok(await retainedPreview.evaluate(n=>n.isConnected),'Preview remounted the same slide for a build');assert.equal((await state()).version,previewVersion,'Presenter preview dirtied the document');
+  await upcoming.getByRole('button',{name:'Next presentation state',exact:true}).click();
+  await popup.waitForFunction(()=>document.querySelector('[data-object-id="second"]')?.dataset.buildPending==='false');
+  await upcoming.locator('strong').filter({hasText:'End of presentation'}).waitFor();
+  assert.ok(await upcoming.getByRole('button',{name:'Next presentation state',exact:true}).isDisabled());
+  assert.ok(await upcoming.getByRole('button',{name:'Previous presentation state',exact:true}).isEnabled());
+  await upcoming.getByRole('button',{name:'Previous presentation state',exact:true}).focus();await page.keyboard.press('ArrowLeft');
+  await popup.waitForFunction(()=>document.querySelector('[data-object-id="second"]')?.dataset.buildPending==='true');
+  await upcoming.locator('[data-object-id="second"]').waitFor({state:'visible'});assert.equal((await state()).version,previewVersion,'Preview keyboard nudged the selected object');
+  await page.screenshot({path:path.join(output,'next-state-preview.png')});
+  await upcoming.getByRole('button',{name:'Hide next state preview',exact:true}).click();await upcoming.waitFor({state:'hidden'});
+  await page.getByRole('button',{name:'Next state preview',exact:true}).click();await upcoming.waitFor({state:'visible'});
+  await popup.close();await upcoming.waitFor({state:'hidden'});
+  const previewCache=await page.evaluate(async()=>{
+    const host=document.createElement('aside');document.body.append(host);
+    const pages=[...deck.pages],cursor={session:'cache-proof',slideId:pages[0].scene.slideId,step:0,generation:1,startedAtMs:0,motion:'seek',paused:false},position={slide:0,page:0,key:'revision-1',buildCursor:cursor};
+    const preview=KeynopeBuilds.presenterPreview(host);preview.update(pages,position);
+    await new Promise(r=>setTimeout(r,100));const node=host.querySelector('[data-object-id="first"]'),observer=new MutationObserver(()=>{});observer.observe(host,{subtree:true,childList:true,attributes:true,characterData:true});
+    for(let i=0;i<100;i++)preview.update(pages,{...position});
+    if(observer.takeRecords().length)throw Error('Unchanged presenter poll touched preview DOM');
+    pages[0]={...pages[0],scene:{...pages[0].scene,background:'#102938'}};preview.update(pages,{...position,key:'revision-2'});
+    await new Promise(r=>setTimeout(r,100));if(!node.isConnected||getComputedStyle(host.querySelector('.keynope-modern-scene')).backgroundColor!=='rgb(16, 41, 56)')throw Error('Source paint revision did not update the retained preview');
+    observer.disconnect();preview.dispose();return true;
+  });assert.ok(previewCache);
+  // Exercise generations, auto-advance, pause/resume, reduced motion and cleanup
+  // against the actual shared scene nodes, independent of editor draft state.
+  const runtime=await page.evaluate(async()=>{
+   if(KeynopeBuilds.normalize({version:99,steps:[{targetIds:['first'],effect:'fade'}]}).steps.length)throw Error('Unknown timeline version executed');
+   if(KeynopeBuilds.normalize({version:1,steps:[null,{targetIds:'broken'}]}).steps.length)throw Error('Malformed timeline executed');
+   if(KeynopeBuilds.normalize({version:1,steps:[{targetIds:['first','first'],effect:'unknown'}]}).steps[0].targetIds.length!==1)throw Error('Duplicate runtime targets retained');
+   const root=document.querySelector('#stage .keynope-modern-scene'),first=root.querySelector('[data-object-id="first"]'),second=root.querySelector('[data-object-id="second"]');
+   const build={version:1,steps:[{targetIds:['first'],effect:'fade',durationMs:60,advance:'after',delayMs:100},{targetIds:['second'],effect:'zoom',durationMs:60,advance:'click'}]};
+   const c=KeynopeBuilds.controller(root,build,{reducedMotion:()=>true});c.start();c.pause();await new Promise(r=>setTimeout(r,150));if(c.snapshot().step!==0)throw Error('Paused auto step fired');c.resume();await new Promise(r=>setTimeout(r,130));if(c.snapshot().step!==1||first.style.visibility==='hidden'||second.style.visibility!=='hidden')throw Error('Auto resume failed');c.previous();await new Promise(r=>setTimeout(r,180));if(c.snapshot().step!==0)throw Error('Backward restarted an old callback');c.next();c.next();if(second.style.visibility==='hidden')throw Error('Final step missing');c.start();c.seek(2);await new Promise(r=>setTimeout(r,180));if(c.snapshot().step!==2)throw Error('Old generation advanced newer state');c.dispose();if(first.style.visibility==='hidden'||second.style.visibility==='hidden')throw Error('Dispose did not restore editor');
+   const originalAnimate=first.animate;let cancelled=0;first.animate=()=>{first.style.opacity='0';return {finished:new Promise(()=>{}),cancel(){cancelled++;first.style.opacity='';},pause(){},play(){}};};
+   const frozen=KeynopeBuilds.controller(root,{version:1,steps:[{targetIds:['first'],effect:'fade',durationMs:30}]},{reducedMotion:()=>false});frozen.next();frozen.pause();await new Promise(r=>setTimeout(r,120));if(cancelled)throw Error('Paused animation watchdog fired');frozen.resume();await new Promise(r=>setTimeout(r,110));if(!cancelled||Number(getComputedStyle(first).opacity)<.99)throw Error('Frozen compositor left the object transparent');frozen.dispose();first.animate=originalAnimate;return {passed:true};
+  });assert.ok(runtime.passed);assert.deepEqual(errors,[]);
+  const proof=await context.newPage();proof.on('pageerror',e=>errors.push(e.message));await proof.goto(origin+'/proof/builds.html');
+  await proof.waitForFunction(()=>document.querySelector('[data-object-id="first"]')?.dataset.buildPending==='true');
+  await proof.keyboard.press('ArrowRight');await proof.waitForFunction(()=>document.querySelector('[data-object-id="first"]')?.dataset.buildPending==='false');
+  assert.equal(await proof.locator('[data-object-id="second"]').getAttribute('data-build-pending'),'true');
+  await proof.waitForFunction(()=>document.querySelector('[data-object-id="second"]')?.dataset.buildPending==='false');
+  await proof.keyboard.press('ArrowLeft');assert.equal(await proof.locator('[data-object-id="second"]').getAttribute('data-build-pending'),'true');
+  await proof.waitForTimeout(900);assert.equal(await proof.locator('[data-object-id="second"]').getAttribute('data-build-pending'),'true','Backward restarted automatic reveal');
+  await proof.keyboard.press('End');await proof.waitForFunction(()=>document.querySelector('[data-object-id="second"]')?.dataset.buildPending==='false');
+  // Audience consumes cursor-only updates without re-upload/remount or local
+  // automatic advancement. Exercise the actual generated shared renderer.
+  const participant=await proof.evaluate(async()=>{
+    const {createPresentationViewer}=await import('/join/presentation.js');
+    const host=document.createElement('div');host.id='participant-build-proof';host.style.cssText='width:1000px;height:560px';document.body.append(host);
+    const status=document.createElement('p');host.after(status);const viewer=createPresentationViewer({frame:host,status,request:()=>{}});
+    const data=JSON.parse(document.querySelector('#keynope-data').textContent),packed=await KeynopePresentationTransfer.pack(JSON.stringify(data));
+    let generation=1,sentAt=Date.now();
+    const cursor=step=>({session:'audience-proof',slideId:data.pages[0].scene.slideId,step,generation:generation++,startedAtMs:Date.now()-1000,motion:'advance',paused:false});
+    const announce=c=>viewer.receive({type:'presentation-md',format:'rendered-v1',presenting:true,transfer:packed.id,parts:packed.parts.length,slide:0,page:0,slideCount:1,buildCursor:c,sentAt:++sentAt});
+    viewer.setVisible(true);const initial=cursor(1);announce(initial);packed.parts.forEach((part,index)=>viewer.receive({type:'presentation-part',transfer:packed.id,index,data:part}));
+    const wait=ms=>new Promise(r=>setTimeout(r,ms));
+    for(let i=0;i<100&&!host.shadowRoot?.querySelector('[data-object-id="first"]');i++)await wait(30);
+    const first=host.shadowRoot?.querySelector('[data-object-id="first"]'),second=host.shadowRoot?.querySelector('[data-object-id="second"]');
+    if(!first||!second)throw Error('Participant did not render: '+status.textContent);
+    if(first.style.visibility==='hidden'||second.style.visibility!=='hidden')throw Error('Late join did not restore build snapshot');
+    await wait(1100);if(second.style.visibility!=='hidden')throw Error('Participant ran independent automatic reveal');
+    announce(cursor(2));await wait(100);if(second.style.visibility==='hidden'||host.shadowRoot.querySelector('[data-object-id="first"]')!==first)throw Error('Cursor update remounted or failed to reveal');
+    announce(initial);await wait(80);if(second.style.visibility==='hidden')throw Error('Stale generation rewound participant');
+    viewer.setVisible(false);announce(cursor(0));viewer.setVisible(true);await wait(80);if(first.style.visibility!=='hidden'||second.style.visibility!=='hidden')throw Error('Hidden participant did not resume latest cursor');
+    announce({...cursor(2),paused:true,motion:'seek'});await wait(80);if(second.style.visibility==='hidden')throw Error('Paused snapshot failed');
+    window.__participantBuildStop=()=>{viewer.receive({type:'presentation-md',presenting:false,sentAt:++sentAt});if(!host.hidden)throw Error('Stop retained old presentation');viewer.reset();host.previousElementSibling.remove();host.remove();status.remove();};return {passed:true};
+  });assert.ok(participant.passed);
+  await proof.locator('#participant-build-proof').screenshot({path:path.join(output,'participant-builds.png')});
+  await proof.evaluate(()=>window.__participantBuildStop());
+  await proof.evaluate(()=>keynopePrepareSnapshot(0));assert.equal(await proof.locator('#stage [data-object-id="first"]').evaluate(n=>getComputedStyle(n).visibility),'visible');assert.equal(await proof.locator('#stage [data-object-id="second"]').evaluate(n=>getComputedStyle(n).visibility),'visible');
+  await proof.screenshot({path:path.join(output,'static-final-build.png')});assert.deepEqual(errors,[]);
+  fs.writeFileSync(path.join(output,'browser-report.json'),JSON.stringify({passed:true,checks:['draft editing/order/local undo','isolated initial/forward/back preview','one-step Apply/document Undo/Redo','Cancel isolation','metadata save','real web popup next-state preview/isolation/retained DOM/controls','preview End/backward/keyboard ownership/hide/reopen/Stop','auto/pause/resume/generation cancellation/reduced motion/dispose','standalone HTML keyboard builds/automatic/backward navigation','participant late join/cursor-only retained DOM/no independent auto','participant stale generation rejection/hidden tab resume/paused snapshot/stop','static snapshot final visibility']},null,2)+'\n');console.log('Build editor, presenter preview, standalone and participant cursor checks passed');
+ }finally{await browser.close();await new Promise(resolve=>server.close(resolve));}
+})().catch(error=>{console.error(error);process.exitCode=1;server.close();});

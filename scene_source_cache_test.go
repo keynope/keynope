@@ -99,3 +99,34 @@ func BenchmarkSceneSourceEncoding(b *testing.B) {
 		})
 	}
 }
+
+func TestSceneSourceCacheConcurrentMisses(t *testing.T) {
+	for _, limit := range []int{0, 100, 4 << 20} {
+		t.Run(strconv.Itoa(limit), func(t *testing.T) {
+			c := sceneSourceCache{limit: limit}
+			data := make([]byte, 1<<20)
+			want := "data:image/png;base64," + base64.StdEncoding.EncodeToString(data)
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			for i := 0; i < 12; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					<-start
+					if got := c.uri("image/png", data); got != want {
+						t.Error("concurrent miss returned incorrect source")
+					}
+				}()
+			}
+			close(start)
+			wg.Wait()
+			entries, bytes := 0, 0
+			if limit >= len(want)+len("image/png") {
+				entries, bytes = 1, len(want)+len("image/png")
+			}
+			if c.order.Len() != entries || len(c.entries) != entries || c.bytes != bytes {
+				t.Fatalf("concurrent misses corrupted ownership: list=%d map=%d bytes=%d; want %d/%d", c.order.Len(), len(c.entries), c.bytes, entries, bytes)
+			}
+		})
+	}
+}

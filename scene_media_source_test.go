@@ -52,3 +52,13 @@ func TestSceneMediaLegacySource(t *testing.T) {
 		t.Fatal("legacy source changed")
 	}
 }
+
+func TestFrameOnlyMediaKeepsFallbackAndFiniteLoops(t *testing.T) {
+	for _, loops := range []int{-1, 0, 3} {
+		a := DeckAsset{MIME: "image/gif", Width: 2, Height: 3, LoopCount: loops, Frames: []DeckAssetFrame{{Data: []byte{1}, DelayMS: 70}, {Data: []byte{2}, DelayMS: 190}}}
+		s := sceneMediaSource(a)
+		if s.Source != s.Frames[0].Source || s.LoopCount != loops || s.Source == "" {
+			t.Fatal("frame-only fallback or looping lost", s)
+		}
+	}
+}

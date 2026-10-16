@@ -55,6 +55,9 @@ func (d Deck) withTheme(id string) (*DeckAppearance, error) {
 
 // Resolved tokens are rendering data, not authored slide/master overrides.
 func (d Deck) themeColors(mode string) *themeColors {
+	if d.Theme != nil {
+		return &themeColors{d.Theme.Colors.Background, d.Theme.Colors.Text, d.Theme.Colors.Heading}
+	}
 	theme, ok := deckThemes[d.themeID()]
 	if !ok {
 		return nil
@@ -90,6 +93,7 @@ func (d Deck) sceneTextForStyleFromValues(element Element, style string, q url.V
 		return d.modernSceneTextFromValues(element, q)
 	}
 	text := sceneTextFromValues(element, q)
+	d.resolveWordColors(text)
 	text.FontID, text.Family = "c64", "KeynopeC64, monospace"
 	text.Size = float64(trueTypeSizeWithValues(element, q))
 	text.WidthScale = .4167 * trueTypeWidthWithValues(q) / 100
@@ -105,6 +109,7 @@ func (d Deck) modernSceneText(element Element) *sceneText {
 }
 
 func (d Deck) modernSceneTextFromValues(element Element, q url.Values) *sceneText {
+	q = d.resolveThemeTextValues(element, q)
 	if d.usesConcreteAppearance() && !q.Has("modern-font") {
 		cloned := make(url.Values, len(q)+1)
 		for key, values := range q {
@@ -114,6 +119,7 @@ func (d Deck) modernSceneTextFromValues(element Element, q url.Values) *sceneTex
 		q.Set("modern-font", "c64")
 	}
 	text := sceneTextFromValues(element, q)
+	d.resolveWordColors(text)
 	// An explicit Modern fitting adjustment is independent of Retro typography.
 	defer func() {
 		if size, err := strconv.ParseFloat(q.Get("modern-size"), 64); err == nil && size >= 1 && size <= 1024 {

@@ -37,6 +37,15 @@ var emojiRegionFlagsLicenseText string
 //go:embed assets/emoji/UNICODE-LICENSE.txt
 var unicodeLicenseText string
 
+//go:embed assets/licenses/SVG-RENDERER-LICENSE.txt
+var svgRendererLicenseText string
+
+//go:embed assets/licenses/GO-LIBRARIES-LICENSE.txt
+var goLibrariesLicenseText string
+
+//go:embed assets/licenses/UNISEG-LICENSE.txt
+var unisegLicenseText string
+
 type emojiCatalogEntry struct {
 	Emoji    string `json:"emoji"`
 	Name     string `json:"name"`
@@ -74,11 +83,6 @@ const (
 	storedEmojiCellBytes   = 4
 )
 
-var emojiGlyphCache = struct {
-	sync.RWMutex
-	rows map[string][]string
-}{rows: map[string][]string{}}
-
 func bundledLicenseText() string {
 	sections := []struct {
 		title string
@@ -90,6 +94,9 @@ func bundledLicenseText() string {
 		{title: "GO FONT FAMILY", text: modernFontLicense},
 		{title: "NOTO REGIONAL FLAGS", text: emojiRegionFlagsLicenseText},
 		{title: "UNICODE DATA FILES", text: unicodeLicenseText},
+		{title: "SVG RENDERER", text: svgRendererLicenseText},
+		{title: "GO SUPPORT LIBRARIES", text: goLibrariesLicenseText},
+		{title: "UNICODE TEXT SEGMENTATION", text: unisegLicenseText},
 	}
 	var out strings.Builder
 	for index, section := range sections {
@@ -394,23 +401,18 @@ func splitTextVisualUnits(text string, width int) []string {
 
 func renderEmojiGlyph(assetKey string, height int) []string {
 	ensureEmojiData()
-	height = max(1, height)
+	height = max(1, min(storedEmojiGlyphHeight, height))
 	cacheKey := assetKey + ":" + strconv.Itoa(height)
-	emojiGlyphCache.RLock()
-	rows := emojiGlyphCache.rows[cacheKey]
-	emojiGlyphCache.RUnlock()
-	if rows != nil {
+	if rows, ok := emojiGlyphCache.get(cacheKey); ok {
 		return append([]string(nil), rows...)
 	}
 	cells := emojiData.assets[assetKey]
 	if cells == nil {
 		return nil
 	}
-	rows = resizeStoredEmojiGlyph(cells, height)
-	emojiGlyphCache.Lock()
-	emojiGlyphCache.rows[cacheKey] = append([]string(nil), rows...)
-	emojiGlyphCache.Unlock()
-	return rows
+	rows := resizeStoredEmojiGlyph(cells, height)
+	rows = emojiGlyphCache.put(cacheKey, rows, imageRowsCost(rows))
+	return append([]string(nil), rows...)
 }
 
 func resizeStoredEmojiGlyph(cells []byte, height int) []string {

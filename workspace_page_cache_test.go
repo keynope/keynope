@@ -40,11 +40,11 @@ func TestWorkspaceCacheInvalidation(t *testing.T) {
 	deck.HideActivityQR = true
 	check(3)
 	deck.Masters.Base.Slide.BG = "44"
-	check(3)
+	check(0) // Detached slides do not consume the base background.
 	deck.Assets = map[string]DeckAsset{"unused": {Data: []byte{1}}}
-	check(3)
+	check(0)
 	deck.Assets["unused"] = DeckAsset{Data: []byte{2}}
-	check(3)
+	check(0)
 	deck.Slides = append(deck.Slides, cloneSlide(deck.Slides[0]))
 	check(4)
 	if _, err := cache.render(deck, false, 0, 320, 90); err != nil {
@@ -78,8 +78,8 @@ func TestWorkspaceCacheIgnoresMasterNamesAndOrdering(t *testing.T) {
 	if _, err := cache.render(deck, false, 0, 245, 56); err != nil {
 		t.Fatal(err)
 	}
-	if rebuilt := cache.misses - before; rebuilt != len(deck.Slides) {
-		t.Fatalf("visual master mutation total rebuilds = %d, want %d", rebuilt, len(deck.Slides))
+	if rebuilt := cache.misses - before; rebuilt != 0 {
+		t.Fatalf("unused master mutation rebuilt %d pages", rebuilt)
 	}
 }
 
@@ -181,5 +181,69 @@ func TestWorkspaceCachePageLimitAndReorder(t *testing.T) {
 	}
 	if cache.misses-before != 4 {
 		t.Fatalf("reorder should rebuild two moved and two uncached pages, got %d", cache.misses-before)
+	}
+}
+
+func TestWorkspaceCacheRetainsCurrentLateSlide(t *testing.T) {
+	deck := themedSharedTextFixture(1)
+	for len(deck.Slides) < 140 {
+		deck.Slides = append(deck.Slides, cloneSlide(deck.Slides[0]))
+	}
+	var cache workspacePageCache
+	check := func(current, misses int) {
+		t.Helper()
+		before := cache.misses
+		got, err := cache.render(deck, false, current, 245, 56)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := editorWorkspacePages(deck, false, current, 245, 56)
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatal("priority changed workspace output", err)
+		}
+		if cache.misses-before != misses {
+			t.Fatalf("current %d rebuilt %d pages, want %d", current, cache.misses-before, misses)
+		}
+		if _, exists := cache.pages[current]; !exists {
+			t.Fatal("current slide evicted", current)
+		}
+		if len(cache.pages) != 128 || len(cache.consumers.base) != 128 {
+			t.Fatal("cache/index bounds", len(cache.pages), len(cache.consumers.base))
+		}
+	}
+	check(139, 140)
+	if _, retained := cache.pages[0]; retained {
+		t.Fatal("first slide outranked active late slide")
+	}
+	check(139, 12)
+	deck.Slides[139].Elements[0].Text = "Late edit"
+	check(139, 13)
+	deck.Slides[139].Notes = "Private speaker note"
+	check(139, 12)
+	check(0, 12)
+	check(0, 12)
+}
+
+func TestWorkspacePagePriorityBudget(t *testing.T) {
+	entries := make([]workspacePageEntry, 5)
+	for i := range entries {
+		entries[i] = workspacePageEntry{bytes: 20 << 20, refs: workspaceReferences{assets: map[string]bool{fmt.Sprint(i): true}}}
+	}
+	retained, index := retainWorkspacePages(entries, 3)
+	for _, i := range []int{3, 2, 4} {
+		if _, ok := retained[i]; !ok || !index.assets[fmt.Sprint(i)][i] {
+			t.Fatal("wrong priority/index", retained, i)
+		}
+	}
+	if len(retained) != 3 {
+		t.Fatal("byte budget exceeded", len(retained))
+	}
+	entries[3].bytes = 65 << 20
+	retained, _ = retainWorkspacePages(entries, 3)
+	if _, ok := retained[3]; ok {
+		t.Fatal("oversized page retained")
+	}
+	if len(retained) != 3 {
+		t.Fatal("oversized active page prevented useful neighbour retention")
 	}
 }

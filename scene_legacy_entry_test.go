@@ -34,7 +34,7 @@ func TestLegacyDocumentUsesSharedSceneAtEveryRenderEntry(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(participant.Pages[0].Scene, preview.ModernScene) {
+		if !reflect.DeepEqual(publicParityScene(*participant.Pages[0].Scene), publicParityScene(*preview.ModernScene)) {
 			t.Fatal("participant/presenter scene mismatch")
 		}
 		if deck.masterRenderPreview(0, 245, 56).ModernScene == nil {

@@ -4,6 +4,26 @@ All notable changes to `keynope` are documented in this file.
 
 This project follows semantic versioning.
 
+## 1.8.3
+
+Added:
+
+- Starting templates and deck themes with reusable colours and fonts.
+- Widescreen, standard, portrait, ultrawide and custom slide sizes.
+- Editable tables with merged cells, rich text, flexible borders and row/column sizing.
+- Editable column, bar, line, area, pie and doughnut charts, including stacked series.
+- Expanded shape library, adjustable geometry and richer shape and connector styling.
+- Style copying, format painting and custom object names.
+- Ordered object builds and slide transitions.
+- Presenter laser pointer, spotlight and temporary ink tools.
+- PDF export with selectable text and vector artwork, plus an exact-appearance option.
+
+Changed:
+
+- Richer editable PowerPoint import and export for themes, text, tables, charts, shapes, connectors and animated images, with detailed conversion notes.
+- More flexible image cropping, masks, fitting and editable backgrounds, including Retro artwork.
+- Faster editing, dragging and presentation updates for large, content-heavy decks.
+
 ## 1.8.2
 
 Fixed:

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"math"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 )
@@ -80,44 +79,47 @@ func shapeLabel(e Element) (Element, bool) {
 		return Element{}, false
 	}
 	v, _ := url.ParseQuery(data.Query)
+	v = shapeLabelStyleValues(e, v)
+	v = concreteTextDefaults(v)
 	v.Set("render", "truetype")
-	v.Set("text-align", "center")
-	v.Set("text-valign", "middle")
-	if !v.Has("fg") {
+	if !v.Has("text-align") {
+		alignment := "center"
+		if v.Get("align") == "justify" {
+			alignment = "justify" // Historical paragraph alias, not box placement.
+		}
+		v.Set("text-align", alignment)
+	}
+	if !v.Has("text-valign") {
+		v.Set("text-valign", "middle")
+	}
+	if !v.Has("fg") && !v.Has("theme-fg") && !v.Has("default-color") {
 		v.Set("fg", "#ffffff")
 	}
 	return standardTextElement(Element{Kind: "text", Text: data.Text, Query: v.Encode(), ID: e.ID}), true
 }
 
-var shapeLabelColourTag = regexp.MustCompile(`(?i)\[color=#[0-9a-f]{6}\]|\[/color\]`)
-
-func shapeLabelSize(label Element, cols, rows int) (int, int) {
-	// Match the fixed-advance TrueType renderer, ignoring colour markup.
-	plain := shapeLabelColourTag.ReplaceAllString(label.Text, "")
+func shapeLabelSize(label Element, cols, rows int, canvas ...sceneRect) (int, int) {
+	canvasWidth, canvasHeight := pptxCanvasDimensions(canvas)
 	q, _ := url.ParseQuery(label.Query)
-	size, percent := float64(trueTypeSize(label)), trueTypeWidthPercent(label)/100
-	longest := 0.0
-	for _, line := range strings.Split(plain, "\n") {
-		w := 0.0
-		for _, token := range splitEmojiText(line) {
-			if token.assetKey != "" {
-				w += size*.8*percent + 2*math.Max(1, size/40)
-			} else {
-				w += float64(len([]rune(token.text))) * size * .8 * .4167 * percent
-			}
-		}
-		longest = math.Max(longest, w)
-	}
-	w := int(math.Ceil(longest * float64(cols) / 1920))
-	h := int(math.Ceil(float64(len(strings.Split(plain, "\n"))) * size * 1.2 * float64(rows) / 1080))
-	padding := 1
+	// Use the same semantic runs and physical font advances as ordinary text.
+	// Stripping markup and counting base-font characters misses inline sizes,
+	// mixed fonts, tab stops, trailing lines and paragraph spacing.
+	text := (Deck{Appearance: &DeckAppearance{Version: 3}}).modernSceneTextFromValues(label, q)
+	physicalWidth, physicalHeight := sceneTextNaturalSize(text)
+	size := text.Size
+	w := int(math.Ceil(physicalWidth * float64(cols) / canvasWidth))
+	h := int(math.Ceil(physicalHeight * float64(rows) / canvasHeight))
+	paddingX, paddingY := 1, 1
 	if q.Has("outline") {
-		padding += int(math.Ceil(size * .035 * float64(cols) / 1920))
+		paddingX += int(math.Ceil(size * .035 * float64(cols) / canvasWidth))
+		paddingY += int(math.Ceil(size * .035 * float64(rows) / canvasHeight))
 	}
 	if q.Has("shadow") {
-		padding += 2 + max(abs(intQueryDefault(q, "shadow-x", 1)), abs(intQueryDefault(q, "shadow-y", 1)))
+		padding := 2 + max(abs(intQueryDefault(q, "shadow-x", 1)), abs(intQueryDefault(q, "shadow-y", 1)))
+		paddingX += padding
+		paddingY += padding
 	}
-	return max(1, w) + 2*padding, max(1, h) + 2*padding
+	return max(1, w) + 2*paddingX, max(1, h) + 2*paddingY
 }
 
 func shapeLabelFits(shape string, w, h, tw, th int) bool {
@@ -126,8 +128,8 @@ func shapeLabelFits(shape string, w, h, tw, th int) bool {
 		return false
 	}
 	left, top := (w-tw)/2, (h-th)/2
-	// All supported silhouettes are convex. Testing the rectangle's four
-	// corners is sufficient and avoids scanning millions of pixels per edit.
+	// The four legacy silhouettes use this convex-corner fitting rule. New
+	// concave/adjustable shapes use their registered content region below.
 	for _, y := range []int{top, top + th - 1} {
 		for _, x := range []int{left, left + tw - 1} {
 			if !shapeCellFilled(shape, x, y, w, h) {
@@ -178,18 +180,54 @@ func fitShapeLabelDimensions(shape string, w, h, tw, th int) (int, int) {
 	return originalW, originalH
 }
 
-func fitShapeLabel(e *Element, cols, rows int) {
+func fitShapeLabel(e *Element, cols, rows int, canvas ...sceneRect) {
+	sharedShapeLabelFits.fit(e, cols, rows, canvas...)
+}
+
+func fitShapeLabelUncached(e *Element, cols, rows int, canvas ...sceneRect) {
+	if cols <= 0 || rows <= 0 {
+		return
+	}
 	label, ok := shapeLabel(*e)
 	if !ok {
 		return
 	}
 	q, _ := url.ParseQuery(e.Query)
 	w, h := shapeHalfCells(q, "width", 12), shapeHalfCells(q, "height", 6)
-	tw, th := shapeLabelSize(label, cols, rows)
-	if shapeLabelFits(shapeName(*e), w, h, tw*2, th*2) {
-		return
+	canvasWidth, canvasHeight := pptxCanvasDimensions(canvas)
+	tw, th := shapeLabelSize(label, cols, rows, canvas...)
+	nw, nh := w, h
+	if name := shapeName(*e); name == "square" || name == "circle" || name == "triangle" || name == "diamond" {
+		if shapeLabelFits(name, w, h, tw*2, th*2) {
+			return
+		}
+		nw, nh = fitShapeLabelDimensions(name, w, h, tw*2, th*2)
+	} else {
+		// Concave shapes cannot use the old convex-corner predicate. Their
+		// registered content region is authoritative and may be off-centre.
+		// Rounded regions depend on aspect ratio. Re-evaluate after growth so
+		// another layout/port pass cannot grow the same label again.
+		spec := shapeSpecFromValues(q)
+		settled := false
+		for attempt := 0; attempt < 32; attempt++ {
+			region := shapeGeometry(spec, (float64(nw)*canvasWidth/float64(cols))/(float64(nh)*canvasHeight/float64(rows))).TextRegion
+			if region.Width <= 0 || region.Height <= 0 {
+				return
+			}
+			nextW, nextH := max(nw, int(math.Ceil(float64(tw*2)/region.Width))), max(nh, int(math.Ceil(float64(th*2)/region.Height)))
+			if nextW > 2000 || nextH > 2000 {
+				return
+			}
+			if nextW == nw && nextH == nh {
+				settled = true
+				break
+			}
+			nw, nh = nextW, nextH
+		}
+		if !settled {
+			return
+		}
 	}
-	nw, nh := fitShapeLabelDimensions(shapeName(*e), w, h, tw*2, th*2)
 	if nw == w && nh == h {
 		return
 	}
@@ -233,19 +271,23 @@ func fitShapeLabel(e *Element, cols, rows int) {
 	e.Query = q.Encode()
 }
 
-func fitSlideShapeLabels(slide *Slide, cols, rows int) {
+func fitSlideShapeLabels(slide *Slide, cols, rows int, canvas ...sceneRect) {
+	physical := slide.physicalCanvas()
+	if len(canvas) > 0 {
+		physical = canvas[0]
+	}
 	for i := range slide.Elements {
-		fitShapeLabel(&slide.Elements[i], cols, rows)
+		fitShapeLabel(&slide.Elements[i], cols, rows, physical)
 	}
 }
 
-func shapeLabelLine(e Element, index, row, col, cols, rows int) (Line, bool) {
+func shapeLabelLine(e Element, index, row, col, cols, rows int, canvas ...sceneRect) (Line, bool) {
 	label, ok := shapeLabel(e)
 	if !ok {
 		return Line{}, false
 	}
 	q, _ := url.ParseQuery(e.Query)
-	w, h := shapeLabelSize(label, cols, rows)
+	w, h := shapeLabelSize(label, cols, rows, canvas...)
 	left := float64(col) + shapeSubcellOffset(q, "shape-offset-x") + (float64(shapeHalfCells(q, "width", 12))/2-float64(w))/2
 	top := float64(row) + shapeSubcellOffset(q, "shape-offset-y") + (float64(shapeHalfCells(q, "height", 6))/2-float64(h))/2
 	v, _ := url.ParseQuery(label.Query)

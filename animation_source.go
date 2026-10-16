@@ -54,7 +54,7 @@ func preflightGIFFrames(data []byte) error {
 			flags := data[pos+8]
 			pos += 9
 			frames++
-			if width*height*frames > 32_000_000 || frames > 10000 {
+			if width*height*frames > 32_000_000 || frames > 2048 {
 				return fmt.Errorf("animation exceeds the decoded frame limit")
 			}
 			if flags&128 != 0 && !skip(3*(1<<((flags&7)+1))) {

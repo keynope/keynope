@@ -24,32 +24,58 @@ func (s *nativeEditorSession) handleConnectorDraft(w http.ResponseWriter, r *htt
 		return
 	}
 	var request connectorDraftRequest
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 131072)).Decode(&request) != nil || len(request.Bounds) == 0 || len(request.Bounds) > 1000 {
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 131072)).Decode(&request) != nil || len(request.Bounds) == 0 || len(request.Bounds) > 1000 || len(request.Routes) > 1000 {
 		http.Error(w, "invalid connector draft", 400)
 		return
 	}
 	s.mu.RLock()
-	if request.Revision != s.version || request.Master != s.masterMode {
+	current := s.current
+	if s.masterMode {
+		current = s.currentMaster
+	}
+	if request.Revision != s.version || request.Master != s.masterMode || request.Slide != current {
 		s.mu.RUnlock()
 		http.Error(w, "document changed", 409)
 		return
 	}
-	deck := cloneDeckForScene(s.deck)
+	scope, scopeErr := captureSlideResolutionScope(s.deck, request.Slide, request.Master)
+	editingGroup := s.editingGroup
 	s.mu.RUnlock()
-	var slide Slide
-	if request.Master {
-		if request.Slide < 0 || request.Slide > len(deck.Masters.Layouts) {
-			http.Error(w, "invalid master", 400)
-			return
-		}
-		slide = masterViewPreview(deck.Masters, request.Slide)
-	} else {
-		if request.Slide < 0 || request.Slide >= len(deck.Slides) {
-			http.Error(w, "invalid slide", 400)
-			return
-		}
-		slide = deck.ResolveSlide(request.Slide, false)
+	if scopeErr != nil {
+		http.Error(w, "invalid slide scope", 400)
+		return
 	}
+	ids := make([]string, 0, len(request.Bounds))
+	for id := range request.Bounds {
+		ids = append(ids, id)
+	}
+	foundIDs := make(map[string]bool, len(ids))
+	for _, element := range scope.source.Elements {
+		if _, wanted := request.Bounds[element.ID]; wanted {
+			foundIDs[element.ID] = true
+		}
+	}
+	for _, id := range ids {
+		if !foundIDs[id] {
+			http.Error(w, "shape no longer exists", 404)
+			return
+		}
+	}
+	indices, targetErr := editableObjectIndices(scope.source, ids)
+	if targetErr != nil {
+		http.Error(w, targetErr.Error(), 400)
+		return
+	}
+	command := nativeEditorAction{Action: "update-elements", ElementIndices: indices}
+	for _, i := range indices {
+		command.ElementsData = append(command.ElementsData, scope.source.Elements[i])
+	}
+	if err := checkObjectLocks(scope.source, command, nil, editingGroup); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	deck := scope.deck
+	slide := deck.withThemeTypography(withTrueTypeDefaults(scope.resolved()))
 	cols, rows := authoredRenderSize(245, 56)
 	seen := 0
 	for i, e := range slide.Elements {
@@ -112,14 +138,16 @@ func (s *nativeEditorSession) handleConnectorDraft(w http.ResponseWriter, r *htt
 	if r.Context().Err() != nil {
 		return
 	}
-	lines := displayLines(slide, cols, rows, 0)
+	// Match the unified scene, not the legacy terminal pagination/rounding path.
+	fitSlideShapeLabels(&slide, cols, rows)
+	lines := layout(slide, cols, rows)
 	if r.Context().Err() != nil {
 		return
 	}
 	routes := slideShapeConnectors(slide, lines, cols, rows)
 	// Keep the Retro preview on the same semi-block painter as committed
 	// connectors. The client can retain Modern paint and replace only points.
-	// displayLines already includes the post-pagination connector raster.
+	// layout already includes the unified-scene connector raster.
 	// Reuse it rather than calculating ports, obstacles and paths again.
 	raster := lines
 	art := map[string][]exportLine{}
@@ -130,7 +158,18 @@ func (s *nativeEditorSession) handleConnectorDraft(w http.ResponseWriter, r *htt
 			art[e.ID] = retroObjectLines(deck, retroSlide, raster, index, cols, rows)
 		}
 	}
+	if r.Context().Err() != nil {
+		return
+	}
+	s.mu.RLock()
+	valid := request.Revision == s.version && request.Master == s.masterMode && ((s.masterMode && request.Slide == s.currentMaster) || (!s.masterMode && request.Slide == s.current))
+	s.mu.RUnlock()
+	if !valid {
+		http.Error(w, "document changed; draft discarded", 409)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(struct {
 		Revision int64                   `json:"revision"`
 		Routes   []shapeConnector        `json:"routes"`

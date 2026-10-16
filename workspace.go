@@ -10,3 +10,21 @@ var workspaceJS string
 
 //go:embed web/workspace.css
 var workspaceCSS string
+
+//go:embed web/conversion-report.js
+var conversionReportJS string
+
+//go:embed web/templates.js
+var templatesJS string
+
+//go:embed web/tables.js
+var tablesJS string
+
+//go:embed web/charts.js
+var chartsJS string
+
+//go:embed web/builds.js
+var buildsJS string
+
+//go:embed web/presentation-tools.js
+var presentationToolsJS string

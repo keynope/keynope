@@ -1,5 +1,34 @@
 /* Shared Mac/Web workspace. This module owns chrome, never document content. */
 globalThis.KeynopeWorkspace = (() => {
+  // Setting an unchanged DOM property can still rewrite its attribute/text
+  // nodes and notify observers. Keep retained chrome genuinely incremental.
+  function setChromeProperty(node,property,value) {
+    if(node[property]!==value)node[property]=value;
+  }
+  function applyScenePagePatches(pages,previous) {
+    return pages.map(page=>{
+      if(!page.scenePatch)return page;
+      const patch=page.scenePatch,old=previous.find(p=>p.slide===page.slide&&p.page===page.page)?.scene;
+      if(!old||patch.version!==1||!patch.slideId||old.slideId!==patch.slideId||!Array.isArray(patch.order)||patch.order.length>10000||!Array.isArray(patch.changed)||!Array.isArray(patch.removed))throw Error('Invalid workspace scene patch');
+      const objects=new Map();for(const object of old.objects){if(!object.id||objects.has(object.id))throw Error('Ambiguous workspace object');objects.set(object.id,object);}
+      const removed=new Set();for(const id of patch.removed){if(removed.has(id)||!objects.has(id))throw Error('Invalid workspace removal');removed.add(id);objects.delete(id);}
+      const changed=new Set();for(const object of patch.changed){if(!object?.id||changed.has(object.id)||removed.has(object.id))throw Error('Invalid workspace replacement');changed.add(object.id);objects.set(object.id,object);}
+      const order=new Set(patch.order);if(order.size!==patch.order.length||objects.size!==order.size||patch.order.some(id=>!objects.has(id)))throw Error('Incomplete workspace object order');
+      const metadata=patch.metadata||old;
+      if(metadata.version!==1||metadata.slideId!==patch.slideId||!Number.isFinite(metadata.width)||metadata.width<=0||!Number.isFinite(metadata.height)||metadata.height<=0)throw Error('Invalid workspace scene metadata');
+      const {scenePatch,...result}=page;
+      return {...result,scene:{...metadata,objects:patch.order.map(id=>objects.get(id))}};
+    });
+  }
+  function alignmentMoves(units, alignment, vertical, reference) {
+    const low=vertical?'minY':'minX',high=vertical?'maxY':'maxX';
+    const leading=vertical?'top':'left',trailing=vertical?'bottom':'right';
+    return units.map(unit=>{
+      const b=unit.bounds;
+      const delta=alignment===leading?reference[low]-b[low]:alignment===trailing?reference[high]-b[high]:(reference[low]+reference[high]-b[low]-b[high])/2;
+      return {id:unit.id,dx:vertical?0:delta,dy:vertical?delta:0};
+    });
+  }
   function connectorIndex(ports,routes) {
     const byShape=new Map(),byRoute=new Map();
     for(const port of ports){
@@ -9,11 +38,16 @@ globalThis.KeynopeWorkspace = (() => {
     for(const route of routes)if(!byRoute.has(route.id))byRoute.set(route.id,route);
     return {port:(id,side)=>byShape.get(id)?.get(side),route:id=>byRoute.get(id)};
   }
-  function clampMove(boxes,dx,dy,cols,rows,step=1) {
+  function cellAspect(cols,rows,canvas) {
+    const width=canvas?.width??1920,height=canvas?.height??1080;
+    if(![width,height,cols,rows].every(Number.isFinite)||width<=0||height<=0||cols<=0||rows<=0)throw Error('Invalid physical canvas geometry.');
+    return (height/rows)/(width/cols);
+  }
+  function clampMove(boxes,dx,dy,cols,rows,step=1,canvas) {
     if(!boxes.length)return {dx:0,dy:0};
     // Include local bounds because legacy placement still requires a local
-    // origin on the slide. Every member receives the same whole-cell delta.
-    const extents=boxes.flatMap(b=>[b,visualBounds(b,cols,rows)]);
+    // origin on the slide. Every member receives the same captured delta.
+    const extents=boxes.flatMap(b=>[b,visualBounds(b,cols,rows,canvas)]);
     const axis=(delta,lo,hi,limit)=>{
       const start=Math.min(...extents.map(b=>b[lo])),end=Math.max(...extents.map(b=>b[hi]));
       const lower=Math.min(0,step?Math.ceil((-start-1e-9)/step)*step:-start),upper=Math.max(0,step?Math.floor((limit-end+1e-9)/step)*step:limit-end);
@@ -21,9 +55,9 @@ globalThis.KeynopeWorkspace = (() => {
     };
     return {dx:axis(dx,'minX','maxX',cols),dy:axis(dy,'minY','maxY',rows)};
   }
-  function visualBounds(b,cols,rows) {
+  function visualBounds(b,cols,rows,canvas) {
     if(!b.rotation)return {minX:b.minX,minY:b.minY,maxX:b.maxX,maxY:b.maxY};
-    const angle=b.rotation*Math.PI/180,aspect=(1080/rows)/(1920/cols);
+    const angle=b.rotation*Math.PI/180,aspect=cellAspect(cols,rows,canvas);
     const width=b.maxX-b.minX,height=b.maxY-b.minY;
     const w=Math.abs(Math.cos(angle))*width+Math.abs(Math.sin(angle))*height*aspect;
     const h=Math.abs(Math.sin(angle))*width/aspect+Math.abs(Math.cos(angle))*height;
@@ -33,7 +67,7 @@ globalThis.KeynopeWorkspace = (() => {
   // Rigid rotation in physical slide space, not the non-square cell grid.
   // Return local boxes plus angles; never resize contents or round positions.
   // The caller keeps the pivot throughout a gesture (and its inverse/undo).
-  function rotateSelection(items,degrees,cols,rows,pivot) {
+  function rotateSelection(items,degrees,cols,rows,pivot,canvas) {
     if(!Number.isFinite(degrees)||!Number.isFinite(cols)||!Number.isFinite(rows)||cols<=0||rows<=0)throw Error('Invalid rotation geometry.');
     if(!items.length)return {pivot:pivot||null,items:[]};
     for(const item of items){
@@ -41,11 +75,11 @@ globalThis.KeynopeWorkspace = (() => {
       if(!b||![b.minX,b.minY,b.maxX,b.maxY,b.rotation||0].every(Number.isFinite)||b.maxX<b.minX||b.maxY<b.minY)throw Error('Selection has invalid bounds.');
     }
     if(!pivot){
-      const boxes=items.map(item=>visualBounds(item.bounds,cols,rows));
+      const boxes=items.map(item=>visualBounds(item.bounds,cols,rows,canvas));
       pivot={x:(Math.min(...boxes.map(b=>b.minX))+Math.max(...boxes.map(b=>b.maxX)))/2,y:(Math.min(...boxes.map(b=>b.minY))+Math.max(...boxes.map(b=>b.maxY)))/2};
     }
     if(!Number.isFinite(pivot.x)||!Number.isFinite(pivot.y))throw Error('Invalid rotation pivot.');
-    const aspect=(1080/rows)/(1920/cols),angle=degrees*Math.PI/180,c=Math.cos(angle),s=Math.sin(angle);
+    const aspect=cellAspect(cols,rows,canvas),angle=degrees*Math.PI/180,c=Math.cos(angle),s=Math.sin(angle);
     return {pivot:{...pivot},items:items.map(item=>{
       const b=item.bounds,w=b.maxX-b.minX,h=b.maxY-b.minY;
       const x=(b.minX+b.maxX)/2-pivot.x,y=((b.minY+b.maxY)/2-pivot.y)*aspect;
@@ -57,10 +91,10 @@ globalThis.KeynopeWorkspace = (() => {
   // rotated rectangles rectangular (nonuniform world scaling would shear
   // them). Text metrics and crop coordinates belong to the caller's content,
   // not this geometry operation. Keep the pivot for an entire gesture.
-  function resizeSelection(items,factor,cols,rows,pivot) {
+  function resizeSelection(items,factor,cols,rows,pivot,canvas) {
     if(!Number.isFinite(factor)||factor<=0)throw Error('Invalid group scale.');
     // Reuse rotation's validation and default visual-union pivot.
-    const validated=rotateSelection(items,0,cols,rows,pivot);
+    const validated=rotateSelection(items,0,cols,rows,pivot,canvas);
     if(!items.length)return validated;
     const anchor=validated.pivot;
     return {pivot:anchor,items:items.map(item=>{
@@ -77,15 +111,15 @@ globalThis.KeynopeWorkspace = (() => {
   // Attached connectors derive their outer geometry from their shapes. Only
   // user-positioned elbow tracks are authored coordinates to scale; stroke
   // and arrow widths are paint and must remain unchanged.
-  function resizeConnectedSelection(items,factor,cols,rows,pivot) {
+  function resizeConnectedSelection(items,factor,cols,rows,pivot,canvas) {
     const members=items.filter(item=>item.element?.kind!=='connector');
-    const ids=new Set(members.map(item=>item.element?.id));
+    const ids=new Set(members.filter(item=>item.element?.kind==='shape').map(item=>item.element.id));
     const connectors=items.filter(item=>item.element?.kind==='connector');
     for(const item of connectors){
       const q=new URLSearchParams(item.element.query||'');
       if(!ids.has(q.get('connector-from'))||!ids.has(q.get('connector-to')))throw Error('Select both attached shapes to resize this connector.');
     }
-    const resized=resizeSelection(members,factor,cols,rows,pivot);
+    const resized=resizeSelection(members,factor,cols,rows,pivot,canvas);
     const attached=connectors.map(item=>{
       const q=new URLSearchParams(item.element.query||''),raw=q.get('connector-route');
       if(!raw)return {...item};
@@ -179,13 +213,58 @@ globalThis.KeynopeWorkspace = (() => {
     panel.addEventListener('keydown',keydown);
     return ()=>panel.removeEventListener('keydown',keydown);
   }
+  // Pointer movement is continuous in slide coordinates. Only the initial
+  // screen-space dead zone distinguishes a click from a drag; once engaged,
+  // returning near the origin must not create a discontinuity.
+  function pointerMove(dx,dy,width,height,cols,rows,engaged=false) {
+    if(![dx,dy,width,height,cols,rows].every(Number.isFinite)||width<=0||height<=0||cols<=0||rows<=0)return {dx:0,dy:0,engaged:false};
+    engaged=engaged||Math.hypot(dx,dy)>=3;
+    return {dx:engaged?dx*cols/width:0,dy:engaged?dy*rows/height:0,engaged};
+  }
+  // Capture group membership and editable boxes once per marquee gesture.
+  // A collapsed group's empty union space is not a selectable member.
+  function marqueeSelectionUnits(elements,bounds,indices,editingGroup='') {
+    const queries=elements.map(element=>new URLSearchParams(element.query||'')),groups=new Map();
+    queries.forEach((q,index)=>{const id=q.get('group');if(id){if(!groups.has(id))groups.set(id,[]);groups.get(id).push(index);}});
+    return indices.flatMap(index=>{
+      const q=queries[index];if(!q)return [];
+      const group=q.get('group'),members=group&&group!==editingGroup?groups.get(group):[index];
+      const boxes=members.filter(i=>queries[i].get('object-hidden')!=='1'&&queries[i].get('object-locked')!=='1'&&bounds.has(i)).map(i=>({...bounds.get(i)}));
+      return boxes.length?[{index,members:[...members],boxes}]:[];
+    });
+  }
+  // Separating-axis test in physical space. Cell height and width need not
+  // match; using logical-grid rotation would distort diagonal hit geometry.
+  function boxIntersectsRect(box,area,aspect=1) {
+    if(!box||!area||![box.minX,box.minY,box.maxX,box.maxY,box.rotation||0,area.minX,area.minY,area.maxX,area.maxY,aspect].every(Number.isFinite)||aspect<=0)return false;
+    if(box.maxX<=box.minX||box.maxY<=box.minY||area.maxX<=area.minX||area.maxY<=area.minY)return false;
+    const angle=(box.rotation||0)*Math.PI/180,c=Math.cos(angle),s=Math.sin(angle);
+    const w=(box.maxX-box.minX)/2,h=(box.maxY-box.minY)*aspect/2;
+    const rw=(area.maxX-area.minX)/2,rh=(area.maxY-area.minY)*aspect/2;
+    const dx=(box.minX+box.maxX-area.minX-area.maxX)/2,dy=(box.minY+box.maxY-area.minY-area.maxY)*aspect/2;
+    for(const [x,y] of [[1,0],[0,1],[c,s],[-s,c]]){
+      const radius=w*Math.abs(x*c+y*s)+h*Math.abs(-x*s+y*c)+rw*Math.abs(x)+rh*Math.abs(y);
+      if(Math.abs(dx*x+dy*y)>=radius-1e-10)return false;
+    }
+    return true;
+  }
+  function marqueeCandidates(units,area,aspect,initial=[]) {
+    const result=new Set(initial);
+    for(const unit of units)if(unit.boxes.some(box=>boxIntersectsRect(box,area,aspect)))for(const index of unit.members)result.add(index);
+    return result;
+  }
+  function sameLayerContext(a,b) {
+    if(!a||!b)return !a&&!b;
+    return ['epoch','owner','slide','master','group','mutationRevision'].every(key=>a[key]===b[key]);
+  }
   function snapMove(bounds,targets,dx,dy,toleranceX,toleranceY,step=1) {
     const result={dx,dy,guides:[]};
+    const quantize=value=>step>0?Math.round(value/step)*step:value;
     for(const [axis,lo,hi,delta,tolerance] of [['x','minX','maxX',dx,toleranceX],['y','minY','maxY',dy,toleranceY]]){
       const anchors=[bounds[lo],(bounds[lo]+bounds[hi])/2,bounds[hi]];
       let best=null;
       for(const target of targets)for(const at of [target[lo],(target[lo]+target[hi])/2,target[hi]])for(const anchor of anchors){
-        const correction=at-anchor-delta,snapped=Math.round((at-anchor)/step)*step;
+        const correction=at-anchor-delta,snapped=quantize(at-anchor);
         if(Math.abs(anchor+snapped-at)>0.00001||Math.abs(correction)>tolerance)continue;
         if(!best||Math.abs(correction)<best.distance)best={distance:Math.abs(correction),delta:snapped,at};
       }
@@ -197,7 +276,7 @@ globalThis.KeynopeWorkspace = (() => {
       const after=peers.filter(t=>t[lo]>=bounds[hi]+delta-tolerance).sort((a,b)=>a[lo]-b[lo])[0];
       if(before&&after&&before!==after){
         const width=bounds[hi]-bounds[lo],gap=(after[lo]-before[hi]-width)/2;
-        const desired=before[hi]+gap-bounds[lo],snapped=Math.round(desired/step)*step,distance=Math.abs(desired-delta);
+        const desired=before[hi]+gap-bounds[lo],snapped=quantize(desired),distance=Math.abs(desired-delta);
         if(gap>0&&distance<=tolerance&&Math.abs(desired-snapped)<.00001&&(!best||distance<best.distance)){
           best={delta:snapped,distance,spacing:true,segments:[[before[hi],before[hi]+gap],[after[lo]-gap,after[lo]]],cross:(bounds[crossLo]+bounds[crossHi])/2+crossDelta};
         }
@@ -236,18 +315,19 @@ globalThis.KeynopeWorkspace = (() => {
   function thumbnails(panel,paint,keyForIndex=()=>null) {
     let disposed=false;
     const entries=new Map();
-    function clear(host,entry){entry.token++;entry.loading=false;entry.cleanup?.();entry.cleanup=null;host.replaceChildren();}
+    function busy(host,entry,value){entry.loading=value;host.setAttribute('aria-busy',String(value));}
+    function clear(host,entry){entry.token++;busy(host,entry,false);entry.cleanup?.();entry.cleanup=null;host.replaceChildren();}
     function render(host,entry){
       if(disposed||!entry.visible||entry.loading||entry.cleanup)return;
-      const token=++entry.token;entry.loading=true;
+      const token=++entry.token;busy(host,entry,true);
       // Give each asynchronous paint its own surface. A superseded paint can
       // finish, but cannot insert stale nodes into the current preview.
       const surface=document.createElement('div');surface.style.cssText='position:absolute;inset:0';host.replaceChildren(surface);
       Promise.resolve().then(()=>paint(surface,entry.index)).then(cleanup=>{
         if(disposed||token!==entry.token){cleanup?.();surface.remove();return;}
-        entry.loading=false;entry.cleanup=()=>{cleanup?.();surface.remove();};
+        busy(host,entry,false);entry.cleanup=()=>{cleanup?.();surface.remove();};
         entry.cleanup.update=cleanup?.update;
-      }).catch(()=>{if(!disposed&&token===entry.token){entry.loading=false;surface.textContent='Preview unavailable';}});
+      }).catch(()=>{if(!disposed&&token===entry.token){busy(host,entry,false);surface.textContent='Preview unavailable';}});
     }
     const observer=new IntersectionObserver(changes=>{
       for(const change of changes){const entry=entries.get(change.target);if(!entry)continue;
@@ -259,16 +339,32 @@ globalThis.KeynopeWorkspace = (() => {
     return {
       add(button,index){const host=document.createElement('div');host.className='keynope-slide-thumbnail';host.setAttribute('aria-hidden','true');button.prepend(host);entries.set(host,{index,key:keyForIndex(index),visible:false,token:0,loading:false,cleanup:null});observer.observe(host);},
       update(nextPaint,nextKey,updateRetained){paint=nextPaint;keyForIndex=nextKey;for(const [host,entry] of entries){const key=keyForIndex(entry.index);if(key===entry.key)continue;entry.key=key;
-        // Only completed visible previews can be updated synchronously. Pending
-        // paints keep token isolation; hidden previews keep no scene resources.
+        // Retain compatible visible previews while an asynchronous master
+        // request is pending. The guarded updater cannot paint a stale result.
+        // Hidden previews retain no scene resources; pending initial paints
+        // still have their own isolated surface and cleanup.
         if(entry.visible&&!entry.loading&&entry.cleanup?.update){
-          try{if(updateRetained?.(entry.cleanup.update,entry.index)===true)continue;}catch(_error){}
+          const token=++entry.token,cleanup=entry.cleanup;
+          const current=()=>!disposed&&entry.visible&&entry.token===token&&entry.cleanup===cleanup;
+          const update=(...args)=>current()&&cleanup.update(...args);
+          try{
+            const result=updateRetained?.(update,entry.index);
+            if(result===true)continue;
+            if(result&&typeof result.then==='function'){
+              busy(host,entry,true);
+              Promise.resolve(result).then(retained=>{
+                if(!current())return;busy(host,entry,false);
+                if(retained!==true){clear(host,entry);render(host,entry);}
+              }).catch(()=>{if(current()){clear(host,entry);render(host,entry);}});
+              continue;
+            }
+          }catch(_error){}
         }
         clear(host,entry);render(host,entry);}},
       dispose(){disposed=true;observer.disconnect();for(const [host,entry] of entries)clear(host,entry);entries.clear();}
     };
   }
-  function mount({topbar, header, quick, tabs, main, selection, panels, addSlide, resize, canUseSlidePresets, appearance, objects,selectObject,setObjectOpacity,moveObjectLayer,setObjectVisibility,setObjectLock,groupScope,groupAction,setTheme,addPreset,setImageDescription}) {
+  function mount({topbar, header, quick, tabs, main, selection, panels, addSlide, resize, canUseSlidePresets, appearance, selectionCapabilities, selectionPaintTarget, setSelectionPaint, objects,selectObject,setObjectOpacity,moveObjectLayer,setObjectVisibility,setObjectLock,setObjectName,groupScope,groupAction,setTheme,getTheme,themePresets,setDeckTheme,themeDraftContext,hasDeckTheme,detachDeckTheme,pickColor,addPreset,setImageDescription,editBuilds}) {
     const root = document.documentElement;
     root.dataset.keynopeWorkspace = 'inspector';
     const toolbar = document.createElement('div');
@@ -295,17 +391,118 @@ globalThis.KeynopeWorkspace = (() => {
     const opacityLabel=document.createElement('label'),opacityInput=document.createElement('input');opacityLabel.textContent='Opacity (%) ';opacityInput.type='number';opacityInput.min='0';opacityInput.max='100';opacityInput.step='1';opacityInput.setAttribute('aria-label','Object opacity');opacityInput.style.width='75px';opacityLabel.append(opacityInput);inspector.insertBefore(opacityLabel,selection);let savingOpacity=false;
     opacityInput.addEventListener('keydown',event=>event.stopPropagation());
     opacityInput.onchange=async()=>{if(!opacityInput.checkValidity()||opacityInput.value===''){opacityInput.reportValidity();return;}savingOpacity=true;opacityInput.disabled=true;try{await setObjectOpacity(Number(opacityInput.value)/100);}catch(error){hint.textContent=error.message||'Could not change opacity';}finally{savingOpacity=false;refresh();}};
+    // Keep shared controls outside the contextual panel: renderEditorTopbar
+    // replaces that panel's children when the authored selection changes.
+    const paintPanel=document.createElement('section');paintPanel.className='keynope-selection-paint';paintPanel.setAttribute('aria-label','Selection paint');inspector.insertBefore(paintPanel,selection);
+    const paintError=document.createElement('p');paintError.className='keynope-theme-error';paintError.setAttribute('role','alert');paintError.hidden=true;
+    let savingPaint=false,paintOwnerKey='';
+    const paintFields=[];
+    const paintSection=(label,collapsible=false)=>{const node=document.createElement(collapsible?'details':'fieldset'),heading=document.createElement(collapsible?'summary':'legend');heading.textContent=label;node.append(heading);paintPanel.append(node);return node;};
+    const basePaint=paintSection('Paint'),strokePaint=paintSection('Shape stroke'),linePaint=paintSection('Lines'),gradientPaint=paintSection('Gradient',true),shadowPaint=paintSection('Shadow',true);
+    async function commitPaint(property,value,target=selectionPaintTarget?.()){
+      if(savingPaint||!target?.targetIds?.length)return;
+      savingPaint=true;paintError.hidden=true;refresh();
+      try{await setSelectionPaint(property,value,target);}
+      catch(error){const current=selectionPaintTarget?.();if(target.epoch===current?.epoch&&target.owner===current?.owner){paintError.textContent=error.message||'Could not change paint';paintError.hidden=false;}}
+      finally{savingPaint=false;refresh();}
+    }
+    function paintField(parent,property,label,type,choices){
+      const row=document.createElement('label'),name=document.createElement('span'),subset=document.createElement('small');row.className='keynope-paint-field';name.textContent=property.startsWith('label.')?label.replace(/^Label /,''):label;name.append(subset);row.append(name);
+      if(property==='label.font')row.classList.add('keynope-label-font-field');
+      if(property==='line.path'||property==='line.arrows'||property==='line.routing')row.classList.add('keynope-line-choice-field');
+      if(['paint.colorToken','paint.strokeToken','label.colorToken'].includes(property))row.classList.add('keynope-paint-role-field');
+      if(property==='paint.strokeColor')row.classList.add('keynope-paint-field-stroke');
+      const control=document.createElement(type==='color'?'button':type==='select'?'select':'input');control.dataset.selectionProperty=property;control.setAttribute('aria-label','Selection '+label.toLowerCase());
+      if(type==='color'){
+        control.type='button';control.className='keynope-paint-color';
+        control.onclick=()=>{const state=selectionCapabilities?.()?.properties?.[property],target=selectionPaintTarget?.();if(!state?.editable||savingPaint)return;pickColor?.(control,state.state==='value'&&String(state.value).startsWith('#')?state.value:'#ffffff',value=>commitPaint(property,value,target));};
+      }else if(type==='select'){
+        for(const [value,title]of choices)control.add(new Option(title,value));
+        const mixed=new Option('Mixed','mixed');mixed.disabled=true;control.add(mixed);
+        control.onchange=()=>commitPaint(property,['label.bold','label.italic','label.underline'].includes(property)?control.value==='true':control.value);
+      }else{
+        control.type='number';control.min='-4';control.max='4';control.step='1';control.required=true;
+        if(property==='paint.strokeWidth'){control.min='0';control.max='64';control.step='.25';}
+        const ranges={'line.width':[1,8,.5],'line.arrowWidth':[.5,20,.5],'label.size':[1,512,1],'label.width':[1,200,1],'label.lineHeight':[.5,4,.05],'label.paragraphBefore':[0,4,.05],'label.paragraphAfter':[0,4,.05]};
+        if(ranges[property]){const [min,max,step]=ranges[property];control.min=min;control.max=max;control.step=step;}
+        control.onchange=()=>{if(control.value===''||!control.reportValidity())return;commitPaint(property,Number(control.value));};
+      }
+      control.addEventListener('keydown',event=>event.stopPropagation());row.append(control);
+      let inherit=null;
+      if(type==='color'||property==='paint.strokeWidth'||property.startsWith('line.')||['label.size','label.width','label.align','label.vertical','label.lineHeight','label.paragraphBefore','label.paragraphAfter'].includes(property)){
+        inherit=document.createElement('button');inherit.type='button';inherit.className='keynope-paint-inherit';inherit.textContent='↶';inherit.setAttribute('aria-label','Inherit '+label.toLowerCase());inherit.title='Use inherited '+label.toLowerCase();inherit.onclick=()=>commitPaint(property,'');row.append(inherit);
+      }
+      let off=null;
+      if(property==='paint.strokeColor'){off=document.createElement('button');off.type='button';off.textContent='Off';off.setAttribute('aria-label','Turn shape stroke off');off.onclick=()=>commitPaint(property,'none');row.append(off);}
+      parent.append(row);paintFields.push({row,name,subset,control,inherit,off,property,type});
+    }
+    paintField(basePaint,'paint.color','Base colour','color');
+    paintField(linePaint,'line.path','Line path','select',[['','Inherit'],['straight','Straight'],['elbow','Elbow']]);
+    paintField(linePaint,'line.arrows','Arrowheads','select',[['','Inherit'],['none','None'],['start','Start'],['end','End'],['both','Both ends']]);
+    paintField(linePaint,'line.width','Line width','number');
+    paintField(linePaint,'line.arrowWidth','Arrow width','number');
+    paintField(linePaint,'line.routing','Routing','select',[['','Inherit'],['automatic','Automatic'],['manual','Manual bends']]);
+    paintFields.find(field=>field.property==='line.routing').control.querySelector('[value="manual"]').disabled=true;
+    paintField(basePaint,'paint.fill','Shape fill','select',[['','Inherit'],['solid','Colour / gradient'],['none','No fill']]);
+    const themeColourChoices=[['','Inherit'],['custom','Custom colour'],['text','Text'],['heading','Heading'],['background','Background'],['surface','Surface'],['muted','Muted'],['line','Line'],...Array.from({length:6},(_,i)=>['accent-'+(i+1),'Accent '+(i+1)])];
+    paintField(basePaint,'paint.colorToken','Theme colour','select',themeColourChoices);
+    const themeColourField=paintFields.find(field=>field.property==='paint.colorToken');
+    themeColourField.control.querySelector('[value="custom"]').disabled=true;
+    paintField(basePaint,'paint.outline','Outline','select',[['','Inherit'],['none','Off'],['dark','Dark'],['light','Light'],['theme','Inherited stroke'],['custom','Custom stroke']]);
+    paintField(strokePaint,'paint.strokeColor','Stroke colour','color');paintField(strokePaint,'paint.strokeWidth','Stroke width','number');
+    paintField(strokePaint,'paint.strokeToken','Stroke theme colour','select',themeColourChoices);
+    paintFields.find(field=>field.property==='paint.strokeToken').control.querySelector('[value="custom"]').disabled=true;
+    paintField(gradientPaint,'paint.gradientDirection','Gradient direction','select',[['','Inherit'],['none','Off'],['horizontal','Horizontal'],['vertical','Vertical'],['diagonal','Diagonal']]);
+    paintField(gradientPaint,'paint.gradientStart','Gradient start','color');paintField(gradientPaint,'paint.gradientEnd','Gradient end','color');
+    paintField(shadowPaint,'paint.shadow','Shadow mode','select',[['','Inherit'],['none','Off'],['soft','Soft'],['solid','Solid']]);
+    paintField(shadowPaint,'paint.shadowColor','Shadow colour','color');paintField(shadowPaint,'paint.shadowX','Shadow x','number');paintField(shadowPaint,'paint.shadowY','Shadow y','number');
+    // Resolved theme or detached defaults are inherited strokes, not an
+    // authored preset. Choose Inherit to restore one, or Off to override it.
+    paintFields.find(field=>field.property==='paint.outline').control.querySelector('option[value="theme"]').disabled=true;
+    paintFields.find(field=>field.property==='paint.outline').control.querySelector('option[value="custom"]').disabled=true;
+    paintPanel.append(paintError);
+    const labelPaint=paintSection('Shape labels',true);labelPaint.dataset.selectionContext='shape-label';
+    paintField(labelPaint,'label.font','Label font','select',[['theme','Inherit font'],['c64','Keynope C64'],['sans','Go — proportional'],['mono','Go Mono']]);
+    paintField(labelPaint,'label.size','Label size','number');paintField(labelPaint,'label.width','Label width','number');
+    for(const name of ['bold','italic','underline'])paintField(labelPaint,'label.'+name,'Label '+name,'select',[['false','Off'],['true','On']]);
+    paintField(labelPaint,'label.align','Label alignment','select',[['left','Left'],['center','Centre'],['right','Right'],['justify','Justify']]);
+    paintField(labelPaint,'label.vertical','Label vertical alignment','select',[['top','Top'],['middle','Middle'],['bottom','Bottom']]);
+    paintField(labelPaint,'label.lineHeight','Label line height','number');
+    paintField(labelPaint,'label.paragraphBefore','Label space before (em)','number');paintField(labelPaint,'label.paragraphAfter','Label space after (em)','number');
+    paintField(labelPaint,'label.color','Label colour','color');paintField(labelPaint,'label.colorToken','Label theme colour','select',themeColourChoices);
+    paintFields.find(field=>field.property==='label.colorToken').control.querySelector('[value="custom"]').disabled=true;
+    paintField(labelPaint,'label.outline','Label outline','select',[['','Inherit'],['none','Off'],['dark','Dark'],['light','Light']]);
+    paintField(labelPaint,'label.gradientDirection','Label gradient','select',[['','Inherit'],['none','Off'],['horizontal','Horizontal'],['vertical','Vertical'],['diagonal','Diagonal']]);
+    paintField(labelPaint,'label.gradientStart','Label gradient start','color');paintField(labelPaint,'label.gradientEnd','Label gradient end','color');
+    paintField(labelPaint,'label.shadow','Label shadow','select',[['','Inherit'],['none','Off'],['soft','Soft'],['solid','Solid']]);paintField(labelPaint,'label.shadowColor','Label shadow colour','color');
+    paintField(labelPaint,'label.shadowX','Label shadow x','number');paintField(labelPaint,'label.shadowY','Label shadow y','number');
     const imageDescription=document.createElement('form'),descriptionLabel=document.createElement('label'),descriptionInput=document.createElement('textarea'),decorativeLabel=document.createElement('label'),decorativeInput=document.createElement('input'),descriptionSave=document.createElement('button');
     imageDescription.className='keynope-image-description';descriptionLabel.textContent='Image description';descriptionInput.setAttribute('aria-label','Image description');descriptionInput.maxLength=1000;descriptionInput.rows=3;descriptionLabel.append(descriptionInput);
     decorativeInput.type='checkbox';decorativeLabel.append(decorativeInput,document.createTextNode(' Decorative image'));descriptionSave.type='submit';descriptionSave.textContent='Apply description';imageDescription.append(descriptionLabel,decorativeLabel,descriptionSave);inspector.insertBefore(imageDescription,selection);
-    let descriptionTarget='',savingDescription=false;
-    decorativeInput.onchange=()=>descriptionInput.disabled=decorativeInput.checked;
+    const descriptionReset=document.createElement('button');descriptionReset.type='button';descriptionReset.textContent='Reset description';descriptionReset.setAttribute('aria-label','Reset image description draft');imageDescription.append(descriptionReset);
+    const descriptionError=document.createElement('p');descriptionError.setAttribute('role','alert');descriptionError.hidden=true;imageDescription.append(descriptionError);
+    let descriptionTarget='',descriptionOwner='',descriptionCapture=null,descriptionDirty=false,savingDescription=false;
+    const editDescription=()=>{descriptionDirty=true;descriptionReset.disabled=savingDescription;descriptionError.hidden=true;};
+    descriptionInput.addEventListener('input',editDescription);
+    decorativeInput.onchange=()=>{descriptionInput.disabled=decorativeInput.checked;editDescription();};
+    descriptionReset.onclick=()=>{if(savingDescription)return;descriptionDirty=false;descriptionCapture=null;descriptionError.hidden=true;refresh();};
     imageDescription.addEventListener('keydown',event=>event.stopPropagation());
-    imageDescription.onsubmit=async event=>{event.preventDefault();if(!descriptionTarget||savingDescription||!imageDescription.reportValidity())return;const id=descriptionTarget,description=descriptionInput.value,decorative=decorativeInput.checked;savingDescription=true;refresh();try{await setImageDescription(id,description,decorative);}catch(error){hint.textContent=error.message||'Could not save image description';}finally{savingDescription=false;refresh();}};
+    imageDescription.onsubmit=async event=>{event.preventDefault();if(!descriptionTarget||savingDescription||!imageDescription.reportValidity())return;const id=descriptionTarget,description=descriptionInput.value,decorative=decorativeInput.checked,capture=descriptionCapture,owner=descriptionOwner;savingDescription=true;descriptionError.hidden=true;refresh();try{await setImageDescription(id,description,decorative,capture);descriptionDirty=false;descriptionCapture=null;}catch(error){if(owner===descriptionOwner){descriptionError.textContent=error.message||'Could not save image description';descriptionError.hidden=false;}}finally{savingDescription=false;refresh();}};
     const objectPanel=document.createElement('div');objectPanel.id='keynope-object-navigator';objectPanel.className='keynope-object-navigator';objectPanel.setAttribute('role','tabpanel');
     panels={...panels,objects:objectPanel};inspector.append(objectPanel);
     const layerControls=document.createElement('div');inspector.insertBefore(layerControls,objectPanel);
     let movingLayer=false;
+    const renameButton=document.createElement('button');renameButton.type='button';renameButton.textContent='Rename object';renameButton.hidden=!setObjectName;layerControls.append(renameButton);
+    const renameForm=document.createElement('form');renameForm.hidden=true;renameForm.className='keynope-object-rename';
+    const renameLabel=document.createElement('label'),renameInput=document.createElement('input'),renameSave=document.createElement('button'),renameCancel=document.createElement('button'),renameError=document.createElement('div');
+    renameLabel.textContent='Object name';renameInput.type='text';renameInput.maxLength=128;renameInput.setAttribute('aria-label','Object name');renameLabel.append(renameInput);
+    renameSave.type='submit';renameSave.textContent='Save name';renameCancel.type='button';renameCancel.textContent='Cancel rename';renameError.setAttribute('role','status');renameForm.append(renameLabel,renameSave,renameCancel,renameError);inspector.insertBefore(renameForm,objectPanel);
+    let naming=null,savingName=false;
+    const closeRename=()=>{const id=naming?.id;naming=null;renameForm.hidden=true;renameError.textContent='';if(id)objectNodes.get(id)?.focus();};
+    async function beginRename(item){if(!setObjectName||!item||item.locked||editing||movingLayer||savingName)return;await selectObject(item.id,false);naming={id:item.id,capture:selectionPaintTarget?.()};renameInput.value=item.name||'';renameError.textContent='';renameForm.hidden=false;renameInput.focus();renameInput.select();}
+    renameButton.onclick=()=>beginRename((objects?.()||[]).find(item=>item.selected)).catch(error=>hint.textContent=error.message);
+    renameCancel.onclick=closeRename;renameForm.addEventListener('keydown',event=>{event.stopPropagation();if(event.key==='Escape'){event.preventDefault();if(!savingName)closeRename();}});
+    renameForm.onsubmit=async event=>{event.preventDefault();if(!naming||savingName||!renameForm.reportValidity())return;savingName=true;renameSave.disabled=renameCancel.disabled=renameInput.disabled=true;try{await setObjectName(naming.id,renameInput.value,naming.capture);closeRename();}catch(error){renameError.textContent=error.message||'Could not rename object';}finally{savingName=false;renameSave.disabled=renameCancel.disabled=renameInput.disabled=false;}};
     const visibility=document.createElement('button');visibility.type='button';layerControls.append(visibility);
     const lock=document.createElement('button');lock.type='button';layerControls.append(lock);
     const groupButtons=[['group-elements','Group','Alt+Meta+G'],['ungroup-elements','Ungroup','Shift+Alt+Meta+G'],['enter-group','Edit group','Alt+Meta+Enter']].map(([action,label,shortcut])=>{const button=document.createElement('button');button.type='button';button.textContent=label;button.title=label+' · '+shortcut.replaceAll('Meta','⌘').replaceAll('Alt','⌥');button.setAttribute('aria-keyshortcuts',shortcut);button.onclick=()=>performGroupAction(action);layerControls.append(button);return button;});
@@ -323,30 +520,49 @@ globalThis.KeynopeWorkspace = (() => {
     const layerStatus=document.createElement('p');layerStatus.setAttribute('role','status');layerStatus.setAttribute('aria-live','polite');layerStatus.className='keynope-workspace-hint';layerControls.append(layerStatus);
     let objectDrag=null,suppressObjectClick=false;
     const clearObjectDrop=()=>{for(const button of objectPanel.children){button.classList.remove('layer-dragging','layer-drop-before','layer-drop-after');}};
-    async function reorderObject(id,value,target,side){
+    const cancelObjectDrag=message=>{
+      const drag=objectDrag;if(!drag)return;objectDrag=null;
+      if(drag.active)suppressObjectClick=true;
+      clearObjectDrop();
+      const button=objectNodes.get(drag.key);if(button?.hasPointerCapture(drag.id))button.releasePointerCapture(drag.id);
+      if(message)layerStatus.textContent=message;
+    };
+    const cancelLayerKey=event=>{if(objectDrag&&event.key==='Escape'){event.preventDefault();event.stopImmediatePropagation();cancelObjectDrag('Layer reorder cancelled.');}};
+    const blurLayerDrag=()=>cancelObjectDrag('Layer reorder cancelled.');
+    // Register before the editor's canvas shortcuts. A listener installed only
+    // on pointerdown can lose Escape to an older capture-phase shortcut.
+    window.addEventListener('keydown',cancelLayerKey,true);window.addEventListener('blur',blurLayerDrag);
+    const canReorderObject=id=>{const all=objects?.()||[],item=all.find(item=>item.id===id);return item&&!item.locked&&(!item.group||item.group===groupScope?.()||!all.some(peer=>peer.group===item.group&&peer.locked));};
+    async function reorderObject(id,value,target,side,capture=selectionPaintTarget?.()){
       if(editing||movingLayer||!moveObjectLayer)return;
+      if(!sameLayerContext(capture,selectionPaintTarget?.())){layerStatus.textContent='The object list changed; reorder cancelled.';return;}
+      if(!canReorderObject(id)){layerStatus.textContent='Unlock the object or its group before reordering.';return;}
       movingLayer=true;refresh();
-      try{await moveObjectLayer(id,value,target,side);layerStatus.textContent='Object stack updated.';}
+      try{await moveObjectLayer(id,value,target,side,capture);layerStatus.textContent='Object stack updated.';}
       catch(error){layerStatus.textContent=error.message||'Could not reorder object';}
       finally{movingLayer=false;refresh();}
     }
     function refreshObjects(allObjects){
+      if(objectDrag&&!sameLayerContext(objectDrag.capture,selectionPaintTarget?.()))cancelObjectDrag('The object list changed; reorder cancelled.');
       const scope=groupScope?.()||'',items=(allObjects||[]).filter(item=>!scope||item.group===scope);const signature=JSON.stringify([items,editing,scope]);if(signature===objectSignature)return;objectSignature=signature;
       const focused=document.activeElement?.closest('[data-object-key]')?.dataset.objectKey;
       const retained=new Set(items.map(item=>item.id));
       for(const [id,button] of objectNodes){if(retained.has(id))continue;button.remove();objectNodes.delete(id);}
       if(!items.length){objectEmpty.hidden=false;objectPanel.append(objectEmpty);return;}
       objectEmpty.remove();
+      let cursor=objectPanel.firstElementChild;
       for(const item of items){
         let button=objectNodes.get(item.id);
         if(!button){
           button=document.createElement('button');button.type='button';button.dataset.objectKey=item.id;
-          button.setAttribute('aria-keyshortcuts','Shift+Enter Shift+Space ArrowUp ArrowDown Home End Alt+ArrowUp Alt+ArrowDown');
-          button.onclick=async event=>{const current=button.keynopeObject;if(!current)return;if(suppressObjectClick){suppressObjectClick=false;return;}try{await selectObject(current.id,!!event.shiftKey);}catch(error){hint.textContent=error.message||'Could not select object';}};
-          button.onkeydown=async event=>{const current=button.keynopeObject;if(!current)return;event.stopPropagation();if(event.shiftKey&&(event.key==='Enter'||event.key===' ')){event.preventDefault();try{await selectObject(current.id,true);}catch(error){hint.textContent=error.message||'Could not extend selection';}return;}if(!['ArrowUp','ArrowDown','Home','End'].includes(event.key))return;event.preventDefault();if(event.altKey&&event.key.startsWith('Arrow')){reorderObject(current.id,event.key==='ArrowUp'?-1:1);return;}const buttons=[...objectPanel.querySelectorAll('button')],index=buttons.indexOf(button);buttons[event.key==='Home'?0:event.key==='End'?buttons.length-1:(index+(event.key==='ArrowUp'?-1:1)+buttons.length)%buttons.length]?.focus();};
-          button.onpointerdown=event=>{const current=button.keynopeObject;if(!current||event.button!==0||editing||movingLayer||!moveObjectLayer)return;suppressObjectClick=false;objectDrag={id:event.pointerId,key:current.id,x:event.clientX,y:event.clientY,active:false};button.setPointerCapture(event.pointerId);};
+          button.setAttribute('aria-keyshortcuts','F2 Shift+Enter Shift+Space ArrowUp ArrowDown Home End Alt+ArrowUp Alt+ArrowDown');
+          button.onclick=async event=>{const current=button.keynopeObject;if(!current)return;if(suppressObjectClick&&event.detail!==0){suppressObjectClick=false;return;}suppressObjectClick=false;try{await selectObject(current.id,!!event.shiftKey);}catch(error){hint.textContent=error.message||'Could not select object';}};
+          button.onkeydown=async event=>{const current=button.keynopeObject;if(!current)return;event.stopPropagation();if(event.key==='F2'){event.preventDefault();try{await beginRename(current);}catch(error){hint.textContent=error.message;}return;}if(event.shiftKey&&(event.key==='Enter'||event.key===' ')){event.preventDefault();try{await selectObject(current.id,true);}catch(error){hint.textContent=error.message||'Could not extend selection';}return;}if(!['ArrowUp','ArrowDown','Home','End'].includes(event.key))return;event.preventDefault();if(event.altKey&&event.key.startsWith('Arrow')){reorderObject(current.id,event.key==='ArrowUp'?-1:1);return;}const buttons=[...objectPanel.querySelectorAll('button')],index=buttons.indexOf(button);buttons[event.key==='Home'?0:event.key==='End'?buttons.length-1:(index+(event.key==='ArrowUp'?-1:1)+buttons.length)%buttons.length]?.focus();};
+          button.ondblclick=()=>beginRename(button.keynopeObject).catch(error=>hint.textContent=error.message);
+          button.onpointerdown=event=>{const current=button.keynopeObject;if(!current||event.button!==0||editing||movingLayer||!moveObjectLayer)return;suppressObjectClick=false;if(!canReorderObject(current.id))return;cancelObjectDrag();objectDrag={id:event.pointerId,key:current.id,x:event.clientX,y:event.clientY,active:false,capture:selectionPaintTarget?.()};button.setPointerCapture(event.pointerId);};
           button.onpointermove=event=>{
             if(objectDrag?.id!==event.pointerId)return;
+            if(!sameLayerContext(objectDrag.capture,selectionPaintTarget?.())){cancelObjectDrag('The object list changed; reorder cancelled.');return;}
             if(!objectDrag.active&&Math.hypot(event.clientX-objectDrag.x,event.clientY-objectDrag.y)<5)return;
             objectDrag.active=true;event.preventDefault();clearObjectDrop();button.classList.add('layer-dragging');
             const bounds=inspector.getBoundingClientRect();if(event.clientY>bounds.bottom-32)inspector.scrollTop+=16;else if(event.clientY<bounds.top+32)inspector.scrollTop-=16;
@@ -355,15 +571,18 @@ globalThis.KeynopeWorkspace = (() => {
             if(!target)return;const box=target.getBoundingClientRect(),side=event.clientY<box.y+box.height/2?'before':'after';
             objectDrag.target=target.dataset.objectKey;objectDrag.side=side;target.classList.add('layer-drop-'+side);
           };
-          const finishObjectDrag=event=>{if(objectDrag?.id!==event.pointerId)return;const drag=objectDrag;objectDrag=null;clearObjectDrop();if(event.type==='pointerup'&&drag.active){suppressObjectClick=true;if(drag.target&&drag.target!==drag.key)reorderObject(drag.key,0,drag.target,drag.side);}};
+          const finishObjectDrag=event=>{if(objectDrag?.id!==event.pointerId)return;const drag=objectDrag;cancelObjectDrag();if(event.type==='pointerup'&&drag.active&&drag.target&&drag.target!==drag.key)reorderObject(drag.key,0,drag.target,drag.side,drag.capture);};
           for(const type of ['pointerup','pointercancel','lostpointercapture'])button.addEventListener(type,finishObjectDrag);
           objectNodes.set(item.id,button);
         }
         button.keynopeObject=item;
         button.textContent=item.label+(item.hidden?' · Hidden':'')+(item.locked?' · Locked':'');button.title=button.textContent;button.setAttribute('aria-pressed',String(item.selected));button.disabled=editing;
         button.classList.toggle('active',item.selected);
-        button.title+=' · Shift+Enter/Space extends selection · Drag to reorder · Alt+Up/Down moves one layer';
-        objectPanel.append(button);
+        button.title+=' · F2 renames · Shift+Enter/Space extends selection · Drag to reorder · Alt+Up/Down moves one layer';
+        // Keep an unchanged row attached/in place: re-appending every row on
+        // selection-only refresh can invalidate its active pointer capture.
+        if(button!==cursor)objectPanel.insertBefore(button,cursor);
+        else cursor=cursor.nextElementSibling;
       }
       if(focused)[...objectPanel.children].find(n=>n.dataset.objectKey===focused)?.focus();
     }
@@ -403,6 +622,86 @@ globalThis.KeynopeWorkspace = (() => {
     themeSelect.title='Sets the deck colour defaults. Explicit slide, master and object colours are preserved.';themeLabel.append(themeSelect);if(setTheme)panels.slide.append(themeLabel);
     let savingTheme=false;
     themeSelect.addEventListener('keydown',event=>event.stopPropagation());themeSelect.onchange=async()=>{savingTheme=true;themeSelect.disabled=true;try{await setTheme(themeSelect.value);themeSelect.setCustomValidity('');}catch(error){themeSelect.setCustomValidity(error.message||'Could not apply theme');themeSelect.reportValidity();}finally{savingTheme=false;refresh();}};
+    const editTheme=document.createElement('button');editTheme.type='button';editTheme.textContent='Edit theme…';editTheme.title='Edit portable deck colours and typography';
+    if(setDeckTheme)panels.slide.append(editTheme);
+    const editBuildsButton=document.createElement('button');editBuildsButton.type='button';editBuildsButton.textContent='Builds…';editBuildsButton.title='Edit object builds and slide transition';editBuildsButton.setAttribute('aria-label','Edit slide builds');
+    if(editBuilds)panels.slide.append(editBuildsButton);
+    editBuildsButton.onclick=()=>Promise.resolve(editBuilds()).catch(error=>{hint.textContent=error.message||'Could not open Builds';});
+    const themeDialog=document.createElement('dialog');themeDialog.className='keynope-theme-dialog';themeDialog.setAttribute('aria-label','Edit deck theme');
+    const themeForm=document.createElement('form');themeForm.className='keynope-theme-form';themeDialog.append(themeForm);
+    let themeDraft=null,themeContext=null,themeFocus=null,themeApplying=false;
+    const closeTheme=()=>{if(!themeApplying&&themeDialog.open)themeDialog.close();};
+    const renderThemeDraft=()=>{
+      themeForm.replaceChildren();
+      const heading=document.createElement('h2');heading.textContent='Deck theme';themeForm.append(heading);
+      const row=(label,node,parent=themeForm)=>{const field=document.createElement('label');field.append(document.createTextNode(label),node);parent.append(field);return node;};
+      const name=document.createElement('input');name.type='text';name.value=themeDraft.name||'';name.maxLength=100;name.setAttribute('aria-label','Theme name');name.oninput=()=>themeDraft.name=name.value;row('Name',name);
+      const presets=document.createElement('div');presets.className='keynope-theme-presets';
+      for(const preset of themePresets?.()||[]){
+        const choice=document.createElement('button');choice.type='button';choice.textContent=preset.name;
+        choice.style.setProperty('--theme-preview-bg',preset.colors.background);choice.style.setProperty('--theme-preview-fg',preset.colors.heading);
+        choice.onclick=()=>{themeDraft=JSON.parse(JSON.stringify(preset));renderThemeDraft();};presets.append(choice);
+      }
+      themeForm.append(presets);
+      const colorSection=document.createElement('fieldset'),colorLegend=document.createElement('legend');colorLegend.textContent='Colours';colorSection.append(colorLegend);
+      const colors=document.createElement('div');colors.className='keynope-theme-colors';colorSection.append(colors);
+      const colorControl=(label,value,set)=>{
+        const button=document.createElement('button');button.type='button';button.className='keynope-theme-color';button.setAttribute('aria-label',label);button.title=label;
+        const show=color=>{button.style.setProperty('--theme-color',color);button.setAttribute('aria-description',color);};show(value);
+        button.onclick=()=>pickColor?.(button,value,color=>{value=color;set(color);show(color);});return button;
+      };
+      const addColor=(label,value,set)=>row(label,colorControl('Theme '+label.toLowerCase(),value,set),colors);
+      for(const [key,label] of [['background','Background'],['surface','Surface'],['text','Text'],['heading','Heading'],['muted','Muted'],['line','Line']])addColor(label,themeDraft.colors[key],value=>themeDraft.colors[key]=value);
+      themeDraft.colors.accent.forEach((value,index)=>addColor('Accent '+(index+1),value,color=>themeDraft.colors.accent[index]=color));themeForm.append(colorSection);
+      const fonts=document.createElement('fieldset'),fontLegend=document.createElement('legend');fontLegend.textContent='Typography';fonts.append(fontLegend);
+      for(const [role,label]of [['heading','Heading'],['body','Body'],['mono','Code']]){
+        const group=document.createElement('div');group.className='keynope-theme-font';const title=document.createElement('h3');title.textContent=label;group.append(title);
+        const select=document.createElement('select');for(const [id,name] of [['c64','Keynope C64'],['sans','Go — proportional'],['mono','Go Mono — monospaced']])select.add(new Option(name,id));select.value=themeDraft.fonts[role].fontId;select.setAttribute('aria-label',label+' theme font');select.onchange=()=>themeDraft.fonts[role].fontId=select.value;row('Font',select,group);
+        for(const [key,title,min,max,step]of [['size','Size',1,1024,1],['width','Width',1,200,1],['lineHeight','Line height',.5,4,.05]]){
+          const input=document.createElement('input');input.type='number';input.min=String(min);input.max=String(max);input.step=String(step);input.required=true;input.value=String(themeDraft.fonts[role][key]);input.setAttribute('aria-label',label+' theme '+title.toLowerCase());input.oninput=()=>{if(input.value!==''&&input.checkValidity())themeDraft.fonts[role][key]=Number(input.value);};row(title,input,group);
+        }
+        fonts.append(group);
+      }
+      themeForm.append(fonts);
+      const defaults=document.createElement('fieldset'),defaultLegend=document.createElement('legend');defaultLegend.textContent='Shapes and lines';defaults.append(defaultLegend);
+      for(const [key,label]of [['shapeFill','Shape fill'],['shapeLine','Shape outline']]){
+        const fallback=themeDraft.colors[key==='shapeFill'?'surface':'line'];
+        let chosen=themeDraft.defaults[key]==='none'?fallback:themeDraft.defaults[key]||fallback;
+        const colour=colorControl(label,chosen,value=>{chosen=value;themeDraft.defaults[key]=value;off.checked=false;});
+        const group=document.createElement('div'),off=document.createElement('input');off.type='checkbox';off.checked=themeDraft.defaults[key]==='none';off.setAttribute('aria-label','No '+label.toLowerCase());
+        off.onchange=()=>{themeDraft.defaults[key]=off.checked?'none':chosen;};
+        const offLabel=document.createElement('label');offLabel.append(off,document.createTextNode('None'));group.append(colour,offLabel);row(label,group,defaults);
+      }
+      const width=document.createElement('input');width.type='number';width.min='0';width.max='20';width.step='any';width.required=true;width.value=String(themeDraft.defaults.lineWidth??1);width.setAttribute('aria-label','Theme line width');width.oninput=()=>{if(width.value!==''&&width.checkValidity())themeDraft.defaults.lineWidth=Number(width.value);};row('Line width',width,defaults);themeForm.append(defaults);
+      const note=document.createElement('p');note.className='keynope-theme-note';note.textContent='Explicit slide, master and object styles stay unchanged. Choose “Use theme font” on text to link its font.';themeForm.append(note);
+      const error=document.createElement('p');error.className='keynope-theme-error';error.setAttribute('role','alert');themeForm.append(error);
+      const actions=document.createElement('div');actions.className='keynope-theme-actions';
+      const cancel=document.createElement('button');cancel.type='button';cancel.textContent='Cancel';cancel.onclick=closeTheme;
+      const apply=document.createElement('button');apply.type='submit';apply.textContent='Apply theme';apply.className='primary';actions.append(cancel,apply);themeForm.append(actions);
+      const detach=document.createElement('button');detach.type='button';detach.textContent='Detach from theme';
+      if(detachDeckTheme&&hasDeckTheme?.()){
+        actions.prepend(detach);
+        const explanation=document.createElement('p');explanation.className='keynope-theme-note';explanation.textContent='Detach keeps the deck’s current appearance and master links, but removes theme links. Unapplied changes above are not used. You can undo this.';themeForm.insertBefore(explanation,actions);
+      }
+      const pending=value=>{themeApplying=value;apply.disabled=cancel.disabled=detach.disabled=value;};
+      detach.onclick=async()=>{
+        if(themeApplying)return;
+        pending(true);error.textContent='';
+        try{await detachDeckTheme(themeContext);themeApplying=false;themeDialog.close();}
+        catch(problem){error.textContent=problem.message||'Could not detach theme';}
+        finally{pending(false);refresh();}
+      };
+      themeForm.onsubmit=async event=>{
+        event.preventDefault();if(themeApplying||!themeForm.reportValidity())return;
+        pending(true);error.textContent='';
+        try{await setDeckTheme(JSON.parse(JSON.stringify(themeDraft)),themeContext);themeApplying=false;themeDialog.close();}
+        catch(problem){error.textContent=problem.message||'Could not apply theme';}
+        finally{pending(false);refresh();}
+      };
+    };
+    editTheme.onclick=()=>{const current=getTheme?.();if(!current)return;themeDraft=JSON.parse(JSON.stringify(current));themeContext=themeDraftContext?JSON.parse(JSON.stringify(themeDraftContext())):null;themeDraft.defaults||={};themeFocus=document.activeElement;renderThemeDraft();themeDialog.showModal();themeForm.querySelector('input')?.focus();};
+    themeDialog.addEventListener('keydown',event=>event.stopPropagation());themeDialog.addEventListener('cancel',event=>{if(themeApplying)event.preventDefault();});
+    themeDialog.addEventListener('close',()=>{themeDraft=null;themeContext=null;if(themeFocus?.isConnected)themeFocus.focus({preventScroll:true});themeFocus=null;});document.body.append(themeDialog);
     const button = (label, callback, control) => {
       const node = document.createElement('button');
       node.type = 'button'; node.textContent = label; node.title = label;
@@ -593,6 +892,8 @@ globalThis.KeynopeWorkspace = (() => {
     navigatorDivider.addEventListener('dblclick',()=>{setNavigatorWidth(210);rememberNavigator();});
     navigatorDivider.addEventListener('keydown',event=>{event.stopPropagation();if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();const step=event.shiftKey?50:10;setNavigatorWidth(event.key==='Home'?160:event.key==='End'?Number(navigatorDivider.getAttribute('aria-valuemax')):Number(navigatorDivider.getAttribute('aria-valuenow'))+(event.key==='ArrowLeft'?-step:step));rememberNavigator();});
     function refresh() {
+      const paintOwner=selectionPaintTarget?.(),paintKey=JSON.stringify([paintOwner?.epoch,paintOwner?.owner]);
+      if(paintOwnerKey!==paintKey){paintOwnerKey=paintKey;paintError.hidden=true;}
       const slideControlsDisabled=editing||context==='master'||(canUseSlidePresets&&!canUseSlidePresets());
       presets.hidden=editing||(canUseSlidePresets&&!canUseSlidePresets());
       // Object projection parses every authored query and sorts the complete
@@ -602,25 +903,77 @@ globalThis.KeynopeWorkspace = (() => {
       const allObjects=section!=='slide'||scope?(objects?.()||[]):[];
       const opacityItems=allObjects.filter(item=>item.selected);
       const members=allObjects.filter(item=>item.group===scope);
-      scopeBar.hidden=!scope;scopeLabel.textContent=' › Group · '+members.length+' objects';scopeExit.disabled=editing||changingGroup;
+      scopeBar.hidden=!scope;setChromeProperty(scopeLabel,'textContent',' › Group · '+members.length+' objects');scopeExit.disabled=editing||changingGroup;
       const groups=new Set(opacityItems.map(item=>item.group).filter(Boolean));
       const groupingLocked=opacityItems.some(item=>item.locked)||allObjects.some(item=>groups.has(item.group)&&item.locked);
       groupButtons.forEach((button,index)=>{button.hidden=!groupAction;button.disabled=editing||changingGroup||movingLayer||(index===0?(opacityItems.length<2||groupingLocked):index===1?(!groups.size||groupingLocked):(!oneStackUnit(opacityItems)||!groups.size||!!scope));});
-      lock.hidden=!setObjectLock;lock.textContent=opacityItems.length&&opacityItems.every(item=>item.locked)?'Unlock objects':'Lock objects';lock.disabled=editing||movingLayer||!opacityItems.length;
+      lock.hidden=!setObjectLock;setChromeProperty(lock,'textContent',opacityItems.length&&opacityItems.every(item=>item.locked)?'Unlock objects':'Lock objects');lock.disabled=editing||movingLayer||!opacityItems.length;
       const hasLocked=opacityItems.some(item=>item.locked);
+      renameButton.disabled=editing||movingLayer||savingName||opacityItems.length!==1||hasLocked;
+      if(naming&&(naming.capture?.epoch!==selectionPaintTarget?.()?.epoch||!allObjects.some(item=>item.id===naming.id)))closeRename();
+      renameForm.hidden=!naming||section!=='objects';
       const describedImage=opacityItems.length===1&&opacityItems[0].kind==='image'?opacityItems[0]:null;
       imageDescription.hidden=!setImageDescription||!describedImage||section==='slide';
-      if(descriptionTarget!==(describedImage?.id||'')){descriptionTarget=describedImage?.id||'';descriptionInput.value=describedImage?.alt||'';decorativeInput.checked=!!describedImage?.decorative;}
-      else if(!imageDescription.contains(document.activeElement)&&!savingDescription){descriptionInput.value=describedImage?.alt||'';decorativeInput.checked=!!describedImage?.decorative;}
+      const descriptionContext=selectionPaintTarget?.(),descriptionKey=JSON.stringify([describedImage?.id,descriptionContext?.epoch,descriptionContext?.owner,descriptionContext?.slide,descriptionContext?.master,descriptionContext?.group]);
+      if(descriptionOwner!==descriptionKey){descriptionOwner=descriptionKey;descriptionTarget=describedImage?.id||'';descriptionDirty=false;descriptionCapture=null;descriptionError.hidden=true;}
+      if(!descriptionDirty&&!savingDescription){descriptionInput.value=describedImage?.alt||'';decorativeInput.checked=!!describedImage?.decorative;descriptionCapture={...descriptionContext,alt:describedImage?.alt||'',decorative:!!describedImage?.decorative};}
       decorativeInput.disabled=descriptionSave.disabled=editing||savingDescription||hasLocked;descriptionInput.disabled=decorativeInput.disabled||decorativeInput.checked;
-      visibility.hidden=!setObjectVisibility;visibility.textContent=opacityItems.length&&opacityItems.every(item=>item.hidden)?'Show objects':'Hide objects';visibility.disabled=editing||movingLayer||!opacityItems.length||hasLocked;
+      descriptionReset.disabled=editing||savingDescription||!descriptionDirty;
+      visibility.hidden=!setObjectVisibility;setChromeProperty(visibility,'textContent',opacityItems.length&&opacityItems.every(item=>item.hidden)?'Show objects':'Hide objects');visibility.disabled=editing||movingLayer||!opacityItems.length||hasLocked;
       layerControls.hidden=section!=='objects'||!moveObjectLayer;
       for(const button of layerButtons)button.disabled=editing||movingLayer||!oneStackUnit(opacityItems)||hasLocked;
-      opacityLabel.hidden=!setObjectOpacity||section==='slide'||!opacityItems.length;
-      opacityInput.disabled=editing||savingOpacity||hasLocked;
-      if(document.activeElement!==opacityInput){const values=opacityItems.map(item=>Math.round((Number.isFinite(item.opacity)?item.opacity:1)*100));opacityInput.value=values.length&&values.every(value=>value===values[0])?String(values[0]):'';opacityInput.placeholder='Mixed';}
+      const opacityState=selectionCapabilities?.()?.properties?.['paint.opacity'];
+      const paintStates=selectionCapabilities?.()?.properties||{};
+      setChromeProperty(paintPanel,'hidden',!setSelectionPaint||section!=='style'||!paintFields.some(field=>paintStates[field.property]?.eligibleIds?.length));
+      for(const field of paintFields){
+        const state=paintStates[field.property],count=state?.eligibleIds?.length||0;
+        setChromeProperty(field.row,'hidden',!count);setChromeProperty(field.control,'disabled',editing||savingPaint||!state?.editable);
+        if(field.inherit)setChromeProperty(field.inherit,'disabled',field.control.disabled||state?.provenance==='inherited');
+        if(field.off)setChromeProperty(field.off,'disabled',field.control.disabled);
+        setChromeProperty(field.subset,'textContent',count&&count<state.totalCount?' · '+count+' of '+state.totalCount:'');
+        setChromeProperty(field.control,'title',state?.reason||((state?.provenance||'')+' · Applies to '+count+' of '+(state?.totalCount||0)+' selected objects'));
+        setChromeProperty(field.control.dataset,'provenance',state?.provenance||'');
+        if(field.property==='paint.colorToken'||field.property==='paint.strokeToken'||field.property==='label.colorToken'){
+          const colors=getTheme?.()?.colors;
+          for(const [role,label]of themeColourChoices){
+            const option=[...field.control.options].find(option=>option.value===role);
+            const color=role.startsWith('accent-')?colors?.accent?.[Number(role.slice(7))-1]:colors?.[role];
+            const text=role==='custom'&&state?.provenance==='inherited'?'Inherited colour':color?label+' · '+color:label;
+            if(option&&option.textContent!==text)option.textContent=text;
+          }
+        }
+        if(field.type==='color'){
+          const color=state?.state==='value'?state.value:'';
+          const label=state?.state==='mixed'?'Mixed':color==='none'?'Off':color||'Not set';
+          if(field.control.textContent!==label)field.control.textContent=label;
+          const swatch=color&&color!=='none'?color:'transparent';
+          if(field.control.style.getPropertyValue('--paint-color')!==swatch)field.control.style.setProperty('--paint-color',swatch);
+          const description=state?.state==='mixed'?'Mixed colours':color==='none'?'Stroke off':color||'No explicit colour';
+          if(field.control.getAttribute('aria-description')!==description)field.control.setAttribute('aria-description',description);
+        }else if(document.activeElement!==field.control||savingPaint||field.control.disabled){
+          const value=field.property==='label.font'&&state?.state==='value'&&state.fontBinding==='theme'?'theme':state?.state==='mixed'?(field.type==='select'?'mixed':''):state?.state==='value'?String(state.value):'';
+          setChromeProperty(field.control,'value',value);
+          if(field.type==='number')setChromeProperty(field.control,'placeholder',state?.state==='mixed'?'Mixed':'');
+        }
+      }
+      setChromeProperty(gradientPaint,'hidden',!paintStates['paint.gradientDirection']?.eligibleIds?.length);setChromeProperty(shadowPaint,'hidden',!paintStates['paint.shadow']?.eligibleIds?.length);
+      setChromeProperty(strokePaint,'hidden',!paintStates['paint.strokeColor']?.eligibleIds?.length);
+      setChromeProperty(linePaint,'hidden',!paintStates['line.width']?.eligibleIds?.length);
+      setChromeProperty(labelPaint,'hidden',!paintStates['label.size']?.eligibleIds?.length);
+      opacityLabel.hidden=!setObjectOpacity||section==='slide'||(opacityState?!opacityState.eligibleIds.length:!opacityItems.length);
+      opacityInput.disabled=editing||savingOpacity||(opacityState?!opacityState.editable:hasLocked);
+      opacityInput.dataset.selectionProperty='paint.opacity';
+      opacityInput.title=opacityState?.reason||('Object opacity'+(opacityState?.provenance==='inherited'?' · Inherited':''));
+      if(document.activeElement!==opacityInput){
+        const values=opacityItems.map(item=>Math.round((Number.isFinite(item.opacity)?item.opacity:1)*100));
+        opacityInput.value=opacityState?(opacityState.state==='value'?String(Math.round(opacityState.value*100)):''):(values.length&&values.every(value=>value===values[0])?String(values[0]):'');
+        opacityInput.placeholder=opacityState?.state==='mixed'?'Mixed':opacityState?'':'Mixed';
+      }
       main.hidden = !insertOpen;
-      themeSelect.disabled=slideControlsDisabled||savingTheme;themeSelect.value=appearance?.()?.theme||'';
+      themeSelect.disabled=editing||savingTheme;themeSelect.value=appearance?.()?.theme||'';
+      editTheme.disabled=editing||savingTheme||!getTheme?.();
+      editBuildsButton.disabled=editing;
+      if(getTheme?.()&&setDeckTheme){themeLabel.firstChild.textContent='Colour preset';editTheme.textContent='Edit theme…';}
       inspector.hidden = !visible;
       divider.hidden=!visible;
       selection.hidden = false;
@@ -628,8 +981,8 @@ globalThis.KeynopeWorkspace = (() => {
       format.setAttribute('aria-expanded', String(visible));
       format.classList.toggle('active', visible);
       slide.classList.toggle('active', visible && section === 'slide');
-      title.textContent = section==='objects'?'Objects':section === 'slide' ? (context === 'master' ? 'Master slide' : 'Slide') : context;
-      hint.textContent = section==='objects'?'Select an object, including those behind other objects.':section === 'slide' ? 'Layout and slide appearance' : editing ? 'Editing text' : 'Format the current selection';
+      setChromeProperty(title,'textContent',section==='objects'?'Objects':section === 'slide' ? (context === 'master' ? 'Master slide' : 'Slide') : context);
+      setChromeProperty(hint,'textContent',section==='objects'?'Select an object, including those behind other objects.':section === 'slide' ? 'Layout and slide appearance' : editing ? 'Editing text' : 'Format the current selection');
       if(section==='objects')refreshObjects(allObjects);
       for (const [id, panel] of Object.entries(panels)) panel.hidden = id === 'insert' ? false : id !== section;
       for (const item of tabs.children) {
@@ -649,7 +1002,7 @@ globalThis.KeynopeWorkspace = (() => {
       if (changed || editing !== nextEditing) {
         context = nextContext; editing = nextEditing;
         const empty = context === 'main' || context === 'master';
-        const choices = empty ? [['slide', 'Slide']] : context === 'Line' ? [['content', 'Line'], ['slide', 'Slide']] : [['content', context], ['style', 'Style'], ['arrange', 'Arrange'], ['slide', 'Slide']];
+        const choices = empty ? [['slide', 'Slide']] : context === 'Line' ? [['content', 'Line'], ['style', 'Style'], ['slide', 'Slide']] : [['content', context], ['style', 'Style'], ['arrange', 'Arrange'], ['slide', 'Slide']];
         if(objects)choices.push(['objects','Objects']);
         // Arrange/Style are workflows shared by different object kinds. Keep
         // the user's current workflow when the new selection supports it;
@@ -690,10 +1043,10 @@ globalThis.KeynopeWorkspace = (() => {
     });
     document.addEventListener('click',event=>{if(narrowNavigator()&&event.target.closest('#keynope-slide-navigator .keynope-slide-item'))closeNavigator(true);},true);
     // Own drawer Escape before the editor's document-level canvas shortcuts.
-    window.addEventListener('keydown',event=>{if(narrowNavigator()&&navigatorOpen&&event.key==='Escape'){event.preventDefault();event.stopImmediatePropagation();closeNavigator(true);}},true);
+    window.addEventListener('keydown',event=>{if(event.target?.closest?.('dialog,[role="dialog"],[role="menu"]'))return;if(dismissInsert(event)){event.stopImmediatePropagation();return;}if(narrowNavigator()&&navigatorOpen&&event.key==='Escape'){event.preventDefault();event.stopImmediatePropagation();closeNavigator(true);}},true);
     window.addEventListener('keydown',event=>{if(drawerInspector()&&visible&&event.key==='Escape'&&!event.target?.closest?.('dialog,[role="dialog"],[role="menu"]')){event.preventDefault();event.stopImmediatePropagation();closeInspector(true);}},true);
     function dismissInsert(event) {
-      if(event.key!=='Escape'||!insertOpen||event.target?.closest?.('dialog,[role="dialog"]'))return false;
+      if(event.key!=='Escape'||!insertOpen||event.target?.closest?.('dialog,[role="dialog"],[role="menu"]'))return false;
       event.preventDefault();event.stopPropagation();insertOpen=false;refresh();insert.focus();return true;
     }
     topbar.addEventListener('keydown',dismissInsert);
@@ -708,5 +1061,5 @@ globalThis.KeynopeWorkspace = (() => {
     }
     return {configure, selectPanel, bindCommand, dismissInsert};
   }
-  return {mount,thumbnails,distribute,snapMove,matchSize,slideKeyboard,toolbarKeyboard,sceneSelectionBounds,visualBounds,clampMove,connectorIndex,rotateSelection,resizeSelection,resizeConnectedSelection};
+  return {applyScenePagePatches,mount,thumbnails,distribute,snapMove,pointerMove,marqueeSelectionUnits,boxIntersectsRect,marqueeCandidates,sameLayerContext,matchSize,slideKeyboard,toolbarKeyboard,sceneSelectionBounds,cellAspect,visualBounds,clampMove,connectorIndex,rotateSelection,resizeSelection,resizeConnectedSelection,alignmentMoves};
 })();

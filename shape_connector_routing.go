@@ -10,15 +10,20 @@ import (
 )
 
 type connectorObstacle struct {
-	X, Y          float64
-	W, H          int
-	Shape         string
-	ID            string
-	Rotation      float64
-	Width, Height float64 // Continuous cells; zero retains legacy raster dimensions.
+	X, Y                      float64
+	W, H                      int
+	Shape                     string
+	ID                        string
+	Rotation                  float64
+	Width, Height             float64 // Continuous cells; zero retains legacy raster dimensions.
+	Spec                      *ShapeSpec
+	StrokeWidth               float64 // Resolved physical scene pixels, including inherited paint.
+	CanvasWidth, CanvasHeight float64 // Derived, not authored.
 }
 
 func connectorObstacles(slide Slide, lines []Line, width, height int) []connectorObstacle {
+	slide.Elements = append([]Element(nil), slide.Elements...)
+	fitSlideShapeLabels(&slide, width, height)
 	seen := map[int]bool{}
 	var result []connectorObstacle
 	for _, l := range lines {
@@ -26,13 +31,18 @@ func connectorObstacles(slide Slide, lines []Line, width, height int) []connecto
 			continue
 		}
 		seen[l.Element] = true
-		q, _ := url.ParseQuery(l.Query)
+		q, _ := url.ParseQuery(slide.Elements[l.Element].Query)
 		x, y := preciseShapeAnchor(q, float64(l.Col), float64(l.Row), width, height)
 		angle, _ := strconv.ParseFloat(q.Get("object-rotation"), 64)
 		if math.IsNaN(angle) || math.IsInf(angle, 0) {
 			angle = 0
 		}
-		result = append(result, connectorObstacle{X: x + shapeSubcellOffset(q, "shape-offset-x") + objectPlacementOffset(q, "x"), Y: y + shapeSubcellOffset(q, "shape-offset-y") + objectPlacementOffset(q, "y"), W: shapeHalfCells(q, "width", 12), H: shapeHalfCells(q, "height", 6), Width: shapeDimension(q, "width", 12), Height: shapeDimension(q, "height", 6), Shape: shapeName(slide.Elements[l.Element]), ID: slide.Elements[l.Element].ID, Rotation: math.Mod(angle, 360)})
+		spec := shapeSpecFromValues(q)
+		result = append(result, connectorObstacle{X: x + shapeSubcellOffset(q, "shape-offset-x") + objectPlacementOffset(q, "x"), Y: y + shapeSubcellOffset(q, "shape-offset-y") + objectPlacementOffset(q, "y"), W: shapeHalfCells(q, "width", 12), H: shapeHalfCells(q, "height", 6), Width: shapeDimension(q, "width", 12), Height: shapeDimension(q, "height", 6), Shape: shapeName(slide.Elements[l.Element]), ID: slide.Elements[l.Element].ID, Rotation: math.Mod(angle, 360), Spec: &spec, StrokeWidth: resolvedShapeStrokeWidth(slide, slide.Elements[l.Element], q, width, height)})
+	}
+	canvas := slide.physicalCanvas()
+	for i := range result {
+		result[i].CanvasWidth, result[i].CanvasHeight = canvas.Width, canvas.Height
 	}
 	return result
 }
@@ -41,6 +51,9 @@ type projectedConnectorObstacle struct {
 	object                   connectorObstacle
 	cx, cy, sx, sy, c, s     float64
 	left, top, right, bottom float64
+	geometry                 sceneShapeGeometry
+	strokeSegments           []shapeBoundarySegment
+	sweepSegments            []shapeBoundarySegment // Lazy world-pixel contour for swept line coverage.
 }
 
 func projectConnectorObstacle(o connectorObstacle, width, height int) projectedConnectorObstacle {
@@ -51,9 +64,20 @@ func projectConnectorObstacle(o connectorObstacle, width, height int) projectedC
 		o.Height = float64(o.H) / 2
 	}
 	p := projectedConnectorObstacle{object: o, cx: o.X + o.Width/2, cy: o.Y + o.Height/2, sx: 1920 / float64(max(1, width)), sy: 1080 / float64(max(1, height))}
+	if o.CanvasWidth > 0 && o.CanvasHeight > 0 {
+		p.sx, p.sy = o.CanvasWidth/float64(max(1, width)), o.CanvasHeight/float64(max(1, height))
+	}
+	spec := ShapeSpec{Kind: o.Shape}
+	if o.Spec != nil {
+		spec = *o.Spec
+	}
+	p.geometry = shapeGeometry(spec, o.Width*p.sx/(o.Height*p.sy))
+	if o.StrokeWidth > 0 {
+		p.strokeSegments = shapeBoundarySegments(p.geometry, o.Width*p.sx, o.Height*p.sy)
+	}
 	p.c, p.s = math.Cos(o.Rotation*math.Pi/180), math.Sin(o.Rotation*math.Pi/180)
 	hw, hh := o.Width/2*p.sx, o.Height/2*p.sy
-	rx, ry := (math.Abs(p.c)*hw+math.Abs(p.s)*hh)/p.sx, (math.Abs(p.s)*hw+math.Abs(p.c)*hh)/p.sy
+	rx, ry := (math.Abs(p.c)*hw+math.Abs(p.s)*hh+o.StrokeWidth/2)/p.sx, (math.Abs(p.s)*hw+math.Abs(p.c)*hh+o.StrokeWidth/2)/p.sy
 	p.left, p.right, p.top, p.bottom = p.cx-rx, p.cx+rx, p.cy-ry, p.cy+ry
 	return p
 }
@@ -68,8 +92,23 @@ func (p *projectedConnectorObstacle) contains(x, y float64) bool {
 	if o.Width <= 0 || o.Height <= 0 {
 		return false
 	}
-	px, py := int(math.Floor((x-o.X)*float64(o.W)/o.Width)), int(math.Floor((y-o.Y)*float64(o.H)/o.Height))
-	return px >= 0 && py >= 0 && px < o.W && py < o.H && shapeCellFilled(o.Shape, px, py, o.W, o.H)
+	if p.geometry.contains((x-o.X)/o.Width, (y-o.Y)/o.Height) {
+		return true
+	}
+	// The round-joined outline is a union of physical segment capsules. Do
+	// not enlarge the whole rectangular frame: concave silhouettes keep their
+	// usable negative space, and rotated outlines retain the same thickness.
+	point := connectorPoint{(x - o.X) * p.sx, (y - o.Y) * p.sy}
+	for _, segment := range p.strokeSegments {
+		radius := o.StrokeWidth / 2
+		if point.X < math.Min(segment.a.X, segment.b.X)-radius || point.X > math.Max(segment.a.X, segment.b.X)+radius || point.Y < math.Min(segment.a.Y, segment.b.Y)-radius || point.Y > math.Max(segment.a.Y, segment.b.Y)+radius {
+			continue
+		}
+		if shapeSegmentDistanceSquared(point, segment) <= o.StrokeWidth*o.StrokeWidth/4 {
+			return true
+		}
+	}
+	return false
 }
 func connectorNumber(q url.Values, key string, fallback, limit float64) float64 {
 	v, err := strconv.ParseFloat(q.Get(key), 64)
@@ -102,27 +141,36 @@ func (h *routeHeap) Pop() any          { old := *h; v := old[len(old)-1]; *h = o
 // A routing pass borrows immutable obstacles. Compute their fingerprint lazily,
 // once per pass, rather than serializing the whole slide for every connector.
 type connectorRoutingPass struct {
+	canvas    sceneRect
 	obstacles []connectorObstacle
 	digest    [32]byte
 	ready     bool
 }
 
-func (pass *connectorRoutingPass) key(a, b shapePort, width, height int, lineWidth float64) [32]byte {
+func (pass *connectorRoutingPass) key(a, b shapePort, width, height int, lineWidth float64, footprint ...any) [32]byte {
 	if !pass.ready {
 		data, _ := json.Marshal(pass.obstacles)
 		pass.digest = connectorRouteKey(data)
 		pass.ready = true
 	}
-	data, _ := json.Marshal([]any{a, b, pass.digest, width, height, lineWidth})
+	data, _ := json.Marshal([]any{a, b, pass.digest, width, height, lineWidth, footprint, pass.canvas})
 	return connectorRouteKey(data)
 }
 
-func routedConnectorPath(e Element, a, b shapePort, obstacles []connectorObstacle, width, height int) []connectorPoint {
+func routedConnectorPath(e Element, a, b shapePort, obstacles []connectorObstacle, width, height int, canvas ...sceneRect) []connectorPoint {
 	pass := connectorRoutingPass{obstacles: obstacles}
+	if len(canvas) > 0 {
+		pass.canvas = canvas[0]
+	}
 	return pass.path(e, a, b, width, height)
 }
 
 func (pass *connectorRoutingPass) path(e Element, a, b shapePort, width, height int) []connectorPoint {
+	cw, ch := pass.canvas.Width, pass.canvas.Height
+	if cw <= 0 || ch <= 0 {
+		cw, ch = 1920, 1080
+	}
+	cellRatio := (cw / float64(max(1, width))) / (ch / float64(max(1, height)))
 	obstacles := pass.obstacles
 	if a.Direction != "" {
 		a.Side = a.Direction
@@ -136,28 +184,47 @@ func (pass *connectorRoutingPass) path(e Element, a, b shapePort, width, height 
 		return fallback
 	}
 	lineWidth := connectorNumber(q, "connector-width", 1, 8)
-	key := pass.key(a, b, width, height, lineWidth)
+	arrows := q.Get("connector-arrows")
+	arrowWidth := 0.0
+	if arrows == "start" || arrows == "end" || arrows == "both" {
+		arrowWidth = connectorNumber(q, "connector-arrow-width", 6, 20)
+	}
+	key := pass.key(a, b, width, height, lineWidth, arrows, arrowWidth)
 	cached := connectorRouteCache.get(key)
 	if cached != nil {
 		return cached
 	}
-	stub := func(p shapePort) connectorPoint {
+	stub := func(p shapePort, head bool) connectorPoint {
 		v := connectorPoint{p.X, p.Y}
+		length := math.Max(4, lineWidth/2+.5)
+		if head {
+			// Keep the complete head on a terminal leg, not across the first
+			// elbow. Retro's head is longer than the native marker; reserve both.
+			length = math.Max(length, math.Max(3, arrowWidth*1.5))
+		}
 		switch p.Side {
 		case "left":
-			v.X -= 4
+			v.X -= length
 		case "right":
-			v.X += 4
+			v.X += length
 		case "top":
-			v.Y -= 2
+			vertical := length / 2
+			if head {
+				vertical = math.Max(vertical, arrowWidth*cellRatio)
+			}
+			v.Y -= vertical
 		case "bottom":
-			v.Y += 2
+			vertical := length / 2
+			if head {
+				vertical = math.Max(vertical, arrowWidth*cellRatio)
+			}
+			v.Y += vertical
 		}
 		v.X = math.Max(0, math.Min(float64(width), v.X))
 		v.Y = math.Max(0, math.Min(float64(height), v.Y))
 		return v
 	}
-	u, v := stub(a), stub(b)
+	u, v := stub(a, arrows == "start" || arrows == "both"), stub(b, arrows == "end" || arrows == "both")
 	coords := func(size int, step float64, values []float64) []float64 {
 		for x := 0.0; x <= float64(size); x += step {
 			values = append(values, x)
@@ -194,27 +261,25 @@ func (pass *connectorRoutingPass) path(e Element, a, b shapePort, width, height 
 	if nx*ny > 400000 {
 		return fallback
 	}
-	inside := indexConnectorObstacles(projected).contains
+	obstacleIndex := indexConnectorObstacles(projected)
+	// The native stroke uses square scene pixels; sampled strokes use optical
+	// half-height cells. Reserve the union rather than three disconnected rails,
+	// which can miss a narrow silhouette entirely between the samples.
+	rx := lineWidth / 2
+	ry := math.Max(lineWidth/4, lineWidth*cellRatio/2)
 	edgeCost := func(p, n connectorPoint) float64 {
 		distance := math.Abs(p.X-n.X) + 2*math.Abs(p.Y-n.Y)
 		steps := max(1, int(math.Ceil(distance*2)))
 		hits := 0
-		for i := 0; i <= steps; i++ {
-			t := float64(i) / float64(steps)
-			x, y := p.X+(n.X-p.X)*t, p.Y+(n.Y-p.Y)*t
-			blocked := false
-			for _, offset := range []float64{-lineWidth / 2, 0, lineWidth / 2} {
-				if p.Y == n.Y {
-					blocked = blocked || inside(x, y+offset/2)
-				} else {
-					blocked = blocked || inside(x+offset, y)
-				}
-			}
-			if blocked {
+		for i := 0; i < steps; i++ {
+			t0, t1 := float64(i)/float64(steps), float64(i+1)/float64(steps)
+			x0, y0 := p.X+(n.X-p.X)*t0, p.Y+(n.Y-p.Y)*t0
+			x1, y1 := p.X+(n.X-p.X)*t1, p.Y+(n.Y-p.Y)*t1
+			if obstacleIndex.intersectsRect(math.Min(x0, x1)-rx, math.Min(y0, y1)-ry, math.Max(x0, x1)+rx, math.Max(y0, y1)+ry) {
 				hits++
 			}
 		}
-		return distance + float64(hits)/float64(steps+1)*distance*1e6
+		return distance + float64(hits)/float64(steps)*distance*1e6
 	}
 	// Cache each undirected edge's silhouette sampling during this search.
 	edges := map[[2]int]float64{}

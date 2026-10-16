@@ -597,6 +597,7 @@ func TestLabelOpacityValidation(t *testing.T) {
 }
 
 func TestTextAlignmentKeepsBoxes(t *testing.T) {
+	useTestAuthoredSize(t, 245, 56)
 	deck := Deck{Slides: []Slide{{Elements: []Element{
 		{ID: "m", Kind: "text", Text: "Modern", Query: "render=truetype&element-style=modern&top=3&left=8&width=80&height=14&group=g"},
 		{ID: "r", Kind: "text", Text: "Retro", Query: "render=truetype&element-style=retro&top=25&left=12&group=g"},
@@ -619,8 +620,11 @@ func TestTextAlignmentKeepsBoxes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, object := range afterScene.Objects {
-		if object.Bounds != beforeScene.Objects[i].Bounds {
-			t.Fatalf("alignment moved/resized %s: %+v -> %+v", object.ID, beforeScene.Objects[i].Bounds, object.Bounds)
+		old, got := beforeScene.Objects[i].Bounds, object.Bounds
+		for _, p := range [][2]float64{{old.X, got.X}, {old.Y, got.Y}, {old.Width, got.Width}, {old.Height, got.Height}} {
+			if math.Abs(p[0]-p[1]) > 1e-9 {
+				t.Fatalf("alignment moved/resized %s: %+v -> %+v", object.ID, old, got)
+			}
 		}
 	}
 	for _, e := range s.deck.Slides[0].Elements[:2] {

@@ -13,6 +13,7 @@ cp "$welcome_source" "$temporary_dir/Welcome.md"
 
 (
   cd "$repo_dir"
+  GOCACHE=${GOCACHE:-/tmp/keynope-go-cache} go run -tags keynope_sitegen . --template-previews assets/templates/previews.json
   GOCACHE=${GOCACHE:-/tmp/keynope-go-cache} go run -tags keynope_sitegen . "$temporary_dir/Welcome.md" "$temporary_dir"
   GOOS=js GOARCH=wasm GOCACHE=${GOCACHE:-/tmp/keynope-go-cache} go build -o "$output_dir/keynope-editor.wasm" .
 )
@@ -42,6 +43,7 @@ cp "$repo_dir/web/ui-font.css" "$output_dir/../ui-font.css"
 mkdir -p "$output_dir/../fonts"
 base64 -d < "$repo_dir/assets/keynope-c64.ttf.base64" > "$output_dir/../fonts/keynope-c64.ttf"
 cp "$repo_dir/web/participant-transfer.js" "$output_dir/../participant-transfer.js"
+cp "$repo_dir/web/participant-presentation.js" "$output_dir/../join/presentation.js"
 node "$repo_dir/tools/build_participant_renderer.cjs" "$temporary_dir/Welcome.html" "$output_dir/../join/slide-renderer.js" "$temporary_dir/modern-fonts.css"
 cp "$repo_dir/web/editor/service-worker.js" "$output_dir/service-worker.js"
 cp "$repo_dir/web/editor/manifest.webmanifest" "$output_dir/manifest.webmanifest"

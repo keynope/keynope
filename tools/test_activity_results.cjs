@@ -2,10 +2,10 @@ const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/st
 const source=fs.readFileSync('main.go','utf8'),noop=()=>{},stored=new Map();
 const context=vm.createContext({window:{keynopeStoreActivityResult:async(id,result)=>{stored.set(id,result)},keynopeActivityResult:id=>stored.get(id)},
   document:{querySelectorAll:()=>[]},deck:{pages:[]},pageIndex:0,Date,crypto:require('node:crypto').webcrypto,
-  keynopeEngagementSessions:new Map(),keynopeEngagementRuntime:null,keynopeRunningActivity:null,keynopeEngagementOverlay:null,keynopeEngagementSessionEpoch:0,renderActiveActivityStatus:noop,
+  keynopeEngagementSessions:new Map(),keynopeEngagementRuntime:null,keynopeRunningActivity:null,keynopeEngagementOverlay:null,keynopeEngagementSessionEpoch:0,keynopeEngagementFocusGeneration:0,keynopeEngagementOverlayFocus:null,renderActiveActivityStatus:noop,
   keynopeEngagementCountdownTick:0,keynopeRecentActivityItems:[],keynopeLobbyPresentation:null,
   clearInterval:noop,renderActivityMarker:noop,renderEngagementRuntime:noop,publishEngagementRuntime:noop,engagementPresentationActive:()=>true,
-  runEngagementCountdown:noop,startHostedEngagement:noop,randomActivityCode:()=> 'AbCd1234',
+  runEngagementCountdown:noop,startHostedEngagement:noop,loadEngagementQRCode:noop,randomActivityCode:()=> 'AbCd1234',
   showEngagementToast:message=>{throw Error(message)},publishHostedEngagementState:()=>Promise.resolve()});
 vm.runInContext(source.slice(source.indexOf('let keynopeActivityResultWrites ='),source.indexOf('function engagementHasCompleted(')),context);
 for(const name of ['engagementIsRunning','engagementHasCompleted','archiveEngagementResult','queueActivityResultWrite','onboardingSessionDefinition','engagementSessionFor','currentEngagementDefinition','activitySubmittedItems','closeEngagementRuntime','openEngagementRuntime','resetEngagementRuntime']){

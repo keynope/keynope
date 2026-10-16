@@ -1,6 +1,9 @@
 package main
 
-import "net/url"
+import (
+	"net/url"
+	"strings"
+)
 
 // Marquee selection is applied atomically, without adding a document mutation
 // or exposing intermediate selections while the pointer is still down.
@@ -163,12 +166,31 @@ func freshPastedGroups(elements []Element) {
 // Resolve every target before writing, as sorting may have moved the indices
 // since the browser captured this batch. Reject the whole action if stale.
 func resolveEditorBatch(elements []Element, action *nativeEditorAction) error {
+	if len(action.ElementIndices) == 0 || len(action.ElementIndices) != len(action.ElementsData) {
+		return errInvalidEditorAction
+	}
 	seen := map[int]bool{}
+	byID := make(map[string]int, len(elements))
+	for index, element := range elements {
+		if element.ID == "" {
+			continue // Legacy index-only commands remain compatible.
+		}
+		if _, exists := byID[element.ID]; exists {
+			return errInvalidEditorAction
+		}
+		byID[element.ID] = index
+	}
 	indices := make([]int, len(action.ElementIndices))
 	for n, index := range action.ElementIndices {
 		updated := action.ElementsData[n]
-		index = nativeEditorElementIndex(elements, index, updated.ID)
-		if index < 0 || updated.Kind == "" || seen[index] {
+		if updated.ID != "" {
+			var exists bool
+			index, exists = byID[updated.ID]
+			if !exists {
+				return errInvalidEditorAction
+			}
+		}
+		if index < 0 || index >= len(elements) || strings.TrimSpace(updated.Kind) == "" || seen[index] {
 			return errInvalidEditorAction
 		}
 		seen[index] = true
