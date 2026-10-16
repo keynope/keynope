@@ -21,6 +21,7 @@ Added:
 Changed:
 
 - System fonts throughout the application interface, independent of slide fonts.
+- Markdown files remain associated with the user's chosen editor rather than automatically opening in Keynope.
 - Richer editable PowerPoint import and export for themes, text, tables, charts, shapes, connectors and animated images, with detailed conversion notes.
 - More flexible image cropping, masks, fitting and editable backgrounds, including Retro artwork.
 - Faster editing, dragging and presentation updates for large, content-heavy decks.
