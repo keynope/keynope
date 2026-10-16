@@ -155,7 +155,7 @@ html[data-keynope-timer-active="true"] :is(.keynope-workspace-inspector,.keynope
 .keynope-image-description label{display:block;font-size:13px}
 .keynope-image-description textarea{display:block;box-sizing:border-box;width:100%;resize:vertical;margin-top:6px;background:#17212b;color:#f1f5f9;border:1px solid #64748b;padding:8px;font:inherit}
 .keynope-image-description button{min-height:36px;font:inherit;background:#243244;color:#f1f5f9;border:1px solid #64748b;border-radius:6px}
-.keynope-theme-dialog { width:min(760px,calc(100vw - 40px));max-height:calc(100dvh - 56px);overflow:auto;box-sizing:border-box;padding:24px;border:1px solid #64748b;border-radius:12px;color:#edf1f3;background:#19222c;font:15px/1.45 KeynopeC64,monospace; }
+.keynope-theme-dialog { width:min(760px,calc(100vw - 40px));max-height:calc(100dvh - 56px);overflow:auto;box-sizing:border-box;padding:24px;border:1px solid #64748b;border-radius:12px;color:#edf1f3;background:#19222c;font:15px/1.45 var(--keynope-ui-font,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif); }
 .keynope-theme-dialog::backdrop { background:#0009; }
 .keynope-theme-form { display:grid;gap:16px; }
 .keynope-theme-form h2,.keynope-theme-form h3 { margin:0; }

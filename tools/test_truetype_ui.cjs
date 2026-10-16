@@ -30,7 +30,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
   });
   assert(outline.outlined>0,'outline extends above the text box');assert.equal(outline.plain,0,'glyph position stays unchanged');
   fs.mkdirSync('output/truetype-audit',{recursive:true});fs.writeFileSync('output/truetype-audit/outline.png',Buffer.from(outline.preview.split(',')[1],'base64'));
-  assert.match(await size.evaluate(e=>getComputedStyle(e).fontFamily),/KeynopeC64/);
+  assert.doesNotMatch(await size.evaluate(e=>getComputedStyle(e).fontFamily),/KeynopeC64/);
   const typography=await page.evaluate(()=>{
     const line={trueType:{text:'ONE TWO THREE\nFOUR FIVE SIX\nSHORT',size:30,width:500,height:200,query:'render=truetype&align=justify'}};
     const m=KeynopeTrueType.metrics(line,1920,1080);

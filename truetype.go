@@ -317,8 +317,9 @@ func trueTypeLayoutRowsFromValues(element Element, cols, rows int, values url.Va
 
 func trueTypeCSS() string {
 	return `@font-face{font-family:KeynopeC64;src:url(data:font/ttf;base64,` + strings.TrimSpace(trueTypeFontBase64) + `) format('truetype');font-weight:400;font-display:block}
+:root{--keynope-ui-font:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 body :is([class*="keynope-editor"],[class*="keynope-app"],[class*="keynope-engagement"],[class*="keynope-font"],[class*="keynope-modal"],[class*="keynope-slide"],[class*="keynope-colour"],[class*="keynope-speaker"],[class*="keynope-text-effect"]),
-body :is(.keynope-editor-shell,.keynope-editor-topbar,.keynope-app-toolbar,.keynope-engagement-board,.keynope-modal-blocker,.keynope-font-editor) :is(button,input,textarea,select,label,h1,h2,h3,p,span,div){font-family:KeynopeC64,ui-monospace,monospace!important}
+body :is(.keynope-editor-shell,.keynope-editor-topbar,.keynope-app-toolbar,.keynope-engagement-board,.keynope-modal-blocker,.keynope-font-editor) :is(button,input,textarea,select,label,h1,h2,h3,p,span,div){font-family:var(--keynope-ui-font)!important}
 .keynope-ttf-size,.keynope-ttf-width{width:64px;min-width:64px;height:30px;box-sizing:border-box;background:#20262c;color:#fff;border:1px solid #59616a;border-radius:4px}
 .keynope-ttf-width-control{display:inline-flex;flex-direction:column;align-items:flex-start;gap:2px;white-space:nowrap;color:#d8dde3;font-size:10px;line-height:12px}
 `
