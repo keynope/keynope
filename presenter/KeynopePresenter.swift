@@ -6,6 +6,14 @@ import UniformTypeIdentifiers
 import WebKit
 import PDFKit
 
+// WebKit added actor/sendability annotations to this callback in the Xcode 26
+// SDK. Match the SDK signature on both the release runners and newer Xcodes.
+#if compiler(>=6.2)
+typealias KeynopeScriptReplyHandler = @MainActor @Sendable (Any?, String?) -> Void
+#else
+typealias KeynopeScriptReplyHandler = (Any?, String?) -> Void
+#endif
+
 final class PresenterWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
@@ -2057,7 +2065,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     nonisolated func userContentController(
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage,
-        replyHandler: @escaping @MainActor @Sendable (Any?, String?) -> Void
+        replyHandler: @escaping KeynopeScriptReplyHandler
     ) {
         MainActor.assumeIsolated {
             let expected = editorURL()
