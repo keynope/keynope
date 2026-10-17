@@ -1,5 +1,5 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
-const source=fs.readFileSync('main.go','utf8'),noop=()=>{},stored=new Map();
+const source=fs.readFileSync('internal/app/main.go','utf8'),noop=()=>{},stored=new Map();
 const context=vm.createContext({window:{keynopeStoreActivityResult:async(id,result)=>{stored.set(id,result)},keynopeActivityResult:id=>stored.get(id)},
   document:{querySelectorAll:()=>[]},deck:{pages:[]},pageIndex:0,Date,crypto:require('node:crypto').webcrypto,
   keynopeEngagementSessions:new Map(),keynopeEngagementRuntime:null,keynopeRunningActivity:null,keynopeEngagementOverlay:null,keynopeEngagementSessionEpoch:0,keynopeEngagementFocusGeneration:0,keynopeEngagementOverlayFocus:null,renderActiveActivityStatus:noop,

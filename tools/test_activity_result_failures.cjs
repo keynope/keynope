@@ -1,5 +1,5 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
-const source=fs.readFileSync('main.go','utf8');
+const source=fs.readFileSync('internal/app/main.go','utf8');
 const stored=new Map(),sessions=new Map(),messages=[];let failing=true,attempts=0;
 const context=vm.createContext({window:{keynopeStoreActivityResult:async(id,result)=>{
   attempts++;if(failing)throw Error('activity result definition does not match');stored.set(id,result);

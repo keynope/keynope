@@ -1,7 +1,7 @@
 // Deterministic queue ownership regression using the actual editor functions
 // and workspace geometry. No UI test hooks or browser timing assumptions.
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
-const source=fs.readFileSync('main.go','utf8');
+const source=fs.readFileSync('internal/app/main.go','utf8');
 const names=['canvasGeometryContext','canvasGeometryContextCurrent','canvasGeometryGestureCurrent','canvasArrangeTargets','canvasArrangeAction','canvasMoveSnapshot','canvasArrangeUnits','rotateCanvasSelection','resizeCanvasSelection','distributeCanvasSelection','matchCanvasSelectionSize','alignCanvasSceneObjects','setCanvasObjectOrigin','preserveCanvasPositionOverride','showEditorCommandError'];
 const functions=names.map(name=>{
  const match=source.match(new RegExp('^  (?:async )?function '+name+'\\([^]*?^  }','m'));

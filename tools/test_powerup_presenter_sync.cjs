@@ -1,6 +1,6 @@
 // Exercise production presenter refresh code without a window, network or app.
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
-const source=fs.readFileSync('main.go','utf8');
+const source=fs.readFileSync('internal/app/main.go','utf8');
 const start=source.indexOf('async function refreshPresenterDeck('),end=source.indexOf('let presenterStateSync = null;',start);
 assert.ok(start>=0&&end>start);
 const editorRefresh=source.match(/window\.keynopeRefreshEditorCanvasState=\(\)=>\{[^\n]+\};/)[0];

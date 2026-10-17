@@ -7,7 +7,7 @@ const comparison=process.env.KEYNOPE_NATIVE_LATENCY_COMPARISON||'demand';
 assert(['demand','scene-patches','dependencies'].includes(comparison));
 (async()=>{
   let logs='',code=null,browser;
-  const go=cp.spawn('go',['test','-run','^TestNativeEditingLatencyBrowserFixture$','-count=1','.'],
+  const go=cp.spawn('go',['test','-run','^TestNativeEditingLatencyBrowserFixture$','-count=1','./internal/app'],
     {env:{...process.env,GOCACHE:process.env.GOCACHE||'/tmp/keynope-go-cache',KEYNOPE_NATIVE_EDITING_EVIDENCE:root},stdio:['ignore','pipe','pipe']});
   go.stdout.on('data',b=>logs+=b);go.stderr.on('data',b=>logs+=b);
   const exited=new Promise(resolve=>go.on('exit',value=>{code=value;resolve(value);}));

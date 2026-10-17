@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const source = fs.readFileSync('main.go','utf8');
+const source = fs.readFileSync('internal/app/main.go','utf8');
 const noop = () => {};
 let now = 1000;
 const context = vm.createContext({Date:{now:()=>now},clearInterval:noop,crypto:require('node:crypto').webcrypto,engagementBase64URL:bytes=>Buffer.from(bytes).toString('base64url'),

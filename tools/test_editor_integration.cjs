@@ -66,8 +66,8 @@ function fingerprint(root){
   if(stat.isDirectory()){for(const name of fs.readdirSync(full).sort())walk(path.join(relative,name));}
   else if(stat.isFile())files.push(relative);
  }
- for(const name of fs.readdirSync(root).sort())if(/\.go$/.test(name)||['go.mod','go.sum','Makefile','README.md','CHANGELOG.md','LICENSE.txt','sandbox_bridge_darwin.m'].includes(name))walk(name);
- for(const dir of ['internal','web','presenter','app','assets','testdata/powerup','testdata/pptx'])walk(dir);
+ for(const name of fs.readdirSync(root).sort())if(/\.go$/.test(name)||['go.mod','go.sum','Makefile','README.md','CHANGELOG.md','LICENSE.txt'].includes(name))walk(name);
+ for(const dir of ['cmd','internal','web','presenter','app','assets','testdata/powerup','testdata/pptx'])walk(dir);
  for(const name of [...cases.map(c=>c.script),'test_editor_integration.cjs','test_editor_integration_unit.cjs','test_native_acceptance.sh','test_native_acceptance_unit.cjs','wait_for_async.cjs','build_web_editor.sh','build_participant_renderer.cjs','test_pptx_text_schema.py','test_pptx_table_schema.py','test_pptx_timing_schema.py','test_native_style_commands.sh','test_native_pdf_export.sh','test_sandbox_pdf_readback.swift','test_native_appkit_gestures.sh'])walk('tools/'+name);
  const hashes={},digest=crypto.createHash('sha256');
  for(const name of [...new Set(files)].sort()){const hash=crypto.createHash('sha256').update(fs.readFileSync(path.join(root,name))).digest('hex');hashes[name]=hash;digest.update(name+'\0'+hash+'\0');}
@@ -142,7 +142,7 @@ async function main(args){
     report.steps.at(-1).coverage=test.coverage;save();
     if(proof&&passed){
      requireArtifacts(folder,proof.outputs);
-     await step(engine+'-'+test.id+'-package',env.GO||'go',['test','-v','-count=1','-run',proof.readback,'.'],extra);
+     await step(engine+'-'+test.id+'-package',env.GO||'go',['test','-v','-count=1','-run',proof.readback,'./internal/app'],extra);
     }
    }
   }

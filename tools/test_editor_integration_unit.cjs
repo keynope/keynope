@@ -29,6 +29,10 @@ test('fingerprints bind code, fixtures and tested harnesses but exclude output/p
  try{
   fs.mkdirSync(path.join(root,'web'));fs.writeFileSync(path.join(root,'main.go'),'package main');fs.writeFileSync(path.join(root,'web','scene.js'),'first');
   const initial=fingerprint(root);fs.mkdirSync(path.join(root,'terraform'));fs.writeFileSync(path.join(root,'terraform','private.tf'),'not part of the build');assert.equal(fingerprint(root).sha256,initial.sha256);
+  for(const dir of ['cmd/keynope','internal/app']){
+   fs.mkdirSync(path.join(root,dir),{recursive:true});const file=path.join(root,dir,'main.go');fs.writeFileSync(file,'first');
+   const before=fingerprint(root).sha256;fs.writeFileSync(file,'second');assert.notEqual(fingerprint(root).sha256,before,'fingerprint must include '+dir);
+  }
   fs.writeFileSync(path.join(root,'web','scene.js'),'second');assert.notEqual(fingerprint(root).sha256,initial.sha256);
   fs.mkdirSync(path.join(root,'tools'));fs.writeFileSync(path.join(root,'tools','test_pptx_font_capture.cjs'),'first capture check');
   const beforeCapture=fingerprint(root).sha256;fs.writeFileSync(path.join(root,'tools','test_pptx_font_capture.cjs'),'changed capture check');assert.notEqual(fingerprint(root).sha256,beforeCapture);

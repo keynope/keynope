@@ -5,7 +5,7 @@ const {waitForAsync}=require('./wait_for_async.cjs'),pw=require(process.env.PLAY
 const root=path.resolve(process.env.TEST_SITE||'/tmp/keynope-powerup-site'),output=fs.mkdtempSync('/tmp/keynope-inherited-adjustments-');
 const server=http.createServer((req,res)=>{let name=new URL(req.url,'http://localhost').pathname;if(name.endsWith('/'))name+='index.html';const file=path.resolve(root,'.'+name);if(!file.startsWith(root+'/')||!fs.existsSync(file)){res.writeHead(404);return res.end();}res.setHeader('Content-Type',({'.js':'text/javascript','.css':'text/css','.html':'text/html','.wasm':'application/wasm'})[path.extname(file)]||'application/octet-stream');res.end(fs.readFileSync(file));});
 (async()=>{
- cp.execFileSync('go',['test','-run','^(TestInheritedShapeAdjustmentBrowserFixture|TestPowerupDenseEditingFixture)$','.'],{env:{...process.env,GOCACHE:process.env.GOCACHE||'/tmp/keynope-go-cache',KEYNOPE_INHERITED_ADJUSTMENT_EVIDENCE:output,KEYNOPE_DENSE_EDITING_FIXTURE:path.join(output,'media.md')},stdio:'inherit'});
+ cp.execFileSync('go',['test','-run','^(TestInheritedShapeAdjustmentBrowserFixture|TestPowerupDenseEditingFixture)$','./internal/app'],{env:{...process.env,GOCACHE:process.env.GOCACHE||'/tmp/keynope-go-cache',KEYNOPE_INHERITED_ADJUSTMENT_EVIDENCE:output,KEYNOPE_DENSE_EDITING_FIXTURE:path.join(output,'media.md')},stdio:'inherit'});
  console.log('Inherited adjustment artifacts: '+output);await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
  for(const engine of ['chromium','webkit']){
   const browser=await pw[engine].launch({headless:true,...(engine==='chromium'?{executablePath:process.env.CHROME_PATH}:{})});

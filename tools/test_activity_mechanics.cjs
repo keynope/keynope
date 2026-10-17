@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const source = fs.readFileSync('main.go', 'utf8');
+const source = fs.readFileSync('internal/app/main.go', 'utf8');
 const start = source.indexOf('function validEngagementDots(');
 const end = source.indexOf('function finishBalancedPairs(', start);
 const context = vm.createContext({crypto:require('node:crypto').webcrypto});

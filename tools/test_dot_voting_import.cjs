@@ -1,5 +1,5 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
-const source=fs.readFileSync('main.go','utf8'),noop=()=>{},sessions=new Map(),saved=new Map(),messages=[];
+const source=fs.readFileSync('internal/app/main.go','utf8'),noop=()=>{},sessions=new Map(),saved=new Map(),messages=[];
 const c=vm.createContext({window:{keynopeActivityResult:id=>saved.get(id)},deck:{pages:[]},Date,TextEncoder,
  keynopeEngagementRuntime:null,keynopeRunningActivity:null,
  engagementSessionFor:d=>{if(!sessions.has(d.id))sessions.set(d.id,{});return sessions.get(d.id);},

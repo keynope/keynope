@@ -1,5 +1,5 @@
 // Shared payload/default formatting proof, not the unfinished full Detach UI.
-// Generate: KEYNOPE_SHARED_DETACH_FIXTURE=/tmp/keynope-shared-detach go test . -run TestConcreteThemeSharedMasterPayloads
+// Generate: KEYNOPE_SHARED_DETACH_FIXTURE=/tmp/keynope-shared-detach go test ./internal/app -run TestConcreteThemeSharedMasterPayloads
 const fs=require('node:fs'),path=require('node:path'),http=require('node:http'),assert=require('node:assert/strict');
 const playwright=require(process.env.PLAYWRIGHT_MODULE||'playwright'),engine=process.env.TEST_BROWSER||'chromium';
 const site=path.resolve(process.env.TEST_SITE||'/tmp/keynope-powerup-site'),fixtures=process.env.TEST_DECK_DIR||'/tmp/keynope-shared-detach',output=process.env.TEST_OUTPUT||'/tmp/keynope-shared-detach-proof';

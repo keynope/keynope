@@ -1,5 +1,5 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
-const src=fs.readFileSync('main.go','utf8');
+const src=fs.readFileSync('internal/app/main.go','utf8');
 const context=vm.createContext({Date,crypto:require('node:crypto').webcrypto,keynopeRunningActivity:null,keynopeEngagementRuntime:null,keynopePairingPublished:new WeakMap(),keynopeTrainingDepartures:new Map(),randomActivityCode:()=>String(Math.random()),engagementRandomIndex:()=>0,renderEngagementRuntime(){},publishEngagementRuntime(){},publishHostedEngagementState(){}});
 vm.runInContext(fs.readFileSync('web/activity-games.js','utf8'),context);
 for(const name of ['setPairingGroups','publishPairingRoom']){const begin=src.search(new RegExp('(?:async )?function '+name+'\\('));vm.runInContext(src.slice(begin,src.indexOf('\n}',begin)+2),context);}

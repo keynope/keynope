@@ -1,5 +1,5 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
-const src=fs.readFileSync('main.go','utf8');
+const src=fs.readFileSync('internal/app/main.go','utf8');
 const start=src.indexOf('function receiveHostedEngagement('),end=src.indexOf('\n}',start)+2;
 let broadcasts=[],timers=[],renders=0;
 const runtime={definition:{kind:'ball',id:'ball'},memberNames:{},rolePublicKeys:{},activityChannel:{},connectionEpoch:1};

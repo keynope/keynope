@@ -13,9 +13,9 @@ cp "$welcome_source" "$temporary_dir/Welcome.md"
 
 (
   cd "$repo_dir"
-  GOCACHE=${GOCACHE:-/tmp/keynope-go-cache} go run -tags keynope_sitegen . --template-previews assets/templates/previews.json
-  GOCACHE=${GOCACHE:-/tmp/keynope-go-cache} go run -tags keynope_sitegen . "$temporary_dir/Welcome.md" "$temporary_dir"
-  GOOS=js GOARCH=wasm GOCACHE=${GOCACHE:-/tmp/keynope-go-cache} go build -o "$output_dir/keynope-editor.wasm" .
+  GOCACHE=${GOCACHE:-/tmp/keynope-go-cache} go run -tags keynope_sitegen ./cmd/keynope --template-previews assets/templates/previews.json
+  GOCACHE=${GOCACHE:-/tmp/keynope-go-cache} go run -tags keynope_sitegen ./cmd/keynope "$temporary_dir/Welcome.md" "$temporary_dir"
+  GOOS=js GOARCH=wasm GOCACHE=${GOCACHE:-/tmp/keynope-go-cache} go build -o "$output_dir/keynope-editor.wasm" ./cmd/keynope
 )
 
 version=$(awk '/^## [0-9]/{print $2; exit}' "$repo_dir/CHANGELOG.md")

@@ -1,7 +1,7 @@
 // Run the production frame/selection functions with a deliberately suspended
 // animation-frame queue. Model IDs can reorder before native paint arrives.
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
-const source=fs.readFileSync('main.go','utf8');
+const source=fs.readFileSync('internal/app/main.go','utf8');
 const between=(start,end)=>{const a=source.indexOf(start),b=source.indexOf(end,a);assert(a>=0&&b>a);return source.slice(a,b);};
 const context=vm.createContext({console});
 vm.runInContext('window=globalThis;',context);

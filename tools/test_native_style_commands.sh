@@ -9,6 +9,6 @@ if [[ "${KEYNOPE_NATIVE_STYLE_MENU_FOREGROUND:-0}" == "1" ]]; then
   export KEYNOPE_NATIVE_BACKGROUND=0
 fi
 KEYNOPE_NATIVE_STYLE_MENU_EVIDENCE="$fixtureRoot" GOCACHE="${GOCACHE:-/tmp/keynope-go-cache}" \
-  go test -run '^TestNativeStyleMenuFixture$' .
+  go test -run '^TestNativeStyleMenuFixture$' ./internal/app
 KEYNOPE_NATIVE_STYLE_MENU_ACCEPTANCE=1 KEYNOPE_NATIVE_STYLE_MENU_FIXTURE="$fixtureRoot/original.md" \
   zsh "$repo/tools/test_native_pdf_export.sh"

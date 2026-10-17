@@ -1,5 +1,5 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
-const source=fs.readFileSync('main.go','utf8');
+const source=fs.readFileSync('internal/app/main.go','utf8');
 const context=vm.createContext({KeynopeGames:{has:()=>false},keynopePairingRoom:null});
 vm.runInContext(fs.readFileSync('web/activity-games.js','utf8'),context);
 for(const name of ['receiveQuestionResponse','foldHostedEngagementResponses','hostedEngagementResults']){

@@ -6,7 +6,7 @@ const server=http.createServer((req,res)=>{let name=new URL(req.url,'http://loca
 (async()=>{
   // Generate owned fixtures before opening a browser. Never depend on artifacts
   // left by a previous agent/test run (or on a customer's presentation).
-  require('node:child_process').execFileSync('go',['test','.', '-run','^(TestSelectionLabelVisualFixture|TestTableCellStyleBrowserFixture)$','-count=1'],{
+  require('node:child_process').execFileSync('go',['test','./internal/app', '-run','^(TestSelectionLabelVisualFixture|TestTableCellStyleBrowserFixture)$','-count=1'],{
     cwd:path.resolve(__dirname,'..'),stdio:'inherit',env:{...process.env,GOCACHE:process.env.GOCACHE||'/tmp/keynope-go-cache',KEYNOPE_LABEL_EVIDENCE:'/tmp/keynope-label-proof',KEYNOPE_CELL_STYLE_EVIDENCE:'/tmp/keynope-cell-style-proof'}
   });
   fs.mkdirSync(output,{recursive:true});await new Promise(r=>server.listen(0,'127.0.0.1',r));

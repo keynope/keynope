@@ -15,7 +15,7 @@ assert.equal(state.nominations.length,1);assert.equal(state.nominations[0].count
 r.definition.named=true;state=games.publicState(r);assert.equal(state.nominations[0].voters.join(','),'Alice,Bob');assert.equal(state.skipVoters.join(','),'Charlie');
 r.phase=1;send('a',{skip:true});assert.equal(games.publicState(r).submitted,3);
 r.deadlineMs=Date.now()-1;send('b',{skip:true});assert.equal(r.game.entries.find(e=>e.id==='b').target,'c');
-const source=fs.readFileSync('main.go','utf8'),start=source.indexOf('function pruneTrainingParticipant(');
+const source=fs.readFileSync('internal/app/main.go','utf8'),start=source.indexOf('function pruneTrainingParticipant(');
 c.foldHostedEngagementResponses=()=>{};
 vm.runInContext(source.slice(start,source.indexOf('\n}',start)+2),c);
 c.pruneTrainingParticipant(r,'c');assert.equal(r.game.entries.length,1);assert.equal(r.participants,1);

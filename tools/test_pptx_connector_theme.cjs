@@ -2,7 +2,7 @@
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),http=require('node:http'),{execFileSync}=require('node:child_process');
 const {waitForAsync}=require('./wait_for_async.cjs'),pw=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const root=path.resolve(process.env.TEST_SITE||'/tmp/keynope-powerup-site'),proof=process.env.KEYNOPE_CONNECTOR_THEME_EVIDENCE||'/tmp/keynope-connector-theme-proof',engine=process.env.TEST_BROWSER||'chromium';
-execFileSync('go',['test','.', '-run','^TestAttachedConnectorThemeNativePackageAndHistory$','-count=1'],{cwd:path.resolve(__dirname,'..'),env:{...process.env,GOCACHE:process.env.GOCACHE||'/tmp/keynope-go-cache',KEYNOPE_CONNECTOR_THEME_EVIDENCE:proof},stdio:'pipe'});
+execFileSync('go',['test','./internal/app', '-run','^TestAttachedConnectorThemeNativePackageAndHistory$','-count=1'],{cwd:path.resolve(__dirname,'..'),env:{...process.env,GOCACHE:process.env.GOCACHE||'/tmp/keynope-go-cache',KEYNOPE_CONNECTOR_THEME_EVIDENCE:proof},stdio:'pipe'});
 const server=http.createServer((req,res)=>{let name=new URL(req.url,'http://localhost').pathname;if(name.endsWith('/'))name+='index.html';const file=path.resolve(root,'.'+name);if(!file.startsWith(root+'/')||!fs.existsSync(file)){res.writeHead(404);return res.end();}res.setHeader('Content-Type',({'.js':'text/javascript','.css':'text/css','.html':'text/html','.wasm':'application/wasm'})[path.extname(file)]||'application/octet-stream');res.end(fs.readFileSync(file));});
 (async()=>{
  await new Promise(r=>server.listen(0,'127.0.0.1',r));const browser=await pw[engine].launch({headless:true,...(engine==='chromium'?{executablePath:process.env.CHROME_PATH}:{})});

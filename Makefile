@@ -29,27 +29,18 @@ KEYNOPE_VERSION := $(shell awk '/^\#\# [0-9]/{print $$2; exit}' CHANGELOG.md)
 PRESENTER_ICON := assets/KeynopeMenuTemplate.png
 PRESENTER_SRC := presenter/KeynopePresenter.swift presenter/ScreenShare.swift presenter/EmbeddedIcon.swift presenter/SlideExport.swift presenter/SlideExportWriter.swift
 PRESENTER_FRAMEWORKS := -framework Cocoa -framework WebKit -framework AVFoundation -framework ScreenCaptureKit -framework PDFKit
-GO_SRC := $(filter-out %_test.go,$(wildcard *.go))
-GO_SRC += $(shell find internal -type f -name '*.go')
-GO_SRC += web/activity-games.js
-GO_SRC += web/activity-design.js
-GO_SRC += web/truetype.js assets/keynope-c64.ttf.base64
-GO_SRC += web/participant-transfer.js
-GO_SRC += web/workspace.js web/workspace.css web/interface.css
-GO_SRC += web/templates.js $(wildcard assets/templates/*.md)
-GO_SRC += web/text-layout.js
-GO_SRC += web/fonts.js
-GO_SRC += web/scene.js
-GO_SRC += web/tables.js web/charts.js web/builds.js
-GO_SRC += web/print.js
+GO_SRC := resources.go $(shell find cmd internal -type f -name '*.go' ! -name '*_test.go')
+GO_SRC += $(wildcard web/*.js web/*.css)
+GO_SRC += assets/keynope-c64.ttf.base64 $(wildcard assets/templates/*.md)
 GO_SRC += assets/fonts/GO-FONT-LICENSE.txt
 GO_SRC += $(wildcard assets/licenses/*.txt)
+GO_SRC += $(KEYNOPE_EMOJI_ASSETS)
 TEMPLATE_PREVIEWS := assets/templates/previews.json
 GO_SRC += $(TEMPLATE_PREVIEWS)
 
 .DEFAULT_GOAL := all
 
-character_assets_data.go: characters_svg/items.json eyes.json tools/generate_character_assets.go
+internal/app/character_assets_data.go: characters_svg/items.json eyes.json tools/generate_character_assets.go
 	$(GO) run ./tools/generate_character_assets.go
 
 .PHONY: all build app web-editor test install clean
@@ -61,12 +52,13 @@ build: app
 web-editor:
 	./tools/build_web_editor.sh
 
-$(TEMPLATE_PREVIEWS): $(filter-out $(TEMPLATE_PREVIEWS),$(GO_SRC)) main_sitegen.go
-	$(GO) run -tags keynope_sitegen . --template-previews $@
+$(TEMPLATE_PREVIEWS): $(filter-out $(TEMPLATE_PREVIEWS),$(GO_SRC))
+	$(GO) run -tags keynope_sitegen ./cmd/keynope --template-previews $@
+	@touch $@
 
 app: $(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources
 
-$(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE_APP_INFO) $(KEYNOPE_APP_ENTITLEMENTS) $(KEYNOPE_APP_ENGINE_ENTITLEMENTS) $(KEYNOPE_APP_PRIVACY) $(KEYNOPE_APP_WELCOME) $(KEYNOPE_APP_ICON_FILES) $(KEYNOPE_APP_ICON_FALLBACK) $(PRESENTER_ICON) $(KEYNOPE_EMOJI_ASSETS) $(GO_SRC) sandbox_bridge_darwin.m go.mod go.sum CHANGELOG.md LICENSE.txt
+$(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE_APP_INFO) $(KEYNOPE_APP_ENTITLEMENTS) $(KEYNOPE_APP_ENGINE_ENTITLEMENTS) $(KEYNOPE_APP_PRIVACY) $(KEYNOPE_APP_WELCOME) $(KEYNOPE_APP_ICON_FILES) $(KEYNOPE_APP_ICON_FALLBACK) $(PRESENTER_ICON) $(KEYNOPE_EMOJI_ASSETS) $(GO_SRC) internal/app/sandbox_bridge_darwin.m go.mod go.sum CHANGELOG.md LICENSE.txt
 	rm -rf $(KEYNOPE_APP)
 	@mkdir -p $(KEYNOPE_APP)/Contents/MacOS $(KEYNOPE_APP)/Contents/Helpers $(KEYNOPE_APP)/Contents/Resources
 	cp $(KEYNOPE_APP_INFO) $(KEYNOPE_APP)/Contents/Info.plist
@@ -81,7 +73,7 @@ $(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE
 	cp assets/fonts/GO-FONT-LICENSE.txt $(KEYNOPE_APP)/Contents/Resources/EmojiLicenses/
 	cp assets/licenses/*.txt $(KEYNOPE_APP)/Contents/Resources/EmojiLicenses/
 	cp LICENSE.txt $(KEYNOPE_APP)/Contents/Resources/EmojiLicenses/Keynope-LICENSE.txt
-	$(GO) build -o $(KEYNOPE_APP_ENGINE) .
+	$(GO) build -o $(KEYNOPE_APP_ENGINE) ./cmd/keynope
 	$(SWIFTC) $(SWIFTFLAGS) -target $(SWIFT_TARGET) -O $(PRESENTER_FRAMEWORKS) $(PRESENTER_SRC) -o $(KEYNOPE_APP_EXECUTABLE)
 	$(CODESIGN) --force --options runtime --identifier sh.keynope.app.engine --entitlements $(KEYNOPE_APP_ENGINE_ENTITLEMENTS) --sign "$(CODESIGN_IDENTITY)" $(KEYNOPE_APP_ENGINE)
 	$(CODESIGN) --force --options runtime --entitlements $(KEYNOPE_APP_ENTITLEMENTS) --sign "$(CODESIGN_IDENTITY)" $(KEYNOPE_APP)

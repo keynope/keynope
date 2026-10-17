@@ -1,6 +1,6 @@
 const fs=require('node:fs'),assert=require('node:assert/strict');
 const playwright=require(process.env.PLAYWRIGHT_MODULE||'playwright');
-const main=fs.readFileSync('main.go','utf8');
+const main=fs.readFileSync('internal/app/main.go','utf8');
 const css=main.slice(main.indexOf('.keynope-tabs-overlay {'),main.indexOf('.keynope-tabs-dialog button:disabled {'))+'.keynope-tabs-dialog button:disabled { opacity:.4; }';
 const start=main.indexOf('  function openDeckTabsDialog(launcher) {');
 const script=main.slice(start,main.indexOf('\n  exportButton.classList.add',start));

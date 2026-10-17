@@ -1,5 +1,5 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
-const source=fs.readFileSync('main.go','utf8'),noop=()=>{};
+const source=fs.readFileSync('internal/app/main.go','utf8'),noop=()=>{};
 let now=100000,conflicts=0,connections=0;
 const sessions=new Map();
 const c=vm.createContext({Date:{now:()=>now},window:{},keynopeEngagementRuntime:null,keynopeRunningActivity:null,

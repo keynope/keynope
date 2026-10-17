@@ -1,5 +1,5 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
-const source=fs.readFileSync('main.go','utf8'),noop=()=>{};
+const source=fs.readFileSync('internal/app/main.go','utf8'),noop=()=>{};
 let mode='none',connections=0,writes=0;
 const context=vm.createContext({window:{KEYNOPE_PRESENTER:true},keynopeAppSurface:true,
   keynopeEditorMasterMode:false,presenterPresenting:false,keynopeHostedEngagementControllerSurface:true,

@@ -3,7 +3,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
 const pw=require(process.env.PLAYWRIGHT_MODULE||'playwright'),root=path.resolve(process.env.TEST_SITE||'/tmp/keynope-powerup-site'),output=fs.mkdtempSync('/tmp/keynope-build-draft-');
 const server=http.createServer((req,res)=>{let name=new URL(req.url,'http://localhost').pathname;if(name.endsWith('/'))name+='index.html';const file=path.resolve(root,'.'+name);if(!file.startsWith(root+'/')||!fs.existsSync(file)){res.writeHead(404);return res.end();}res.setHeader('Content-Type',({'.js':'text/javascript','.css':'text/css','.html':'text/html','.wasm':'application/wasm'})[path.extname(file)]||'application/octet-stream');res.end(fs.readFileSync(file));});
 (async()=>{
- cp.execFileSync('go',['test','-run','^TestBuildDraftBrowserFixture$','.'],{env:{...process.env,GOCACHE:process.env.GOCACHE||'/tmp/keynope-go-cache',KEYNOPE_BUILD_DRAFT_EVIDENCE:output},stdio:'inherit'});
+ cp.execFileSync('go',['test','-run','^TestBuildDraftBrowserFixture$','./internal/app'],{env:{...process.env,GOCACHE:process.env.GOCACHE||'/tmp/keynope-go-cache',KEYNOPE_BUILD_DRAFT_EVIDENCE:output},stdio:'inherit'});
  const markdown=fs.readFileSync(path.join(output,'build-drafts.md'),'utf8'),records=[];
  await new Promise(r=>server.listen(0,'127.0.0.1',r));
  for(const engine of ['chromium','webkit']){

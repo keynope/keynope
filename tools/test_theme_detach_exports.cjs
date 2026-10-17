@@ -1,5 +1,5 @@
 // Generate owned source/detached standalone HTML using:
-// KEYNOPE_DETACH_EXPORT_EVIDENCE=/tmp/keynope-detach-exports go test . -run '^TestThemeDetachExportCorpus$'
+// KEYNOPE_DETACH_EXPORT_EVIDENCE=/tmp/keynope-detach-exports go test ./internal/app -run '^TestThemeDetachExportCorpus$'
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
 const playwright=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const root=path.resolve(process.env.KEYNOPE_DETACH_EXPORT_EVIDENCE||'/tmp/keynope-detach-exports');

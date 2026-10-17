@@ -5,7 +5,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
  try{
   const page=await browser.newPage();
   await page.setContent('<style>aside{width:240px}button{display:block;width:240px;height:50px}.master-dragging{display:none}</style><aside id="slidesPanel"></aside>');
-  const src=fs.readFileSync('main.go','utf8');
+  const src=fs.readFileSync('internal/app/main.go','utf8');
   const start=src.indexOf('  let draggedMasterIndex = -1;'),end=src.indexOf('  const masterModeButton =',start);
   const bindStart=src.indexOf('      {\n        button.dataset.masterIndex = String(index);'),bindEnd=src.indexOf('      slidesPanel.appendChild(button);',bindStart);
   assert(start>0&&bindStart>0);

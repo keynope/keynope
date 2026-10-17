@@ -1,5 +1,5 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
-const source=fs.readFileSync('main.go','utf8'),noop=()=>{};let now=1000,connections=0,presenting=true;
+const source=fs.readFileSync('internal/app/main.go','utf8'),noop=()=>{};let now=1000,connections=0,presenting=true;
 const c=vm.createContext({window:{},document:{querySelectorAll:()=>[]},Date:{now:()=>now},crypto:require('node:crypto').webcrypto,
  keynopeEngagementSessions:new Map(),keynopeEngagementRuntime:null,keynopeRunningActivity:null,keynopeEngagementOverlay:null,keynopeEngagementSessionEpoch:0,keynopeEngagementFocusGeneration:0,keynopeEngagementOverlayFocus:null,keynopePairingRoom:null,showEngagementToast:noop,
  renderActiveActivityStatus:noop,clearTimeout:noop,confirmRunningActivity:()=>{throw Error('Unexpected conflict')},

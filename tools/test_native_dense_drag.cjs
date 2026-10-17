@@ -4,7 +4,7 @@ const fs=require('node:fs'),path=require('node:path'),cp=require('node:child_pro
 const root=fs.mkdtempSync('/tmp/keynope-native-dense-drag-');
 (async()=>{
  let logs='',code=null;
- const go=cp.spawn('go',['test','-run','^TestNativeEditingLatencyBrowserFixture$','-count=1','.'],{env:{...process.env,GOCACHE:process.env.GOCACHE||'/tmp/keynope-go-cache',KEYNOPE_NATIVE_EDITING_EVIDENCE:root,KEYNOPE_NATIVE_LATENCY_COMPARISON:'demand'},stdio:['ignore','pipe','pipe']});
+ const go=cp.spawn('go',['test','-run','^TestNativeEditingLatencyBrowserFixture$','-count=1','./internal/app'],{env:{...process.env,GOCACHE:process.env.GOCACHE||'/tmp/keynope-go-cache',KEYNOPE_NATIVE_EDITING_EVIDENCE:root,KEYNOPE_NATIVE_LATENCY_COMPARISON:'demand'},stdio:['ignore','pipe','pipe']});
  go.stdout.on('data',b=>logs+=b);go.stderr.on('data',b=>logs+=b);
  const exited=new Promise(resolve=>go.on('exit',value=>{code=value;resolve(value);}));
  try{

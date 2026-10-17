@@ -4,7 +4,7 @@ const context=vm.createContext({crypto:require('node:crypto').webcrypto,console,
  randomActivityCode:()=>require('node:crypto').randomBytes(6).toString('hex'),
  renderEngagementRuntime(){},publishEngagementRuntime(){},publishHostedEngagementState:async()=>{}});
 vm.runInContext(fs.readFileSync('web/activity-games.js','utf8'),context);
-const src=fs.readFileSync('main.go','utf8');
+const src=fs.readFileSync('internal/app/main.go','utf8');
 for(const name of ['receivePairingRoom','publishPairingRoom','setPairingGroups','replacePairingRoom','syncDeducerRuntimeGroups','shuffleEngagementGroups']){
  const i=src.search(new RegExp('(?:async )?function '+name+'\\('));vm.runInContext(src.slice(i,src.indexOf('\n}',i)+2),context);
 }

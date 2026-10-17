@@ -148,13 +148,20 @@ stores Unicode text and styling, not a second copy of the built-in fonts.
 
 | Location | Responsibility |
 | --- | --- |
-| `main.go`, `native_editor.go`, `main_wasm.go` | Shared engine and editor entry points |
-| `masters.go`, `master_ui.go` | Master/layout model, persistence and editing |
-| `scene*.go`, `workspace*.go`, `web/scene.js`, `web/workspace.js` | Scene projection and visual editing |
-| `table*.go`, `chart*.go`, `web/tables.js`, `web/charts.js` | Structured objects and editors |
-| `internal/pptx/`, `pptx*.go` | PowerPoint package conversion |
+| `cmd/keynope/` | Small executable entry point for native, WebAssembly and site-generation builds |
+| `internal/app/` | Shared application engine, document/editor logic and its tests |
+| `internal/app/masters.go`, `internal/app/master_ui.go` | Master/layout model, persistence and editing |
+| `internal/app/scene*.go`, `internal/app/workspace*.go`, `web/scene.js`, `web/workspace.js` | Scene projection and visual editing |
+| `internal/app/table*.go`, `internal/app/chart*.go`, `web/tables.js`, `web/charts.js` | Structured objects and editors |
+| `internal/pptx/`, `internal/app/pptx*.go` | PowerPoint package conversion |
+| `resources.go` | Embedded resource bundle shared by all engine builds |
 | `presenter/` | Native Mac app, display handling and export capture |
 | `app/`, `assets/` | App metadata, starter decks, templates, fonts and licenses |
 | `web/`, `tools/` | Shared browser components, build scripts and tests |
 | `testdata/` | Committed synthetic regression fixtures |
 | `Makefile` | Build, sign, test, install and clean targets |
+
+Run all Go tests from the repository root with `go test ./...`, or only the
+application tests with `go test ./internal/app`. To build the private engine
+without the Swift app bundle, use `go build -o /tmp/keynope-engine ./cmd/keynope`.
+The usual `make build`, `make test` and web build commands are unchanged.

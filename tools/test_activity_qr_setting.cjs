@@ -3,7 +3,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 (async()=>{
  const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
  try{
-  const page=await browser.newPage({viewport:{width:900,height:700}}),source=fs.readFileSync('main.go','utf8');
+  const page=await browser.newPage({viewport:{width:900,height:700}}),source=fs.readFileSync('internal/app/main.go','utf8');
   await page.setContent('<body style="background:#111c26;color:white"><main id="root"></main></body>');
   await page.addScriptTag({path:path.resolve('web/activity-design.js')});
   const css=source.split('\n').filter(line=>line.startsWith('.keynope-engagement-join-text')).join('\n');

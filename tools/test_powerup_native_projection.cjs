@@ -3,7 +3,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
 const playwright=require(process.env.PLAYWRIGHT_MODULE||'playwright'),output='/tmp/keynope-native-projection-proof';
 (async()=>{
   fs.mkdirSync(output,{recursive:true});for(const file of ['connection.json','stop']){try{fs.unlinkSync(path.join(output,file));}catch(e){if(e.code!=='ENOENT')throw e;}}
-  const go=cp.spawn('go',['test','-run','^TestNativeProjectionBrowserFixture$','-count=1','.'],{env:{...process.env,GOCACHE:process.env.GOCACHE||'/tmp/keynope-go-cache',KEYNOPE_NATIVE_PROJECTION_EVIDENCE:output},stdio:['ignore','pipe','pipe']});
+  const go=cp.spawn('go',['test','-run','^TestNativeProjectionBrowserFixture$','-count=1','./internal/app'],{env:{...process.env,GOCACHE:process.env.GOCACHE||'/tmp/keynope-go-cache',KEYNOPE_NATIVE_PROJECTION_EVIDENCE:output},stdio:['ignore','pipe','pipe']});
   let logs='';go.stdout.on('data',x=>logs+=x);go.stderr.on('data',x=>logs+=x);let exit=null;const finished=new Promise(r=>go.on('exit',code=>{exit=code;r(code);}));
   let browser;
   try{

@@ -6,7 +6,7 @@ const {waitForAsync}=require('./wait_for_async.cjs');
 const output=fs.mkdtempSync('/tmp/keynope-object-commands-'),fixture=path.join(output,'commands.md');
 const server=http.createServer((req,res)=>{let name=new URL(req.url,'http://localhost').pathname;if(name.endsWith('/'))name+='index.html';const file=path.resolve(root,'.'+name);if(!file.startsWith(root+'/')||!fs.existsSync(file)){res.writeHead(404);return res.end();}res.setHeader('Content-Type',({'.js':'text/javascript','.css':'text/css','.html':'text/html','.wasm':'application/wasm'})[path.extname(file)]||'application/octet-stream');res.end(fs.readFileSync(file));});
 (async()=>{
- cp.execFileSync('go',['test','-run','^TestPowerupDenseEditingFixture$','.'],{env:{...process.env,GOCACHE:process.env.GOCACHE||'/tmp/keynope-go-cache',KEYNOPE_DENSE_EDITING_FIXTURE:fixture},stdio:'inherit'});
+ cp.execFileSync('go',['test','-run','^TestPowerupDenseEditingFixture$','./internal/app'],{env:{...process.env,GOCACHE:process.env.GOCACHE||'/tmp/keynope-go-cache',KEYNOPE_DENSE_EDITING_FIXTURE:fixture},stdio:'inherit'});
  console.log('Object-command artifacts: '+output);
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
  for(const engine of ['chromium','webkit']){

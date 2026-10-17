@@ -28,13 +28,13 @@ case "$1" in
 esac
 if [[ "${2:-}" == --dry-run ]]; then
   if [[ "$1" == svg ]]; then
-    print -r -- 'KEYNOPE_SVG_EVIDENCE=/tmp/keynope-svg-proof go test -run TestSVG .'
+    print -r -- 'KEYNOPE_SVG_EVIDENCE=/tmp/keynope-svg-proof go test -run TestSVG ./internal/app'
   fi
   print -r -- "$flag=1 zsh tools/test_native_pdf_export.sh"
   exit 0
 fi
 if [[ "$1" == svg ]]; then
-  KEYNOPE_SVG_EVIDENCE=/tmp/keynope-svg-proof GOCACHE=${GOCACHE:-/tmp/keynope-go-cache} go -C "$repo" test -run TestSVG .
+  KEYNOPE_SVG_EVIDENCE=/tmp/keynope-svg-proof GOCACHE=${GOCACHE:-/tmp/keynope-go-cache} go -C "$repo" test -run TestSVG ./internal/app
 fi
 export "$flag=1"
 exec zsh "$repo/tools/test_native_pdf_export.sh"

@@ -27,7 +27,7 @@ const state=game.publicState(r);assert.equal(state.entries.length,3);assert(stat
 game.next(r);const end=JSON.stringify(r.game);send(a,{action:'remove',entryId:second});send(a,{action:'add',text:'Late'});assert.equal(JSON.stringify(r.game),end);assert.equal(r.phase,3);
 const expired=fresh();game.syncDeducerGroups(expired);expired.deadlineMs=Date.now()-1;game.receive(expired,{id:'expired',identity:'p0',payload:{response:{action:'add',text:'Too late'}}});assert.equal(expired.game.entries.length,0);
 console.log('Deducer: balanced random groups, stable assignments/late joins, shared caps, teammate editing, group isolation, stable-ID ordering, duplicate/stale events and timer/stop locking passed.');
-const source=fs.readFileSync('main.go','utf8'),start=source.indexOf('function replacePairingRoom(');
+const source=fs.readFileSync('internal/app/main.go','utf8'),start=source.indexOf('function replacePairingRoom(');
 let roomSequence=0;
 const rooms=vm.createContext({KeynopeGames:game,KeynopeGroups:context.KeynopeGroups,keynopeEngagementRuntime:null,keynopeRunningActivity:null,keynopePairingRoom:null,keynopePairingPublished:new WeakMap(),randomActivityCode:()=> 'room-'+(++roomSequence)});
 for(const name of ['setPairingGroups','publishPairingRoom']){const begin=source.search(new RegExp('(?:async )?function '+name+'\\('));vm.runInContext(source.slice(begin,source.indexOf('\n}',begin)+2),rooms);}

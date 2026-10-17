@@ -1,5 +1,5 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
-const source=fs.readFileSync('main.go','utf8');
+const source=fs.readFileSync('internal/app/main.go','utf8');
 const start=source.indexOf('  function clearCanvasPlacementAnchors(');
 const end=source.indexOf('  function canvasElementAt(',start);
 const context=vm.createContext({});

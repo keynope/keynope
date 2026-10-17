@@ -8,7 +8,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
     page.on('pageerror',e=>errors.push(e.message));
     await page.setContent('<body style="background:#111c26;color:white;font:16px monospace"><main id="root"></main></body>');
     for(const file of ['web/activity-games.js','web/activity-design.js'])await page.addScriptTag({path:path.resolve(file)});
-    const source=fs.readFileSync('main.go','utf8'),start=source.indexOf('  let activeEngagementEditor = null;');
+    const source=fs.readFileSync('internal/app/main.go','utf8'),start=source.indexOf('  let activeEngagementEditor = null;');
     const end=source.indexOf("  const topbar = document.createElement('div');",start);
     assert(start>=0&&end>start);
     await page.addScriptTag({content:'var editorState={current:0,slides:[{}]},saved=null;async function editorAction(action){saved=action.engagementData;}function engagementButton(label,cls,action){const b=document.createElement("button");b.type="button";b.textContent=label;b.onclick=action;return b;}\n'+source.slice(start,end)});

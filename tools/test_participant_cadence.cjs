@@ -2,7 +2,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const source = fs.readFileSync('main.go', 'utf8');
+const source = fs.readFileSync('internal/app/main.go', 'utf8');
 const builder = fs.readFileSync('tools/build_participant_renderer.cjs', 'utf8');
 const cadence = source.slice(source.indexOf('function contentAnimationWakeDelayMS()'), source.indexOf('function tick()'));
 const suffix = builder.split('const suffix=`')[1].split('\n`;')[0];
