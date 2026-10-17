@@ -326,6 +326,18 @@ jobs:
             exit 1
           fi
 
+      - name: Use TCP For Apple Ticket Checks On Intel
+        if: matrix.os == 'macos-15-intel'
+        shell: bash
+        run: |
+          # Work around dropped HTTP/3 connections to Apple's ticket service.
+          # This changes only the disposable GitHub-hosted release runner.
+          # Remove once https://github.com/actions/runner-images/issues/14924 is resolved.
+          sudo pfctl -f - <<'PF_RULES'
+          block return out quick proto udp from any to any port 443
+          PF_RULES
+          sudo pfctl -E
+
       - name: Staple And Assess Distribution
         shell: bash
         run: |
