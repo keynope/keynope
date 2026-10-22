@@ -42,6 +42,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Keep the minimum supported OS independent from the build runner and SDK.
+  MACOSX_DEPLOYMENT_TARGET: "14.0"
+
 concurrency:
   group: test-and-build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -97,12 +101,14 @@ jobs:
     needs: release-state
     if: needs.release-state.outputs.release_needed == 'true'
     runs-on: ${{ matrix.os }}
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             arch: arm64
             goarch: arm64
           - os: macos-15-intel
@@ -159,6 +165,8 @@ jobs:
     if: needs.release-state.outputs.release_needed == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     environment: release
     runs-on: ${{ matrix.os }}
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     timeout-minutes: 45
     permissions:
       contents: read
@@ -166,7 +174,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             arch: arm64
             goarch: arm64
           - os: macos-15-intel
@@ -389,7 +397,7 @@ jobs:
       - release-state
       - release-build
     if: needs.release-state.outputs.release_needed == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     permissions:
       contents: write
