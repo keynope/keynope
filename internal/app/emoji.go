@@ -34,6 +34,11 @@ var goLibrariesLicenseText = embeddedString("assets/licenses/GO-LIBRARIES-LICENS
 
 var unisegLicenseText = embeddedString("assets/licenses/UNISEG-LICENSE.txt")
 
+var craftEffectsLicenseText = embeddedString("assets/licenses/CRAFT-EFFECTS-LICENSE.txt")
+var mcpSDKLicenseText = embeddedString("assets/licenses/MCP-SDK-LICENSE.txt")
+var jsonschemaLicenseText = embeddedString("assets/licenses/JSONSCHEMA-LICENSE.txt")
+var mcpSupportLicenseText = embeddedString("assets/licenses/MCP-SUPPORT-LICENSE.txt")
+
 type emojiCatalogEntry struct {
 	Emoji    string `json:"emoji"`
 	Name     string `json:"name"`
@@ -85,6 +90,10 @@ func bundledLicenseText() string {
 		{title: "SVG RENDERER", text: svgRendererLicenseText},
 		{title: "GO SUPPORT LIBRARIES", text: goLibrariesLicenseText},
 		{title: "UNICODE TEXT SEGMENTATION", text: unisegLicenseText},
+		{title: "CRAFT RENDERING ALGORITHMS", text: craftEffectsLicenseText},
+		{title: "MODEL CONTEXT PROTOCOL GO SDK", text: mcpSDKLicenseText},
+		{title: "JSON SCHEMA GO", text: jsonschemaLicenseText},
+		{title: "MCP SUPPORT LIBRARIES", text: mcpSupportLicenseText},
 	}
 	var out strings.Builder
 	for index, section := range sections {

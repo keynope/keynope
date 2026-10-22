@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+
+	"keynope/internal/effects"
 )
 
 type textGradient struct {
@@ -28,10 +30,11 @@ type rgbColour struct {
 }
 
 type textEffectBounds struct {
-	minRow int
-	maxRow int
-	minCol int
-	maxCol int
+	minRow                int
+	maxRow                int
+	minCol                int
+	maxCol                int
+	cellWidth, cellHeight float64
 }
 
 func parseElementTextGradient(query string) (textGradient, bool) {
@@ -53,7 +56,7 @@ func textGradientFromValues(values url.Values) (textGradient, bool) {
 	}
 	direction := values.Get("gradient-dir")
 	switch direction {
-	case "vertical", "diagonal":
+	case "vertical", "diagonal", "radial", "reflected", "diamond", "angle":
 	default:
 		direction = "horizontal"
 	}
@@ -137,7 +140,7 @@ func padTextRowsForShadow(element Element, rows []string) []string {
 	return out
 }
 
-func applyTextElementEffects(lines []Line, slide Slide) []Line {
+func applyTextElementEffects(lines []Line, slide Slide, grid ...int) []Line {
 	if len(lines) == 0 || len(slide.Elements) == 0 {
 		return lines
 	}
@@ -164,6 +167,11 @@ func applyTextElementEffects(lines []Line, slide Slide) []Line {
 			continue
 		}
 		if gradient, ok := parseElementTextGradient(slide.Elements[element].Query); ok {
+			if len(grid) >= 2 && grid[0] > 0 && grid[1] > 0 {
+				canvas := slide.physicalCanvas()
+				bounds.cellWidth = canvas.Width / float64(grid[0])
+				bounds.cellHeight = canvas.Height / float64(grid[1])
+			}
 			for _, index := range indices {
 				lines[index].Text = gradientTextLine(lines[index], bounds, gradient)
 			}
@@ -223,6 +231,16 @@ func gradientTextLine(line Line, bounds textEffectBounds, gradient textGradient)
 }
 
 func gradientPosition(row, col int, bounds textEffectBounds, direction string) float64 {
+	if extendedGradient(direction) {
+		cw, ch := bounds.cellWidth, bounds.cellHeight
+		if cw <= 0 {
+			cw = 1
+		}
+		if ch <= 0 {
+			ch = 1
+		}
+		return effects.GradientT(direction, float64(bounds.maxCol-bounds.minCol+1)*cw, float64(bounds.maxRow-bounds.minRow+1)*ch, (float64(col-bounds.minCol)+.5)*cw, (float64(row-bounds.minRow)+.5)*ch)
+	}
 	var numerator, denominator int
 	switch direction {
 	case "vertical":

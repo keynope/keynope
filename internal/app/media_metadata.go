@@ -36,7 +36,7 @@ func (asset *DeckAsset) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
-	extra, err := decodeJSONExtensions(data, "vector", "source", "mime", "width", "height", "data", "frames", "loopCount")
+	extra, err := decodeJSONExtensions(data, "vector", "video", "source", "mime", "width", "height", "data", "frames", "loopCount")
 	if err != nil {
 		return err
 	}
@@ -120,6 +120,9 @@ func participantMediaAssets(assets map[string]DeckAsset) map[string]DeckAsset {
 		return result
 	}
 	for id, asset := range assets {
+		// A movie's poster can also be used as an ordinary image/background.
+		// Preserve those pixels, but never serialize its movie bytes publicly.
+		asset.Video = nil
 		asset.Extra = nil
 		asset.Frames = clearFrames(asset.Frames)
 		if asset.Source != nil {

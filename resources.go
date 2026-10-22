@@ -14,9 +14,12 @@ import "embed"
 //go:embed assets/emoji/emoji-test.txt
 //go:embed assets/fonts/GO-FONT-LICENSE.txt assets/keynope-c64.ttf.base64
 //go:embed assets/licenses/GO-LIBRARIES-LICENSE.txt assets/licenses/SVG-RENDERER-LICENSE.txt assets/licenses/UNISEG-LICENSE.txt
+//go:embed assets/licenses/CRAFT-EFFECTS-LICENSE.txt
+//go:embed assets/licenses/MCP-SDK-LICENSE.txt assets/licenses/JSONSCHEMA-LICENSE.txt
+//go:embed assets/licenses/MCP-SUPPORT-LICENSE.txt
 //go:embed assets/templates/*.md assets/templates/previews.json
 //go:embed web/activity-design.js web/activity-games.js web/builds.js web/charts.js web/conversion-report.js web/fonts.js
-//go:embed web/interface.css web/participant-transfer.js web/presentation-tools.js web/print.js web/scene.js web/tables.js web/templates.js
+//go:embed web/interface.css web/participant-transfer.js web/presentation-tools.js web/video.js web/print.js web/scene.js web/tables.js web/templates.js
 //go:embed web/text-layout.js web/text-styles.js web/truetype.js web/workspace.css web/workspace.js
 var Resources embed.FS
 

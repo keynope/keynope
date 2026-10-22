@@ -4,6 +4,22 @@ All notable changes to `keynope` are documented in this file.
 
 This project follows semantic versioning.
 
+## 1.8.6
+
+Added:
+
+- Non-destructive blur, glow, colour inversion, duotone, tritone and posterisation for slide objects, including Retro artwork.
+- Radial, reflected, diamond and angular gradients, plus inside, centred and outside shape outlines.
+- Dip-to-black, dip-to-white and TV-switching slide transitions.
+- Embedded MP4, M4V and MOV video with editor previews, autoplay, looping, sound controls and offline playback in standalone HTML exports. Videos stay local and are not sent to workshop participants.
+- Synchronized video playback controls on the presenter's Mac when presenting to an external display.
+- An opt-in MCP server for AI-assisted deck creation and editing, including masters, media, effects, activities, validation, exports and rendered slide previews in a separate automation workspace.
+
+Changed:
+
+- Faster rendering of backgrounds with effects, with immediate previews when adjusting treatments.
+- Standalone HTML exports omit presenter-only annotation tools.
+
 ## 1.8.5
 
 Added:

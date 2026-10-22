@@ -109,7 +109,7 @@ func TestSelectionPaintSubsetAndContentIsolation(t *testing.T) {
 }
 
 func TestSelectionPaintRejectsInvalidValuesAtomically(t *testing.T) {
-	for _, edit := range []struct{ property, value string }{{"paint.color", `"red"`}, {"paint.color", `12`}, {"paint.outline", `"theme"`}, {"paint.outline", `"bogus"`}, {"paint.shadow", `"hard"`}, {"paint.gradientDirection", `"radial"`}, {"paint.gradientEnd", `"url(foo)"`}, {"paint.shadowX", `4.1`}, {"paint.shadowY", `-5`}, {"paint.shadowX", `"1"`}} {
+	for _, edit := range []struct{ property, value string }{{"paint.color", `"red"`}, {"paint.color", `12`}, {"paint.outline", `"theme"`}, {"paint.outline", `"bogus"`}, {"paint.shadow", `"hard"`}, {"paint.gradientDirection", `"spiral"`}, {"paint.gradientEnd", `"url(foo)"`}, {"paint.shadowX", `4.1`}, {"paint.shadowY", `-5`}, {"paint.shadowX", `"1"`}} {
 		t.Run(edit.property+edit.value, func(t *testing.T) {
 			s := capabilityFixture()
 			version := s.version

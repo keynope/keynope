@@ -156,7 +156,8 @@ globalThis.KeynopeTextLayout = (() => {
         const ramp=ctx.createLinearGradient(x1-x,y1-y,x2-x,y2-y);
         ramp.addColorStop(0,emojiGradient.start);ramp.addColorStop(1,emojiGradient.end);ctx.fillStyle=ramp;ctx.fillRect(0,0,w,h);
         const image=document.createElementNS(ns,'feImage');
-        for(const [k,v]of Object.entries({href:canvas.toDataURL(),x:0,y:0,width:1,height:1,preserveAspectRatio:'none',result:'ramp'}))image.setAttribute(k,v);
+        const sample=emojiGradient.source?{href:emojiGradient.source,x:-x/w,y:-y/h,width:rw/w,height:rh/h}:{href:canvas.toDataURL(),x:0,y:0,width:1,height:1};
+        for(const [k,v]of Object.entries({...sample,preserveAspectRatio:'none',result:'ramp'}))image.setAttribute(k,v);
         const mask=document.createElementNS(ns,'feComposite');
         for(const [k,v]of Object.entries({in:'ramp',in2:'SourceAlpha',operator:'in',result:'gradient'}))mask.setAttribute(k,v);
         filter.append(image,mask);content='gradient';
@@ -197,9 +198,9 @@ globalThis.KeynopeTextLayout = (() => {
         }else span.style.filter='';
       }
     }
-    function setEmojiGradient(start,end,direction){
+    function setEmojiGradient(start,end,direction,source){
       const valid=value=>/^#[0-9a-f]{6}$/i.test(value||'');
-      const next=valid(start)&&valid(end)?{start,end,direction:['vertical','diagonal'].includes(direction)?direction:'horizontal'}:null;
+      const next=valid(start)&&valid(end)?{start,end,direction:['vertical','diagonal'].includes(direction)?direction:'horizontal',...(/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(source||'')?{source}:{})}:null;
       if(JSON.stringify(next)===JSON.stringify(emojiGradient))return api;
       emojiGradient=next;refreshEmojiPaint();return api;
     }

@@ -1,0 +1,70 @@
+// Real Go import/editor transport and real H.264/AAC playback, not mocked video.
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),http=require('node:http');
+const pw=require(process.env.PLAYWRIGHT_MODULE||'playwright'),repo=path.resolve(__dirname,'../../..');
+const output=process.env.KEYNOPE_VIDEO_EVIDENCE||'/tmp/keynope-video-proof';
+fs.mkdirSync(output,{recursive:true});
+const server=http.createServer((req,res)=>{res.setHeader('Content-Type','text/html');res.end(fs.readFileSync(path.join(output,'video.html')))});
+(async()=>{
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));
+ try{for(const engine of ['chromium','webkit']){
+  const browser=await pw[engine].launch({headless:true});
+  try{
+   const context=await browser.newContext({viewport:{width:1440,height:1000}}),page=await context.newPage(),errors=[];let playbackRequests=0;page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(new URL(r.url()).pathname==='/video-playback')playbackRequests++;});
+   await context.route(/https?:\/\/(?!127\.0\.0\.1).*/,route=>route.abort());
+   await page.goto('http://127.0.0.1:'+server.address().port+'/video.html');
+   const video=page.locator('#stage video.keynope-video');await video.waitFor();
+   await page.waitForFunction(()=>{const v=document.querySelector('video');return v.readyState>=2&&!v.paused&&v.currentTime>.2;},null,{timeout:15000});
+   assert.equal(await video.evaluate(v=>v.controls&&v.loop&&v.muted&&v.videoWidth===320),true);
+   assert.equal(await video.evaluate(v=>{const r=v.getBoundingClientRect();return v.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));}),true,'Video must receive clicks, not the transparent slide canvas');
+   await page.screenshot({path:path.join(output,engine+'-playing.png')});
+   await page.evaluate(()=>{const v=document.querySelector('video');v.parentElement.dataset.buildPending='true';modernPageView.setVideoPlayback(true);});
+   assert.equal(await video.evaluate(v=>v.paused),true,'Unrevealed video builds must not play');
+   await page.evaluate(()=>{document.querySelector('video').parentElement.dataset.buildPending='false';modernPageView.setVideoPlayback(true);});
+   await page.waitForFunction(()=>!document.querySelector('video').paused);
+   const counts=await page.evaluate(()=>{const v=document.querySelector('video');window.__video=v;const scene=structuredClone(deck.pages[pageIndex].scene);scene.objects[0].bounds.x+=50;scene.objects[0].bounds.width-=40;const before=modernPageView.renderStats().objectMounts;if(!modernPageView.update(scene))throw Error('Video resize was incompatible');return [before,modernPageView.renderStats().objectMounts,v===document.querySelector('video')];});
+   assert.deepEqual(counts,[1,1,true],'Dragging/resizing must retain the media player');
+   await page.evaluate(()=>keynopePrepareSnapshot(0));assert.equal(await video.evaluate(v=>v.paused&&v.hidden),true);
+   await page.screenshot({path:path.join(output,engine+'-poster.png')});
+   assert.equal(await page.evaluate(()=>{const v=document.querySelector('video');modernPageView.dispose();return v.paused&&!v.getAttribute('src');}),true,'Leaving a scene must release the player');
+   await page.goto(process.argv[2]);await page.waitForFunction(()=>typeof editorAction==='function'&&document.querySelector('.keynope-canvas-element'));
+   let alert='';page.on('dialog',async dialog=>{alert=dialog.message();await dialog.dismiss();});
+   const previousVideos=await page.evaluate(()=>deck.pages[pageIndex].scene.objects.filter(o=>o.kind==='video').map(o=>o.id));
+   await page.getByRole('button',{name:'Insert',exact:true}).click();
+   const chooser=page.waitForEvent('filechooser');await page.getByRole('button',{name:'Import video',exact:true}).click();await(await chooser).setFiles(path.join(repo,'internal/app/testdata/video-sample.mp4'));
+   await page.waitForFunction(ids=>deck.pages[pageIndex]?.scene?.objects.some(o=>o.kind==='video'&&!ids.includes(o.id)),previousVideos,{timeout:20000});assert.equal(alert,'');
+   let state=await page.evaluate(()=>fetch('/api/editor/state').then(r=>r.json()));
+   const inserted=state.slides[state.current].elements.filter(e=>e.kind==='video').at(-1);assert(inserted);
+   await page.evaluate(async id=>{const state=await fetch('/api/editor/state').then(r=>r.json());await editorAction({action:'select-element',element:state.slides[state.current].elements.findIndex(e=>e.id===id)});},inserted.id);
+   await page.getByRole('tab',{name:'Video',exact:true}).click();
+   const original=page.locator('#stage [data-object-id="'+inserted.id+'"]');await original.waitFor();
+   assert.equal(await original.locator('video').evaluate(v=>v.paused&&v.hidden&&!v.controls),true,'Editor must show poster without starting video');
+   const editingRevision=await page.evaluate(()=>fetch('/api/editor/state').then(r=>r.json()).then(s=>s.version));
+   await page.getByRole('button',{name:'Play video',exact:true}).click();
+   await page.waitForFunction(id=>{const v=document.querySelector('#stage [data-object-id="'+id+'"] video');return v&&!v.paused&&v.currentTime>.2;},inserted.id);
+   assert.equal(await original.locator('video').evaluate(v=>!v.muted&&v.volume===1),true,'Local preview should play normal audio, not use the silent presenter monitor');
+   await page.getByRole('button',{name:'Pause video',exact:true}).click();
+   assert.equal(await original.locator('video').evaluate(v=>v.paused),true);
+   await page.getByRole('button',{name:'Sound on',exact:true}).click();
+   assert.equal(await original.locator('video').evaluate(v=>v.muted),true,'Local sound control must work without the presenter service');
+   await page.getByRole('button',{name:'Sound off',exact:true}).click();
+   assert.equal(await page.locator('.keynope-canvas-overlay').isVisible(),true,'Playback must preserve canvas editing');
+   assert.equal(await page.evaluate(()=>fetch('/api/editor/state').then(r=>r.json()).then(s=>s.version)),editingRevision,'Local playback must not dirty the deck');
+   assert.equal(playbackRequests,0,'Local playback must not publish presenter commands');
+   await page.screenshot({path:path.join(output,engine+'-local-playback.png')});
+   await page.getByRole('checkbox',{name:'Loop',exact:true}).check();
+   await page.waitForFunction(id=>fetch('/api/editor/state').then(r=>r.json()).then(s=>new URLSearchParams(s.slides[s.current].elements.find(e=>e.id===id).query).get('video-loop')==='1'),inserted.id);
+   await page.getByRole('button',{name:'Preview video',exact:true}).click();
+   const dialog=page.getByRole('dialog',{name:'Video preview'}),preview=dialog.locator('video');await preview.waitFor();await preview.evaluate(v=>{v.muted=true;return v.play()});
+   await page.waitForFunction(()=>document.querySelector('dialog video')?.currentTime>.2);const handle=await preview.elementHandle();await dialog.getByRole('button',{name:'Close',exact:true}).click();assert.equal(await handle.evaluate(v=>v.paused&&!v.getAttribute('src')),true,'Closing preview must stop/release media');
+   assert.equal(await page.getByRole('checkbox',{name:'Loop',exact:true}).isChecked(),true,'Accepted playback options must remain reflected in the inspector');
+   await page.screenshot({path:path.join(output,engine+'-editor.png')});
+   await page.getByRole('tab',{name:'Arrange',exact:true}).click();
+   const width=page.getByRole('spinbutton',{name:'Object width',exact:true});await width.fill('100.5');await width.press('Enter');
+   await page.waitForFunction(id=>fetch('/api/editor/state').then(r=>r.json()).then(s=>Number(new URLSearchParams(s.slides[s.current].elements.find(e=>e.id===id).query).get('width'))===100.5),inserted.id);
+   const rotation=page.getByRole('spinbutton',{name:'Object rotation degrees',exact:true});await rotation.fill('15');await rotation.press('Tab');
+   await page.waitForFunction(id=>fetch('/api/editor/state').then(r=>r.json()).then(s=>Number(new URLSearchParams(s.slides[s.current].elements.find(e=>e.id===id).query).get('object-rotation'))===15),inserted.id);
+   await page.evaluate(async()=>{await editorAction({action:'undo'});await editorAction({action:'redo'});});
+   assert.deepEqual(errors,[]);console.log('PASS '+engine+': embedded playback/audio track, stable resize, poster snapshots, native import, video inspector, loop, preview and teardown');
+  }finally{await browser.close();}
+ }}finally{await new Promise(r=>server.close(r));}
+})().catch(error=>{console.error(error);process.exitCode=1;server.close();});

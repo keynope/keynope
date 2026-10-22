@@ -39,7 +39,23 @@ Colour emoji use the same bundled artwork across Mac, web and HTML presentations
 
 Choose animated backgrounds and effects that adapt to your slide palette.
 
+Add glow, blur, duotone/tritone colour treatments and posterisation, with radial,
+reflected, diamond and angular gradients. Place shape outlines inside, centred
+or outside the edge.
+
 ![Retro image conversion alongside C64 text with gradients and shadows](https://raw.githubusercontent.com/keynope/keynope/416e430902ce3eb582f2709f326b2208678d7ded/screenshots/1.8.5/02-retro-image-effects.png)
+
+### Video
+
+Use **Insert → Video** to embed an MP4, M4V or MOV clip directly in
+the deck, within its remaining embedded-media capacity. Move, resize and rotate
+it like other objects. Preview playback directly on the editor canvas, or use
+the Video inspector to configure autoplay, looping and sound. When presenting
+to an external display, control playback from your Mac without moving to the
+second screen.
+
+Standalone HTML exports include playable video; PDF and PowerPoint use a still
+poster. Videos are not sent to workshop participants.
 
 ### Shapes and diagrams
 
@@ -101,6 +117,14 @@ Keep the Markdown deck as your editable source, then choose the format that fits
 PowerPoint import and export do not require PowerPoint to be installed. Some effects, animation and formatting differ between formats; review the conversion notes and check the result in your intended viewer. Retro image artwork exports as pictures, while ordinary C64 text remains editable text.
 
 For supported conversions and format limits, see [Format and export details](docs/formats.md).
+
+## Build with an AI assistant
+
+Keynope includes an opt-in MCP server for building and editing decks with an AI
+client. Agents can use native editing tools, inspect slides, apply effects and
+review actual rendered screenshots while keeping the deck editable. Enable the
+app's separate automation workspace, or use an isolated folder without opening
+an editor window. Enabling MCP does not share the deck currently open in the editor.
 
 ## Build from source
 

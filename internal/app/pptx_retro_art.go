@@ -345,7 +345,7 @@ func rasterPPTXRetroImageFrame(object sceneObject, options ...*pptxExportWork) (
 
 func pptxRetroPicture(object sceneObject, data []byte, mime string, w, h float64) (*pptx.Object, error) {
 	b := object.Bounds
-	const padding = 64
+	padding := artworkCapturePadding(object)
 	// PNG storage rounds its dimensions up, while the authored frame may be
 	// fractional. Compensate the picture centre so native rotation still pivots
 	// around the original object centre, not the rounded padded bitmap centre.

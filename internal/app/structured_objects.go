@@ -619,7 +619,7 @@ func (build SlideBuild) Validate() error {
 		return fmt.Errorf("unsupported build version %d", build.Version)
 	}
 	switch build.Transition.Effect {
-	case "", "cut", "fade", "push", "wipe":
+	case "", "cut", "fade", "push", "wipe", "dip-black", "dip-white", "tv-switch":
 	default:
 		return fmt.Errorf("unsupported transition")
 	}

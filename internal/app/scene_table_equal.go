@@ -26,11 +26,12 @@ func workspaceSceneTableEqual(a, b *sceneTable) bool {
 	}
 	for i, x := range a.Cells {
 		y := b.Cells[i]
-		if !sceneShapedTextEqual(x.Text, y.Text) || !sceneFloatPointerEqual(x.Paint.Opacity, y.Paint.Opacity) {
+		if !sceneShapedTextEqual(x.Text, y.Text) || !sceneFloatPointerEqual(x.Paint.Opacity, y.Paint.Opacity) || !reflect.DeepEqual(x.Paint.Effects, y.Paint.Effects) {
 			return false
 		}
 		x.Text, y.Text = nil, nil
 		x.Paint.Opacity, y.Paint.Opacity = nil, nil
+		x.Paint.Effects, y.Paint.Effects = nil, nil
 		if x != y {
 			return false
 		}

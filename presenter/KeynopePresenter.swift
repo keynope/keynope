@@ -40,6 +40,8 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var styleClipboardData = ""
     private var aboutWindow: NSWindow?
     private var licensesWindow: NSWindow?
+    private let automationService = AutomationService()
+    private var automationSettings: AutomationSettingsController?
     private var window: NSWindow?
     private var webView: WKWebView?
     private var compositeView: PresenterCompositeView?
@@ -148,6 +150,12 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if UserDefaults.standard.bool(forKey: AutomationService.enabledKey) {
+            Task { @MainActor in
+                do { try await automationService.setEnabled(true) }
+                catch { NSAlert(error: error).runModal() }
+            }
+        }
         // Keynope owns one document session, not independently tabbed windows.
         NSWindow.allowsAutomaticWindowTabbing = false
         applyInterfaceAppearance(savedInterfaceAppearance)
@@ -265,6 +273,8 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         qrItem.state = .on
         activityQRMenuItem = qrItem
         settingsMenu.addItem(.separator())
+        let automationItem = settingsMenu.addItem(withTitle: "Automation (MCP)…", action: #selector(configureAutomation), keyEquivalent: "")
+        automationItem.target = self
         let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
         let appearanceMenu = NSMenu(title: "Appearance")
         appearanceMenu.autoenablesItems = false
@@ -416,7 +426,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         presenterURLForSurface("app")
     }
 
-    private func installedFontCatalogue() -> [[String: String]] {
+    static func installedFontCatalogue() -> [[String: String]] {
         NSFontManager.shared.availableFontFamilies.sorted { $0.localizedStandardCompare($1) == .orderedAscending }.flatMap { family in
             (NSFontManager.shared.availableMembers(ofFontFamily: family) ?? []).compactMap { member in
                 guard member.count >= 2, let postscript = member[0] as? String, let style = member[1] as? String else { return nil }
@@ -425,7 +435,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
     }
 
-    private func installedTypeface(_ name: String) throws -> [String: Any] {
+    static func installedTypeface(_ name: String) throws -> [String: Any] {
         guard let entry = installedFontCatalogue().first(where: { $0["postScriptName"] == name }) else {
             throw NSError(domain: "KeynopeFonts", code: 1, userInfo: [NSLocalizedDescriptionKey: "This font is no longer installed."])
         }
@@ -611,6 +621,12 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         editorWebView?.evaluateJavaScript("window.keynopeToggleActivityQR?.()")
     }
 
+    @objc private func configureAutomation() {
+        if automationSettings == nil { automationSettings = AutomationSettingsController(service: automationService) }
+        automationSettings?.showWindow(nil)
+        automationSettings?.window?.makeKeyAndOrderFront(nil)
+    }
+
     private var versionedAppName: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         guard let version, !version.isEmpty else { return "Keynope" }
@@ -719,6 +735,8 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         panel.prompt = "Import"
         panel.allowedContentTypes = [
             .image,
+            .mpeg4Movie,
+            .quickTimeMovie,
             UTType(filenameExtension: "svg"),
             UTType(filenameExtension: "json"),
             UTType(filenameExtension: "flf"),
@@ -1841,6 +1859,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         presentationDisplayID = screenDisplayID(screen)
         let frame = screen.frame
         let config = WKWebViewConfiguration()
+        config.mediaTypesRequiringUserActionForPlayback = []
         config.userContentController.add(self, name: "keynopePresenter")
         let composite = PresenterCompositeView(frame: NSRect(origin: .zero, size: frame.size), configuration: config)
         let view = composite.webView
@@ -2275,8 +2294,8 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             }
             if message.name == "keynopeFonts" {
                 do {
-                    if action == "catalogue" { replyHandler(installedFontCatalogue(), nil) }
-                    else if action == "read", let name = body["postScriptName"] as? String { replyHandler(try installedTypeface(name), nil) }
+                    if action == "catalogue" { replyHandler(Self.installedFontCatalogue(), nil) }
+                    else if action == "read", let name = body["postScriptName"] as? String { replyHandler(try Self.installedTypeface(name), nil) }
                     else { replyHandler(nil, "Unsupported font request.") }
                 } catch { replyHandler(nil, error.localizedDescription) }
                 return
@@ -4526,6 +4545,10 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         return appMode
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        automationService.stop()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard appMode, documentDirty, !discardingUnsavedChanges else { return .terminateNow }
         let response = unsavedChangesAlert().runModal()
@@ -4640,6 +4663,11 @@ struct KeynopePresenterMain {
 
     static func main() {
         let args = ProcessInfo.processInfo.arguments
+        #if KEYNOPE_NATIVE_ACCEPTANCE
+        if args.count == 2, args[1] == "--mcp-settings-test" { AutomationSettingsAcceptance.run(); return }
+        #endif
+        if args.count == 2, args[1] == "--mcp-render" { AutomationRenderer.run(); return }
+        if args.count > 1, args[1] == "--mcp" { AutomationServer.run(arguments: Array(args.dropFirst())); return }
         let appMode = args.contains("--app") || Bundle.main.bundleIdentifier == "sh.keynope.app"
         let url: URL
         if appMode {

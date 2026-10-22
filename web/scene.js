@@ -168,13 +168,65 @@ globalThis.KeynopeScene = (() => {
     const typefacesReady=globalThis.KeynopeFonts?.install(scene.typefaces);
     const root=document.createElement('div'),surfaces=[],textBoxes=[],media=[],readingNodes=[],retroReady=[],retroTracks=[],diagnostics=[...(scene.diagnostics||[])],backgroundReady=[];
     const activeIDs=new Set(scene.objects.map(object=>object.id));
-    const renderCounters={objectMounts:0,textMounts:0,updates:0,textRebuilds:0,textContentUpdates:0,textWidthUpdates:0,textPaintUpdates:0,structuredUpdates:0,tableCellPaintUpdates:0,chartMarkUpdates:0,imageFrameUpdates:0,imageTreatmentUpdates:0,imagePaintUpdates:0,backgroundUpdates:0,backgroundReplacements:0};
+    const renderCounters={objectMounts:0,textMounts:0,updates:0,textRebuilds:0,textContentUpdates:0,textWidthUpdates:0,textPaintUpdates:0,structuredUpdates:0,tableCellPaintUpdates:0,chartMarkUpdates:0,imageFrameUpdates:0,imageTreatmentUpdates:0,imagePaintUpdates:0,backgroundUpdates:0,backgroundReplacements:0,backgroundRasterizations:0};
     let lastChangedObjectIDs=[];
     const initialPausedTime=pausedTime();
     root.className='keynope-modern-scene';root.setAttribute('role','region');root.setAttribute('aria-label','Slide preview');
     Object.assign(root.style,{position:'relative',width:scene.width+'px',height:scene.height+'px',
       background:scene.background,overflow:'hidden',fontFamily:'sans-serif',isolation:'isolate'});
     parent.append(root);
+    const objectEffects=new Map();
+    const effectTags=new Set(['feImage','feComposite','feColorMatrix','feComponentTransfer','feFuncR','feFuncG','feFuncB','feFuncA','feConvolveMatrix','feFlood']);
+    const effectAttrs=new Set(['href','x','y','width','height','preserveAspectRatio','result','in','in2','operator','type','values','slope','intercept','tableValues','order','kernelMatrix','divisor','edgeMode','preserveAlpha','flood-color']);
+    function validEffects(effect){
+      if(!effect)return true;
+      const valid=(p,depth=0)=>depth<=1&&effectTags.has(p?.tag)&&(!p.attrs||typeof p.attrs==='object'&&!Array.isArray(p.attrs))&&Object.entries(p.attrs||{}).every(([key,value])=>effectAttrs.has(key)&&typeof value==='string'&&value.length<=4000000&&(key!=='href'||/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(value)))&&(!p.children||Array.isArray(p.children)&&p.children.length<=4&&p.children.every(c=>valid(c,depth+1)));
+      return Number.isFinite(effect.padding)&&effect.padding>=0&&effect.padding<=1024&&Array.isArray(effect.primitives)&&effect.primitives.length<=32&&effect.primitives.every(p=>valid(p));
+    }
+    function effectDefinition(effect,box,id){
+      const pad=effect.padding,filter=svg('filter',{id,filterUnits:'userSpaceOnUse',primitiveUnits:'userSpaceOnUse',x:-pad,y:-pad,width:Math.max(1,box.width)+pad*2,height:Math.max(1,box.height)+pad*2,'color-interpolation-filters':'sRGB'});
+      const make=p=>{const node=svg(p.tag,p.attrs);for(const child of p.children||[])node.append(make(child));return node;};
+      for(const p of effect.primitives)filter.append(make(p));return filter;
+    }
+    // CSSOM may quote fragment URLs even when the authored string did not.
+    const hasEffectURL=(value,url)=>value.includes(url.slice(4,-1));
+    const withoutEffectURL=(value,url)=>value.replace(/url\((["']?)(#[\w-]+)\1\)/g,(match,_quote,id)=>url===`url(${id})`?'':match).trim();
+    function applyObjectEffects(node,paint,box){
+      // A static background already contains its effects in the cached pixels.
+      if(backgroundRaster?.node===node&&backgroundRaster.canvas)return;
+      const effect=paint?.effects,previous=objectEffects.get(node),key=JSON.stringify([effect,box.width,box.height,...(node.namespaceURI===NS?[box.x,box.y]:[])]);
+      if(previous?.key===key&&previous.surface.isConnected){if(previous.target){if(previous.target.getAttribute('filter')!==previous.url)previous.target.setAttribute('filter',previous.url);}else if(!hasEffectURL(node.style.filter,previous.url))node.style.filter=(node.style.filter+' '+previous.url).trim();return;}
+      if(previous){if(previous.target)previous.target.removeAttribute('filter');else node.style.filter=withoutEffectURL(node.style.filter,previous.url);previous.surface.remove();objectEffects.delete(node);}
+      if(!effect||!validEffects(effect))return;
+      // Background nodes deliberately have no selectable object ID. They still
+      // need the SVG-native filter path, not an expensive HTML subtree filter.
+      const ownerID=node.dataset.objectId||(node===backgroundNode?backgroundObjectID:null);
+      const image=imageViews.get(ownerID),drawing=shapeViews.get(ownerID);
+      if(image||drawing){
+        const owner=image?.paintSurface||drawing;
+        let target=owner.querySelector(':scope > [data-keynope-effect-content]');
+        if(!target){target=svg('g',{'data-keynope-effect-content':''});for(const child of [...owner.children])if(child.tagName.toLowerCase()!=='defs')target.append(child);owner.append(target);}
+        const defs=svg('defs'),id='keynope-object-effect-'+(++serial),url=`url(#${id})`;
+        defs.append(effectDefinition(effect,box,id));owner.prepend(defs);target.setAttribute('filter',url);objectEffects.set(node,{surface:defs,target,key,url});return;
+      }
+      if(node.namespaceURI===NS){
+        const surface=svg('defs'),id='keynope-object-effect-'+(++serial),url=`url(#${id})`,filter=effectDefinition(effect,box,id);
+        filter.setAttribute('x',(box.x||0)-effect.padding);filter.setAttribute('y',(box.y||0)-effect.padding);surface.append(filter);node.parentNode.append(surface);node.setAttribute('filter',url);objectEffects.set(node,{surface,target:node,key,url});return;
+      }
+      const surface=svg('svg',{width:1,height:1,'aria-hidden':'true'}),defs=svg('defs'),id='keynope-object-effect-'+(++serial),url=`url(#${id})`;
+      surface.style.cssText='position:absolute;width:1px;height:1px;overflow:visible;pointer-events:none';
+      // Keep definitions outside the filtered subtree. WebKit treats a filter
+      // containing its own definition as a circular paint dependency and can
+      // render the entire object transparent even while export still works.
+      const filter=effectDefinition(effect,box,id);
+      // WebKit resolves userSpaceOnUse filter *regions* on HTML in page
+      // coordinates. Relative regions avoid clipping moved objects while
+      // primitiveUnits stays userSpaceOnUse for the Go pixel kernels.
+      const padX=effect.padding/Math.max(1,box.width),padY=effect.padding/Math.max(1,box.height);
+      for(const [name,value]of Object.entries({filterUnits:'objectBoundingBox',x:-padX,y:-padY,width:1+2*padX,height:1+2*padY}))filter.setAttribute(name,value);
+      defs.append(filter);surface.append(defs);root.append(surface);node.style.filter=(node.style.filter+' '+url).trim();
+      objectEffects.set(node,{surface,key,url});
+    }
     const position=(node,b)=>Object.assign(node.style,{position:'absolute',left:b.x+'px',top:b.y+'px',width:b.width+'px',height:b.height+'px'});
     function text(parent,data,b,paint,id,ownerID=id,isLabel=false) {
       renderCounters.textMounts++;
@@ -231,10 +283,11 @@ globalThis.KeynopeScene = (() => {
       for(const marker of box.wrapper.querySelectorAll('.keynope-scene-bullet'))marker.style.background=paint.gradientStart||paint.color||'#ffffff';
       for(const surface of box.local){
         surface.setEmojiOutline(paint.stroke,paint.strokeWidth||1);
-        surface.setEmojiGradient(paint.gradientStart,paint.gradientEnd,paint.gradientDirection);
+        surface.setEmojiGradient(paint.gradientStart,paint.gradientEnd,paint.gradientDirection,paint.gradientImage);
         const angle=paint.gradientDirection==='vertical'?'180deg':paint.gradientDirection==='diagonal'?'135deg':'90deg';
         Object.assign(surface.element.style,{
-          backgroundImage:paint.gradientStart?`linear-gradient(${angle},${paint.gradientStart},${paint.gradientEnd})`:'',
+          backgroundImage:paint.gradientImage?`url("${paint.gradientImage}")`:paint.gradientStart?`linear-gradient(${angle},${paint.gradientStart},${paint.gradientEnd})`:'',
+          backgroundSize:paint.gradientImage?'100% 100%':'',backgroundRepeat:'no-repeat',
           backgroundClip:paint.gradientStart?'text':'',webkitBackgroundClip:paint.gradientStart?'text':'',
           color:paint.gradientStart?'transparent':paint.color||'#ffffff',
           webkitTextStroke:paint.stroke?`${paint.strokeWidth||1}px ${paint.stroke}`:'',
@@ -245,21 +298,76 @@ globalThis.KeynopeScene = (() => {
     function fill(defs,p) {
       if(!p.gradientStart)return p.color;
       const id='keynope-scene-gradient-'+(++serial);
+      if(p.gradientImage){const pattern=svg('pattern',{id,width:1,height:1,patternContentUnits:'objectBoundingBox'});pattern.append(svg('image',{href:p.gradientImage,width:1,height:1,preserveAspectRatio:'none'}));defs.append(pattern);return `url(#${id})`;}
       const gradient=svg('linearGradient',{id,x1:0,y1:0,x2:p.gradientDirection==='vertical'?0:1,y2:p.gradientDirection==='horizontal'?0:1});
       gradient.append(svg('stop',{offset:'0%', 'stop-color':p.gradientStart}),svg('stop',{offset:'100%','stop-color':p.gradientEnd}));defs.append(gradient);
       return `url(#${id})`;
     }
     const shapeViews=new Map();
     const imageViews=new Map();
+    const videoViews=new Map();
     const chartDataDialogs=new Map();
     const structuredViews=new Map();
-    let backgroundNode=null,backgroundEntry=null,backgroundObjectID='keynope-background-media';
+    let backgroundNode=null,backgroundEntry=null,backgroundObjectID='keynope-background-media',backgroundRaster=null;
     while(scene.objects.some(object=>object.id===backgroundObjectID))backgroundObjectID+='-background';
     function backgroundObjectFor(value,id){
       const background=value.backgroundMedia;
       if(!background||!(background.source||background.frames?.[0]?.source||background.retroLines))return null;
       const {paint,opacity,retroLines,fit,...media}=background;
       return {id,kind:'image',bounds:{x:0,y:0,width:value.width,height:value.height},paint:paint||{color:'#ffffff',opacity:Number.isFinite(opacity)?opacity:1},media:{...media,fit:fit||'cover',decorative:true},retroLines:retroLines||null};
+    }
+    // One bounded bitmap per mounted slide, never a global media/data-URI cache.
+    // Otherwise WebKit can re-run six full-slide convolution passes whenever
+    // foreground content or animated slide effects invalidate the compositor.
+    const backgroundRasterKey=object=>{
+      if(!object)return '';
+      const {opacity,...paint}=object.paint||{};
+      // Compare embedded bytes directly, rather than copying megabytes of
+      // base64 into JSON on every foreground drag or text edit.
+      const {source,frames,...media}=object.media||{};
+      return {source,frameSources:(frames||[]).map(frame=>frame.source),metadata:JSON.stringify([object.id,object.bounds,media,frames?.map(({source,...frame})=>frame),object.retroLines,paint])};
+    };
+    const sameBackgroundRasterKey=(a,b)=>a===b||!!a&&!!b&&a.source===b.source&&a.metadata===b.metadata&&a.frameSources.length===b.frameSources.length&&a.frameSources.every((source,index)=>source===b.frameSources[index]);
+    function clearBackgroundRaster(){
+      const cached=backgroundRaster;backgroundRaster=null;
+      if(!cached)return;
+      cached.cancelWait?.();
+      cached.controller?.abort();
+      cached.canvas?.remove();
+      if(cached.source)cached.source.style.display=cached.display;
+      if(cached.effectURL&&!hasEffectURL(cached.node.style.filter,cached.effectURL))cached.node.style.filter=(cached.node.style.filter+' '+cached.effectURL).trim();
+    }
+    function cacheBackground(object,key){
+      if(!object||disposed||key!==currentBackgroundRasterKey)return;
+      if(backgroundRaster)return backgroundRaster.promise;
+      // Do not freeze GIFs, sampled animations or unexpanded animated sources.
+      const source=object.media?.source||'';
+      if(object.media?.frames?.length||object.retroLines?.frames?.length||/^data:image\/(gif|webp|svg\+xml);/i.test(source))return;
+      const paint=object.paint||{};
+      if(!paint.effects&&!paint.stroke&&!paint.gradientStart&&!object.media?.colourMatrices?.length&&!(Number(object.media?.sharpness)>0&&Number(object.media.sharpness)!==1))return;
+      const node=backgroundNode,state={node,controller:new AbortController()};backgroundRaster=state;
+      state.promise=(async()=>{try{
+        // Live SVG/canvas paint has already changed. Bake only after input
+        // settles, so spinner/key repeats don't start a queue of full-slide
+        // convolutions. Cancellation releases old readiness promises promptly.
+        await new Promise(resolve=>{const timer=setTimeout(resolve,120);state.cancelWait=()=>{clearTimeout(timer);resolve();};});
+        state.cancelWait=null;
+        if(disposed||backgroundRaster!==state||key!==currentBackgroundRasterKey||!node.isConnected)return;
+        const canvas=await captureImageArtwork(object,state.controller.signal);
+        if(disposed||backgroundRaster!==state||key!==currentBackgroundRasterKey||!node.isConnected)return;
+        const original=imageViews.get(object.id)?.paintSurface||sampledViews.get(object.id)?.canvas;
+        if(!original)return;
+        const padding=64+Math.ceil(paint.effects?.padding||0);
+        canvas.className='keynope-scene-background-raster';canvas.setAttribute('aria-hidden','true');
+        Object.assign(canvas.style,{position:'absolute',left:-padding+'px',top:-padding+'px',pointerEvents:'none'});
+        state.source=original;state.display=original.style.display;state.canvas=canvas;
+        const effect=objectEffects.get(node);
+        if(effect&&!effect.target){state.effectURL=effect.url;node.style.filter=withoutEffectURL(node.style.filter,effect.url);}
+        node.append(canvas);original.style.display='none';renderCounters.backgroundRasterizations++;
+      }catch(_error){
+        // Capture limits/decoder failures must never make a background vanish.
+        // Leave the original renderer visible; retry only after a real edit.
+      }})();return state.promise;
     }
     const structuredKey=object=>{
       // Text surfaces own content/font comparisons (including direct binary
@@ -426,7 +534,7 @@ globalThis.KeynopeScene = (() => {
             const ctx=ramp.getContext('2d'),vertical=paint.gradientDirection==='vertical',diagonal=paint.gradientDirection==='diagonal';
             const gradient=ctx.createLinearGradient(0,0,vertical?0:256,vertical||diagonal?256:0);
             gradient.addColorStop(0,paint.gradientStart);gradient.addColorStop(1,paint.gradientEnd);ctx.fillStyle=gradient;ctx.fillRect(0,0,256,256);
-            filter.append(svg('feImage',{href:ramp.toDataURL(),x:0,y:0,width:box.width,height:box.height,preserveAspectRatio:'none',result:'gradient'}));
+            filter.append(svg('feImage',{href:paint.gradientImage||ramp.toDataURL(),x:0,y:0,width:box.width,height:box.height,preserveAspectRatio:'none',result:'gradient'}));
             filter.append(svg('feComposite',{in:'gradient',in2:'SourceAlpha',operator:'in',result:'coloured'}));content='coloured';
           }
           if(paint.stroke){
@@ -445,6 +553,7 @@ globalThis.KeynopeScene = (() => {
         if(paint.shadowColor)compositing.push(`drop-shadow(${shadow(paint)})`);
         node.style.filter=compositing.join(' ');
       }
+      applyObjectEffects(node,paint,box);
       return changed;
     }
     function paintShape(drawing,object){
@@ -463,8 +572,25 @@ globalThis.KeynopeScene = (() => {
       else shape=svg('rect',{width:box.width,height:box.height});
       shape.setAttribute('fill',paint.noFill?'none':fill(defs,paint));
       if(paint.stroke){shape.setAttribute('stroke',paint.stroke);shape.setAttribute('stroke-width',paint.strokeWidth??1);shape.setAttribute('stroke-linejoin','round');}
+      let edge=null,insideClip=null;
+      if(paint.stroke&&paint.strokeWidth>0&&['inside','outside'].includes(paint.strokePosition)){
+        const id='keynope-stroke-position-'+(++serial),inside=paint.strokePosition==='inside',boundary=shape.cloneNode(true);
+        boundary.removeAttribute('stroke');boundary.removeAttribute('stroke-width');boundary.setAttribute('fill',inside?'#fff':'#000');boundary.setAttribute('clip-rule','evenodd');
+        const region=inside?svg('clipPath',{id,clipPathUnits:'userSpaceOnUse'}):svg('mask',{id,maskUnits:'userSpaceOnUse',x:-paint.strokeWidth,y:-paint.strokeWidth,width:box.width+2*paint.strokeWidth,height:box.height+2*paint.strokeWidth});
+        if(!inside)region.append(svg('rect',{x:-paint.strokeWidth,y:-paint.strokeWidth,width:box.width+2*paint.strokeWidth,height:box.height+2*paint.strokeWidth,fill:'#fff'}));
+        region.append(boundary);defs.append(region);
+        edge=shape.cloneNode(true);edge.setAttribute('fill','none');edge.setAttribute('stroke-width',paint.strokeSpan||paint.strokeWidth*2);
+        if(inside)insideClip=`url(#${id})`;else if(paint.noFill)edge.setAttribute('mask',`url(#${id})`);
+        shape.removeAttribute('stroke');
+      }
       drawing.style.filter=paint.shadowColor?`drop-shadow(${shadow(paint)})`:'';
-      drawing.replaceChildren(defs,shape);
+      // Share one antialias boundary: clipping two independently painted edges
+      // produces a dark seam. A filled outside stroke sits under the fill;
+      // an inside stroke and fill are clipped together, as one silhouette.
+      drawing.replaceChildren(defs);
+      if(insideClip){const group=svg('g',{'clip-path':insideClip});group.append(shape,edge);drawing.append(group);}
+      else if(edge&&!paint.noFill)drawing.append(edge,shape);
+      else{drawing.append(shape);if(edge)drawing.append(edge);}
       for(const path of object.shapeGeometry?.details||[])drawing.append(svg('path',{d:path,transform:`scale(${box.width} ${box.height})`,fill:'none',stroke:paint.stroke||'#202833','stroke-width':paint.stroke?paint.strokeWidth??1.5:1.5,'vector-effect':'non-scaling-stroke'}));
     }
     function objectNameSemantics(node,object){
@@ -616,6 +742,8 @@ globalThis.KeynopeScene = (() => {
       else if(object.kind==='shape'){
         const drawing=svg('svg');paintShape(drawing,object);node.append(drawing);
         shapeViews.set(object.id,drawing);
+      }else if(object.kind==='video'&&object.video&&object.media){
+        videoViews.set(object.id,KeynopeVideo.mount(node,object));
       }else if(object.kind==='image'&&object.media){
         const image=document.createElement('img');image.draggable=false;
         const fallback=document.createElement('div');fallback.className='keynope-scene-image-unavailable';fallback.textContent='[IMG]';
@@ -669,12 +797,14 @@ globalThis.KeynopeScene = (() => {
         }
         media.push({image,media:object.media,current:source,id:object.id,failed,paintReady});
       }
+      applyObjectEffects(node,paint,box);
     }
     // Reuse the normal image/Retro painters for the background layer. This is
     // intentionally not included in scene.objects: it has no canvas selection
     // or z-order affordance, yet brightness, tint, sharpness, animation and
     // ASCII/Braille treatment remain identical to an ordinary image.
     const initialBackgroundObject=backgroundObjectFor(scene,backgroundObjectID);
+    let currentBackgroundRasterKey=backgroundRasterKey(initialBackgroundObject);
     if(initialBackgroundObject){activeIDs.add(backgroundObjectID);mountObject(initialBackgroundObject,true);}
     for(const object of scene.objects)mountObject(object);
     // Routes are above shape bodies, as are terminating heads. Geometry comes
@@ -703,6 +833,8 @@ globalThis.KeynopeScene = (() => {
       if(['start','both'].includes(object.arrows))path.setAttribute('marker-start',`url(#${id})`);
       trimConnectorShaft(path,object);
       path.dataset.objectId=object.id;connectors.append(path);
+      // SVG geometry already uses slide coordinates rather than local boxes.
+      applyObjectEffects(path,paint,object.bounds);
       connectorNodes.set(object.id,{path,defs,points:path.getAttribute('points'),opacity:paint.opacity,arrows:object.arrows,arrowWidth:object.arrowWidth});
       if(Number.isFinite(paint.opacity))path.style.opacity=String(Math.max(0,Math.min(1,paint.opacity)));
     }
@@ -745,7 +877,9 @@ globalThis.KeynopeScene = (() => {
     // mount(). Do not settle text metrics against fallback fonts before that
     // shared batch has registered and loaded (a first-resize jump in WebKit).
     const initialRetroReady=retroReady.splice(0);
-    let ready=Promise.all([Promise.resolve().then(()=>fonts),typefacesReady]).then(()=>Promise.all([...backgroundReady,...initialRetroReady,...surfaces.map(s=>s.surface.ready()),...media.flatMap(item=>[item.image.decode().catch(item.failed),item.paintReady])])).then(()=>checkOverflow());
+    const initialBackgroundRasterKey=currentBackgroundRasterKey;
+    let contentReady=Promise.all([Promise.resolve().then(()=>fonts),typefacesReady]).then(()=>Promise.all([...backgroundReady,...initialRetroReady,...surfaces.map(s=>s.surface.ready()),...media.flatMap(item=>[item.image.decode().catch(item.failed),item.paintReady])])).then(()=>checkOverflow());
+    let ready=contentReady.then(()=>cacheBackground(initialBackgroundObject,initialBackgroundRasterKey)).then(()=>diagnostics);
     const animationTrack=item=>{
       let duration=0;const ends=item.media.frames.map(frame=>(duration+=Math.max(1,Number(frame.delayMs)||100)));
       return {item,ends,duration};
@@ -754,6 +888,7 @@ globalThis.KeynopeScene = (() => {
     let lastTime=0,lastSnapshot=false;
     function setTime(ms,snapshot=false){
       lastTime=ms;lastSnapshot=snapshot;
+      if(snapshot)for(const video of videoViews.values())video.setActive(false);
       if(disposed||(!animationTracks.length&&!retroTracks.length))return;
       // Use the same elapsed-time clock as the presenter, excluding actual
       // editor pause duration. This also handles hidden tabs and sparse ticks.
@@ -784,19 +919,31 @@ globalThis.KeynopeScene = (() => {
     // live image. No DOM/foreignObject screenshot or system font dependency.
     async function imageArtwork(id){
       await ready;
-      const entry=imageViews.get(id),object=scene.objects.find(o=>o.id===id);
-      if(disposed||!entry||!object)throw Error('Image artwork is unavailable');
-      const {image}=entry,b=object.bounds,w=Math.ceil(b.width+128),h=Math.ceil(b.height+128);
+      const object=scene.objects.find(o=>o.id===id);
+      return captureImageArtwork(object);
+    }
+    async function captureImageArtwork(object,signal){
+      signal?.throwIfAborted();
+      const id=object?.id,entry=imageViews.get(id),sampled=sampledViews.get(id)?.canvas;
+      if(disposed||(!entry&&!sampled)||!object)throw Error('Image artwork is unavailable');
+      const b=object.bounds,padding=64+Math.ceil(object.paint?.effects?.padding||0),w=Math.ceil(b.width+padding*2),h=Math.ceil(b.height+padding*2);
       if(w>8192||h>8192||w*h>16000000)throw Error('Image artwork exceeds capture limits');
-      await image.decode();
-      entry.paintSource.setAttribute('href',image.src);
-      const drawing=entry.paintSurface.cloneNode(true),outer=svg('g',{transform:'translate(64 64)'});
+      if(entry){await entry.image.decode();entry.paintSource.setAttribute('href',entry.image.src);}
+      const drawing=entry?entry.paintSurface.cloneNode(true):svg('svg'),outer=svg('g',{transform:`translate(${padding} ${padding})`}),content=svg('g');
       drawing.setAttribute('width',w);drawing.setAttribute('height',h);drawing.setAttribute('viewBox',`0 0 ${w} ${h}`);drawing.removeAttribute('style');
-      for(const child of [...drawing.children])if(child.tagName.toLowerCase()!=='defs')outer.append(child);
+      for(const child of [...drawing.children])if(child.tagName.toLowerCase()!=='defs')content.append(child);
+      if(sampled)content.append(svg('image',{href:sampled.toDataURL('image/png'),x:-64,y:-64,width:sampled.width,height:sampled.height}));
+      if(sampled&&object.paint?.effects){const id='keynope-capture-effects-'+(++serial),defs=svg('defs');defs.append(effectDefinition(object.paint.effects,b,id));drawing.prepend(defs);content.setAttribute('filter',`url(#${id})`);}
+      outer.append(content);
       drawing.append(outer);
-      const rendered=new Image();rendered.src='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent(new XMLSerializer().serializeToString(drawing))));await rendered.decode();
-      if(disposed)throw Error('Cannot capture a disposed scene');
-      const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;canvas.getContext('2d').drawImage(rendered,0,0);return canvas;
+      signal?.throwIfAborted();
+      const rendered=new Image(),cancel=()=>{rendered.src='';};signal?.addEventListener('abort',cancel,{once:true});
+      try{
+        rendered.src='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent(new XMLSerializer().serializeToString(drawing))));await rendered.decode();
+        signal?.throwIfAborted();
+        if(disposed)throw Error('Cannot capture a disposed scene');
+        const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;canvas.getContext('2d').drawImage(rendered,0,0);return canvas;
+      }finally{signal?.removeEventListener('abort',cancel);}
     }
     function objectSnapshot(object){
       // Retain only the values consumed by geometry/paint reconciliation.
@@ -866,10 +1013,17 @@ globalThis.KeynopeScene = (() => {
           };
           rest.retroLines={...retro,lines:retro.lines.map(normalizeLine),...(retro.frames?{frames:retro.frames.map(frame=>({...frame,...(frame.lines?{lines:frame.lines.map(normalizeLine)}:{}),...(frame.update?{update:frame.update.map(normalizeLine)}:{}),...(frame.clear?{clear:frame.clear.map(normalizeClear)}:{})}))}:{})};
           delete rest.retroLines.alt;delete rest.retroLines.decorative;
+          // Overall opacity is composited by the object node, not baked into
+          // its sampled pixels. Retain the canvas (and background cache).
+          if(rest.paint){const {opacity,...paint}=rest.paint;rest.paint=paint;}
           // A continuous resize can reuse identical raster coverage. Compare
           // its unscaled extent, then scale the retained canvas at composition
           // time rather than remounting it and restarting animated playback.
           return {...rest,sampleScale:undefined,bounds:{...object.bounds,x:0,y:0,width:Math.round(object.bounds.width/(object.sampleScale?.x||1)*1e8)/1e8,height:Math.round(object.bounds.height/(object.sampleScale?.y||1)*1e8)/1e8}};
+        }
+        if(object.kind==='video'&&object.video){
+          const {source,...video}=object.video,{source:poster,...media}=object.media||{};
+          delete rest.paint;return {...rest,video,media,bounds:{...object.bounds,x:0,y:0,width:0,height:0}};
         }
         if(object.kind==='image'&&object.media&&!object.retroText&&!object.retroLines){
           const {crop,mask,source,frames,alt,decorative,colourMatrices,sharpness,sharpnessAfter,fit,...media}=object.media;
@@ -915,7 +1069,7 @@ globalThis.KeynopeScene = (() => {
     const retainedEnvelope=sceneEnvelope(scene);
     const initialObjects=[...scene.objects,...(initialBackgroundObject?[initialBackgroundObject]:[])];
     const retainedObjects=new Map(initialObjects.map(object=>[object.id,JSON.stringify(retainedObjectProjection(object))]));
-    const retainedSources=new Map(initialObjects.filter(object=>imageViews.has(object.id)).map(object=>[object.id,{source:object.media.source,frames:(object.media.frames||[]).map(frame=>frame.source)}]));
+    const retainedSources=new Map(initialObjects.filter(object=>imageViews.has(object.id)||videoViews.has(object.id)).map(object=>[object.id,{videoSource:object.video?.source,source:object.media.source,frames:(object.media.frames||[]).map(frame=>frame.source)}]));
     function reconcileReadingOrder(structural=false){
       const compare=(a,b)=>a.object.bounds.y-b.object.bounds.y||a.object.bounds.x-b.object.bounds.x||String(a.object.id).localeCompare(String(b.object.id));
       const outOfOrder=readingNodes.some((entry,index)=>index>0&&compare(readingNodes[index-1],entry)>0);
@@ -977,6 +1131,8 @@ globalThis.KeynopeScene = (() => {
       // Do not cache by JS reference: callers may mutate an input object.
       for(const object of nextObjects){
         if(!object||!object.id||byID.has(object.id))return false;
+        if([object.paint,object.labelPaint].some(p=>p?.gradientImage&&!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(p.gradientImage)))return false;
+        if(!validEffects(object.paint?.effects)||!validEffects(object.labelPaint?.effects))return false;
         const rect=box=>box&&['x','y','width','height'].every(key=>Number.isFinite(box[key]))&&box.width>=0&&box.height>=0;
         if(object.table){
           const data=object.table;
@@ -986,10 +1142,10 @@ globalThis.KeynopeScene = (() => {
         }
         if(object.chart&&(!Array.isArray(object.chart.paths)||!Array.isArray(object.chart.labels)||!object.chart.data||!Array.isArray(object.chart.data.categories)||!Array.isArray(object.chart.data.series)||object.chart.labels.some(label=>!rect(label.bounds)||!label.text)))return false;
         const sources=retainedSources.get(object.id);
-        const incompatible=retainedObjects.has(object.id)&&(JSON.stringify(retainedObjectProjection(object))!==retainedObjects.get(object.id)||sources&&(object.media?.source!==sources.source||(object.media?.frames||[]).length!==sources.frames.length||(object.media?.frames||[]).some((frame,index)=>frame.source!==sources.frames[index])));
+        const incompatible=retainedObjects.has(object.id)&&(JSON.stringify(retainedObjectProjection(object))!==retainedObjects.get(object.id)||sources&&(object.video?.source!==sources.videoSource||object.media?.source!==sources.source||(object.media?.frames||[]).length!==sources.frames.length||(object.media?.frames||[]).some((frame,index)=>frame.source!==sources.frames[index])));
         if(incompatible&&!replaceIncompatible)return false;
         if(!retainedObjects.has(object.id)||incompatible){
-          if(!['text','shape','image','table','chart','connector'].includes(object.kind))return false;
+          if(!['text','shape','image','video','table','chart','connector'].includes(object.kind))return false;
           try{
             for(const data of [!object.retroText&&!object.retroLines?object.text:null,!object.retroLabel?object.label:null,...(object.table?.cells||[]).map(cell=>cell.text),...(object.chart?.labels||[]).map(label=>label.text)].filter(Boolean)){
               for(const paragraph of data.paragraphs||[{runs:data.runs}])KeynopeTextLayout.normalize({...data,runs:paragraph.runs});
@@ -1011,6 +1167,7 @@ globalThis.KeynopeScene = (() => {
         if(['gradientStart','gradientEnd','stroke','shadowColor'].some(key=>paint[key]!=null&&paint[key]!==''&&!CSS.supports('color',paint[key])))return false;
         if(['strokeWidth','shadowX','shadowY','shadowBlur'].some(key=>paint[key]!=null&&!Number.isFinite(paint[key])))return false;
         if(paint.shadowBlur<0)return false;
+        if(!validEffects(paint.effects)||!validEffects(object.labelPaint?.effects))return false;
         if(paint.gradientStart&&paint.gradientEnd&&[paint.gradientStart,paint.gradientEnd].some(value=>!/^#[\da-f]{6}$/i.test(value))){
           // CSS accepts variables/currentColor that a Canvas colour stop may
           // reject. Preflight before removing any live filter definitions.
@@ -1060,15 +1217,19 @@ globalThis.KeynopeScene = (() => {
       const removed=new Set([...retainedObjects.keys()].filter(id=>!byID.has(id)||replaced.has(id)));
       for(const id of removed)changedIDs.add(id);
       const oldBackgroundID=backgroundObjectID;
+      for(const id of removed){videoViews.get(id)?.dispose();videoViews.delete(id);}
       const hadBackground=!!backgroundEntry;
+      const nextBackgroundRasterKey=backgroundRasterKey(nextBackgroundObject),backgroundRasterChanged=!sameBackgroundRasterKey(nextBackgroundRasterKey,currentBackgroundRasterKey)||removed.has(oldBackgroundID);
+      if(backgroundRasterChanged){clearBackgroundRaster();currentBackgroundRasterKey=nextBackgroundRasterKey;}
+      if(removed.has(oldBackgroundID)&&backgroundNode)applyObjectEffects(backgroundNode,null,backgroundEntry.object.bounds);
       if(removed.has(oldBackgroundID)&&backgroundNode){backgroundNode.remove();backgroundNode=null;backgroundEntry=null;}
       backgroundObjectID=nextBackgroundID;
       if(next.background!==retainedBackground){root.style.background=next.background||'';retainedBackground=next.background;}
       const removedDiagnostics=new Set([...removed,...textBoxes.filter(box=>removed.has(box.ownerID)).map(box=>box.id)]);
-      for(const id of removed){activeIDs.delete(id);retainedObjects.delete(id);retainedSources.delete(id);structuredViews.delete(id);shapeViews.delete(id);imageViews.get(id)?.cancelPaint?.();imageViews.delete(id);sampledViews.delete(id);connectorNodes.get(id)?.path.remove();connectorNodes.get(id)?.defs.remove();connectorNodes.delete(id);}
+      for(const id of removed){activeIDs.delete(id);retainedObjects.delete(id);retainedSources.delete(id);structuredViews.delete(id);shapeViews.delete(id);imageViews.get(id)?.cancelPaint?.();imageViews.delete(id);sampledViews.delete(id);const connector=connectorNodes.get(id);if(connector)applyObjectEffects(connector.path,null,{width:0,height:0});connector?.path.remove();connector?.defs.remove();connectorNodes.delete(id);}
       for(const id of removed){const dialog=chartDataDialogs.get(id);if(dialog){dialog.close();dialog.remove();chartDataDialogs.delete(id);}}
       for(let i=textBoxes.length-1;i>=0;i--){const box=textBoxes[i];if(!removed.has(box.ownerID))continue;for(const surface of box.local)surface.dispose();for(let j=surfaces.length-1;j>=0;j--)if(box.local.includes(surfaces[j].surface))surfaces.splice(j,1);dirtyTextIDs.delete(box.id);textBoxes.splice(i,1);}
-      for(let i=readingNodes.length-1;i>=0;i--)if(removed.has(readingNodes[i].object.id)){readingNodes[i].node.remove();readingNodes.splice(i,1);}
+      for(let i=readingNodes.length-1;i>=0;i--)if(removed.has(readingNodes[i].object.id)){applyObjectEffects(readingNodes[i].node,null,readingNodes[i].object.bounds);readingNodes[i].node.remove();readingNodes.splice(i,1);}
       for(let i=retroTracks.length-1;i>=0;i--)if(removed.has(retroTracks[i].id))retroTracks.splice(i,1);
       for(let i=animationTracks.length-1;i>=0;i--)if(removed.has(animationTracks[i].item.id))animationTracks.splice(i,1);
       for(let i=media.length-1;i>=0;i--)if(removed.has(media[i].id))media.splice(i,1);
@@ -1084,7 +1245,7 @@ globalThis.KeynopeScene = (() => {
         const firstRetro=retroReady.length,firstSurface=surfaces.length,firstMedia=media.length,firstBox=textBoxes.length;
         if(object.kind==='connector'&&!object.retroLines)mountConnector(object);else mountObject(object,object.id===nextBackgroundID);
         retainedObjects.set(object.id,JSON.stringify(retainedObjectProjection(object)));
-        if(imageViews.has(object.id))retainedSources.set(object.id,{source:object.media.source,frames:(object.media.frames||[]).map(frame=>frame.source)});
+        if(imageViews.has(object.id)||videoViews.has(object.id))retainedSources.set(object.id,{videoSource:object.video?.source,source:object.media.source,frames:(object.media.frames||[]).map(frame=>frame.source)});
         for(const box of textBoxes.slice(firstBox))dirtyTextIDs.add(box.id);
         pendingText.push(...retroReady.splice(firstRetro),...surfaces.slice(firstSurface).map(s=>s.surface.ready()));
         for(const item of media.slice(firstMedia)){pendingText.push(item.image.decode().catch(item.failed),item.paintReady);if(item.media.frames?.length)animationTracks.push(animationTrack(item));}
@@ -1128,8 +1289,8 @@ globalThis.KeynopeScene = (() => {
         if(contentChanged||resized)pendingText.push(...box.local.map(surface=>surface.ready()));
       }
       if(pendingText.length||added.length){
-        const revision=++readinessRevision,previous=ready;
-        ready=Promise.all([previous,...pendingText]).then(()=>{
+        const revision=++readinessRevision,previous=contentReady;
+        contentReady=Promise.all([previous,...pendingText]).then(()=>{
           if(revision!==readinessRevision)return diagnostics;
           setTime(lastTime,lastSnapshot);
           const result=checkOverflow(dirtyTextIDs);dirtyTextIDs.clear();return result;
@@ -1147,6 +1308,7 @@ globalThis.KeynopeScene = (() => {
         if(entry.node.style.zIndex!==z||['x','y','width','height'].some(key=>object.bounds[key]!==entry.object.bounds[key])||(object.rotation||0)!==(entry.object.rotation||0)||snapshot.paintKey!==entry.object.paintKey)changedIDs.add(object.id);
         if(entry.node.style.zIndex!==z)entry.node.style.zIndex=z;
         const image=imageViews.get(object.id);
+        videoViews.get(object.id)?.update(object);
         if(image){imageSemantics(image,object.media);if(paintImage(image,object))changedIDs.add(object.id);}
         const sampled=sampledViews.get(object.id);
         if(sampled){
@@ -1173,6 +1335,7 @@ globalThis.KeynopeScene = (() => {
         entry.object=snapshot;
       }
       for(const {id,entry,value,opacity,object}of routes){
+        applyObjectEffects(entry.path,object.paint,object.bounds);
         entry.arrows=object.arrows;entry.arrowWidth=object.arrowWidth;
         entry.path.setAttribute('aria-label',object.name||'Connector'+(object.arrows==='both'?', arrows at both ends':object.arrows==='start'?', arrow at start':object.arrows==='end'?', arrow at end':''));
         if(entry.points!==value){changedIDs.add(id);entry.path.setAttribute('points',value);trimConnectorShaft(entry.path,object);entry.points=value;}
@@ -1191,12 +1354,19 @@ globalThis.KeynopeScene = (() => {
       if(!next.objects.some(object=>object.id===oldBackgroundID))changedIDs.delete(oldBackgroundID);
       changedIDs.delete(nextBackgroundID);
       lastChangedObjectIDs=[...changedIDs];
+      for(const {node}of readingNodes){const object=byID.get(node.dataset.objectId);if(object)applyObjectEffects(node,object.paint,object.bounds);}
+      // New input must never wait for obsolete background captures. Exports
+      // still await the latest cache, independently of font/media readiness.
+      if(backgroundRasterChanged||pendingText.length||added.length){const key=currentBackgroundRasterKey;ready=contentReady.then(()=>cacheBackground(nextBackgroundObject,key)).then(()=>diagnostics);}
       return true;
     }
     function resourceCounts(){return {objects:readingNodes.length+connectorNodes.size,textSurfaces:surfaces.length,media:media.length,animationTracks:animationTracks.length+retroTracks.length,pendingRasterQueue:retroReady.length};}
     function dispose(){
       if(disposed)return;disposed=true;
+      clearBackgroundRaster();
+      objectEffects.clear();
       for(const entry of imageViews.values())entry.cancelPaint?.();
+      for(const video of videoViews.values())video.dispose();videoViews.clear();
       for(const dialog of chartDataDialogs.values()){dialog.close();dialog.remove();}chartDataDialogs.clear();
       for(const s of surfaces)s.surface.dispose();
       for(const list of [surfaces,textBoxes,media,readingNodes,retroReady,retroTracks,animationTracks])list.length=0;
@@ -1208,7 +1378,7 @@ globalThis.KeynopeScene = (() => {
     // Runtime-only diagnostic counters, not document/scene metadata. Callers
     // receive a fresh copy so profiling cannot alter renderer bookkeeping.
     const renderStats=()=>({...renderCounters,lastChangedObjectIDs:[...lastChangedObjectIDs]});
-    return {element:root,get ready(){return ready;},setTime,snapshotAt,imageArtwork,updateTransforms,previewPositions,update:next=>updateTransforms(next,true),diagnostics,tableContentMetrics,resourceCounts,renderStats,dispose};
+    return {element:root,get ready(){return ready;},setTime,snapshotAt,imageArtwork,setVideoPlayback:(active,options)=>{for(const video of videoViews.values())video.setActive(active,options);},videoPlayers:()=>[...videoViews],syncVideoPlayback:states=>{for(const [id,video]of videoViews)video.sync(states?.[id]);},updateTransforms,previewPositions,update:next=>updateTransforms(next,true),diagnostics,tableContentMetrics,resourceCounts,renderStats,dispose};
   }
   function editImage(object,commit,{renderDraft=null}={}) {
     const previous=document.activeElement;
@@ -1509,10 +1679,10 @@ globalThis.KeynopeScene = (() => {
         node.style.backgroundColor=background+(object.text.seeThrough?'80':'');
       }
       Object.assign(node.style,{flexShrink:'0',tabSize:'4',paddingTop:model.bullet?'0':(model.paragraphBefore||0)*model.size+'px',paddingBottom:model.bullet?'0':(model.paragraphAfter||0)*model.size+'px'});
-      if(paint.gradientStart){const angle=paint.gradientDirection==='vertical'?'180deg':paint.gradientDirection==='diagonal'?'135deg':'90deg';Object.assign(node.style,{backgroundImage:`linear-gradient(${angle},${paint.gradientStart},${paint.gradientEnd})`,backgroundClip:'text',webkitBackgroundClip:'text',color:'transparent'});}
+      if(paint.gradientStart){const angle=paint.gradientDirection==='vertical'?'180deg':paint.gradientDirection==='diagonal'?'135deg':'90deg';Object.assign(node.style,{backgroundImage:paint.gradientImage?`url("${paint.gradientImage}")`:`linear-gradient(${angle},${paint.gradientStart},${paint.gradientEnd})`,backgroundSize:paint.gradientImage?'100% 100%':'',backgroundClip:'text',webkitBackgroundClip:'text',color:'transparent'});}
       if(paint.stroke){node.style.webkitTextStroke=`${paint.strokeWidth||1}px ${paint.stroke}`;node.style.paintOrder='stroke fill';}
       editor.setEmojiOutline(paint.stroke,paint.strokeWidth||1);
-      editor.setEmojiGradient(paint.gradientStart,paint.gradientEnd,paint.gradientDirection);
+      editor.setEmojiGradient(paint.gradientStart,paint.gradientEnd,paint.gradientDirection,paint.gradientImage);
       if(paint.shadowColor)node.style.filter=`drop-shadow(${shadow(paint)})`;
     };
     let updateGrowth=()=>{},wordStyles=null;
@@ -1862,7 +2032,7 @@ globalThis.KeynopeScene = (() => {
         const frames=[];
         for(const time of item.times){
           check();await wait(view.snapshotAt(time));check();
-          const canvas=retroCanvas||await wait(view.imageArtwork(object.id));check();
+          const canvas=retroCanvas&&!object.paint?.effects?retroCanvas:await wait(view.imageArtwork(object.id));check();
           const source=canvas.toDataURL('image/png');encodedBytes+=source.length;
           if(encodedBytes>96*1024*1024)throw Error('PowerPoint artwork exceeds capture limits; reduce image dimensions or frames.');
           frames.push(source);await new Promise(resolve=>setTimeout(resolve,0));

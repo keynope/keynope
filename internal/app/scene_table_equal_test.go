@@ -1,6 +1,7 @@
 package app
 
 import (
+	"keynope/internal/effects"
 	"math"
 	"reflect"
 	"sort"
@@ -24,7 +25,7 @@ func TestSceneTableEqualityFieldCoverage(t *testing.T) {
 	}
 	check(sceneTable{}, []string{"Header", "Banded", "Rows", "Columns", "Cells", "Borders"})
 	check(sceneTableCell{}, []string{"Row", "Column", "RowSpan", "ColSpan", "Header", "Bounds", "ContentBounds", "Text", "Paint", "Fill", "BorderColor", "BorderWidth"})
-	check(scenePaint{}, []string{"NoFill", "Opacity", "Color", "GradientStart", "GradientEnd", "GradientDirection", "Stroke", "StrokeWidth", "ShadowColor", "ShadowX", "ShadowY", "ShadowBlur"})
+	check(scenePaint{}, []string{"NoFill", "Opacity", "Color", "GradientStart", "GradientEnd", "GradientDirection", "Stroke", "StrokeWidth", "ShadowColor", "ShadowX", "ShadowY", "ShadowBlur", "Effects", "GradientImage", "StrokePosition", "StrokeSpan"})
 	check(sceneRun{}, []string{"Text", "Bold", "BoldOff", "Italic", "Underline", "Color", "ColorToken", "FontID", "FontRole", "FontSize"})
 	check(sceneParagraph{}, []string{"Runs", "Bullet"})
 	check(sceneTableBorder{}, []string{"Axis", "Track", "From", "To", "Color", "Width"})
@@ -39,7 +40,7 @@ func TestSceneTableEqualityFieldCoverage(t *testing.T) {
 		refs  map[string]reflect.Type
 	}{
 		{sceneTableCell{}, map[string]reflect.Type{"Text": reflect.TypeOf((*sceneText)(nil))}},
-		{scenePaint{}, map[string]reflect.Type{"Opacity": reflect.TypeOf((*float64)(nil))}},
+		{scenePaint{}, map[string]reflect.Type{"Opacity": reflect.TypeOf((*float64)(nil)), "Effects": reflect.TypeOf((*effects.Filter)(nil))}},
 	} {
 		typ := reflect.TypeOf(entry.value)
 		for i := 0; i < typ.NumField(); i++ {

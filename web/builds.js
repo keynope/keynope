@@ -10,7 +10,7 @@ const KeynopeBuilds=(()=>{
     const allowed=ids?new Set(ids):null,seen=new Set();
     const duration=n=>Math.max(0,Math.min(60000,Number.isFinite(Number(n))?Number(n):0));
     const transition=input?.transition||{};
-    const result={version:1,transition:{effect:['cut','fade','push','wipe'].includes(transition.effect)?transition.effect:'cut',direction:directions.includes(transition.direction)?transition.direction:'left',durationMs:duration(transition.durationMs)},steps:[]};
+    const result={version:1,transition:{effect:['cut','fade','push','wipe','dip-black','dip-white','tv-switch'].includes(transition.effect)?transition.effect:'cut',direction:directions.includes(transition.direction)?transition.direction:'left',durationMs:duration(transition.durationMs)},steps:[]};
     if(input?.version!==1)return {version:1,transition:{effect:'cut',durationMs:0},steps:[]};
     for(const source of (Array.isArray(input?.steps)?input.steps:[]).slice(0,1000)){
       if(!source||typeof source!=='object')continue;
@@ -23,10 +23,10 @@ const KeynopeBuilds=(()=>{
   function controller(root,input,{onChange=()=>{},transitions=true,reducedMotion=()=>matchMedia('(prefers-reduced-motion: reduce)').matches,clock=()=>performance.now()}={}){
     const build=normalize(input),targets=new Map(),saved=new Map(),animations=new Map();
     build.steps.forEach((step,index)=>step.targetIds.forEach(id=>targets.set(id,index)));
-    let step=0,generation=0,disposed=false,timer=null,deadline=0,remaining=0,paused=false,remoteCursor=null;
+    let step=0,generation=0,disposed=false,timer=null,deadline=0,remaining=0,paused=false,remoteCursor=null,dipPlayback=null;
     const nodes=()=>[...root.querySelectorAll('[data-object-id]')].filter(node=>targets.has(node.dataset.objectId));
     const cancelTimer=()=>{if(timer!==null)clearTimeout(timer);timer=null;deadline=0;};
-    const cancelAnimations=()=>{for(const [animation,timing]of animations){clearTimeout(timing.timer);animation.cancel();}animations.clear();};
+    const cancelAnimations=()=>{dipPlayback?.cancel();for(const [animation,timing]of animations){clearTimeout(timing.timer);animation.cancel();}animations.clear();};
     function settleAnimation(animation,timing){
       clearTimeout(timing.timer);timing.deadline=clock()+timing.remaining;
       // Occluded WebKit views can freeze compositor animation time. Visibility
@@ -37,6 +37,7 @@ const KeynopeBuilds=(()=>{
     function animate(node,effect,direction,duration,transition=false,elapsed=0){
       if(elapsed>=duration)return;
       if(!duration||effect==='appear'||effect==='cut'||reducedMotion()||typeof node.animate!=='function')return;
+      if(transition&&['dip-black','dip-white','tv-switch'].includes(effect)&&root.parentElement){dipPlayback||=slideTransition(root.parentElement,root,{reducedMotion});dipPlayback.play({effect,durationMs:duration},{elapsed});return;}
       const base=getComputedStyle(node).transform==='none'?'':getComputedStyle(node).transform;
       let start,end;
       if(effect==='fade'){const opacity=getComputedStyle(node).opacity;start={opacity:0};end={opacity};}
@@ -70,8 +71,8 @@ const KeynopeBuilds=(()=>{
     function next(){if(disposed||step>=build.steps.length)return false;const settings=build.steps[step];seek(step+1,{animated:true,automatic:true,wait:settings.durationMs});return true;}
     function previous(){if(disposed||step<=0)return false;seek(step-1);return true;}
     function start(){seek(0,{motion:'enter'});if(transitions)animate(root,build.transition.effect,build.transition.direction,build.transition.durationMs,true);schedule(build.transition.durationMs);}
-    function pause(){if(disposed||paused)return;remaining=deadline?Math.max(0,deadline-clock()):0;cancelTimer();paused=true;for(const [a,timing]of animations){timing.remaining=Math.max(0,timing.deadline-clock());clearTimeout(timing.timer);a.pause();}onChange({step,total:build.steps.length,generation,paused});}
-    function resume(){if(disposed||!paused)return;paused=false;for(const [a,timing]of animations){a.play();settleAnimation(a,timing);}if(step<build.steps.length&&build.steps[step].advance==='after'){const wait=remaining;cancelTimer();const epoch=generation;deadline=clock()+wait;timer=setTimeout(()=>{timer=null;if(!disposed&&!paused&&generation===epoch)next();},wait);}onChange({step,total:build.steps.length,generation,paused});}
+    function pause(){if(disposed||paused)return;remaining=deadline?Math.max(0,deadline-clock()):0;cancelTimer();paused=true;dipPlayback?.pause();for(const [a,timing]of animations){timing.remaining=Math.max(0,timing.deadline-clock());clearTimeout(timing.timer);a.pause();}onChange({step,total:build.steps.length,generation,paused});}
+    function resume(){if(disposed||!paused)return;paused=false;dipPlayback?.resume();for(const [a,timing]of animations){a.play();settleAnimation(a,timing);}if(step<build.steps.length&&build.steps[step].advance==='after'){const wait=remaining;cancelTimer();const epoch=generation;deadline=clock()+wait;timer=setTimeout(()=>{timer=null;if(!disposed&&!paused&&generation===epoch)next();},wait);}onChange({step,total:build.steps.length,generation,paused});}
     function dispose(){if(disposed)return;disposed=true;generation++;cancelTimer();cancelAnimations();for(const [node,visibility]of saved){node.style.visibility=visibility;delete node.dataset.buildPending;}saved.clear();}
     function applyCursor(cursor){
       const key=cursorKey(cursor);if(disposed||!key)return false;
@@ -91,8 +92,8 @@ const KeynopeBuilds=(()=>{
     return {next,previous,seek,start,pause,resume,dispose,applyCursor,settleAnimations:cancelAnimations,snapshot:()=>({step,total:build.steps.length,generation,paused}),build};
   }
   function slideTransition(host,incoming,{reducedMotion=()=>matchMedia('(prefers-reduced-motion: reduce)').matches}={}){
-    let outgoing=null,animations=[],timer=null,epoch=0,serial=0;
-    function cancel(){epoch++;if(timer!==null)clearTimeout(timer);timer=null;for(const animation of animations)animation.cancel();animations=[];outgoing?.remove();outgoing=null;delete host.dataset.transitionState;}
+    let outgoing=null,animations=[],timer=null,epoch=0,serial=0,dipFrame=null,dipCleanup=null,dipPause=null,dipResume=null;
+    function cancel(){epoch++;if(timer!==null)clearTimeout(timer);timer=null;if(dipFrame!==null)cancelAnimationFrame(dipFrame);dipFrame=null;dipCleanup?.();dipCleanup=dipPause=dipResume=null;for(const animation of animations)animation.cancel();animations=[];outgoing?.remove();outgoing=null;delete host.dataset.transitionState;}
     function snapshot(){
       // Rapid navigation first settles the old composition. Do not accumulate
       // a recursive history of snapshots or copy compositor intermediate paint.
@@ -117,6 +118,59 @@ const KeynopeBuilds=(()=>{
       elapsed=Math.max(0,Math.min(duration,Number(elapsed)||0));
       if(transition.effect==='cut'||!duration||elapsed>=duration||reducedMotion()||typeof incoming.animate!=='function'){cancel();return;}
       const generation=epoch;host.dataset.transitionState=transition.effect;if(outgoing)outgoing.style.zIndex='1';
+      if(transition.effect==='tv-switch'){
+        // Original channel-flip palette, sparse cells, row wobble and tracking
+        // lines, composited over the complete scene on a tiny fixed grid.
+        const snow=document.createElement('canvas'),backdrop=document.createElement('div');snow.width=245;snow.height=56;
+        snow.className='keynope-tv-switch';snow.setAttribute('aria-hidden','true');
+        snow.style.cssText='position:absolute;inset:0;width:100%;height:100%;image-rendering:pixelated;pointer-events:none;z-index:4';
+        backdrop.style.cssText='position:absolute;inset:0;background:#050505;pointer-events:none;z-index:0';backdrop.setAttribute('aria-hidden','true');
+        const context=snow.getContext('2d');if(!context){cancel();return;}
+        host.prepend(backdrop);host.append(snow);
+        const original=[incoming,outgoing].filter(Boolean).map(node=>({node,visibility:node.style.visibility}));
+        let start=performance.now()-elapsed,pausedAt=null,lastFrame=-1;
+        dipCleanup=()=>{for(const item of original)item.node.style.visibility=item.visibility;snow.remove();backdrop.remove();};
+        const paint=frame=>{
+          let state=((frame+1)*2654435761)>>>0;
+          const int=n=>{state=(state+0x6D2B79F5)>>>0;let t=state;t=Math.imul(t^(t>>>15),t|1);t^=t+Math.imul(t^(t>>>7),t|61);return Math.floor(((t^(t>>>14))>>>0)/4294967296*n);};
+          const palette=['#000000','#181818','#404040','#8a8a8a','#f7f7f7'];context.clearRect(0,0,245,56);
+          for(let row=0;row<56;row++){const wobble=int(9)-4;for(let col=0;col<245;col++){if(int(100)<22)continue;context.fillStyle=palette[int(palette.length)];context.fillRect(Math.max(0,Math.min(244,col+wobble)),row,1,1);}}
+          context.fillStyle='#fff';context.fillRect(0,int(56),245,1);context.fillStyle='#090909';context.fillRect(0,int(56),245,1);
+        };
+        const tick=now=>{
+          if(epoch!==generation)return;const time=Math.max(0,now-start),progress=Math.min(1,time/duration),midpoint=.48;
+          if(progress>=1){cancel();return;}
+          for(const item of original)item.node.style.visibility=item.node===(progress<midpoint?outgoing:incoming)?item.visibility:'hidden';
+          snow.style.opacity=String(progress<midpoint?.20+progress/midpoint*.80:.95-(progress-midpoint)/(1-midpoint)*.95);
+          const frame=Math.floor(time*15/1000);if(frame!==lastFrame){paint(frame);lastFrame=frame;}
+          dipFrame=requestAnimationFrame(tick);
+        };
+        const settle=()=>{timer=setTimeout(()=>{if(epoch===generation)cancel();},Math.max(0,duration-(performance.now()-start))+100);};
+        dipPause=()=>{if(pausedAt!==null)return;pausedAt=performance.now();if(dipFrame!==null)cancelAnimationFrame(dipFrame);clearTimeout(timer);timer=null;};
+        dipResume=()=>{if(pausedAt===null)return;start+=performance.now()-pausedAt;pausedAt=null;tick(performance.now());if(epoch===generation)settle();};
+        tick(performance.now());if(epoch===generation)settle();return;
+      }
+      const curve=globalThis.KeynopeTransitionCurves?.[transition.effect];
+      if(curve){
+        const ns='http://www.w3.org/2000/svg',surface=document.createElementNS(ns,'svg'),filter=document.createElementNS(ns,'filter'),transfer=document.createElementNS(ns,'feComponentTransfer'),id='keynope-dip-'+(++serial)+'-'+Math.random().toString(36).slice(2);
+        surface.setAttribute('width','0');surface.setAttribute('height','0');surface.style.position='absolute';surface.setAttribute('aria-hidden','true');filter.id=id;filter.setAttribute('color-interpolation-filters','linearRGB');filter.setAttribute('x','0');filter.setAttribute('y','0');filter.setAttribute('width','100%');filter.setAttribute('height','100%');
+        const channels=['R','G','B'].map(channel=>{const f=document.createElementNS(ns,'feFunc'+channel);f.setAttribute('type','linear');transfer.append(f);return f;});
+        filter.append(transfer);surface.append(filter);host.append(surface);
+        const backdrop=document.createElement('div');backdrop.style.cssText='position:absolute;inset:0;pointer-events:none;background:'+(transition.effect==='dip-white'?'#fff':'#000');backdrop.setAttribute('aria-hidden','true');host.prepend(backdrop);
+        const original=[incoming,outgoing].filter(Boolean).map(node=>({node,filter:node.style.filter,visibility:node.style.visibility}));let start=performance.now()-elapsed,pausedAt=null;
+        dipCleanup=()=>{for(const item of original){item.node.style.filter=item.filter;item.node.style.visibility=item.visibility;}surface.remove();backdrop.remove();};
+        const tick=now=>{
+          if(epoch!==generation)return;
+          const progress=Math.max(0,Math.min(1,(now-start)/duration)),scaled=progress*(curve.length-1),a=curve[Math.floor(scaled)],b=curve[Math.min(curve.length-1,Math.floor(scaled)+1)],k=scaled-Math.floor(scaled);
+          for(const channel of channels){channel.setAttribute('slope',String(a.gain+(b.gain-a.gain)*k));channel.setAttribute('intercept',String(a.bias+(b.bias-a.bias)*k));}
+          for(const item of original){const visible=item.node===(progress<.5?outgoing:incoming);item.node.style.visibility=visible?item.visibility:'hidden';if(visible)item.node.style.filter=(item.filter+' url(#'+id+')').trim();}
+          if(progress>=1){cancel();return;}dipFrame=requestAnimationFrame(tick);
+        };
+        const settle=()=>{timer=setTimeout(()=>{if(epoch===generation)cancel();},Math.max(0,duration-(performance.now()-start))+100);};
+        dipPause=()=>{if(pausedAt!==null)return;pausedAt=performance.now();if(dipFrame!==null)cancelAnimationFrame(dipFrame);clearTimeout(timer);timer=null;};
+        dipResume=()=>{if(pausedAt===null)return;start+=performance.now()-pausedAt;pausedAt=null;tick(performance.now());settle();};
+        tick(performance.now());settle();return;
+      }
       const dx=transition.direction==='right'?-host.clientWidth:transition.direction==='left'?host.clientWidth:0,dy=transition.direction==='down'?-host.clientHeight:transition.direction==='up'?host.clientHeight:0;
       let frames;
       if(transition.effect==='fade')frames=[{opacity:0},{opacity:1}];
@@ -130,7 +184,7 @@ const KeynopeBuilds=(()=>{
         Promise.all(animations.map(animation=>animation.finished)).then(()=>{if(epoch===generation)cancel();}).catch(()=>{});
       }catch(_error){cancel();}
     }
-    return {snapshot,hold,play,cancel,active:()=>!!host.dataset.transitionState};
+    return {snapshot,hold,play,cancel,pause:()=>dipPause?.(),resume:()=>dipResume?.(),active:()=>!!host.dataset.transitionState};
   }
   function nextState(pages,position){
     if(!position||!Array.isArray(pages))return null;
@@ -266,7 +320,7 @@ const KeynopeBuilds=(()=>{
         select(fields,'Advance',[['click','On click'],['after','Automatically after previous']],()=>step.advance,v=>step.advance=v);
         number(fields,'Build delay (ms)',3600000,()=>step.delayMs,v=>step.delayMs=v);
       }
-      select(transition,'Transition effect',[['cut','Cut'],['fade','Fade'],['push','Push'],['wipe','Wipe']],()=>draft.transition.effect,v=>draft.transition.effect=v);
+      select(transition,'Transition effect',[['cut','Cut'],['fade','Fade'],['push','Push'],['wipe','Wipe'],['dip-black','Dip to black'],['dip-white','Dip to white'],['tv-switch','TV switching']],()=>draft.transition.effect,v=>{draft.transition.effect=v;if(v==='tv-switch'&&!draft.transition.durationMs)draft.transition.durationMs=180;});
       select(transition,'Transition direction',directions.map(d=>[d,d[0].toUpperCase()+d.slice(1)]),()=>draft.transition.direction,v=>draft.transition.direction=v);
       number(transition,'Transition duration (ms)',60000,()=>draft.transition.durationMs,v=>draft.transition.durationMs=v);
       refreshRuntime();onDirty();

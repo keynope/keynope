@@ -124,7 +124,7 @@ func (bundle ObjectClipboard) validateContext(ctx context.Context) error {
 			usedCharts[element.ObjectID] = true
 		}
 		switch element.Kind {
-		case "text", "heading", "bullet", "code", "text-image", "page-number", "shape", "connector", "image", "table", "chart":
+		case "text", "heading", "bullet", "code", "text-image", "page-number", "shape", "connector", "image", "video", "table", "chart":
 		default:
 			return fmt.Errorf("unsupported clipboard object kind %q", element.Kind)
 		}
@@ -133,7 +133,7 @@ func (bundle ObjectClipboard) validateContext(ctx context.Context) error {
 		}
 		if element.AssetID != "" {
 			usedAssets[element.AssetID] = true
-			if element.Kind != "image" {
+			if element.Kind != "image" && element.Kind != "video" {
 				return fmt.Errorf("only images may reference clipboard media")
 			}
 			if _, ok := bundle.Assets[element.AssetID]; !ok {
@@ -271,6 +271,18 @@ func validateClipboardAssetBudgetContext(ctx context.Context, asset DeckAsset, p
 }
 
 func validateMediaPixelsUncached(ctx context.Context, asset DeckAsset, pixels *int64) error {
+	if asset.Video != nil {
+		if asset.Source != nil || asset.Vector != nil || len(asset.Frames) != 0 {
+			return fmt.Errorf("video poster cannot also contain image derivatives or animation")
+		}
+		info, err := inspectMovie(asset.Video.Data)
+		if err != nil {
+			return err
+		}
+		if info.MIME != asset.Video.MIME || info.Width != asset.Video.Width || info.Height != asset.Video.Height || info.DurationMS != asset.Video.DurationMS {
+			return fmt.Errorf("video bytes do not match declared metadata")
+		}
+	}
 	if err := validateVectorAsset(ctx, asset); err != nil {
 		return err
 	}
@@ -385,7 +397,7 @@ func snapshotObjectClipboard(deck Deck, elements []Element) (ObjectClipboard, er
 		// A pasted placeholder becomes an ordinary authored object. Local image
 		// cache paths are never included in the system clipboard.
 		element.Placeholder, element.SlotID, element.PlaceholderRole, element.MasterSlotID, element.Inherited = false, "", "", "", false
-		if element.Kind == "image" {
+		if element.Kind == "image" || element.Kind == "video" {
 			element.Path = ""
 			if element.AssetID != "" {
 				asset, ok := deck.Assets[element.AssetID]

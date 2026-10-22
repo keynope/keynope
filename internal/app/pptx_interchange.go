@@ -304,6 +304,26 @@ func collectPPTXC64Width(widths map[string]float64, text *sceneText) {
 
 func sceneObjectToPPTX(object sceneObject, work ...*pptxExportWork) (*pptx.Object, []pptx.Warning) {
 	warnings := []pptx.Warning{}
+	if object.Kind == "video" {
+		object.Kind = "image"
+		object.Video = nil
+		warnings = append(warnings, pptx.Warning{Object: object.ID, Code: "video-poster-only", Message: "Embedded video was exported as its still poster. Use Keynope or HTML for playback."})
+	}
+	if object.Kind == "shape" && object.Paint.StrokePosition != "" {
+		warnings = append(warnings, pptx.Warning{Object: object.ID, Code: "stroke-position-approximated", Message: "Inside/outside stroke alignment uses a centred editable PowerPoint stroke; HTML and PDF preserve the original outline."})
+	}
+	if object.Kind != "image" && (object.Paint.Effects != nil || object.Paint.GradientImage != "") {
+		warnings = append(warnings, pptx.Warning{Object: object.ID, Code: "object-effects-omitted", Message: "Object remains editable; additional colour, glow, blur or non-linear gradient effects require HTML or PDF for exact appearance."})
+	}
+	if object.Kind == "image" && (object.Paint.Effects != nil || object.Paint.GradientImage != "") {
+		state := firstPPTXWork(work)
+		if state == nil || state.captures == nil {
+			warnings = append(warnings, pptx.Warning{Object: object.ID, Code: "object-effects-omitted", Message: "Image effects were not captured for this export. Export through the editor for rendered image treatments, or use PDF/HTML."})
+			// The direct/headless fallback has the legacy 64-pixel raster border,
+			// not the larger native capture border. Do not misposition that image.
+			object.Paint.Effects, object.Paint.GradientImage = nil, ""
+		}
+	}
 	if pptxModernNeedsPaintCapture(object) {
 		if state := firstPPTXWork(work); state != nil && state.captures != nil {
 			capture, ok := state.captures[pptxCaptureKey(state.slide, object.ID)]
@@ -338,7 +358,7 @@ func sceneObjectToPPTX(object sceneObject, work ...*pptxExportWork) (*pptx.Objec
 		}
 		picture, report, err := rasterPPTXRetroImage(object, firstPPTXWork(work))
 		if err == nil {
-			return picture, report
+			return picture, append(warnings, report...)
 		}
 		return nil, []pptx.Warning{{Object: object.ID, Code: "retro-image-capture-unavailable", Message: "Rendered Retro artwork could not be captured and was omitted: " + err.Error() + ". Use exact-appearance PDF/HTML or change this image to Modern."}}
 	}

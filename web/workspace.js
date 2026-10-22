@@ -19,6 +19,34 @@ globalThis.KeynopeWorkspace = (() => {
   function setChromeProperty(node,property,value) {
     if(node[property]!==value)node[property]=value;
   }
+  // Keep controls responsive while commands are in flight. Coalesce repeated
+  // edits per property, but never retarget a delayed edit to a new selection.
+  function selectionPaintWriter({target,write,error=()=>{},changed=()=>{}}){
+    const pending=new Map();let active=null,running=null;
+    const same=(a,b)=>!!a&&!!b&&['epoch','owner','slide','master','group'].every(key=>a[key]===b[key])&&Array.isArray(a.targetIds)&&Array.isArray(b.targetIds)&&a.targetIds.length===b.targetIds.length&&a.targetIds.every((id,index)=>id===b.targetIds[index]);
+    const busy=property=>active?.property===property||pending.has(property);
+    async function drain(){
+      while(pending.size){
+        const [property,job]=pending.entries().next().value;pending.delete(property);
+        const current=target();if(!same(job.target,current))continue;
+        active=job;changed();
+        try{await write(property,job.value,current);}
+        catch(reason){if(same(job.target,target()))error(reason);}
+        finally{active=null;changed();}
+      }
+    }
+    function enqueue(property,value,expected=target()){
+      const current=target();if(!expected?.targetIds?.length||!same(expected,current))return Promise.resolve();
+      // Explicit captures (e.g. an open colour picker) must still be current.
+      if(expected.revision!==current.revision){error(Error('The document changed; pick the colour or style again.'));return Promise.resolve();}
+      const queued=pending.get(property);
+      if(queued&&same(queued.target,expected)&&Object.is(queued.value,value)||!queued&&active?.property===property&&same(active.target,expected)&&Object.is(active.value,value))return running;
+      pending.set(property,{property,value,target:{...expected,targetIds:[...expected.targetIds]}});changed();
+      if(!running)running=Promise.resolve().then(drain).finally(()=>{running=null;});
+      return running;
+    }
+    return {enqueue,busy};
+  }
   function applyScenePagePatches(pages,previous) {
     return pages.map(page=>{
       if(!page.scenePatch)return page;
@@ -409,16 +437,13 @@ globalThis.KeynopeWorkspace = (() => {
     // replaces that panel's children when the authored selection changes.
     const paintPanel=document.createElement('section');paintPanel.className='keynope-selection-paint';paintPanel.setAttribute('aria-label','Selection paint');inspector.insertBefore(paintPanel,selection);
     const paintError=document.createElement('p');paintError.className='keynope-theme-error';paintError.setAttribute('role','alert');paintError.hidden=true;
-    let savingPaint=false,paintOwnerKey='';
+    let paintOwnerKey='';
     const paintFields=[];
     const paintSection=(label,collapsible=false)=>{const node=document.createElement(collapsible?'details':'fieldset'),heading=document.createElement(collapsible?'summary':'legend');heading.textContent=label;node.append(heading);paintPanel.append(node);return node;};
-    const basePaint=paintSection('Paint'),strokePaint=paintSection('Shape stroke'),linePaint=paintSection('Lines'),gradientPaint=paintSection('Gradient',true),shadowPaint=paintSection('Shadow',true);
-    async function commitPaint(property,value,target=selectionPaintTarget?.()){
-      if(savingPaint||!target?.targetIds?.length)return;
-      savingPaint=true;paintError.hidden=true;refresh();
-      try{await setSelectionPaint(property,value,target);}
-      catch(error){const current=selectionPaintTarget?.();if(target.epoch===current?.epoch&&target.owner===current?.owner){paintError.textContent=error.message||'Could not change paint';paintError.hidden=false;}}
-      finally{savingPaint=false;refresh();}
+    const basePaint=paintSection('Paint'),strokePaint=paintSection('Shape stroke'),linePaint=paintSection('Lines'),gradientPaint=paintSection('Gradient',true),shadowPaint=paintSection('Shadow',true),colourEffects=paintSection('Colour effects',true),blurEffects=paintSection('Blur',true),glowEffects=paintSection('Glow',true);
+    const paintWriter=selectionPaintWriter({target:()=>selectionPaintTarget?.(),write:(property,value,target)=>{paintError.hidden=true;return setSelectionPaint(property,value,target);},error:error=>{paintError.textContent=error.message||'Could not change paint';paintError.hidden=false;},changed:()=>refresh()});
+    function commitPaint(property,value,target=selectionPaintTarget?.()){
+      paintError.hidden=true;return paintWriter.enqueue(property,value,target);
     }
     function paintField(parent,property,label,type,choices){
       const row=document.createElement('label'),name=document.createElement('span'),subset=document.createElement('small');row.className='keynope-paint-field';name.textContent=property.startsWith('label.')?label.replace(/^Label /,''):label;name.append(subset);row.append(name);
@@ -429,22 +454,32 @@ globalThis.KeynopeWorkspace = (() => {
       const control=document.createElement(type==='color'?'button':type==='select'?'select':'input');control.dataset.selectionProperty=property;control.setAttribute('aria-label','Selection '+label.toLowerCase());
       if(type==='color'){
         control.type='button';control.className='keynope-paint-color';
-        control.onclick=()=>{const state=selectionCapabilities?.()?.properties?.[property],target=selectionPaintTarget?.();if(!state?.editable||savingPaint)return;pickColor?.(control,state.state==='value'&&String(state.value).startsWith('#')?state.value:'#ffffff',value=>commitPaint(property,value,target));};
+        control.onclick=()=>{const state=selectionCapabilities?.()?.properties?.[property],target=selectionPaintTarget?.();if(!state?.editable)return;pickColor?.(control,state.state==='value'&&String(state.value).startsWith('#')?state.value:'#ffffff',value=>commitPaint(property,value,target));};
       }else if(type==='select'){
         for(const [value,title]of choices)control.add(new Option(title,value));
         globalThis.KeynopeFonts?.enhance(control);
         const mixed=new Option('Mixed','mixed');mixed.disabled=true;control.add(mixed);
-        control.onchange=()=>commitPaint(property,['label.bold','label.italic','label.underline'].includes(property)?control.value==='true':control.value);
+        control.onchange=()=>commitPaint(property,property==='paint.posterize'?Number(control.value):['label.bold','label.italic','label.underline'].includes(property)?control.value==='true':control.value);
       }else{
         control.type='number';control.min='-4';control.max='4';control.step='1';control.required=true;
         if(property==='paint.strokeWidth'){control.min='0';control.max='64';control.step='.25';}
         const ranges={'line.width':[1,8,.5],'line.arrowWidth':[.5,20,.5],'label.size':[1,512,1],'label.width':[1,200,1],'label.lineHeight':[.5,4,.05],'label.paragraphBefore':[0,4,.05],'label.paragraphAfter':[0,4,.05]};
         if(ranges[property]){const [min,max,step]=ranges[property];control.min=min;control.max=max;control.step=step;}
-        control.onchange=()=>{if(control.value===''||!control.reportValidity())return;commitPaint(property,Number(control.value));};
+        const effects={'paint.blur':[0,48,.25],'paint.posterize':[0,32,1],'paint.glowRadius':[0,48,1],'paint.glowThreshold':[0,100,1],'paint.glowIntensity':[0,100,1]};
+        if(effects[property]){const [min,max,step]=effects[property];control.min=min;control.max=max;control.step=step;}
+        let submitted=null;
+        const submit=report=>{
+          if(control.value===''||!(report?control.reportValidity():control.checkValidity()))return;
+          const target=selectionPaintTarget?.(),key=JSON.stringify([target?.epoch,target?.owner,target?.slide,target?.master,target?.group,target?.targetIds,control.value]);
+          if(submitted===key)return;submitted=key;
+          commitPaint(property,Number(control.value),target);
+        };
+        control.oninput=()=>submit(false);control.onchange=()=>submit(true);
+        control.addEventListener('blur',()=>{submitted=null;});
       }
       control.addEventListener('keydown',event=>event.stopPropagation());row.append(control);
       let inherit=null;
-      if(type==='color'||property==='paint.strokeWidth'||property.startsWith('line.')||['label.size','label.width','label.align','label.vertical','label.lineHeight','label.paragraphBefore','label.paragraphAfter'].includes(property)){
+      if(type==='color'||property==='paint.strokeWidth'||property.startsWith('line.')||property.startsWith('paint.glow')||['paint.blur','paint.blurAxes','paint.posterize','paint.colourEffect','label.size','label.width','label.align','label.vertical','label.lineHeight','label.paragraphBefore','label.paragraphAfter'].includes(property)){
         inherit=document.createElement('button');inherit.type='button';inherit.className='keynope-paint-inherit';inherit.textContent='↶';inherit.setAttribute('aria-label','Inherit '+label.toLowerCase());inherit.title='Use inherited '+label.toLowerCase();inherit.onclick=()=>commitPaint(property,'');row.append(inherit);
       }
       let off=null;
@@ -465,12 +500,21 @@ globalThis.KeynopeWorkspace = (() => {
     themeColourField.control.querySelector('[value="custom"]').disabled=true;
     paintField(basePaint,'paint.outline','Outline','select',[['','Inherit'],['none','Off'],['dark','Dark'],['light','Light'],['theme','Inherited stroke'],['custom','Custom stroke']]);
     paintField(strokePaint,'paint.strokeColor','Stroke colour','color');paintField(strokePaint,'paint.strokeWidth','Stroke width','number');
+    paintField(strokePaint,'paint.strokePosition','Stroke position','select',[['','Inherit'],['inside','Inside'],['center','Centre'],['outside','Outside']]);
     paintField(strokePaint,'paint.strokeToken','Stroke theme colour','select',themeColourChoices);
     paintFields.find(field=>field.property==='paint.strokeToken').control.querySelector('[value="custom"]').disabled=true;
-    paintField(gradientPaint,'paint.gradientDirection','Gradient direction','select',[['','Inherit'],['none','Off'],['horizontal','Horizontal'],['vertical','Vertical'],['diagonal','Diagonal']]);
+    paintField(gradientPaint,'paint.gradientDirection','Gradient geometry','select',[['','Inherit'],['none','Off'],['horizontal','Horizontal'],['vertical','Vertical'],['diagonal','Diagonal'],['radial','Radial'],['reflected','Reflected'],['diamond','Diamond'],['angle','Angular']]);
     paintField(gradientPaint,'paint.gradientStart','Gradient start','color');paintField(gradientPaint,'paint.gradientEnd','Gradient end','color');
     paintField(shadowPaint,'paint.shadow','Shadow mode','select',[['','Inherit'],['none','Off'],['soft','Soft'],['solid','Solid']]);
     paintField(shadowPaint,'paint.shadowColor','Shadow colour','color');paintField(shadowPaint,'paint.shadowX','Shadow x','number');paintField(shadowPaint,'paint.shadowY','Shadow y','number');
+    paintField(colourEffects,'paint.colourEffect','Colour treatment','select',[['none','Original'],['invert','Invert'],['duotone','Duotone'],['tritone','Tritone']]);
+    paintField(colourEffects,'paint.effectShadows','Shadows','color');paintField(colourEffects,'paint.effectMidtones','Midtones','color');paintField(colourEffects,'paint.effectHighlights','Highlights','color');
+    paintField(colourEffects,'paint.posterize','Posterise levels','select',[['0','Off'],...Array.from({length:31},(_,i)=>[String(i+2),String(i+2)])]);
+    paintField(blurEffects,'paint.blur','Blur radius (0 = off)','number');
+    paintField(blurEffects,'paint.blurAxes','Blur direction','select',[['both','Both axes'],['horizontal','Horizontal'],['vertical','Vertical']]);
+    paintField(glowEffects,'paint.glowRadius','Glow radius (0 = off)','number');paintField(glowEffects,'paint.glowColour','Glow colour','color');
+    paintField(glowEffects,'paint.glowThreshold','Glow threshold','number');paintField(glowEffects,'paint.glowIntensity','Glow strength','number');
+    for(const [panel,text]of [[colourEffects,'Non-destructive colour mapping, then posterisation. Use at least 2 levels, or 0 to turn it off.'],[blurEffects,'Softens the rendered artwork, after Retro conversion. Zero keeps edges sharp.'],[glowEffects,'A soft, coloured halo behind visible pixels. Threshold selects how opaque pixels must be to emit light.']]){const help=document.createElement('p');help.className='keynope-command-scope';help.textContent=text;panel.append(help);}
     // Resolved theme or detached defaults are inherited strokes, not an
     // authored preset. Choose Inherit to restore one, or Off to override it.
     paintFields.find(field=>field.property==='paint.outline').control.querySelector('option[value="theme"]').disabled=true;
@@ -631,7 +675,7 @@ globalThis.KeynopeWorkspace = (() => {
     const insertSection=(label,className)=>{const section=document.createElement('section');section.className='keynope-insert-section '+className;const heading=document.createElement('h3');heading.textContent=label;section.append(heading);panels.insert.append(section);return section;};
     const insertControls=[...panels.insert.children];
     const textSection=insertSection('Text','keynope-insert-text'),mediaSection=insertSection('Media & objects','keynope-insert-media'),defaults=insertSection('New text defaults','keynope-insert-defaults'),other=insertSection('Document','keynope-insert-document');
-    const labels={'Add title':'Title','Add subtitle':'Subtitle','Add text':'Text','Add bullet point':'Bullets','Add code':'Code','Add emoji':'Emoji','Add shape':'Shape','Connect shapes':'Connector','Import image':'Image','Add table':'Table','Add chart':'Chart'};
+    const labels={'Add title':'Title','Add subtitle':'Subtitle','Add text':'Text','Add bullet point':'Bullets','Add code':'Code','Add emoji':'Emoji','Add shape':'Shape','Connect shapes':'Connector','Import image':'Image','Import video':'Video','Add table':'Table','Add chart':'Chart'};
     for(const node of insertControls){
       if(node.classList.contains('keynope-text-metric-control')){defaults.append(node);continue;}
       if(node.tagName==='BUTTON'&&labels[node.title]){
@@ -972,7 +1016,7 @@ globalThis.KeynopeWorkspace = (() => {
       setChromeProperty(paintPanel,'hidden',!setSelectionPaint||section!=='style'||!paintFields.some(field=>paintStates[field.property]?.eligibleIds?.length));
       for(const field of paintFields){
         const state=paintStates[field.property],count=state?.eligibleIds?.length||0;
-        setChromeProperty(field.row,'hidden',!count);setChromeProperty(field.control,'disabled',editing||savingPaint||!state?.editable);
+        setChromeProperty(field.row,'hidden',!count);setChromeProperty(field.control,'disabled',editing||!state?.editable);
         if(field.inherit)setChromeProperty(field.inherit,'disabled',field.control.disabled||state?.provenance==='inherited');
         if(field.off)setChromeProperty(field.off,'disabled',field.control.disabled);
         setChromeProperty(field.subset,'textContent',count&&count<state.totalCount?' · '+count+' of '+state.totalCount:'');
@@ -995,7 +1039,7 @@ globalThis.KeynopeWorkspace = (() => {
           if(field.control.style.getPropertyValue('--paint-color')!==swatch)field.control.style.setProperty('--paint-color',swatch);
           const description=state?.state==='mixed'?'Mixed colours':color==='none'?'Stroke off':color||'No explicit colour';
           if(field.control.getAttribute('aria-description')!==description)field.control.setAttribute('aria-description',description);
-        }else if(document.activeElement!==field.control||savingPaint||field.control.disabled){
+        }else if(!paintWriter.busy(field.property)&&(document.activeElement!==field.control||field.control.disabled)){
           const value=field.property==='label.font'&&state?.state==='value'&&state.fontBinding==='theme'?'theme':state?.state==='mixed'?(field.type==='select'?'mixed':''):state?.state==='value'?String(state.value):'';
           if(field.type==='select')globalThis.KeynopeFonts?.enhance(field.control);
           setChromeProperty(field.control,'value',value);
@@ -1003,6 +1047,9 @@ globalThis.KeynopeWorkspace = (() => {
         }
       }
       setChromeProperty(gradientPaint,'hidden',!paintStates['paint.gradientDirection']?.eligibleIds?.length);setChromeProperty(shadowPaint,'hidden',!paintStates['paint.shadow']?.eligibleIds?.length);
+      for(const panel of [colourEffects,blurEffects,glowEffects])setChromeProperty(panel,'hidden',!paintStates['paint.blur']?.eligibleIds?.length);
+      const mode=paintStates['paint.colourEffect']?.value;
+      for(const field of paintFields){if(['paint.effectShadows','paint.effectHighlights','paint.effectMidtones'].includes(field.property))setChromeProperty(field.row,'hidden',!['duotone','tritone'].includes(mode)||field.property==='paint.effectMidtones'&&mode!=='tritone');}
       setChromeProperty(strokePaint,'hidden',!paintStates['paint.strokeColor']?.eligibleIds?.length);
       setChromeProperty(linePaint,'hidden',!paintStates['line.width']?.eligibleIds?.length);
       setChromeProperty(labelPaint,'hidden',!paintStates['label.size']?.eligibleIds?.length);
@@ -1141,5 +1188,5 @@ globalThis.KeynopeWorkspace = (() => {
     const setPreview=(shown,height)=>{const h=Math.ceil(height||0);if(previewVisible===shown&&previewHeight===h)return;previewVisible=shown;previewHeight=h;updateGeometry();};
     return {configure, selectPanel, bindCommand, dismissInsert,setPreview};
   }
-  return {applyScenePagePatches,mount,thumbnails,distribute,snapMove,pointerMove,marqueeSelectionUnits,boxIntersectsRect,marqueeCandidates,sameLayerContext,matchSize,slideKeyboard,toolbarKeyboard,sceneSelectionBounds,cellAspect,visualBounds,clampMove,connectorIndex,rotateSelection,resizeSelection,resizeConnectedSelection,alignmentMoves};
+  return {selectionPaintWriter,applyScenePagePatches,mount,thumbnails,distribute,snapMove,pointerMove,marqueeSelectionUnits,boxIntersectsRect,marqueeCandidates,sameLayerContext,matchSize,slideKeyboard,toolbarKeyboard,sceneSelectionBounds,cellAspect,visualBounds,clampMove,connectorIndex,rotateSelection,resizeSelection,resizeConnectedSelection,alignmentMoves};
 })();

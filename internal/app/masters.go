@@ -44,6 +44,7 @@ type Deck struct {
 }
 
 type DeckAsset struct {
+	Video     *DeckAssetVideo  `json:"video,omitempty"`
 	Extra     *jsonExtensions  `json:"-"`
 	Vector    *DeckAssetVector `json:"vector,omitempty"`
 	Source    *DeckAssetSource `json:"source,omitempty"`
@@ -497,6 +498,13 @@ func cloneDeckAsset(asset DeckAsset) DeckAsset {
 // Render snapshots borrow immutable pixels, but own every mutable metadata
 // container. History/clipboard snapshots own both pixels and metadata.
 func cloneDeckAssetContent(asset DeckAsset, copyPixels bool) DeckAsset {
+	if asset.Video != nil {
+		video := *asset.Video
+		if copyPixels {
+			video.Data = append([]byte(nil), video.Data...)
+		}
+		asset.Video = &video
+	}
 	asset.Extra = cloneJSONExtensions(asset.Extra)
 	if asset.Vector != nil {
 		vector := *asset.Vector

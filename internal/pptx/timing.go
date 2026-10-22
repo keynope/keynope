@@ -57,6 +57,17 @@ func timelineXML(timeline *Timeline, ids map[string]int, objects []Object) (stri
 	t := timeline.Transition
 	if t.Effect != "" && t.Effect != "cut" && t.DurationMS > 0 {
 		effect := t.Effect
+		if effect == "tv-switch" {
+			effect = "fade"
+			warn("transition-fallback", "TV switching was exported as a cross-fade without the static overlay.", "")
+		}
+		if effect == "dip-white" {
+			effect = "fade"
+			warn("transition-fallback", "Dip to white was exported as a cross-fade.", "")
+		}
+		if effect == "dip-black" {
+			effect = "fade"
+		}
 		if effect != "fade" && effect != "push" && effect != "wipe" {
 			effect = "cut"
 			warn("transition-fallback", "Unsupported slide transition was exported as a cut.", "")
@@ -72,6 +83,9 @@ func timelineXML(timeline *Timeline, ids map[string]int, objects []Object) (stri
 			fmt.Fprintf(&out, `<p:transition spd="%s" advClick="1" p14:dur="%d"><p:%s`, speed, duration, effect)
 			if effect != "fade" {
 				fmt.Fprintf(&out, ` dir="%s"`, timingSide(t.Direction))
+			}
+			if t.Effect == "dip-black" {
+				out.WriteString(` thruBlk="1"`)
 			}
 			out.WriteString(`/></p:transition>`)
 		}
@@ -336,6 +350,9 @@ func readTimeline(ctx context.Context, data []byte, root *node, objects []Object
 			case "cut":
 			case "fade", "push", "wipe":
 				result.Transition.Effect = effect.name.Local
+				if effect.name.Local == "fade" && effect.attr("thruBlk") == "1" {
+					result.Transition.Effect = "dip-black"
+				}
 				result.Transition.Direction = timingDirection(effect.attr("dir"))
 				duration, err := strconv.Atoi(transition.attrNS(powerpoint2010Namespace, "dur"))
 				if err != nil {

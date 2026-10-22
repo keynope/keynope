@@ -236,7 +236,7 @@ func TestWebExportUsesPresentationCanvasRenderer(t *testing.T) {
 		"presenterTimerMode === 'config' && !e.metaKey",
 		"presenterTimerMode === 'running' && !e.metaKey",
 		"data-keynope-timer-active",
-		"canvasOverlay.hidden = active;",
+		"canvasOverlay.hidden = active || editorPresentationMode !== 'none';",
 		"function cycleEditorTimer()",
 		"timerButton.dataset.timerAudience = active ? (presenterTimerBroadcast ? 'broadcast' : 'local') : 'off'",
 		"button !== stopPresentationButton && button !== pauseButton",

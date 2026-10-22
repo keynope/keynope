@@ -16,6 +16,7 @@ var tablesJS = embeddedString("web/tables.js")
 
 var chartsJS = embeddedString("web/charts.js")
 
-var buildsJS = embeddedString("web/builds.js")
+var buildsJS = transitionCurvesJS() + embeddedString("web/builds.js")
 
 var presentationToolsJS = embeddedString("web/presentation-tools.js")
+var videoJS = embeddedString("web/video.js")

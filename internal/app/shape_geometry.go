@@ -111,6 +111,9 @@ func validateShapeAdjustments(e Element) error {
 	if q.Has("shape-fill") && (len(q["shape-fill"]) != 1 || q.Get("shape-fill") != "none" && q.Get("shape-fill") != "solid") {
 		return fmt.Errorf("shape fill must be solid or none")
 	}
+	if position := q.Get("shape-stroke-position"); position != "" && position != "inside" && position != "center" && position != "outside" {
+		return fmt.Errorf("shape stroke position must be inside, center or outside")
+	}
 	if q.Has("shape-stroke") && q.Get("shape-stroke") != "none" {
 		if _, ok := normalizeHexColour(q.Get("shape-stroke")); !ok {
 			return fmt.Errorf("shape stroke must be a hexadecimal RGB colour or none")

@@ -186,7 +186,7 @@ func TestTimelineRejectsComplexOrMalformedTreesWithoutHidingObjects(t *testing.T
 }
 
 func TestTimelineTransitionMatrix(t *testing.T) {
-	for _, effect := range []string{"cut", "fade", "push", "wipe"} {
+	for _, effect := range []string{"cut", "fade", "push", "wipe", "dip-black"} {
 		for _, direction := range []string{"left", "right", "up", "down"} {
 			t.Run(effect+"-"+direction, func(t *testing.T) {
 				p := timingFixture()
@@ -203,11 +203,31 @@ func TestTimelineTransitionMatrix(t *testing.T) {
 					return
 				}
 				tr := got.Slides[0].Timeline.Transition
-				if tr.Effect != effect || tr.DurationMS != 1371 || effect != "fade" && tr.Direction != direction {
+				if tr.Effect != effect || tr.DurationMS != 1371 || effect != "fade" && effect != "dip-black" && tr.Direction != direction {
 					t.Fatal(tr)
 				}
 			})
 		}
+	}
+}
+
+func TestTVSwitchTransitionFallback(t *testing.T) {
+	timeline := &Timeline{Transition: Transition{Effect: "tv-switch", DurationMS: 180}}
+	xml, warnings := timelineXML(timeline, nil, nil)
+	if !strings.Contains(xml, "<p:fade") || len(warnings) != 1 || warnings[0].Code != "transition-fallback" {
+		t.Fatalf("unexpected TV switching export: %s %#v", xml, warnings)
+	}
+	p := timingFixture()
+	p.Slides[0].Timeline = timeline
+	var output bytes.Buffer
+	exportReport, err := Write(context.Background(), &output, p)
+	if err != nil || len(exportReport.Warnings) != 1 || exportReport.Warnings[0].Code != "transition-fallback" {
+		t.Fatal("missing TV switching export warning", err, exportReport)
+	}
+	data := output.Bytes()
+	got, report, err := Read(context.Background(), bytes.NewReader(data), int64(len(data)), Options{})
+	if err != nil || len(report.Warnings) != 0 || got.Slides[0].Timeline == nil || got.Slides[0].Timeline.Transition.Effect != "fade" {
+		t.Fatal("fallback is not valid, editable PowerPoint timing", err, report)
 	}
 }
 

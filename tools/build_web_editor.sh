@@ -23,7 +23,7 @@ version=$(awk '/^## [0-9]/{print $2; exit}' "$repo_dir/CHANGELOG.md")
 awk '
   /<title>Keynope Export<\/title>/ {
     print "<title>Keynope Web Editor</title>"
-    print "<meta name=\"description\" content=\"Build expressive retro presentations in your browser with Keynope.\">"
+    print "<meta name=\"description\" content=\"Build interactive presentations in your browser with modern typography, retro artwork, tables, charts and live workshop activities.\">"
     next
   }
   /<script id="keynope-data"/ {

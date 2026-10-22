@@ -34,6 +34,8 @@ func (report Report) Normalized() Report {
 
 func warningFeature(code string) string {
 	switch {
+	case strings.HasPrefix(code, "video-"):
+		return "video"
 	case strings.HasPrefix(code, "table-"):
 		return "table"
 	case strings.HasPrefix(code, "chart-"):
@@ -60,6 +62,9 @@ func warningFeature(code string) string {
 // Explicit outcomes, not guesses based on message prose or a code suffix.
 // New/foreign codes remain honestly unclassified until their mapping is added.
 func warningFallback(code string) string {
+	if code == "stroke-position-approximated" || code == "object-effects-omitted" {
+		return "partial-conversion"
+	}
 	switch code {
 	case "text-gradient-reader-dependent", "page-size-rounded", "font-not-embedded", "font-embedding-restricted":
 		return "partial-conversion"
@@ -69,7 +74,7 @@ func warningFallback(code string) string {
 		return "treated-image"
 	case "image-paint-rasterized", "reflected-svg-rasterized", "retro-font-artwork-rasterized", "retro-image-rasterized":
 		return "picture-artwork"
-	case "animated-background-frozen", "image-animation-frozen", "retro-image-animation-frozen":
+	case "video-poster-only", "animated-background-frozen", "image-animation-frozen", "retro-image-animation-frozen":
 		return "static-first-frame"
 	case "chart-theme-colours-frozen", "chart-theme-font-frozen", "word-theme-colours-frozen", "word-theme-fonts-frozen":
 		return "resolved-formatting"

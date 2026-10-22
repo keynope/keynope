@@ -33,6 +33,17 @@ func participantSlideMarkdown(deck Deck, index int) ([]byte, error) {
 	}
 	slide.TabID = "" // Explicit tab requests render normally, outside the slide show.
 	hidden := hiddenSlideObjects(slide)
+	// Movies are local-presentation/HTML content, never participant transfers.
+	// Treat them like hidden objects so removing one preserves other objects'
+	// original flow positions in the legacy Markdown adapter as well.
+	for i, element := range slide.Elements {
+		if element.Kind == "video" {
+			if hidden == nil {
+				hidden = map[int]bool{}
+			}
+			hidden[i] = true
+		}
+	}
 	publicFrames := map[string]sceneRect{}
 	if len(hidden) > 0 {
 		cols, rows := authoredRenderSize(245, 56)
@@ -235,9 +246,33 @@ func participantMarkdownExportPages(deck Deck, slideIndex, slideCount, cols, row
 	}
 	pages := exportSlidePages(slide, slideIndex, slideCount, cols, rows)
 	for i := range pages {
-		pages[i] = audienceExportPage(pages[i])
+		pages[i] = participantExportPage(pages[i])
 	}
 	return pages
+}
+
+// Keep standalone HTML playback intact: this extra projection belongs only to
+// participant broadcasts (including participant slide tabs and activity pages).
+// Own the modified envelopes; the shared editor scene must retain its videos.
+func participantExportPage(page exportPage) exportPage {
+	page = audienceExportPage(page)
+	if page.Scene == nil {
+		return page
+	}
+	for _, object := range page.Scene.Objects {
+		if object.Kind == "video" || object.Video != nil {
+			scene := *page.Scene
+			scene.Objects = make([]sceneObject, 0, len(page.Scene.Objects))
+			for _, candidate := range page.Scene.Objects {
+				if candidate.Kind != "video" && candidate.Video == nil {
+					scene.Objects = append(scene.Objects, candidate)
+				}
+			}
+			page.Scene = &scene
+			break
+		}
+	}
+	return page
 }
 
 func participantRenderedDeck(deck Deck, index int) (exportDeck, error) {
@@ -253,7 +288,7 @@ func participantRenderedDeck(deck Deck, index int) (exportDeck, error) {
 	page.Effect, page.Background = resolved.Effect, resolved.Background
 	page.FG = ansiCSSColour(slideFG(resolved))
 	page.BackgroundLines = staticBackgroundExportLines(resolved.Background, cols, rows, page.FG, slideBG(resolved))
-	return exportDeck{Cols: cols, Rows: rows, Pages: []exportPage{audienceExportPage(page)}}, nil
+	return exportDeck{Cols: cols, Rows: rows, Pages: []exportPage{participantExportPage(page)}}, nil
 }
 
 func (s *nativeEditorSession) handleParticipantPage(w http.ResponseWriter, r *http.Request) {

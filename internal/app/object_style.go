@@ -35,7 +35,8 @@ var objectStyleKeys = map[string]string{
 	"paint.gradientDirection": "gradient-dir", "paint.shadow": "shadow", "paint.shadowColor": "shadow-color",
 	"paint.shadowX": "shadow-x", "paint.shadowY": "shadow-y",
 	"paint.strokeColor": "shape-stroke", "paint.strokeWidth": "shape-stroke-width",
-	"text.font": "modern-font", "text.size": "modern-size", "text.width": "modern-width",
+	"paint.strokePosition": "shape-stroke-position",
+	"text.font":            "modern-font", "text.size": "modern-size", "text.width": "modern-width",
 	"text.bold": "ttf-weight", "text.italic": "text-italic", "text.underline": "text-underline",
 	"text.align": "text-align", "text.vertical": "text-valign", "text.lineHeight": "modern-line-height",
 	"text.paragraphBefore": "modern-paragraph-before", "text.paragraphAfter": "modern-paragraph-after",
@@ -51,10 +52,13 @@ func styleObjectSupported(e Element) bool {
 }
 
 func styleFieldEligible(e Element, field string) bool {
+	if _, ok := effectControls[field]; ok {
+		return styleObjectSupported(e)
+	}
 	if field == "paint.fill" {
 		return e.Kind == "shape"
 	}
-	if field == "paint.strokeColor" || field == "paint.strokeWidth" {
+	if field == "paint.strokeColor" || field == "paint.strokeWidth" || field == "paint.strokePosition" {
 		return e.Kind == "shape"
 	}
 	if !styleObjectSupported(e) {
@@ -136,8 +140,16 @@ func (snapshot *ObjectStyleSnapshot) Validate() error {
 			return fmt.Errorf("invalid style colour token")
 		}
 		v := field.Value
+		if _, ok := effectControls[key]; ok {
+			if err := validateEffectProperty(key, v); err != nil {
+				return err
+			}
+			continue
+		}
 		valid := false
 		switch key {
+		case "paint.strokePosition":
+			valid = v == "inside" || v == "center" || v == "outside"
 		case "paint.fill":
 			valid = v == "none" || v == "solid"
 		case "paint.strokeColor":
@@ -150,7 +162,7 @@ func (snapshot *ObjectStyleSnapshot) Validate() error {
 		case "paint.transparent":
 			valid = v == "1"
 		case "paint.gradientDirection":
-			valid = v == "horizontal" || v == "vertical" || v == "diagonal" || v == "none"
+			valid = v == "horizontal" || v == "vertical" || v == "diagonal" || v == "none" || extendedGradient(v)
 		case "paint.shadow":
 			valid = v == "soft" || v == "solid" || v == "none"
 		case "text.font":

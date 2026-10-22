@@ -118,6 +118,9 @@ func (s *nativeEditorSession) applySpeakerNotes(action nativeEditorAction) (resu
 			s.mu.Unlock()
 		}
 	}()
+	if err := s.checkCommandOwnerLocked(action); err != nil {
+		return err
+	}
 	scoped := action.NotesOwnerID != ""
 	if scoped && (action.NotesSessionID == "" || action.NotesSessionID != s.notesSessionID || action.SceneRevision == nil || *action.SceneRevision != s.version) {
 		return editorFailure("stale-target", "notes", action.NotesOwnerID, fmt.Errorf("the document changed; retry saving the speaker notes"))

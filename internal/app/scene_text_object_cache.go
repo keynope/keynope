@@ -38,6 +38,7 @@ func sceneTextDependencyKey(deck Deck, element Element, style string, values url
 			"width", "height", "text-box", "object-offset-x", "object-offset-y", "object-rotation", "orientation",
 			"fg", "header", "bg", "theme-fg", "modern-opacity", "outline",
 			"gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y",
+			"fx-blur", "fx-blur-axes", "fx-posterize", "fx-colour", "fx-shadows", "fx-midtones", "fx-highlights", "fx-glow-radius", "fx-glow-colour", "fx-glow-threshold", "fx-glow-intensity",
 			"link", "group", "object-name", "object-locked", "object-hidden", "layer", "render":
 			continue
 		}

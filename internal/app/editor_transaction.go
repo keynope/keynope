@@ -134,6 +134,9 @@ func (tx *editorCommandTransaction) release() {
 // binds a long gesture to the authored state where it started, even if the
 // caller has since observed newer selection-only command revisions.
 func (s *nativeEditorSession) checkCommandOwnerLocked(action nativeEditorAction) error {
+	if action.automationRevision != nil && *action.automationRevision != s.version {
+		return editorFailure("stale-target", "", "", fmt.Errorf("the deck changed; inspect it again before editing"))
+	}
 	if action.Action != "update-slide-notes" && action.NotesSessionID != "" && action.NotesSessionID != s.notesSessionID {
 		return editorFailure("stale-target", "", action.ObjectID, fmt.Errorf("the document changed; retry the action in the current document"))
 	}

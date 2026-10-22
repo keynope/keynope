@@ -14,6 +14,50 @@ import (
 
 const maxDeckAssetArchiveBytes = 100 << 20
 
+// Count the exact JSON storage without allocating base64 copies of movie/image
+// payloads. One-byte stand-ins preserve every field/omitempty/extension rule;
+// add back only the difference in encoded payload length. Never modify input.
+func deckAssetArchiveStorageSize(assets map[string]DeckAsset) (int64, error) {
+	total := int64(2) // {}
+	for id, source := range assets {
+		asset := cloneDeckAssetContent(source, false)
+		var payload int64
+		count := func(data []byte) []byte {
+			if len(data) == 0 {
+				return data
+			}
+			payload += int64(base64.StdEncoding.EncodedLen(len(data)) - 4)
+			return []byte{0}
+		}
+		asset.Data = count(asset.Data)
+		for i := range asset.Frames {
+			asset.Frames[i].Data = count(asset.Frames[i].Data)
+		}
+		if asset.Video != nil {
+			asset.Video.Data = count(asset.Video.Data)
+		}
+		if asset.Vector != nil {
+			asset.Vector.Data = count(asset.Vector.Data)
+		}
+		if asset.Source != nil {
+			asset.Source.Data = count(asset.Source.Data)
+			for i := range asset.Source.Frames {
+				asset.Source.Frames[i].Data = count(asset.Source.Frames[i].Data)
+			}
+		}
+		value, err := json.Marshal(asset)
+		if err != nil {
+			return 0, err
+		}
+		key, _ := json.Marshal(id)
+		if total > 2 {
+			total++ // comma between registry entries
+		}
+		total += int64(len(key)+1+len(value)) + payload
+	}
+	return total, nil
+}
+
 var assetArchivePrefixRE = regexp.MustCompile(`<!--\s*keynope-assets(?:\s|-->|$)`)
 
 // Limits apply to the complete decompressed JSON, not a truncated prefix that

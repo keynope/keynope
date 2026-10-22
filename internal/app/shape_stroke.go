@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"keynope/internal/effects"
 )
 
 type shapeStrokeDefaults struct {
@@ -46,7 +48,8 @@ func resolvedShapeStrokeWidth(slide Slide, element Element, q url.Values, width,
 	if paint.Stroke == "" || paint.StrokeWidth <= 0 {
 		return 0
 	}
-	return paint.StrokeWidth
+	_, outside := effects.StrokeWidths(q.Get("shape-stroke-position"), paint.StrokeWidth)
+	return outside * 2
 }
 
 type shapeBoundarySegment struct{ a, b connectorPoint }
@@ -180,12 +183,17 @@ func explicitShapeStroke(q url.Values, paint scenePaint, inheritedWidth ...float
 // vector outline pasted on Retro artwork. Segment/cell intersections retain
 // narrow borders without gaps or scanning every pixel against every segment.
 // Consecutive cells coalesce to keep the public derivative small.
-func retroShapeStroke(geometry sceneShapeGeometry, bounds sceneRect, width, cw, ch float64) ([]sceneRect, bool) {
+func retroShapeStroke(geometry sceneShapeGeometry, bounds sceneRect, width, cw, ch float64, position ...string) ([]sceneRect, bool) {
 	if width <= 0 || cw <= 0 || ch <= 0 || bounds.Width <= 0 || bounds.Height <= 0 {
 		return nil, false
 	}
 	stepX, stepY := cw/2, ch/2
 	pad := width / 2
+	align := "center"
+	if len(position) > 0 && (position[0] == "inside" || position[0] == "outside") {
+		align = position[0]
+		pad = width
+	}
 	x0, x1 := int(math.Floor(-pad/stepX)), int(math.Ceil((bounds.Width+pad)/stepX))
 	y0, y1 := int(math.Floor(-pad/stepY)), int(math.Ceil((bounds.Height+pad)/stepY))
 	reduced := false
@@ -221,6 +229,12 @@ func retroShapeStroke(geometry sceneShapeGeometry, bounds sceneRect, width, cw, 
 				end = min(right, int(math.Ceil(rowRight/stepX))+1)
 			}
 			for x := start; x < end; x++ {
+				if align != "center" {
+					inside := geometry.contains((float64(x)+.5)*stepX/bounds.Width, (float64(y)+.5)*stepY/bounds.Height)
+					if inside != (align == "inside") {
+						continue
+					}
+				}
 				cell := (y-y0)*gridWidth + x - x0
 				if !on[cell] && strokeSegmentTouchesCell(s.a, s.b, float64(x)*stepX, float64(y)*stepY, stepX, stepY, pad) {
 					on[cell] = true

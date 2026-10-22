@@ -96,7 +96,7 @@
       const sx=b.width/cw,sy=b.height/ch,scale=m.fit==='contain'||m.fit==='stretch'?Math.min(sx,sy):Math.max(sx,sy);
       if(!Number.isFinite(scale)||scale<2)return;
       const box=node.getBoundingClientRect(),origin=scene.getBoundingClientRect(),paint=object.paint||{};
-      const padding=2+(Number(paint.strokeWidth)||0)+3*(Number(paint.shadowBlur)||0)+Math.max(Math.abs(Number(paint.shadowX)||0),Math.abs(Number(paint.shadowY)||0));
+      const padding=2+(Number(paint.strokeWidth)||0)+3*(Number(paint.shadowBlur)||0)+Math.max(Math.abs(Number(paint.shadowX)||0),Math.abs(Number(paint.shadowY)||0))+Math.max(0,Number(paint.effects?.padding)||0);
       const x=Math.max(0,Math.floor(box.left-origin.left-padding)),y=Math.max(0,Math.floor(box.top-origin.top-padding));
       const right=Math.min(data.width,Math.ceil(box.right-origin.left+padding)),bottom=Math.min(data.height,Math.ceil(box.bottom-origin.top+padding));
       if(right<=x||bottom<=y)return;

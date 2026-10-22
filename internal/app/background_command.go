@@ -115,6 +115,12 @@ func restoreBackgroundImage(deck *Deck, action nativeEditorAction, editingGroup 
 }
 
 func copyBackgroundTreatment(query, treatment url.Values, background *slideBackgroundMedia) {
+	for _, control := range effectControls {
+		query.Del(control.key)
+		if values, ok := treatment[control.key]; ok {
+			query[control.key] = append([]string(nil), values...)
+		}
+	}
 	for _, key := range []string{"image-style", "element-style", "glyph", "shape", "brightness", "contrast", "saturation", "tint", "sharpness", "alpha", "modern-crop", "modern-mask", "outline", "transparent", "fg", "bg", "gradient-start", "gradient-end", "gradient-dir", "shadow", "shadow-color", "shadow-x", "shadow-y"} {
 		query.Del(key)
 		if values, ok := treatment[key]; ok {

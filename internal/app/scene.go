@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"keynope/internal/effects"
 )
 
 // Scene is a render-only projection, not a second persisted copy of the deck.
@@ -67,18 +69,22 @@ type sceneParagraph struct {
 }
 
 type scenePaint struct {
-	NoFill            bool     `json:"noFill,omitempty"` // Shape fill is explicitly off; colour remains available for style editing.
-	Opacity           *float64 `json:"opacity,omitempty"`
-	Color             string   `json:"color"`
-	GradientStart     string   `json:"gradientStart,omitempty"`
-	GradientEnd       string   `json:"gradientEnd,omitempty"`
-	GradientDirection string   `json:"gradientDirection,omitempty"`
-	Stroke            string   `json:"stroke,omitempty"`
-	StrokeWidth       float64  `json:"strokeWidth"` // Zero is explicit Off, not the renderer's fallback width.
-	ShadowColor       string   `json:"shadowColor,omitempty"`
-	ShadowX           float64  `json:"shadowX,omitempty"`
-	ShadowY           float64  `json:"shadowY,omitempty"`
-	ShadowBlur        float64  `json:"shadowBlur,omitempty"`
+	Effects           *effects.Filter `json:"effects,omitempty"`
+	GradientImage     string          `json:"gradientImage,omitempty"`
+	NoFill            bool            `json:"noFill,omitempty"` // Shape fill is explicitly off; colour remains available for style editing.
+	Opacity           *float64        `json:"opacity,omitempty"`
+	Color             string          `json:"color"`
+	GradientStart     string          `json:"gradientStart,omitempty"`
+	GradientEnd       string          `json:"gradientEnd,omitempty"`
+	GradientDirection string          `json:"gradientDirection,omitempty"`
+	Stroke            string          `json:"stroke,omitempty"`
+	StrokeWidth       float64         `json:"strokeWidth"` // Zero is explicit Off, not the renderer's fallback width.
+	StrokePosition    string          `json:"strokePosition,omitempty"`
+	StrokeSpan        float64         `json:"strokeSpan,omitempty"` // Full centred SVG width for inside/outside clipping.
+	ShadowColor       string          `json:"shadowColor,omitempty"`
+	ShadowX           float64         `json:"shadowX,omitempty"`
+	ShadowY           float64         `json:"shadowY,omitempty"`
+	ShadowBlur        float64         `json:"shadowBlur,omitempty"`
 }
 
 type sceneMedia struct {
@@ -138,6 +144,7 @@ type sceneMediaFrame struct {
 }
 
 type sceneObject struct {
+	Video            *sceneVideo         `json:"video,omitempty"`
 	Name             string              `json:"name,omitempty"`
 	RetroStroke      []sceneRect         `json:"retroStroke,omitempty"`
 	Chart            *sceneChart         `json:"chart,omitempty"`
@@ -373,6 +380,9 @@ func scenePaintFromValues(e Element, slide Slide, sx, sy float64, q url.Values, 
 		}
 	}
 	p := scenePaint{Color: color}
+	if position := q.Get("shape-stroke-position"); position == "inside" || position == "outside" {
+		p.StrokePosition = position
+	}
 	if gradient, ok := textGradientFromValues(q); ok && queryErr == nil {
 		p.GradientStart, p.GradientEnd, p.GradientDirection = q.Get("gradient-start"), q.Get("gradient-end"), gradient.direction
 	}
@@ -699,6 +709,9 @@ func buildStyledSceneProjection(deck Deck, resolved Slide, index, cols, rows int
 				// never applied twice when the original image is promoted.
 				paint := scenePaintFromValues(Element{Kind: "image", Query: slide.BackgroundMedia.Query}, slide, scene.Width/float64(cols), scene.Height/float64(rows), query, nil)
 				paint.Opacity = &opacity
+				backgroundObject := sceneObject{Bounds: sceneRect{Width: scene.Width, Height: scene.Height}, Paint: paint}
+				compileSceneEffects(&backgroundObject, query)
+				paint = backgroundObject.Paint
 				source.Crop = parseModernCrop(query.Get("modern-crop"))
 				if mask := query.Get("modern-mask"); mask == "rounded" || mask == "ellipse" {
 					source.Mask = mask
@@ -1021,6 +1034,7 @@ func buildStyledSceneProjection(deck Deck, resolved Slide, index, cols, rows int
 				labelSlide.ThemeColors = deck.themeColors(o.LabelStyle)
 				p := scenePaintFor(label, labelSlide, sx, sy)
 				p = deck.applyThemeObjectPaint(label, labelSlide, labelQuery, p)
+				compilePaintEffects(&p, labelQuery, o.Bounds)
 				o.LabelPaint = &p
 				if o.LabelStyle == "retro" && !sharedRetroText(label) {
 					for _, line := range retroObjectLines(deck, retroSlide, objectRows(i), i, cols, rows) {
@@ -1040,7 +1054,7 @@ func buildStyledSceneProjection(deck Deck, resolved Slide, index, cols, rows int
 						if o.Paint.NoFill && line.Role != "outline" {
 							continue
 						}
-						if line.Role == "outline" && (q.Has("shape-stroke") || q.Has("shape-stroke-width")) {
+						if line.Role == "outline" && (q.Has("shape-stroke") || q.Has("shape-stroke-width") || q.Has("shape-stroke-position")) {
 							continue
 						}
 						ownLines = append(ownLines, line)
@@ -1058,9 +1072,9 @@ func buildStyledSceneProjection(deck Deck, resolved Slide, index, cols, rows int
 					retroSlide.Elements[i].Query = fillQuery.Encode()
 				}
 				o.RetroLines = &sceneRetroLines{Cols: cols, Rows: rows, Lines: exportLines(ownLines, retroSlide, cols, rows, len(deck.Slides))}
-				if o.Paint.Stroke != "" && o.Paint.StrokeWidth > 0 && (q.Has("shape-stroke") || q.Has("shape-stroke-width") || !q.Has("outline")) {
+				if o.Paint.Stroke != "" && o.Paint.StrokeWidth > 0 && (q.Has("shape-stroke") || q.Has("shape-stroke-width") || q.Has("shape-stroke-position") || !q.Has("outline")) {
 					var reduced bool
-					o.RetroStroke, reduced = retroShapeStroke(geometry, o.Bounds, o.Paint.StrokeWidth, sx, sy)
+					o.RetroStroke, reduced = retroShapeStroke(geometry, o.Bounds, o.Paint.StrokeWidth, sx, sy, o.Paint.StrokePosition)
 					if reduced {
 						warn(id, "shape-stroke-raster-reduced", "The very large Retro border uses a coarser block grid to bound rendering work.")
 					}
@@ -1107,6 +1121,23 @@ func buildStyledSceneProjection(deck Deck, resolved Slide, index, cols, rows int
 			if treatment == "retro" {
 				o.RetroLines = &sceneRetroLines{Cols: cols, Rows: rows, Lines: retroObjectLines(deck, retroSlide, objectRows(i), i, cols, rows), Alt: "Connector"}
 			}
+		case "video":
+			asset, exists := deck.Assets[e.AssetID]
+			if !exists || asset.Video == nil {
+				warn(id, "missing-video", "Embedded video is unavailable.")
+				continue
+			}
+			w, h := 120.0, 28.0
+			if value, ok := sceneObjectDimension(q, "width", cols); ok {
+				w = value
+			}
+			if value, ok := sceneObjectDimension(q, "height", rows); ok {
+				h = value
+			}
+			x, y := preciseTextAnchor(q, w, h, float64(b.left), float64(b.top), cols, rows)
+			o.Bounds = sceneRect{X: x * sx, Y: y * sy, Width: w * sx, Height: h * sy}
+			o.Video = projectedVideo(asset, q)
+			o.Media = &sceneMedia{Source: "data:image/png;base64," + base64.StdEncoding.EncodeToString(asset.Data), Width: asset.Width, Height: asset.Height, Fit: "contain", Alt: q.Get("alt-text")}
 		case "image":
 			asset, ok := deck.Assets[e.AssetID]
 			if !ok {
@@ -1256,6 +1287,7 @@ func buildStyledSceneProjection(deck Deck, resolved Slide, index, cols, rows int
 				o.SampleOffset.Y += dy
 			}
 		}
+		compileSceneEffects(&o, q)
 		setRetroPageDimensions(o.RetroLines, scene.Width, scene.Height)
 		scene.Objects = append(scene.Objects, o)
 		if cacheText && cachedText == nil {

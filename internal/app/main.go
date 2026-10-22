@@ -306,18 +306,19 @@ type appArgs struct {
 }
 
 type presenterState struct {
-	Overlay     *PresentationOverlay     `json:"overlay,omitempty"`
-	BuildCursor *PresentationBuildCursor `json:"buildCursor,omitempty"`
-	Slide       int                      `json:"slide"`
-	Page        int                      `json:"page"`
-	Presenting  bool                     `json:"presenting"`
-	Version     int64                    `json:"version"`
-	DeckVersion int64                    `json:"deckVersion"`
-	DeckSlide   int                      `json:"deckSlide"`
-	TimerMode   string                   `json:"timerMode,omitempty"`
-	TimerInput  string                   `json:"timerInput,omitempty"`
-	TimerEndMS  int64                    `json:"timerEndMs,omitempty"`
-	Engagement  *EngagementRuntimeState  `json:"engagement,omitempty"`
+	Videos      map[string]presentationVideoPlayback `json:"videos,omitempty"`
+	Overlay     *PresentationOverlay                 `json:"overlay,omitempty"`
+	BuildCursor *PresentationBuildCursor             `json:"buildCursor,omitempty"`
+	Slide       int                                  `json:"slide"`
+	Page        int                                  `json:"page"`
+	Presenting  bool                                 `json:"presenting"`
+	Version     int64                                `json:"version"`
+	DeckVersion int64                                `json:"deckVersion"`
+	DeckSlide   int                                  `json:"deckSlide"`
+	TimerMode   string                               `json:"timerMode,omitempty"`
+	TimerInput  string                               `json:"timerInput,omitempty"`
+	TimerEndMS  int64                                `json:"timerEndMs,omitempty"`
+	Engagement  *EngagementRuntimeState              `json:"engagement,omitempty"`
 }
 
 type presenterTerminalFrame struct {
@@ -329,6 +330,11 @@ type presenterTerminalFrame struct {
 }
 
 type presenterCompanion struct {
+	videoContext      string
+	videoRevision     int64
+	videoSequences    map[string]int64
+	videoPaused       bool
+	automationCleanup func()
 	closed            bool
 	pageChanges       []presenterPageChange
 	nativeProjection  *presenterNativeProjection
@@ -1022,7 +1028,7 @@ func visitDeckImages(deck *Deck, visit func(*Element)) {
 	}
 	visitSlide := func(slide *Slide) {
 		for index := range slide.Elements {
-			if slide.Elements[index].Kind == "image" {
+			if slide.Elements[index].Kind == "image" || slide.Elements[index].Kind == "video" {
 				visit(&slide.Elements[index])
 			}
 		}
@@ -1854,6 +1860,7 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 	})
 	mux.HandleFunc("/presenter-status", companion.handlePresenterStatus)
 	mux.HandleFunc("/presentation-overlay", companion.handlePresentationOverlay)
+	mux.HandleFunc("/video-playback", companion.handleVideoPlayback)
 	mux.HandleFunc("/engagement", companion.handleEngagement)
 	if activeNativeEditor != nil {
 		mux.HandleFunc("/api/editor/state", activeNativeEditor.handleState)
@@ -1881,6 +1888,7 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 		mux.HandleFunc("/api/editor/activity-qr", activeNativeEditor.handleActivityQR)
 		mux.HandleFunc("/api/editor/workspace", activeNativeEditor.handleWorkspace)
 		mux.HandleFunc("/api/editor/upload", activeNativeEditor.handleUpload)
+		mux.HandleFunc("/api/editor/upload-video", activeNativeEditor.handleVideoUpload)
 		mux.HandleFunc("/api/editor/document", activeNativeEditor.handleDocument)
 		mux.HandleFunc("/api/editor/participant-page", activeNativeEditor.handleParticipantPage)
 		mux.HandleFunc("/api/editor/export-document", activeNativeEditor.handleExportDocument)
@@ -1910,6 +1918,11 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 
 func (p *presenterCompanion) authorized(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// MCP owns its opt-in host/origin gate; local clients need no UI cookie.
+		if r.URL.Path == "/mcp" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		authorized := false
 		if token := r.URL.Query().Get("token"); token != "" && token == p.token {
 			authorized = true
@@ -2288,6 +2301,9 @@ func (p *presenterCompanion) Close() {
 	p.mu.Unlock()
 	if p.server != nil {
 		_ = p.server.Close()
+	}
+	if p.automationCleanup != nil {
+		p.automationCleanup()
 	}
 }
 
@@ -3835,7 +3851,7 @@ func exportHTMLSuffix() string {
 	return `<script>
 const keynopeIntroductionAssets = ` + introductionAssetsJSON + `;
 ` + activityGamesJS + activityDesignJS + "\nconst keynopeTTFFontData = '" + strings.TrimSpace(trueTypeFontBase64) + "';\n" + trueTypeJS + `
-` + fontCatalogJS + participantTransferJS + workspaceJS + conversionReportJS + shapedTextJS + textStyleToolsJS + sceneJS + templatesJS + tablesJS + chartsJS + buildsJS + presentationToolsJS + `
+` + fontCatalogJS + participantTransferJS + workspaceJS + conversionReportJS + shapedTextJS + textStyleToolsJS + videoJS + sceneJS + templatesJS + tablesJS + chartsJS + buildsJS + presentationToolsJS + `
 const keynopeShapeCatalog = ` + shapeCatalogJSON() + `;
 const deck = JSON.parse(document.getElementById('keynope-data').textContent);
 let pageIndex = Math.max(0, deck.pages.findIndex(page => !page.tabOnly));
@@ -3967,13 +3983,14 @@ function modernBackdropContentKey(page){
 const sceneReducedMotion=matchMedia('(prefers-reduced-motion: reduce)');
 if(!window.KEYNOPE_PARTICIPANT_VIEW)sceneReducedMotion.addEventListener('change',()=>{if(sceneReducedMotion.matches){slideCompositor.cancel();standaloneBuildPlayback?.settleAnimations();remoteBuildPlayback?.settleAnimations();}drawFrame();});
 function clearModernPage({preserveTransition=false}={}) {
+  presenterVideoControls?.update([]);
   if(!preserveTransition){slideCompositor.cancel();modernPaintedPageKey=null;modernSlideTransitionKey='';modernTransitionReady=false;modernSlideViewport.style.display='none';}
   clearStandaloneBuildPlayback();
   clearRemoteBuildPlayback();
   modernBackdropKey='';
   modernBackdrop.style.display='none';
   modernLinksActive=false;modernLinkViews.clear();linkLayer.replaceChildren();
-  modernPageGeneration++;modernPageView?.dispose();modernPageView=null;modernPageSource=null;modernPageLayer.style.display='none';
+  modernPageGeneration++;modernPageView?.dispose();modernPageView=null;modernPageSource=null;modernPageLayer.style.display='none';presenterCanvas.style.pointerEvents='';
 }
 function drawModernPage(page) {
   if(modernPageSource!==page.scene){
@@ -4029,6 +4046,12 @@ function drawModernPage(page) {
     modernBackdropKey=backdropKey;
   }
   modernPageView.setTime(contentAnimationElapsedMS);
+  presenterCanvas.style.pointerEvents='none';
+  const editorVideoPreview=keynopeAppSurface&&(!remoteBuildCursor||keynopeEditorMasterMode);
+  const videoAvailable=!keynopeSnapshotMode&&!presenterTimerMode&&(editorVideoPreview||!remoteBuildCursor?.paused&&(!window.KEYNOPE_PRESENTER||presenterPresenting)&&(!keynopeAppSurface||presenterPresenting&&!keynopeEditorMasterMode));
+  modernPageView.setVideoPlayback(videoAvailable,{editing:editorVideoPreview,monitor:keynopeAppSurface&&!editorVideoPreview,context:editorVideoPreview?'editor:'+page.scene.slideId:remoteBuildCursor?[remoteBuildCursor.session,remoteBuildCursor.slideId,page.page].join(':'):''});
+  modernPageView.syncVideoPlayback(presenterVideoPlayback);
+  if(presenterVideoControls){presenterVideoControls.update(modernPageView.videoPlayers(),{active:videoAvailable,editing:editorVideoPreview,selectedID:window.keynopeSelectedVideoID?.()||''});Object.assign(presenterVideoControls.element.style,{left:(canvasBox.left-stageBox.left+12)+'px',top:(canvasBox.bottom-stageBox.top-54)+'px',width:Math.max(120,Math.min(740,canvasBox.width-24))+'px'});}
   presenterCanvas.style.display='block';presenterCanvas.style.zIndex='3';
   presenterContext.clearRect(0,0,presenterCanvas.width,presenterCanvas.height);
   linkLayer.style.display=presenterTimerMode==='running'?'none':'block';linkLayer.style.pointerEvents=slideCompositor.active()?'none':'';effectLayer.style.display='none';contentLayer.style.display='none';chromeLayer.style.display='none';
@@ -4040,10 +4063,25 @@ const presenterSurface = window.KEYNOPE_APP_SURFACE
   : (new URLSearchParams(location.search).get('keynopeSurface') || 'external');
 const presenterMainSurface = presenterSurface === 'main';
 const keynopeAppSurface = presenterSurface === 'app';
+let presenterVideoPlayback={},videoCommandSequence=0;
+const videoCommandClient=globalThis.crypto?.randomUUID?.()||'video-'+Math.random().toString(36).slice(2);
+const presenterVideoControls=keynopeAppSurface?KeynopeVideo.controller(stage):null;
+globalThis.keynopeVideoPlaybackChanged=async(objectId,state)=>{
+  const page=presenterPageAt(pageIndex),cursor=remoteBuildCursor;
+  if(!window.KEYNOPE_PRESENTER||!presenterPresenting||!cursor||cursor.paused||!page||keynopeSnapshotMode)return;
+  try{
+    const response=await fetch('/video-playback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...state,objectId,clientId:videoCommandClient,sequence:++videoCommandSequence,session:cursor.session,slideId:cursor.slideId,slide:page.slide,page:page.page}),signal:AbortSignal.timeout(4000)});
+    if(!response.ok)throw Error((await response.text()).trim());
+    const accepted=await response.json();syncPresenterState();return accepted[objectId];
+  }catch(error){window.showEngagementToast?.('Video control could not reach the presentation. '+error.message);console.warn('Video playback:',error.message);}
+};
 let remotePresentationOverlay=null,presentationToolsView=null,presentationToolsBar=null,presentationToolsHost=null,presentationToolsBox='';
 const presentationOverlayKey=value=>value?[KeynopePresentationTools.contextKey(value),value.revision].join(':'):'';
+// Downloaded HTML is an audience snapshot, not a presenter tool surface.
+// The web editor explicitly opts its live popup in without marking exports.
+function presentationToolsAvailable(){return !!(keynopeAppSurface||window.KEYNOPE_PRESENTER||window.KEYNOPE_PARTICIPANT_VIEW||window.KEYNOPE_LIVE_PRESENTATION);}
 function presentationToolsContext(page){
-  if(!page||keynopeSnapshotMode)return null;
+  if(!presentationToolsAvailable()||!page||keynopeSnapshotMode)return null;
   let cursor=remoteBuildCursor,position=null;
   if(keynopeAppSurface&&window.KEYNOPE_WEB_EDITOR){try{const popup=window.keynopeLivePresentationWindow;if(!popup||popup.closed)return null;position=popup.keynopePresentationPosition?.();cursor=position?.buildCursor;}catch(_error){return null;}if(!position||position.slide!==page.slide||position.page!==page.page)return null;}
   else if(window.KEYNOPE_PRESENTER&&(!presenterPresenting||!cursor))return null;
@@ -4052,6 +4090,7 @@ function presentationToolsContext(page){
   return {session,slideId,slide:page.slide,page:page.page};
 }
 function ensurePresentationTools(){
+  if(!presentationToolsAvailable())return null;
   if(presentationToolsView)return presentationToolsView;
   presentationToolsHost=document.createElement('div');presentationToolsHost.className='keynope-presentation-tools-host';presentationToolsHost.style.cssText='position:absolute;overflow:hidden;pointer-events:none;z-index:80';stage.append(presentationToolsHost);
   const readOnly=!!window.KEYNOPE_PARTICIPANT_VIEW||(!!window.KEYNOPE_PRESENTER&&!keynopeAppSurface&&!presenterMainSurface);
@@ -4074,7 +4113,7 @@ function syncPresentationTools(page=presenterPageAt(pageIndex)){
   if(active){let geometry;if(page.scene&&modernSlideViewport.style.display!=='none'){const s=modernSlideViewport.style;geometry={left:s.left,top:s.top,width:s.width,height:s.height};}else{const canvas=presenterCanvas.getBoundingClientRect(),box=stage.getBoundingClientRect();geometry={left:(canvas.left-box.left)+'px',top:(canvas.top-box.top)+'px',width:canvas.width+'px',height:canvas.height+'px'};}const key=JSON.stringify(geometry);if(key!==presentationToolsBox){presentationToolsBox=key;Object.assign(presentationToolsHost.style,geometry);}}
 }
 window.keynopePresentationOverlaySnapshot=()=>window.KEYNOPE_PRESENTER?remotePresentationOverlay:presentationToolsView?.snapshot()||null;
-window.keynopeAcceptToolSnapshot=source=>{const tools=ensurePresentationTools(),current=tools.snapshot();if(!current||KeynopePresentationTools.contextKey(current)!==KeynopePresentationTools.contextKey(source))return null;const next=KeynopePresentationTools.normalize({...source,revision:Math.max(current.revision,source.revision)+1});if(!next)return null;tools.apply(next,{force:true});try{window.opener?.keynopePublishParticipantPage?.();}catch(_error){}return tools.snapshot();};
+window.keynopeAcceptToolSnapshot=source=>{const tools=ensurePresentationTools(),current=tools?.snapshot();if(!current||KeynopePresentationTools.contextKey(current)!==KeynopePresentationTools.contextKey(source))return null;const next=KeynopePresentationTools.normalize({...source,revision:Math.max(current.revision,source.revision)+1});if(!next)return null;tools.apply(next,{force:true});try{window.opener?.keynopePublishParticipantPage?.();}catch(_error){}return tools.snapshot();};
 addEventListener('keydown',event=>{if(keynopeFormControlTarget(event.target))return;if(presentationToolsView?.snapshot()?.mode==='ink'&&presentationToolsView.element.style.display!=='none'&&(event.metaKey||event.ctrlKey)&&['z','y'].includes(event.key.toLowerCase())){event.preventDefault();event.stopImmediatePropagation();event.shiftKey||event.key.toLowerCase()==='y'?presentationToolsView.redo():presentationToolsView.undo();return;}if(event.key==='Escape'&&presentationToolsView?.exit()){event.preventDefault();event.stopImmediatePropagation();}},{capture:true});
 // Standalone HTML and live presentation share this renderer. Presenter state
 // synchronization remains separately gated by KEYNOPE_PRESENTER.
@@ -8380,7 +8419,7 @@ function publishPresenterTimer(seconds) {
   }).catch(() => {});
 }
 function keynopeFormControlTarget(target) {
-  return !!target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable || !!target.closest?.('[data-keynope-scene-dialog],[aria-modal="true"],[role="menu"],.kn-portrait-gallery,.keynope-workspace-more,.keynope-next-state,.keynope-presenter-tools-panel'));
+  return !!target && (/^(INPUT|TEXTAREA|SELECT|VIDEO)$/.test(target.tagName) || target.isContentEditable || !!target.closest?.('[data-keynope-scene-dialog],[aria-modal="true"],[role="menu"],.kn-portrait-gallery,.keynope-workspace-more,.keynope-next-state,.keynope-presenter-tools-panel,.keynope-video-controls'));
 }
 addEventListener('keydown', e => {
   if (keynopeFormControlTarget(e.target)) return;
@@ -8573,6 +8612,7 @@ async function syncPresenterStateOnce(editorRequest=null) {
     if(!current()||state.version<presenterVersion)return;
     if (!initialSync && state.version === presenterVersion && !slideRefreshed) return;
     presenterVersion = state.version;
+    presenterVideoPlayback=state.videos||{};
     remoteBuildCursor=nextBuildCursor;
     const buildChanged=previousBuildKey!==KeynopeBuilds.cursorKey(remoteBuildCursor);
     const wasPresenting = presenterPresenting;
@@ -8786,6 +8826,7 @@ function keynopeTerminalSequence(e) {
 }
 if (keynopeAppSurface) {
   let editorState = null;
+  window.keynopeSelectedVideoID=()=>{const element=editorState?.slides?.[editorState.current]?.elements?.[editorState.selected];return element?.kind==='video'?element.id:'';};
   // The presenter synchronizer lives outside this editor block. Keep its
   // callback inside the state owner's lexical scope, rather than swallowing a
   // ReferenceError after painting a newly accepted native scene.
@@ -10326,6 +10367,13 @@ if (keynopeAppSurface) {
   importButton.setAttribute('aria-label', 'Import image');
   importButton.addEventListener('click', () => imageInput.click());
   mainTopbar.append(importButton, imageInput);
+  const videoInput=document.createElement('input');videoInput.type='file';videoInput.accept='video/mp4,video/quicktime,.mp4,.m4v,.mov';videoInput.hidden=true;
+  const videoButton=svgToolbarButton('Import video','<rect x="2" y="4" width="16" height="12" rx="2"/><path d="m8 7 5 3-5 3Z" fill="currentColor"/>',()=>videoInput.click());
+  videoInput.onchange=async()=>{
+    const file=videoInput.files?.[0];if(!file)return;videoButton.disabled=true;
+    try{const body=await KeynopeVideo.prepareImport(file),response=await fetch('/api/editor/upload-video',{method:'POST',body});if(!response.ok)throw Error(await response.text());editorState=await response.json();editorStateVersion=editorState.version;renderEditorPanels();const inserted=editorState.slides?.[editorState.current]?.elements?.[editorState.selected];if(inserted)await previewCanvasMutation(editorState.selected,inserted,true);}
+    catch(error){window.alert('Could not import video\n\n'+error.message);}finally{videoButton.disabled=false;videoInput.value='';}
+  };mainTopbar.append(videoInput);
   const editSeparator = document.createElement('span');
   editSeparator.className = 'keynope-editor-separator';
   mainTopbar.appendChild(editSeparator);
@@ -11713,7 +11761,7 @@ if (keynopeAppSurface) {
     const objects=deck.pages[pageIndex]?.scene?.objects||[],bounds=canvasCurrentBounds();
     const objectsByID=new Map(objects.map(object=>[object.id,object]));
     const snapshot=indices.map(index=>({index,element:canvasElementAt(index),bounds:bounds.get(index)}));
-    if(snapshot.some(({element:e})=>{const o=objectsByID.get(e?.id);return !o||!['text','shape','image','table','chart','connector'].includes(o.kind)||o.retroText||(o.kind==='text'&&o.retroLines)||e.inherited||new URLSearchParams(e.query||'').get('object-locked')==='1';}))return false;
+    if(snapshot.some(({element:e})=>{const o=objectsByID.get(e?.id);return !o||!['text','shape','image','video','table','chart','connector'].includes(o.kind)||o.retroText||(o.kind==='text'&&o.retroLines)||e.inherited||new URLSearchParams(e.query||'').get('object-locked')==='1';}))return false;
     try{KeynopeWorkspace.resizeConnectedSelection(snapshot,1,deck.cols,deck.rows,undefined,canvasPhysicalGeometry());return true;}catch{return false;}
   }
   function canvasPhysicalGeometry(){return deck.pages[pageIndex]?.scene||{width:1920,height:1080};}
@@ -11818,7 +11866,7 @@ if (keynopeAppSurface) {
     if(snapshot.length!==indices.length||snapshot.length<2)throw Error('Select at least two objects.');
     for(const item of snapshot){
       const object=objects.find(object=>object.id===item.element.id);
-      if(!object||!['text','shape','image','table','chart','connector'].includes(object.kind)||object.retroText||(object.kind==='text'&&object.retroLines)||item.element.inherited||new URLSearchParams(item.element.query||'').get('object-locked')==='1')throw Error('This selection contains an object that cannot resize as a group.');
+      if(!object||!['text','shape','image','video','table','chart','connector'].includes(object.kind)||object.retroText||(object.kind==='text'&&object.retroLines)||item.element.inherited||new URLSearchParams(item.element.query||'').get('object-locked')==='1')throw Error('This selection contains an object that cannot resize as a group.');
     }
     const resized=KeynopeWorkspace.resizeConnectedSelection(snapshot,factor,deck.cols,deck.rows,pivot,canvasPhysicalGeometry());
     if(factor===1)return;
@@ -12035,7 +12083,7 @@ if (keynopeAppSurface) {
     const draft=canvasGeometryDraft;
     const step=snapshot.every(item=>item.element.kind==='shape')?.5:1;
     const sceneObject=single?deck.pages[pageIndex]?.scene?.objects.find(object=>object.id===snapshot[0].element.id):null;
-    const preciseSize=['shape','image','table','chart'].includes(sceneObject?.kind)||(sceneObject?.kind==='text'&&!sceneObject.retroText&&!sceneObject.retroLines);
+    const preciseSize=['shape','image','video','table','chart'].includes(sceneObject?.kind)||(sceneObject?.kind==='text'&&!sceneObject.retroText&&!sceneObject.retroLines);
     for(const [key,label] of [['x','X'],['y','Y'],['width','Width'],['height','Height']]){
       const wrapper=document.createElement('label'),input=document.createElement('input');wrapper.textContent=label;input.type='number';input.required=true;input.setAttribute('aria-label','Object '+label.toLowerCase());input.value=Object.hasOwn(draft.values,key)?draft.values[key]:String(Math.round(values[key]*1000)/1000);input.step='any';input.min=key==='width'||key==='height'?String(step):'0';input.max=String(key==='x'||key==='width'?deck.cols:deck.rows);input.disabled=locked||(!single&&(key==='width'||key==='height'));input.title='Slide cells; '+(step===1?'whole-cell':'half-cell')+' placement';input.addEventListener('input',()=>{draft.values[key]=input.value;});wrapper.append(input);form.append(wrapper);inputs[key]=input;
     }
@@ -13758,7 +13806,7 @@ if (keynopeAppSurface) {
     const allText=selectedElements.length>0&&selectedElements.every(e=>['heading','text','text-image','bullet','code','page-number'].includes(e.kind));
     const allShape=selectedElements.length>0&&selectedElements.every(e=>e.kind==='shape');
     const allImage=selectedElements.length>0&&selectedElements.every(e=>e.kind==='image');
-    const panelContext=shapeConnecting||element?.kind==='connector'&&selectedElements.length===1?'Line':contextual?(allText?'Text':allShape?'Shape':allImage?'Image':'Edit'):(editorState?.masterMode?'master':'main');
+    const panelContext=shapeConnecting||element?.kind==='connector'&&selectedElements.length===1?'Line':contextual?(allText?'Text':allShape?'Shape':allImage?'Image':selectedElements.length===1&&element?.kind==='video'?'Video':'Edit'):(editorState?.masterMode?'master':'main');
     configureRibbon(panelContext,!!activeInlineEditor);
     undoButton.disabled=!editorState?.canUndo && !activeInlineEditor?.isDirty();
     redoButton.disabled=!editorState?.canRedo || !!activeInlineEditor?.isDirty();
@@ -13840,7 +13888,7 @@ if (keynopeAppSurface) {
     appendCanvasGroupTools(arrange,index);
     const selectedText = !!textElement;
     const rotatableText = selectedElements.some(candidate => KeynopeTrueType.is(candidate)||['heading','text','text-image','bullet'].includes(candidate.kind));
-    const positionable = selectedElements.some(candidate => ['heading','text','text-image','bullet','code','shape','image','page-number','table','chart'].includes(candidate.kind));
+    const positionable = selectedElements.some(candidate => ['heading','text','text-image','bullet','code','shape','image','video','page-number','table','chart'].includes(candidate.kind));
     if(element.kind==='chart'&&selectedElements.length===1){const edit=canvasTool('Edit chart','',editSelectedChart);applyCanvasCommandControl(edit,'chart.edit');content.append(edit);}
     if(element.kind==='table'&&selectedElements.length===1){const edit=canvasTool('Edit table','',editSelectedTable),fit=canvasTool('Fit table to content','',fitSelectedTable);edit.setAttribute('aria-label','Edit table');fit.setAttribute('aria-label','Fit table to content');applyCanvasCommandControl(edit,'table.edit');applyCanvasCommandControl(fit,'table.fit');content.append(edit,fit);}
     if (selectedText) {
@@ -14040,6 +14088,16 @@ if (keynopeAppSurface) {
       if(emojiIndex!=null)appendCanvasTintControls(style,emojiIndex,slide.elements[emojiIndex],true);
       if (!canvasSelectionProperty('paint.gradientDirection') && selectedElements.some(canvasTextEffectCompatible)) appendCanvasTypographyEffectTools(style,textIndex,textElement);
       if (selectedElements.length === 1) style.appendChild(canvasLinkTool(textIndex, query));
+    }
+    if(element?.kind==='video'&&selectedElements.length===1){
+      const options=new URLSearchParams(element.query||''),sceneObject=deck.pages[pageIndex]?.scene?.objects.find(object=>object.id===element.id);
+      const preview=canvasTool('Preview video','',()=>sceneObject&&KeynopeVideo.preview(sceneObject));preview.disabled=!sceneObject;content.append(preview);
+      for(const [key,label]of [['video-autoplay','Play automatically'],['video-loop','Loop'],['video-muted','Muted']]){
+        const wrap=document.createElement('label'),check=document.createElement('input');check.type='checkbox';check.checked=options.get(key)==='1';check.setAttribute('aria-label',label);
+        wrap.style.cssText='display:flex;align-items:center;gap:7px;width:100%';check.disabled=options.get('object-locked')==='1';
+        check.onchange=()=>updateCanvasElements(index,e=>e.kind==='video',updated=>{const q=new URLSearchParams(updated.query||'');if(check.checked)q.set(key,'1');else q.delete(key);updated.query=q.toString();return updated;});wrap.append(check,document.createTextNode(label));content.append(wrap);
+      }
+      const note=document.createElement('p');note.textContent='Embedded video. Autoplay with sound may require a click; mute for reliable autoplay.';content.append(note);
     }
     if (!selectedText && shapeElement) { if(!canvasSelectionProperty('paint.color'))style.appendChild(canvasColourTool(shapeIndex, shapeElement, ''));if(!canvasSelectionProperty('paint.colorToken'))style.appendChild(canvasThemeColourTool(shapeIndex)); }
     if (!selectedText && selectedElements.length===1 && selectedElements.some(candidate=>candidate.kind==='image')) {
@@ -14684,7 +14742,7 @@ if (keynopeAppSurface) {
         const fittingText = resizing && ['heading','text','text-image','bullet','code'].includes(sourceElement.kind);
         const resizingObject=deck.pages[pageIndex]?.scene?.objects.find(object=>object.id===sourceElementID);
         const preciseTextResize=fittingText&&resizingObject?.kind==='text'&&!resizingObject.retroText&&!resizingObject.retroLines;
-        const preciseVisualResize=resizing&&['shape','image','table','chart'].includes(resizingObject?.kind);
+        const preciseVisualResize=resizing&&['shape','image','video','table','chart'].includes(resizingObject?.kind);
         const snapDrag = value => preciseTextResize||preciseVisualResize?value:Math.round(value / resizeStep) * resizeStep;
         let moveEngaged=false;
         const pointerDelta=pointerEvent=>{
@@ -14693,7 +14751,7 @@ if (keynopeAppSurface) {
           const move=KeynopeWorkspace.pointerMove(x,y,rect.width,rect.height,deck.cols,deck.rows,moveEngaged);moveEngaged=move.engaged;
           return snappedCanvasMove([{index,element:sourceElement,bounds:start}],start,move.dx,move.dy,pointerEvent);
         };
-		const resizingVisual = resizing && ['shape','image','table','chart'].includes(sourceElement.kind);
+		const resizingVisual = resizing && ['shape','image','video','table','chart'].includes(sourceElement.kind);
 		if (resizingVisual) keynopeEditorVisualResizeActive = true;
         let pendingFit = null;
         let fitting = false;
@@ -15756,7 +15814,7 @@ if (keynopeAppSurface) {
     timerTag.hidden = !active;
     timerTag.textContent = presenterTimerBroadcast ? 'BROADCAST' : 'LOCAL';
     timerInputBlocker.hidden = !active;
-    canvasOverlay.hidden = active;
+    canvasOverlay.hidden = active || editorPresentationMode !== 'none';
     document.documentElement.setAttribute('data-keynope-timer-active', active ? 'true' : 'false');
     for (const button of toolbar.querySelectorAll('button')) {
       button.disabled = active && button !== timerButton && button !== stopPresentationButton && button !== pauseButton;
@@ -15927,7 +15985,7 @@ if (keynopeAppSurface) {
     if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return false;
     queueEditorOperation(async () => {
       if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return;
-      const selectableKinds = new Set(['heading','text','text-image','bullet','code','shape','image','page-number','table']);
+      const selectableKinds = new Set(['heading','text','text-image','bullet','code','shape','image','video','page-number','table']);
       const seenGroups=new Set();
       const indices = (editorState.slides[editorState.current].elements || [])
         .map((element, index) => {
@@ -16011,6 +16069,15 @@ if (keynopeAppSurface) {
     // Escape still dismisses canvas selection after using a toolbar button.
     // Text fields were excluded above; their editing/navigation stays local.
     if (!e.metaKey && !e.ctrlKey && e.key !== 'Escape' && e.target?.closest?.('.keynope-editor-topbar')) return;
+    // The canvas is a presentation monitor while presenting, even if an
+    // object was selected before starting. Navigation must not nudge/delete it.
+    if(editorPresentationMode!=='none'&&!e.metaKey&&!e.ctrlKey&&!e.altKey){
+      if(['ArrowRight','ArrowDown',' ','PageDown','ArrowLeft','ArrowUp','PageUp'].includes(e.key)){
+        e.preventDefault();e.stopImmediatePropagation();navigateEditorPage(['ArrowLeft','ArrowUp','PageUp'].includes(e.key)?-1:1).catch(showEditorCommandError);
+      }else if(e.key==='Escape'){e.preventDefault();e.stopImmediatePropagation();stopPresentationButton.click();}
+      else if(['Delete','Backspace'].includes(e.key)){e.preventDefault();e.stopImmediatePropagation();}
+      return;
+    }
     if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'Tab') {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -16807,6 +16874,9 @@ func validExtensionMetadataKey(key string) bool {
 }
 
 func placementMetadataKey(key string) bool {
+	if effectMetadataKey(key) {
+		return true
+	}
 	if concreteDefaultKey(key) {
 		return true
 	}
@@ -16819,7 +16889,7 @@ func placementMetadataKey(key string) bool {
 	switch key {
 	case "text-bold", "text-italic", "text-underline":
 		return true
-	case "shape-fill", "shape-stroke", "shape-stroke-width":
+	case "shape-fill", "shape-stroke", "shape-stroke-width", "shape-stroke-position":
 		return true
 	case "object-id", "theme-fg":
 		return true
@@ -16832,6 +16902,14 @@ func placementMetadataKey(key string) bool {
 func addPlacementValue(values url.Values, key, value string) {
 	key = strings.ToLower(strings.TrimSpace(key))
 	value = strings.Trim(value, `"'`)
+	if effectMetadataKey(key) {
+		for _, c := range effectControls {
+			if c.key == key && validEffectValue(c, value) {
+				values.Set(key, value)
+			}
+		}
+		return
+	}
 	if concreteDefaultKey(key) {
 		if validConcreteDefault(key, value) {
 			values.Set(key, value)
@@ -16867,6 +16945,10 @@ func addPlacementValue(values url.Values, key, value string) {
 	case "label-style-inherit":
 		if value == "1" {
 			values.Set(key, "1")
+		}
+	case "shape-stroke-position":
+		if value == "inside" || value == "center" || value == "outside" {
+			values.Set(key, value)
 		}
 	case "shape-fill":
 		if value == "none" || value == "solid" {
@@ -17089,7 +17171,7 @@ func addPlacementValue(values url.Values, key, value string) {
 		}
 	case "gradient-dir":
 		switch strings.ToLower(value) {
-		case "horizontal", "vertical", "diagonal", "none":
+		case "horizontal", "vertical", "diagonal", "none", "radial", "reflected", "diamond", "angle":
 			values.Set("gradient-dir", strings.ToLower(value))
 		}
 	case "shadow":
@@ -17154,7 +17236,7 @@ func placementCommentText(query string) string {
 		return query
 	}
 	var fields []string
-	for _, key := range []string{"shape-fill", "shape-stroke", "shape-stroke-width"} {
+	for _, key := range []string{"shape-fill", "shape-stroke", "shape-stroke-width", "shape-stroke-position"} {
 		if value := values.Get(key); value != "" {
 			fields = append(fields, key+"="+value)
 		}
@@ -17188,6 +17270,16 @@ func placementCommentText(query string) string {
 		}
 	}
 	var extensionKeys []string
+	var effectKeys []string
+	for key := range values {
+		if effectMetadataKey(key) {
+			effectKeys = append(effectKeys, key)
+		}
+	}
+	sort.Strings(effectKeys)
+	for _, key := range effectKeys {
+		fields = append(fields, key+"="+url.QueryEscape(values.Get(key)))
+	}
 	for _, key := range []string{"default-font", "default-size", "default-width", "default-line-height", "default-color", "default-fill", "default-stroke", "default-stroke-width"} {
 		if value := values.Get(key); value != "" {
 			fields = append(fields, key+"="+url.QueryEscape(value))
@@ -19519,7 +19611,7 @@ func layoutPreparedSlideWithFlow(slide Slide, width, height int, flow *preparedL
 			typedBlocks = append(typedBlocks, block{lines: roleLines(layoutElementRows(e, width), "body", elementIndex, e.Query)})
 		case "code":
 			typedBlocks = append(typedBlocks, block{lines: roleLines(layoutElementRows(e, width), "code", elementIndex, e.Query)})
-		case "image":
+		case "image", "video":
 			typedBlocks = append(typedBlocks, block{image: true, path: e.Path, query: e.Query, element: elementIndex})
 		case "shape":
 			typedBlocks = append(typedBlocks, block{lines: roleLines(renderShapeRows(e, width, shapeCellSize), "shape", elementIndex, e.Query)})
@@ -19733,7 +19825,7 @@ func layoutPreparedSlideWithFlow(slide Slide, width, height int, flow *preparedL
 		ranks[index] = rank
 	}
 	sort.SliceStable(lines, func(i, j int) bool { return ranks[lines[i].Element] < ranks[lines[j].Element] })
-	lines = applyTextElementEffects(lines, slide)
+	lines = applyTextElementEffects(lines, slide, width, height)
 	hidden := hiddenSlideObjects(slide)
 	visible := lines[:0]
 	for _, line := range lines {
@@ -21454,6 +21546,9 @@ func registerEmbeddedStillAsset(id string, asset DeckAsset) {
 	if id == "" || len(asset.Data) == 0 || len(asset.Frames) > 0 {
 		return
 	}
+	// The still-image cache only needs the poster. Movie bytes belong to the
+	// deck, not an unbounded global cache (including rejected video imports).
+	asset.Video = nil
 	identity := embeddedImageSourceIdentity(asset)
 	embeddedStillAssets.Lock()
 	if embeddedStillAssets.identities[id] != identity {

@@ -23,6 +23,30 @@ func assetArchiveEnvelope(t *testing.T, raw []byte) string {
 	return "<!-- keynope-assets version=1 base64:" + base64.StdEncoding.EncodeToString(output.Bytes()) + " -->"
 }
 
+func TestAssetArchiveStorageSizeMatchesJSONWithoutMutatingPayloads(t *testing.T) {
+	_, id, video, _ := videoFixture(t)
+	asset := DeckAsset{
+		Data: []byte{1, 2}, Extra: extensionFixture("custom", `{"note":"kept"}`),
+		Frames: []DeckAssetFrame{{Data: []byte{}}, {Data: []byte{1, 2, 3, 4, 5}}},
+		Source: &DeckAssetSource{Data: []byte{1, 2, 3}, Frames: []DeckAssetFrame{{Data: nil}, {Data: []byte{1, 2, 3, 4}}}},
+		Vector: &DeckAssetVector{Data: []byte{1}},
+	}
+	for _, assets := range []map[string]DeckAsset{{}, {id: video}, {"quoted\"<&": asset, id: video}, {"empty": {Data: []byte{}}}} {
+		encoded, err := json.Marshal(assets)
+		if err != nil {
+			t.Fatal(err)
+		}
+		count, err := deckAssetArchiveStorageSize(assets)
+		if err != nil || count != int64(len(encoded)) {
+			t.Fatal("asset size does not match its real JSON encoding", count, len(encoded), err)
+		}
+		after, _ := json.Marshal(assets)
+		if !bytes.Equal(encoded, after) {
+			t.Fatal("asset sizing modified source payloads")
+		}
+	}
+}
+
 func TestAssetArchiveRejectsAmbiguousAndUnsupportedEnvelopes(t *testing.T) {
 	valid := assetArchiveEnvelope(t, []byte(`{}`))
 	asset, _ := json.Marshal(clipboardTestAsset(t))

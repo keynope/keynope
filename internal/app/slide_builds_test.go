@@ -123,6 +123,29 @@ func ownedBuild() *SlideBuild {
 	return &SlideBuild{Version: 1, Transition: SlideTransition{Effect: "fade", DurationMS: 400}, Steps: []BuildStep{{TargetIDs: []string{"first"}, Effect: "fade", DurationMS: 500, Advance: "click"}, {TargetIDs: []string{"second"}, Effect: "wipe", Direction: "left", DurationMS: 700, Advance: "after", DelayMS: 300}}}
 }
 
+func TestTVSwitchTransitionPersistence(t *testing.T) {
+	for _, master := range []bool{false, true} {
+		s := buildEditorFixture(master)
+		build := ownedBuild()
+		build.Transition = SlideTransition{Effect: "tv-switch", DurationMS: 180}
+		if err := s.apply(buildAction(s, build)); err != nil {
+			t.Fatal(err)
+		}
+		target := slidesForBuildState(s, 0)
+		data, err := serializeDeck("Switching.md", s.deck)
+		if err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := parseDeckData("Switching.md", data)
+		if err != nil || loaded.Objects.Builds[target.ID].Transition != build.Transition {
+			t.Fatal("TV switching lost on save/reopen", err)
+		}
+		if err := s.apply(nativeEditorAction{Action: "undo"}); err != nil || s.deck.Objects != nil && len(s.deck.Objects.Builds) != 0 {
+			t.Fatal("TV switching was not undoable", err)
+		}
+	}
+}
+
 func TestSlideBuildAtomicHistoryAndPortability(t *testing.T) {
 	for _, master := range []bool{false, true} {
 		s := buildEditorFixture(master)

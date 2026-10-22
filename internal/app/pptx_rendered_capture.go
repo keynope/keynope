@@ -129,7 +129,14 @@ func pptxRetroNeedsFontCapture(object sceneObject) bool {
 }
 
 func pptxModernNeedsPaintCapture(object sceneObject) bool {
-	return object.Kind == "image" && object.RetroLines == nil && object.Media != nil && (object.Paint.GradientStart != "" || object.Paint.Stroke != "")
+	return object.Kind == "image" && (object.Paint.Effects != nil || object.Paint.GradientImage != "" || object.RetroLines == nil && object.Media != nil && (object.Paint.GradientStart != "" || object.Paint.Stroke != ""))
+}
+
+func artworkCapturePadding(object sceneObject) float64 {
+	if object.Paint.Effects != nil {
+		return 64 + math.Ceil(object.Paint.Effects.Padding)
+	}
+	return 64
 }
 
 func pptxImageBackgroundObject(background *sceneBackgroundMedia, index int, page ...sceneRect) sceneObject {
@@ -165,7 +172,8 @@ func chargePPTXCaptureSources(media *sceneMedia, remaining *int64) error {
 
 func pptxCaptureDimensions(object sceneObject) (int, int, error) {
 	b := object.Bounds
-	w, h := math.Ceil(b.Width+128), math.Ceil(b.Height+128)
+	pad := artworkCapturePadding(object)
+	w, h := math.Ceil(b.Width+pad*2), math.Ceil(b.Height+pad*2)
 	if b.Width <= 0 || b.Height <= 0 || math.IsNaN(w+h+b.X+b.Y+object.Rotation) || math.IsInf(w+h+b.X+b.Y+object.Rotation, 0) || w > 8192 || h > 8192 || w*h > 16_000_000 {
 		return 0, 0, fmt.Errorf("invalid or oversized PowerPoint capture dimensions")
 	}
@@ -332,6 +340,7 @@ func capturedPPTXRetroImage(object sceneObject, capture pptxRenderedCapture, wor
 	if err == nil && object.RetroLines == nil {
 		paint := object.Paint
 		paint.GradientStart, paint.GradientEnd, paint.Stroke = "", "", ""
+		paint.Effects, paint.GradientImage = nil, ""
 		applyPPTXPicturePaint(picture, paint)
 	}
 	return picture, warnings, err

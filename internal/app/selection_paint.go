@@ -10,6 +10,12 @@ import (
 )
 
 func selectionPaintProperty(property string) bool {
+	if property == "paint.strokePosition" {
+		return true
+	}
+	if _, ok := effectControls[property]; ok {
+		return true
+	}
 	switch property {
 	case "paint.fill", "paint.color", "paint.colorToken", "paint.strokeToken", "paint.outline", "paint.strokeColor", "paint.strokeWidth", "paint.gradientStart", "paint.gradientEnd", "paint.gradientDirection", "paint.shadow", "paint.shadowColor", "paint.shadowX", "paint.shadowY":
 		return true
@@ -36,6 +42,15 @@ func selectionPaintValue(deck Deck, slide Slide, authored, resolved Element, q, 
 	key := objectStyleKeys[property]
 	explicit := q.Has(key)
 	value := rq.Get(key)
+	if property == "paint.strokePosition" {
+		if value == "" {
+			value = "center"
+		}
+		return value, explicit, true, true
+	}
+	if _, ok := effectControls[property]; ok {
+		return effectPaintValue(rq, property), explicit, true, true
+	}
 	switch property {
 	case "paint.fill":
 		paint := deck.applyThemeObjectPaint(resolved, slide, rq, scenePaintFromValues(resolved, slide, 1, 1, rq, nil))
@@ -145,6 +160,19 @@ func applySelectionPaint(slide *Slide, resolved Slide, ids []string, property, t
 		key = "theme-fg"
 	}
 	value := text
+	if control, ok := effectControls[property]; ok {
+		if control.choices == "" && text != "inherit" {
+			value = strconv.FormatFloat(number, 'f', -1, 64)
+		}
+		if text == "inherit" {
+			value = ""
+		}
+		if value != "" {
+			if err := validateEffectProperty(property, value); err != nil {
+				return false, err
+			}
+		}
+	}
 	if property == "paint.colorToken" {
 		if value != "" && !validThemeColorToken(value) {
 			return false, fmt.Errorf("choose a supported theme colour role")

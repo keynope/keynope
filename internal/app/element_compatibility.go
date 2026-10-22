@@ -16,7 +16,7 @@ var compatibleElementPrefixRE = regexp.MustCompile(`^<!--\s*keynope-element(?:\s
 
 func standardElementKind(kind string) bool {
 	switch kind {
-	case "text", "heading", "bullet", "code", "text-image", "page-number", "image", "shape", "connector", "table", "chart":
+	case "text", "heading", "bullet", "code", "text-image", "page-number", "image", "video", "shape", "connector", "table", "chart":
 		return true
 	}
 	return false
@@ -25,7 +25,7 @@ func standardElementKind(kind string) bool {
 func elementNeedsCompatibilityEnvelope(element Element) bool {
 	// Page-number objects are understood by the scene but have no ordinary
 	// Markdown spelling. The full envelope preserves their semantic kind too.
-	return !standardElementKind(element.Kind) || element.Kind == "page-number"
+	return !standardElementKind(element.Kind) || element.Kind == "page-number" || element.Kind == "video"
 }
 
 func encodeCompatibleElement(element Element) (string, error) {
@@ -34,6 +34,9 @@ func encodeCompatibleElement(element Element) (string, error) {
 }
 
 func encodeCompatibleElementBudget(element Element, remaining *int) (string, error) {
+	if element.Kind == "video" && element.AssetID != "" {
+		element.Path = "keynope-asset:" + element.AssetID + ".png"
+	}
 	data, err := json.Marshal(element)
 	if err != nil || len(data) > maxCompatibleElementBytes || strings.TrimSpace(element.Kind) == "" || len(element.Kind) > 128 {
 		return "", fmt.Errorf("compatible element metadata is invalid or exceeds 1 MiB")

@@ -138,6 +138,8 @@ func wasmEditorHandler(path string) http.HandlerFunc {
 		return activeNativeEditor.handleWorkspace
 	case "/api/editor/upload":
 		return activeNativeEditor.handleUpload
+	case "/api/editor/upload-video":
+		return activeNativeEditor.handleVideoUpload
 	case "/api/editor/document":
 		return activeNativeEditor.handleDocument
 	case "/api/editor/participant-page":
@@ -205,13 +207,32 @@ func wasmEditorUpload(_ js.Value, args []js.Value) any {
 	if activeNativeEditor == nil || len(args) == 0 {
 		return wasmJSON(wasmResponse{Status: http.StatusBadRequest, Body: "editor is not initialized"})
 	}
+	video := len(args) > 1 && args[1].String() == "video"
+	if video && args[0].Get("byteLength").Int() > maxEmbeddedVideoBytes {
+		return wasmJSON(wasmResponse{Status: 400, Body: videoCapacityMessage})
+	}
 	data := make([]byte, args[0].Get("byteLength").Int())
 	js.CopyBytesToGo(data, args[0])
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	part, err := writer.CreateFormFile("image", "image")
+	field := "image"
+	if video {
+		field = "video"
+	}
+	part, err := writer.CreateFormFile(field, field)
 	if err == nil {
 		_, err = part.Write(data)
+	}
+	if video && err == nil && len(args) > 2 && !args[2].IsNull() && !args[2].IsUndefined() {
+		if args[2].Get("byteLength").Int() > 2<<20 {
+			return wasmJSON(wasmResponse{Status: 400, Body: "Video poster exceeds 2 MiB"})
+		}
+		poster := make([]byte, args[2].Get("byteLength").Int())
+		js.CopyBytesToGo(poster, args[2])
+		part, err = writer.CreateFormFile("poster", "poster.png")
+		if err == nil {
+			_, err = part.Write(poster)
+		}
 	}
 	if closeErr := writer.Close(); err == nil {
 		err = closeErr
@@ -222,7 +243,11 @@ func wasmEditorUpload(_ js.Value, args []js.Value) any {
 	request := httptest.NewRequest(http.MethodPost, "/api/editor/upload", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	recorder := httptest.NewRecorder()
-	activeNativeEditor.handleUpload(recorder, request)
+	if video {
+		activeNativeEditor.handleVideoUpload(recorder, request)
+	} else {
+		activeNativeEditor.handleUpload(recorder, request)
+	}
 	return wasmJSON(wasmResponse{Status: recorder.Code, ContentType: recorder.Header().Get("Content-Type"), Body: recorder.Body.String()})
 }
 

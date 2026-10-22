@@ -254,7 +254,10 @@
     await runtimeReady;
     const method = String(init.method || (input && input.method) || 'GET').toUpperCase();
     let raw;
-    if (target.pathname === '/api/editor/upload' && init.body instanceof FormData) {
+    if (target.pathname === '/api/editor/upload-video' && init.body instanceof FormData) {
+      const file = init.body.get('video'), poster = init.body.get('poster');
+      raw = window.keynopeWasmUpload(new Uint8Array(await file.arrayBuffer()), 'video', poster ? new Uint8Array(await poster.arrayBuffer()) : null);
+    } else if (target.pathname === '/api/editor/upload' && init.body instanceof FormData) {
       const file = init.body.get('image');
       if (!(file instanceof Blob)) return new Response('missing image', {status: 400});
       raw = window.keynopeWasmUpload(new Uint8Array(await file.arrayBuffer()));
@@ -265,7 +268,7 @@
     }
     const envelope = JSON.parse(raw);
     let actionName = '';
-    let refresh = target.pathname === '/api/editor/upload' ||
+    let refresh = target.pathname === '/api/editor/upload' || target.pathname === '/api/editor/upload-video' ||
       (target.pathname === '/api/editor/state' && !workspaceLoaded);
     if (target.pathname === '/api/editor/action' || target.pathname === '/api/editor/paste-clipboard') {
       try {
@@ -407,7 +410,12 @@
     });
     if (!response.ok) throw new Error((await response.text()).trim() || 'Could not export presentation');
     const payload = await response.json();
-    const blob = new Blob([payload.content], {type:'text/html;charset=utf-8'});
+    // Only an explicitly opened live presenter window gets annotation tools.
+    // The downloadable HTML remains an audience-only presentation snapshot.
+    const content = openAfterExport
+      ? payload.content.replace('<head>', '<head><script>window.KEYNOPE_LIVE_PRESENTATION=true;</script>')
+      : payload.content;
+    const blob = new Blob([content], {type:'text/html;charset=utf-8'});
     if (openAfterExport) {
       const url = URL.createObjectURL(blob);
       if (presentationWindow) presentationWindow.location.replace(url);

@@ -54,6 +54,7 @@ var selectionPropertyIDs = []string{
 	"paint.color", "paint.outline", "paint.gradientStart", "paint.gradientEnd", "paint.gradientDirection",
 	"paint.shadow", "paint.shadowColor", "paint.shadowX", "paint.shadowY",
 	"paint.strokeColor", "paint.strokeWidth", "paint.strokeToken",
+	"paint.strokePosition",
 	"paint.colorToken",
 	"image.brightness", "image.contrast", "image.saturation", "image.sharpness", "image.alpha", "image.glyph", "image.sampling", "image.tint", "image.mask", "image.fit", "image.style",
 	"label.size", "label.width", "label.font", "label.bold", "label.italic", "label.underline",
@@ -124,7 +125,7 @@ func selectionPropertyValueFromQueries(deck Deck, slide, resolvedSlide Slide, au
 	}
 	if property == "paint.opacity" {
 		switch authored.Kind {
-		case "shape", "image", "table", "chart", "connector", "text", "heading", "bullet", "code", "text-image", "page-number":
+		case "shape", "image", "video", "table", "chart", "connector", "text", "heading", "bullet", "code", "text-image", "page-number":
 		default:
 			return nil, false, false
 		}
@@ -384,7 +385,7 @@ func selectionObjectCanRotate(deck Deck, slide Slide, element Element) bool {
 		style = "modern"
 	}
 	switch element.Kind {
-	case "image", "table", "chart":
+	case "image", "video", "table", "chart":
 		return true
 	case "shape":
 		return style == "modern"
@@ -396,7 +397,7 @@ func selectionObjectCanRotate(deck Deck, slide Slide, element Element) bool {
 
 func selectionObjectCanPosition(element Element) bool {
 	switch element.Kind {
-	case "text", "heading", "bullet", "code", "text-image", "page-number", "shape", "image", "table", "chart":
+	case "text", "heading", "bullet", "code", "text-image", "page-number", "shape", "image", "video", "table", "chart":
 		return true
 	}
 	return false
@@ -567,6 +568,16 @@ func applySelectionProperty(deck *Deck, action nativeEditorAction, editingGroup 
 	var text string
 	command := action
 	command.ObjectIDs = ids
+	if control, ok := effectControls[action.Property]; ok && control.choices == "" {
+		if err := json.Unmarshal(action.PropertyValue, &number); err != nil {
+			var reset string
+			if json.Unmarshal(action.PropertyValue, &reset) != nil || reset != "" {
+				return false, fmt.Errorf("effect setting requires a number or empty text to inherit")
+			}
+			text = "inherit"
+		}
+		return applySelectionPaint(slide, resolved, property.EligibleIDs, action.Property, text, number)
+	}
 	switch action.Property {
 	case "paint.strokeWidth":
 		if err := json.Unmarshal(action.PropertyValue, &number); err != nil {

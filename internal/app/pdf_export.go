@@ -54,8 +54,18 @@ func pdfPageFallbackReasons(p exportPage) []string {
 	if b := p.Scene.BackgroundMedia; b != nil && (b.RetroLines != nil || len(b.Frames) > 1) {
 		reasons = append(reasons, "Sampled or animated background image")
 	}
-	if b := p.Scene.BackgroundMedia; b != nil && (len(b.ColourMatrices) > 0 || b.Sharpness != 0 && b.Sharpness != 1 || b.Paint != nil && b.Paint.GradientStart != "") {
+	if b := p.Scene.BackgroundMedia; b != nil && (len(b.ColourMatrices) > 0 || b.Sharpness != 0 && b.Sharpness != 1 || b.Paint != nil && (b.Paint.GradientStart != "" || b.Paint.Effects != nil)) {
 		reasons = append(reasons, "Background image adjustments needing exact-appearance capture")
+	}
+	for _, o := range p.Scene.Objects {
+		if o.Video != nil {
+			reasons = append(reasons, "Embedded video, shown as its poster frame")
+			break
+		}
+		if o.Paint.Effects != nil || o.Paint.GradientImage != "" {
+			reasons = append(reasons, "Object effects needing exact-appearance capture")
+			break
+		}
 	}
 	for _, o := range p.Scene.Objects {
 		if o.RetroLines != nil || o.RetroText != nil || o.RetroLabel != nil {

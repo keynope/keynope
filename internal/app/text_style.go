@@ -599,7 +599,7 @@ func labelPaintQuery(query string, fields map[string]string) (string, error) {
 				}
 			}
 		case "gradient-dir":
-			if value != "" && value != "horizontal" && value != "vertical" && value != "diagonal" {
+			if value != "" && value != "horizontal" && value != "vertical" && value != "diagonal" && !extendedGradient(value) {
 				return "", fmt.Errorf("invalid gradient direction")
 			}
 		case "shadow":

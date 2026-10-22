@@ -84,6 +84,14 @@ func mediaValidationDigest(ctx context.Context, asset DeckAsset) ([32]byte, erro
 		return nil
 	}
 	integer(int64(asset.LoopCount))
+	integer(0)
+	if asset.Video != nil {
+		integer(1)
+		if err := image(asset.Video.MIME, asset.Video.Width, asset.Video.Height, asset.Video.Data, nil); err != nil {
+			return [32]byte{}, err
+		}
+		integer(asset.Video.DurationMS)
+	}
 	if err := image(asset.MIME, asset.Width, asset.Height, asset.Data, asset.Frames); err != nil {
 		return [32]byte{}, err
 	}

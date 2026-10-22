@@ -16,7 +16,7 @@ func participantRenderKey(key string) bool {
 		return true
 	}
 	switch key {
-	case "modern-crop", "modern-mask", "image-fit", "alt-text", "image-decorative", "object-name", "layer", "qr":
+	case "modern-crop", "modern-mask", "image-fit", "alt-text", "image-decorative", "object-name", "layer", "qr", "video-autoplay", "video-loop", "video-muted":
 		return true
 	}
 	for _, definition := range shapeDefinitions {

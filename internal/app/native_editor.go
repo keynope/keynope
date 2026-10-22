@@ -135,7 +135,7 @@ type nativeEditorState struct {
 // so a slow upload cannot land on another deck, slide, or master after navigation.
 func (s *nativeEditorSession) checkUploadDestinationLocked(action nativeEditorAction) error {
 	if action.uploadContext == nil {
-		return nil
+		return s.checkEmbeddedMediaCapacityLocked(action)
 	}
 	if err := action.uploadContext.Err(); err != nil {
 		return err
@@ -146,12 +146,13 @@ func (s *nativeEditorSession) checkUploadDestinationLocked(action nativeEditorAc
 	}
 	if action.Action != "add-element" || action.SceneRevision == nil || *action.SceneRevision != s.version ||
 		action.SceneMaster != s.masterMode || action.Slide != index {
-		return fmt.Errorf("the image destination changed during import; select the destination and import again")
+		return fmt.Errorf("the media destination changed during import; select the destination and import again")
 	}
-	return nil
+	return s.checkEmbeddedMediaCapacityLocked(action)
 }
 
 type nativeEditorAction struct {
+	automationRevision    *int64               // Private MCP compare-and-swap stamp, never accepted from JSON.
 	PageSize              *DeckPageSize        `json:"pageSize,omitempty"`
 	objectInputOwned      bool                 // Request-local ownership, never accepted from JSON.
 	BuildGeneration       *int64               `json:"buildGeneration,omitempty"`
@@ -2196,6 +2197,12 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) (resultErr error)
 			}
 			element = *action.ElementData
 			element.ID = newStableID("connector")
+		case "video":
+			if action.ElementData == nil || action.ElementData.Kind != "video" || action.ElementData.AssetID == "" {
+				return errInvalidEditorAction
+			}
+			element = *action.ElementData
+			element.ID = newStableID("video")
 		case "image":
 			if action.ElementData != nil && action.ElementData.Kind == "image" && action.ElementData.Path != "" {
 				element = *action.ElementData
@@ -3030,6 +3037,12 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) (resultErr 
 			}
 			element = *action.ElementData
 			element.ID = newStableID("connector")
+		case "video":
+			if action.ElementData == nil || action.ElementData.Kind != "video" || action.ElementData.AssetID == "" {
+				return errInvalidEditorAction
+			}
+			element = *action.ElementData
+			element.ID = newStableID("video")
 		case "image":
 			if action.ElementData != nil && action.ElementData.Kind == "image" && action.ElementData.Path != "" {
 				element = *action.ElementData

@@ -38,6 +38,11 @@ func boundedPlacementCoordinate(key string, value float64) bool {
 // Validate before normalizers can drop malformed input or turn unsafe values
 // into a limit/default. Compatible future keys remain opaque.
 func validatePlacementNumber(key, value string) error {
+	for _, control := range effectControls {
+		if control.key == key && !validEffectValue(control, value) {
+			return fmt.Errorf("invalid object effect field %q", key)
+		}
+	}
 	if strings.HasPrefix(key, "label-") && labelStyleKey(strings.TrimPrefix(key, "label-")) {
 		key = strings.TrimPrefix(key, "label-")
 	}

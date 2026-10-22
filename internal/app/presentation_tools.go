@@ -99,6 +99,7 @@ func validatePresentationOverlay(o *PresentationOverlay) error {
 	return nil
 }
 func (p *presenterCompanion) syncPresentationOverlayLocked() {
+	defer p.syncVideoPlaybackLocked()
 	c := p.state.BuildCursor
 	if c == nil {
 		p.state.Overlay = nil
