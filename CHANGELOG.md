@@ -4,6 +4,13 @@ All notable changes to `keynope` are documented in this file.
 
 This project follows semantic versioning.
 
+## 1.8.7
+
+Fixed:
+
+- Editing and saving text with fractional line spacing, paragraph spacing, font sizes or widths no longer fails validation. Existing values are preserved without rounding.
+- Activity QR codes render as centred, square graphics that stay scannable regardless of the slide or interface font.
+
 ## 1.8.6
 
 Added:

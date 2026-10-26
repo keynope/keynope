@@ -3578,7 +3578,7 @@ html[data-keynope-app="true"] button:active:not(:disabled) > span { translate: 0
 .keynope-engagement-toast { position: fixed; z-index: 570; left: 50%; top: 50%; transform: translate(-50%,-50%); padding: 12px 18px; border: 2px solid #78dc9a; color: #78dc9a; background: rgba(8,12,10,.96); box-shadow: 0 14px 48px rgba(0,0,0,.72); font: 800 16px ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing: .08em; pointer-events: none; animation: keynope-engagement-toast 1.5s ease forwards; }
 @keyframes keynope-engagement-toast { 0% { opacity:0; transform:translate(-50%,-44%) scale(.96); } 12%,72% { opacity:1; transform:translate(-50%,-50%) scale(1); } 100% { opacity:0; transform:translate(-50%,-56%) scale(1.02); } }
 .keynope-engagement-join .participants { margin-left: auto; color: #78dc9a; }
-.keynope-engagement-qr { margin: 0 auto; padding: 2px; color: #000; background: #fff; font: 8px/8px ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing: 0; white-space: pre; }
+.keynope-engagement-qr { display: block; width: 288px; max-width: 100%; height: auto; aspect-ratio: 1; margin: 0 auto; background: #fff; }
 .keynope-engagement-join-text { text-align:center; margin:24px auto; font:clamp(18px,3vw,36px)/1.6 KeynopeC64,monospace; overflow-wrap:anywhere; }
 .keynope-engagement-join-text a { color:#55aaff; }
 .keynope-engagement-countdown { color: #ffd166; text-align: center; font: 800 22px/1 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing: .08em; }
@@ -6040,6 +6040,28 @@ function renderEngagementRevealResults(content,runtime) {
   content.appendChild(results);
   KeynopeActivityDesign.results(results,runtime);
 }
+// The wire format remains the shared block matrix, including for old viewers.
+// Paint modules instead of glyphs: even monospace fonts can fall back to a
+// different advance for full blocks than for spaces, corrupting QR geometry.
+function activityQRCodeView(text) {
+  if(typeof text!=='string'||text.length>70000)return null;
+  const rows=text.split('\n'),size=rows.length;
+  if(size<3||size>185||rows.some(row=>row.length!==size*2||!/^(?:██|  )+$/.test(row)))return null;
+  // The block matrix has one quiet module; add three for a four-module border.
+  const quiet=3,extent=size+quiet*2,ns='http://www.w3.org/2000/svg';
+  const svg=document.createElementNS(ns,'svg');
+  svg.classList.add('keynope-engagement-qr');svg.setAttribute('viewBox','0 0 '+extent+' '+extent);
+  svg.setAttribute('role','img');svg.setAttribute('aria-label','Activity QR code');svg.setAttribute('shape-rendering','crispEdges');
+  const background=document.createElementNS(ns,'rect');background.setAttribute('width',extent);background.setAttribute('height',extent);background.setAttribute('fill','#ffffff');svg.append(background);
+  let pixels='';
+  for(let y=0;y<size;y++)for(let x=0;x<size;){
+    if(rows[y][x*2]!=='█'){x++;continue;}
+    const start=x;while(x<size&&rows[y][x*2]==='█')x++;
+    pixels+='M'+(start+quiet)+' '+(y+quiet)+'h'+(x-start)+'v1h-'+(x-start)+'z';
+  }
+  const modules=document.createElementNS(ns,'path');modules.setAttribute('d',pixels);modules.setAttribute('fill','#000000');svg.append(modules);
+  return svg;
+}
 function activityJoinText(runtime) {
   const area=document.createElement('div');area.className='keynope-engagement-join-text';
   const link=document.createElement('a');link.href='https://keynope.sh/join/';link.target='_blank';link.rel='noopener';link.textContent='https://keynope.sh/join/';
@@ -6138,11 +6160,7 @@ function renderEngagementRuntime(runtime = keynopeEngagementRuntime) {
   if (!revealed && (runtime.roomReady || ready) && hideQR) {
     content.appendChild(ready ? activityReadyText(runtime) : activityJoinText(runtime));
   } else if (!revealed && (runtime.roomReady || ready) && runtime.qrCode) {
-    const qr = document.createElement('pre');
-    qr.className = 'keynope-engagement-qr';
-    qr.setAttribute('aria-label','Activity QR code');
-    qr.textContent = runtime.qrCode;
-    content.appendChild(qr);
+    content.appendChild(activityQRCodeView(runtime.qrCode) || (ready ? activityReadyText(runtime) : activityJoinText(runtime)));
   }
 	const accepting = phase === 'OPEN' && !runtime.readOnly;
   if (revealed) {
@@ -11709,7 +11727,7 @@ if (keynopeAppSurface) {
     KeynopeFonts.enhance(font);
     font.value=q.get('modern-font')||'c64';font.addEventListener('keydown',event=>event.stopPropagation());font.onchange=()=>labelTypography({modernFont:font.value});content.append(font);
     const widthField=document.createElement('label');widthField.className='keynope-ttf-width-control';widthField.append('Shape text width');
-    const widthInput=document.createElement('input');widthInput.type='number';widthInput.className='keynope-ttf-width';widthInput.min=1;widthInput.max=200;widthInput.step=1;widthInput.value=modernLabel?canvasAuthoredTextMetric(label,'modern-width',Number((modernLabel.widthScale*100).toFixed(6))):KeynopeTrueType.widthPercent(label);widthInput.setAttribute('aria-label','Shape text width');
+    const widthInput=document.createElement('input');widthInput.type='number';widthInput.className='keynope-ttf-width';widthInput.min=1;widthInput.max=200;widthInput.step='any';widthInput.value=modernLabel?canvasAuthoredTextMetric(label,'modern-width',Number((modernLabel.widthScale*100).toFixed(6))):KeynopeTrueType.widthPercent(label);widthInput.setAttribute('aria-label','Shape text width');
     widthInput.title='Clear to restore inherited shape text width.';widthInput.addEventListener('keydown',event=>event.stopPropagation());widthInput.onchange=()=>{if(widthInput.checkValidity())labelTypography({textWidth:widthInput.value===''?'':Number(widthInput.value)});};widthField.append(widthInput);content.append(widthField);
     const labelBold=canvasTextIsBold(label,sceneLabel?.label);
     const emphasisTools=document.createElement('span');emphasisTools.style.cssText='display:flex;gap:6px;flex-basis:100%';content.append(emphasisTools);
@@ -13952,7 +13970,7 @@ if (keynopeAppSurface) {
         const sizeControl=document.createElement('span');sizeControl.className='keynope-text-metric-control';sizeControl.append(sizeLabel,sizeStack);metrics.append(sizeControl);
         const widthStack=document.createElement('span');widthStack.className='keynope-text-size-stack';
         const widthLabel=document.createElement('label');widthLabel.className='keynope-ttf-width-control';widthLabel.append('Font width');
-        const width=document.createElement('input');width.type='number';width.min='1';width.max='200';width.step='1';
+        const width=document.createElement('input');width.type='number';width.min='1';width.max='200';width.step='any';
         const authoredWidth=e=>{const q=new URLSearchParams(e.query||''),value=Number(q.get('modern-width')||100);return Number.isFinite(value)?value:100};
         width.value=String(modernText?authoredWidth(textElement):KeynopeTrueType.widthPercent(textElement));width.className='keynope-ttf-width';
         const widths=metricItems.filter(e=>canvasSupportsTextCapability(e,'width')).map(e=>canvasModernText(e)?authoredWidth(e):KeynopeTrueType.widthPercent(e));
@@ -15095,7 +15113,7 @@ if (keynopeAppSurface) {
     const defaults=deck.pages.find(page=>page.slide===index)||{};
     const sizeDefault=editorNumber(slideContextMenu,'Font size (TTF)',slide.ttfSize||'',{min:1,max:512,step:1},value=>{if(value!==''&&(!Number.isInteger(Number(value))||Number(value)<1||Number(value)>512))return;slide.ttfSize=Number(value)||0;updateSlide();});
     sizeDefault.placeholder=String(defaults.ttfSize||97);
-    const widthDefault=editorNumber(slideContextMenu,'Font width',slide.ttfWidth||'',{min:1,max:200,step:1},value=>{if(value!==''&&(!Number.isFinite(Number(value))||Number(value)<1||Number(value)>200))return;slide.ttfWidth=Number(value)||0;updateSlide();});
+    const widthDefault=editorNumber(slideContextMenu,'Font width',slide.ttfWidth||'',{min:1,max:200,step:'any'},value=>{if(value!==''&&(!Number.isFinite(Number(value))||Number(value)<1||Number(value)>200))return;slide.ttfWidth=Number(value)||0;updateSlide();});
     widthDefault.placeholder=String(defaults.ttfWidth||100);
     if (!editorState.masterMode) {
       const reset = document.createElement('button');

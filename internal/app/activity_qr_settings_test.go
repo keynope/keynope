@@ -79,6 +79,20 @@ func TestActivityQRSettingUnavailableWithoutActivities(t *testing.T) {
 	}
 }
 
+func TestActivityQRCodeBrowser(t *testing.T) {
+	if os.Getenv("KEYNOPE_ACTIVITY_QR_BROWSER") != "1" {
+		t.Skip("set KEYNOPE_ACTIVITY_QR_BROWSER=1 for activity QR rendering regression")
+	}
+	useTestAuthoredSize(t, 245, 56)
+	d := Deck{Appearance: &DeckAppearance{Version: 3}, Theme: builtinDeckTheme("clean-light"), Slides: []Slide{{
+		ID: "qr-slide", Engagement: &EngagementDefinition{ID: "qr-lobby", Kind: "onboarding", Prompt: "Join the lobby", Code: "Ab12Cd34"},
+		Elements: []Element{{Kind: "text", Text: "Join the workshop", Query: "modern-font=sans&render=truetype"}},
+	}}}
+	s := newNativeEditorSession("QR.md", d)
+	server := newGeometryBrowserServer(t, s)
+	runGeometryBrowser(t, "internal/app/testdata/activity_qr.cjs", server.URL)
+}
+
 func TestOnboardingQRPreferenceReachesPresentationPages(t *testing.T) {
 	masters := defaultMasterDeck()
 	masters.Layouts = append(masters.Layouts, defaultActivityMaster())

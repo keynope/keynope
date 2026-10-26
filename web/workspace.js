@@ -731,8 +731,8 @@ globalThis.KeynopeWorkspace = (() => {
       for(const [role,label]of [['heading','Heading'],['body','Body'],['mono','Code']]){
         const group=document.createElement('div');group.className='keynope-theme-font';const title=document.createElement('h3');title.textContent=label;group.append(title);
         const select=document.createElement('select');for(const [id,name] of [['c64','Keynope C64'],['sans','Go — proportional'],['mono','Go Mono — monospaced']])select.add(new Option(name,id));globalThis.KeynopeFonts?.enhance(select);select.value=themeDraft.fonts[role].fontId;select.setAttribute('aria-label',label+' theme font');select.onchange=()=>themeDraft.fonts[role].fontId=select.value;row('Font',select,group);
-        for(const [key,title,min,max,step]of [['size','Size',1,1024,1],['width','Width',1,200,1],['lineHeight','Line height',.5,4,.05]]){
-          const input=document.createElement('input');input.type='number';input.min=String(min);input.max=String(max);input.step=String(step);input.required=true;input.value=String(themeDraft.fonts[role][key]);input.setAttribute('aria-label',label+' theme '+title.toLowerCase());input.oninput=()=>{if(input.value!==''&&input.checkValidity())themeDraft.fonts[role][key]=Number(input.value);};row(title,input,group);
+        for(const [key,title,min,max]of [['size','Size',1,1024],['width','Width',1,200],['lineHeight','Line height',.5,4]]){
+          const input=document.createElement('input');input.type='number';input.min=String(min);input.max=String(max);input.step='any';input.required=true;input.value=String(themeDraft.fonts[role][key]);input.setAttribute('aria-label',label+' theme '+title.toLowerCase());input.oninput=()=>{if(input.value!==''&&input.checkValidity())themeDraft.fonts[role][key]=Number(input.value);};row(title,input,group);
         }
         fonts.append(group);
       }

@@ -223,7 +223,7 @@ globalThis.KeynopeActivityDesign = (() => {
   .keynope-engagement-controls button.primary{background:#8de5bb;border-color:#8de5bb;color:#10212a;font-weight:800}
   .keynope-engagement-join{border-radius:10px;background:#182632;padding:14px}
   .keynope-engagement-submitted{font-size:13px;color:#b1becb;border-top:1px solid #405261;padding-top:16px}
-  .keynope-engagement-qr{margin:0 auto 24px;box-shadow:0 0 0 8px white;max-width:100%}
+  .keynope-engagement-qr{margin:0 auto 24px;max-width:100%}
   @media(max-width:600px){.kn-activity-intro{padding:18px 14px;gap:12px;margin-bottom:20px}.kn-activity-intro>svg{width:24px;height:24px;padding:7px;border-radius:8px}.kn-activity .kn-activity-intro h2{font-size:21px}.kn-activity .kn-activity-intro p{font-size:12px}.kn-activity :is(.choices,.keynope-engagement-pulse){grid-template-columns:repeat(2,minmax(0,1fr))}.kn-activity .sort-zones{grid-template-columns:repeat(2,minmax(0,1fr))}.kn-activity .sort-zone{padding:10px}.kn-activity .sort-item{font-size:12px}.kn-activity .result{flex-wrap:wrap}.keynope-engagement-board{padding:18px}.keynope-engagement-controls{bottom:-18px}.kn-activity-intro .kn-activity-eyebrow{font-size:10px}.kn-activity :is(.quiz-options,.match-grid)>label{min-height:48px;padding:12px}}
   .kn-portrait-gallery[data-gallery-view=grid] :is(.marquee,.keynope-engagement-marquee){overflow:visible}
   .kn-portrait-gallery[data-gallery-view=grid] :is(.marquee-track,.keynope-engagement-marquee-track){display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));width:100%;animation:none!important;transform:none!important;gap:16px}

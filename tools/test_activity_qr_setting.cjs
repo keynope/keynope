@@ -9,7 +9,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
   const css=source.split('\n').filter(line=>line.startsWith('.keynope-engagement-join-text')).join('\n');
   await page.addStyleTag({content:css});
   await page.evaluate(async data=>{const face=new FontFace('KeynopeC64','url(data:font/ttf;base64,'+data+')');document.fonts.add(face);await face.load();},fs.readFileSync('assets/keynope-c64.ttf.base64','utf8').trim());
-  const helperStart=source.indexOf('function activityJoinText(runtime) {'),helperEnd=source.indexOf('function renderEngagementRuntime(',helperStart);
+  const helperStart=source.indexOf('function activityQRCodeView(text) {'),helperEnd=source.indexOf('function renderEngagementRuntime(',helperStart);
   assert(helperStart>=0&&helperEnd>helperStart);
   await page.addScriptTag({content:source.slice(helperStart,helperEnd)});
   const start=source.indexOf("  const revealed = phase === 'REVEAL' || phase === 'DISCUSS';",helperEnd);
@@ -19,8 +19,8 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
   for(const readOnly of [false,true])for(const hidden of [false,true])for(const phase of ['OPEN','REVEAL']){
    await page.evaluate(({snippet,readOnly,hidden,phase})=>{
     root.replaceChildren();window.keynopeHideActivityQR=readOnly?!hidden:hidden;
-    const runtime={definition:{kind:'onboarding'},phase:phase==='OPEN'?1:3,roomReady:true,readOnly,hideActivityQR:hidden,sessionCode:'AbCd1234',joinUrl:'https://keynope.sh/join/AbCd1234',qrCode:'██ ▀▀'};
-    const run=new Function('runtime','phase','definition',`const keynopeHostedEngagementControllerSurface=false;function engagementButton(label){const b=document.createElement('button');b.textContent=label;return b;}function copyEngagementJoinURL(){};${snippet};root.append(content);if(join)root.append(join);`);
+    const runtime={definition:{kind:'onboarding'},phase:phase==='OPEN'?1:3,roomReady:true,readOnly,hideActivityQR:hidden,sessionCode:'AbCd1234',joinUrl:'https://keynope.sh/join/AbCd1234',qrCode:'      \n  ██  \n      '};
+    const run=new Function('runtime','phase','definition',`const keynopeHostedEngagementControllerSurface=false,appearanceMode='modern';function engagementButton(label){const b=document.createElement('button');b.textContent=label;return b;}function copyEngagementJoinURL(){};${snippet};root.append(content);if(join)root.append(join);`);
     run(runtime,phase,runtime.definition);
    },{snippet,readOnly,hidden,phase});
    const show=phase==='OPEN';

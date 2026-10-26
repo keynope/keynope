@@ -1550,13 +1550,15 @@ globalThis.KeynopeScene = (() => {
     for(const [value,title]of [['','Default for text type'],['sans','Go — proportional'],['mono','Go Mono — monospaced'],['c64','Keynope C64']]){const option=document.createElement('option');option.value=value;option.textContent=title;font.append(option);}
     globalThis.KeynopeFonts?.enhance(font);
     Object.assign(font.style,{font:'inherit',padding:'6px',marginBottom:'12px'});font.value=object.text.fontId||'';fontLabel.append(font);
-    const spacingLabel=document.createElement('label'),spacing=document.createElement('input');spacingLabel.textContent='Line spacing ';spacing.type='number';spacing.min='.5';spacing.max='4';spacing.step='.05';spacing.value=object.text.lineHeight||1.25;spacing.setAttribute('aria-label','Line spacing');spacing.title='Multiple of font size; default 1.25';Object.assign(spacing.style,{width:'80px',font:'inherit',padding:'6px'});spacingLabel.append(spacing);
+    // Imported and inherited metrics need not be multiples of a UI increment.
+    // Keep the supported ranges without invalidating an unchanged text draft.
+    const spacingLabel=document.createElement('label'),spacing=document.createElement('input');spacingLabel.textContent='Line spacing ';spacing.type='number';spacing.min='.5';spacing.max='4';spacing.step='any';spacing.value=object.text.lineHeight||1.25;spacing.setAttribute('aria-label','Line spacing');spacing.title='Multiple of font size; default 1.25';Object.assign(spacing.style,{width:'80px',font:'inherit',padding:'6px'});spacingLabel.append(spacing);
     const sizeLabel=document.createElement('label'),size=document.createElement('input');sizeLabel.textContent='Font size ';size.type='number';size.min='1';size.max='1024';size.step='any';size.required=true;size.value=object.text.size;size.setAttribute('aria-label','Font size');size.title='Scene pixels; changes font size, not its text box';Object.assign(size.style,{width:'90px',font:'inherit',padding:'6px'});sizeLabel.append(size);
     const typography=document.createElement('div');Object.assign(typography.style,{display:'flex',alignItems:'baseline',flexWrap:'wrap',gap:'16px'});typography.append(fontLabel,sizeLabel,spacingLabel);
     const widthLabel=document.createElement('label'),width=document.createElement('input');widthLabel.textContent='Font width (%) ';width.type='number';width.min='1';width.max='200';width.step='any';width.required=true;width.value=Number(((object.text.widthScale||1)*100).toFixed(6));width.setAttribute('aria-label','Font width percent');Object.assign(width.style,{width:'90px',font:'inherit',padding:'6px'});widthLabel.append(width);typography.insertBefore(widthLabel,spacingLabel);
     const paragraphInputs=['before','after'].map(side=>{
       const label=document.createElement('label'),input=document.createElement('input');label.textContent='Paragraph '+side+' ';
-      input.type='number';input.min='0';input.max='4';input.step='.05';input.value=object.text[side==='before'?'paragraphBefore':'paragraphAfter']||0;
+      input.type='number';input.min='0';input.max='4';input.step='any';input.value=object.text[side==='before'?'paragraphBefore':'paragraphAfter']||0;
       input.setAttribute('aria-label','Paragraph '+side);input.title='Multiple of font size; applies to each paragraph or bullet, not wrapped lines';Object.assign(input.style,{width:'80px',font:'inherit',padding:'6px'});
       label.append(input);typography.append(label);return input;
     });
