@@ -266,7 +266,7 @@ func TestMCPHTTPGate(t *testing.T) {
 	a.editor.deck.Slides[0].Elements = []Element{{Kind: "text", Text: "PRIVATE OPEN DOCUMENT"}}
 	p := &presenterCompanion{url: "http://127.0.0.1:12456/?token=test", token: "private-token"}
 	mux := http.NewServeMux()
-	configureAutomationMCP(mux, t.TempDir(), p)
+	configureAutomationMCP(mux, t.TempDir(), p, nil)
 	t.Cleanup(p.automationCleanup)
 	var response []byte
 	method := http.MethodPost

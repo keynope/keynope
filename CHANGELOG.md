@@ -4,6 +4,16 @@ All notable changes to `keynope` are documented in this file.
 
 This project follows semantic versioning.
 
+## 1.8.8
+
+Added:
+
+- A stable localhost MCP endpoint on port 50987, with a configurable override in Automation settings. Port changes preserve the automation deck.
+
+Fixed:
+
+- Saving works reliably after reopening a presentation, including when opening the same file again.
+
 ## 1.8.7
 
 Fixed:

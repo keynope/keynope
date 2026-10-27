@@ -81,12 +81,15 @@ func newDeckAutomation(editor *nativeEditorSession, directory string, attached b
 // Local MCP clients need no credential. The listener is loopback-only, with
 // strict host/origin checks and no CORS. The private settings endpoint remains
 // protected so clients cannot enable themselves or change this app setting.
-func configureAutomationMCP(mux *http.ServeMux, directory string, p *presenterCompanion) {
+func configureAutomationMCP(mux *http.ServeMux, directory string, p *presenterCompanion, public *automationHTTPListener) {
 	var lock sync.Mutex
 	var automation *deckAutomation
 	p.automationCleanup = func() {
 		lock.Lock()
 		defer lock.Unlock()
+		if public != nil {
+			public.close()
+		}
 		if automation != nil {
 			automation.enabled.Store(false)
 			automation.mu.Lock()
@@ -102,29 +105,34 @@ func configureAutomationMCP(mux *http.ServeMux, directory string, p *presenterCo
 		}
 		return automation.server
 	}, &mcp.StreamableHTTPOptions{Stateless: true, MaxRequestBodyBytes: 24 << 20})
-	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
-		lock.Lock()
-		a := automation
-		lock.Unlock()
+	gate := func(host string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			lock.Lock()
+			a := automation
+			lock.Unlock()
+			if a == nil || !a.enabled.Load() {
+				http.Error(w, "Enable Automation (MCP) in Keynope first", http.StatusForbidden)
+				return
+			}
+			if r.Host != host || r.Header.Get("Origin") != "" && r.Header.Get("Origin") != "http://"+host {
+				http.Error(w, "Forbidden origin or host", http.StatusForbidden)
+				return
+			}
+			handler.ServeHTTP(w, r)
+		})
+	}
+	if public == nil {
 		base := strings.Split(p.url, "?")[0]
-		host := strings.TrimSuffix(strings.TrimPrefix(base, "http://"), "/")
-		if a == nil || !a.enabled.Load() {
-			http.Error(w, "Enable Automation (MCP) in Keynope first", http.StatusForbidden)
-			return
-		}
-		if r.Host != host || r.Header.Get("Origin") != "" && r.Header.Get("Origin") != "http://"+host {
-			http.Error(w, "Forbidden origin or host", http.StatusForbidden)
-			return
-		}
-		handler.ServeHTTP(w, r)
-	})
+		mux.Handle("/mcp", gate(strings.TrimSuffix(strings.TrimPrefix(base, "http://"), "/")))
+	}
 	mux.HandleFunc("/api/editor/mcp", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost && r.Method != http.MethodGet {
 			http.Error(w, "GET or POST required", 405)
 			return
 		}
 		var request struct {
-			Enabled bool `json:"enabled"`
+			Enabled *bool `json:"enabled"`
+			Port    *int  `json:"port"`
 		}
 		if r.Method == http.MethodPost {
 			decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
@@ -136,10 +144,15 @@ func configureAutomationMCP(mux *http.ServeMux, directory string, p *presenterCo
 		}
 		lock.Lock()
 		defer lock.Unlock()
-		if r.Method == http.MethodGet {
-			request.Enabled = automation != nil && automation.enabled.Load()
+		enabled := automation != nil && automation.enabled.Load()
+		if request.Enabled != nil {
+			enabled = *request.Enabled
 		}
-		if request.Enabled && automation == nil {
+		if request.Port != nil && (public == nil || !validMCPPort(*request.Port)) {
+			http.Error(w, "MCP port must be a whole number between 1024 and 65535", http.StatusBadRequest)
+			return
+		}
+		if enabled && automation == nil {
 			deck, err := loadPresentationTemplate("blank")
 			if err != nil {
 				http.Error(w, err.Error(), 500)
@@ -151,14 +164,37 @@ func configureAutomationMCP(mux *http.ServeMux, directory string, p *presenterCo
 				return
 			}
 		}
+		if public != nil {
+			port := public.port
+			if request.Port != nil {
+				port = *request.Port
+			}
+			if enabled {
+				// Bind first. A conflict leaves both the old endpoint and the
+				// unsaved deck usable, without silently choosing a random port.
+				if err := public.listen(port, gate); err != nil {
+					http.Error(w, err.Error(), http.StatusConflict)
+					return
+				}
+			} else {
+				public.close()
+				public.port = port
+			}
+		}
 		if automation != nil {
-			automation.enabled.Store(request.Enabled)
+			automation.enabled.Store(enabled)
 		}
 		endpoint := strings.TrimSuffix(strings.Split(p.url, "?")[0], "/") + "/mcp"
+		if public != nil {
+			endpoint = public.url
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
-		response := map[string]any{"enabled": request.Enabled}
-		if request.Enabled {
+		response := map[string]any{"enabled": enabled}
+		if public != nil {
+			response["port"], response["defaultPort"] = public.port, defaultMCPPort
+		}
+		if enabled {
 			response["workspace"] = automation.directory
 			response["configuration"] = map[string]any{"mcpServers": map[string]any{"keynope": map[string]any{"type": "http", "url": endpoint}}}
 		}
@@ -172,11 +208,15 @@ func configureAutomationMCP(mux *http.ServeMux, directory string, p *presenterCo
 func runMCPHTTP(args []string) error {
 	flags := flag.NewFlagSet("Keynope MCP service", flag.ContinueOnError)
 	workspace := flags.String("workspace", "", "Private automation directory")
+	port := flags.Int("port", defaultMCPPort, "Local MCP port (1024–65535)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if !filepath.IsAbs(*workspace) || flags.NArg() != 0 {
 		return errors.New("MCP service requires an absolute workspace directory")
+	}
+	if !validMCPPort(*port) {
+		return errors.New("MCP port must be a whole number between 1024 and 65535")
 	}
 	if err := os.MkdirAll(*workspace, 0700); err != nil {
 		return err
@@ -193,7 +233,7 @@ func runMCPHTTP(args []string) error {
 	}
 	p := &presenterCompanion{url: "http://" + listener.Addr().String() + "/", token: hex.EncodeToString(secret[:])}
 	mux := http.NewServeMux()
-	configureAutomationMCP(mux, *workspace, p)
+	configureAutomationMCP(mux, *workspace, p, &automationHTTPListener{port: *port})
 	defer p.automationCleanup()
 	server := &http.Server{Handler: p.authorized(mux), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	go func() {

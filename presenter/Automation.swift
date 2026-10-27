@@ -7,6 +7,8 @@ import PDFKit
 @MainActor
 final class AutomationService {
     static let enabledKey = "keynope.mcp.enabled"
+    static let portKey = "keynope.mcp.port"
+    static let defaultPort = 50987
     private var process: Process?
     private var input: Pipe?
     private var managementURL: URL?
@@ -16,6 +18,11 @@ final class AutomationService {
     private let preferences: UserDefaults
     private(set) var settings: [String: Any] = ["enabled": false]
     var enabled: Bool { process?.isRunning == true && settings["enabled"] as? Bool == true }
+    var portOverride: Int? {
+        let value = preferences.integer(forKey: Self.portKey)
+        return (1024...65535).contains(value) ? value : nil
+    }
+    var port: Int { portOverride ?? Self.defaultPort }
 
     init(workspaceDirectory: URL? = nil, preferences: UserDefaults = .standard) {
         self.workspaceDirectory = workspaceDirectory
@@ -30,7 +37,7 @@ final class AutomationService {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let child = Process(), output = Pipe(), parentInput = Pipe()
         child.executableURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/keynope-engine")
-        child.arguments = ["--mcp-http", "--workspace", directory.path]
+        child.arguments = ["--mcp-http", "--workspace", directory.path, "--port", String(port)]
         var environment = ProcessInfo.processInfo.environment
         environment.removeValue(forKey: "KEYNOPE_SANDBOX_BOOKMARK")
         child.environment = environment
@@ -81,9 +88,28 @@ final class AutomationService {
             try Task.checkCancellation()
             if value { try await self.start() }
             try Task.checkCancellation()
-            if self.managementURL != nil { try await self.request(enabled: value) }
-            else { self.settings = ["enabled": false] }
+            if self.managementURL != nil { try await self.request(enabled: value, port: self.port) }
+            else { self.settings = ["enabled": false, "port": self.port] }
             self.preferences.set(value, forKey: Self.enabledKey)
+        }
+        operation = task
+        try await task.value
+    }
+
+    func setPortOverride(_ value: Int?) async throws {
+        if let value, !(1024...65535).contains(value) {
+            throw NSError(domain: "sh.keynope.mcp", code: 3, userInfo: [NSLocalizedDescriptionKey: "Enter a whole-number port between 1024 and 65535, or leave it blank for the default."])
+        }
+        let previous = operation
+        let task = Task { @MainActor in
+            if let previous { _ = try? await previous.value }
+            try Task.checkCancellation()
+            // The private management socket stays put. Rebind only the MCP
+            // socket, preserving the automation deck and the current editor.
+            if self.process?.isRunning == true { try await self.request(port: value ?? Self.defaultPort) }
+            else { self.stop() }
+            if let value { self.preferences.set(value, forKey: Self.portKey) }
+            else { self.preferences.removeObject(forKey: Self.portKey) }
         }
         operation = task
         try await task.value
@@ -92,18 +118,21 @@ final class AutomationService {
     func refresh() async throws {
         if let operation { _ = try? await operation.value }
         if process?.isRunning == true { try await request() }
-        else { settings = ["enabled": false] }
+        else { settings = ["enabled": false, "port": port] }
     }
 
-    private func request(enabled: Bool? = nil) async throws {
+    private func request(enabled: Bool? = nil, port: Int? = nil) async throws {
         guard let managementURL else { throw CocoaError(.fileReadUnknown) }
         var request = URLRequest(url: managementURL)
         request.timeoutInterval = 15
         request.setValue("keynope_session=" + managementToken, forHTTPHeaderField: "Cookie")
-        if let enabled {
+        if enabled != nil || port != nil {
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONSerialization.data(withJSONObject: ["enabled": enabled])
+            var body: [String: Any] = [:]
+            if let enabled { body["enabled"] = enabled }
+            if let port { body["port"] = port }
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieStorage = nil
@@ -138,7 +167,10 @@ final class AutomationService {
 
     func stop() {
         try? input?.fileHandleForWriting.close()
-        if process?.isRunning == true { process?.terminate() }
+        if let process, process.isRunning {
+            process.terminate()
+            process.waitUntilExit()
+        }
         input = nil
         process = nil
         managementURL = nil
@@ -153,12 +185,14 @@ final class AutomationSettingsController: NSWindowController {
     private let toggle = NSButton(checkboxWithTitle: "Enable MCP access", target: nil, action: nil)
     private let status = NSTextField(wrappingLabelWithString: "")
     private let workspace = NSTextField(wrappingLabelWithString: "")
+    private let portField = NSTextField(string: "")
+    private let applyPort = NSButton(title: "Apply", target: nil, action: nil)
     private var copyButtons: [NSButton] = []
     private var busy = false
 
     init(service: AutomationService) {
         self.service = service
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 560, height: 440), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 560, height: 560), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         panel.title = "Automation (MCP)"
         panel.isReleasedWhenClosed = false
         super.init(window: panel)
@@ -172,6 +206,21 @@ final class AutomationSettingsController: NSWindowController {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 14
+        portField.placeholderString = String(AutomationService.defaultPort) + " (default)"
+        portField.setAccessibilityLabel("MCP port override")
+        portField.target = self
+        portField.action = #selector(changePort)
+        portField.widthAnchor.constraint(equalToConstant: 140).isActive = true
+        applyPort.target = self
+        applyPort.action = #selector(changePort)
+        applyPort.setAccessibilityLabel("Apply MCP port")
+        let portRow = NSStackView(views: [NSTextField(labelWithString: "Port override"), portField, applyPort])
+        portRow.spacing = 10
+        stack.addArrangedSubview(portRow)
+        let portHelp = NSTextField(wrappingLabelWithString: "Leave blank to use localhost port \(AutomationService.defaultPort). Applying a new port keeps your automation deck; reconnect clients using the updated connection details.")
+        portHelp.font = .systemFont(ofSize: 12)
+        portHelp.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(portHelp)
         for (index, name) in ["Copy Codex Command", "Copy Claude Command", "Copy MCP Configuration"].enumerated() {
             let button = NSButton(title: name, target: self, action: #selector(copyConnection(_:)))
             button.tag = index
@@ -194,6 +243,7 @@ final class AutomationSettingsController: NSWindowController {
             stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
             stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -24),
             description.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            portHelp.widthAnchor.constraint(equalTo: stack.widthAnchor),
             workspace.widthAnchor.constraint(equalTo: stack.widthAnchor),
             status.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
@@ -213,12 +263,16 @@ final class AutomationSettingsController: NSWindowController {
     private func update() {
         if !busy { toggle.state = service.enabled ? .on : .off }
         toggle.isEnabled = !busy
+        portField.isEnabled = !busy
+        applyPort.isEnabled = !busy
+        if !busy { portField.stringValue = service.portOverride.map(String.init) ?? "" }
         for button in copyButtons { button.isEnabled = service.enabled && !busy }
         workspace.stringValue = (service.settings["workspace"] as? String).map { "Automation workspace: " + $0 } ?? ""
         workspace.isHidden = workspace.stringValue.isEmpty
-        status.stringValue = busy ? "Updating…" : service.enabled ? "MCP is enabled on this Mac. Any local app can connect without a token. Keep Keynope running." : "MCP is disabled. Enable access to copy connection details."
+        status.textColor = .secondaryLabelColor
+        status.stringValue = busy ? "Updating…" : service.enabled ? "MCP is enabled at http://127.0.0.1:\(service.port)/mcp. Local apps can connect without a token. Keep Keynope running." : "MCP is disabled. Enable access to connect on port \(service.port) and copy connection details."
         // Accommodate wrapping and larger accessibility text without clipping.
-        window?.contentMinSize = NSSize(width: 560, height: 440)
+        window?.contentMinSize = NSSize(width: 560, height: 540)
     }
 
     @objc private func changeEnabled() {
@@ -240,6 +294,35 @@ final class AutomationSettingsController: NSWindowController {
             status.stringValue = format == .configuration ? "MCP configuration copied to clipboard." : "Command copied. Run it in your terminal to add Keynope."
         } catch { status.stringValue = error.localizedDescription }
     }
+
+    @objc private func changePort() {
+        let text = portField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value: Int?
+        if text.isEmpty { value = nil }
+        else if let parsed = Int(text), (1024...65535).contains(parsed) { value = parsed }
+        else {
+            status.stringValue = "Enter a whole-number port between 1024 and 65535, or leave it blank for the default."
+            status.textColor = .systemRed
+            portField.selectText(nil)
+            return
+        }
+        busy = true
+        update()
+        Task { @MainActor in
+            do {
+                try await service.setPortOverride(value)
+                busy = false
+                update()
+                status.stringValue = service.enabled ? "MCP now uses port \(service.port). Copy the updated connection details to reconnect your clients." : "Port saved. MCP will use port \(service.port) when enabled."
+            } catch {
+                busy = false
+                update()
+                portField.stringValue = text
+                status.stringValue = error.localizedDescription
+                status.textColor = .systemRed
+            }
+        }
+    }
 }
 
 #if KEYNOPE_NATIVE_ACCEPTANCE
@@ -258,6 +341,24 @@ enum AutomationSettingsAcceptance {
             do {
                 func check(_ condition: Bool, _ message: String) throws {
                     if !condition { throw NSError(domain: "Keynope MCP acceptance", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
+                }
+                func availablePort() throws -> Int {
+                    let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+                    guard descriptor >= 0 else { throw CocoaError(.fileReadUnknown) }
+                    defer { Darwin.close(descriptor) }
+                    var address = sockaddr_in()
+                    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+                    address.sin_family = sa_family_t(AF_INET)
+                    address.sin_addr.s_addr = inet_addr("127.0.0.1")
+                    let bound = withUnsafePointer(to: &address) { pointer in
+                        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+                    }
+                    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+                    let named = withUnsafeMutablePointer(to: &address) { pointer in
+                        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(descriptor, $0, &length) }
+                    }
+                    guard bound == 0, named == 0 else { throw CocoaError(.fileReadUnknown) }
+                    return Int(UInt16(bigEndian: address.sin_port))
                 }
                 @MainActor func connection() throws -> URL {
                     let data = Data(try service.copyText(.configuration).utf8)
@@ -283,9 +384,14 @@ enum AutomationSettingsAcceptance {
                 }
                 do { _ = try service.copyText(.configuration); throw CocoaError(.fileWriteUnknown) }
                 catch let error as NSError { try check(error.domain == "sh.keynope.mcp", "copying disabled settings must fail without enabling") }
+                try check(service.port == AutomationService.defaultPort && service.portOverride == nil, "default static port")
+                let configuredPort = try availablePort()
+                try await service.setPortOverride(configuredPort)
+                try check(!service.enabled && service.port == configuredPort && preferences.integer(forKey: AutomationService.portKey) == configuredPort, "override persists without enabling MCP")
                 try await service.setEnabled(true)
                 try check(service.enabled && preferences.bool(forKey: AutomationService.enabledKey), "enabled preference")
-                let url = try connection()
+                var url = try connection()
+                try check(url.port == configuredPort && url.host == "127.0.0.1", "configured loopback endpoint")
                 let codex = try service.copyText(.codex), claude = try service.copyText(.claude)
                 try check(codex == "codex mcp add keynope --url '" + url.absoluteString + "'", "token-free Codex command")
                 try check(claude == "claude mcp add --transport http keynope '" + url.absoluteString + "'", "token-free Claude command")
@@ -297,31 +403,49 @@ enum AutomationSettingsAcceptance {
                 let result = inspect.1["result"] as! [String: Any]
                 let deck = result["structuredContent"] as! [String: Any]
                 try check(deck["attached"] as? Bool == false && (deck["workspace"] as? String) == root.path && (deck["path"] as? String)?.hasPrefix(root.path + "/") == true, "isolated workspace, not editor document")
+                let changedPort = try availablePort()
+                try await service.setPortOverride(changedPort)
+                url = try connection()
+                try check(url.port == changedPort && service.port == changedPort, "live port override updates connection details")
+                let unchanged = try await rpc("tools/call", ["name": "deck_inspect", "arguments": [:]], url: url)
+                let sameDeck = unchanged.1["result"] as! [String: Any]
+                try check(NSDictionary(dictionary: deck).isEqual(to: sameDeck["structuredContent"] as! [String: Any]), "port change preserves the automation deck")
+                for invalid in [0, 1023, 65536] {
+                    do { try await service.setPortOverride(invalid); throw CocoaError(.fileWriteUnknown) }
+                    catch let error as NSError { try check(error.domain == "sh.keynope.mcp" && service.port == changedPort, "invalid port preserves preference and running service") }
+                }
                 let settings = AutomationSettingsController(service: service)
                 guard let view = settings.window?.contentView else { throw CocoaError(.fileReadCorruptFile) }
                 view.layoutSubtreeIfNeeded()
                 @MainActor func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap { descendants($0) } }
                 let buttons = descendants(view).compactMap { $0 as? NSButton }
-                for name in ["Enable MCP access", "Copy Codex Command", "Copy Claude Command", "Copy MCP Configuration"] {
+                for name in ["Enable MCP access", "Apply", "Copy Codex Command", "Copy Claude Command", "Copy MCP Configuration"] {
                     try check(buttons.contains { $0.title == name && $0.isEnabled }, "missing enabled settings control: " + name)
                 }
+                let portFields = descendants(view).compactMap { $0 as? NSTextField }.filter { $0.accessibilityLabel() == "MCP port override" }
+                try check(portFields.count == 1 && portFields[0].stringValue == String(changedPort), "settings display the persisted port override")
                 try check(!view.hasAmbiguousLayout && buttons.allSatisfy { view.bounds.contains(view.convert($0.bounds, from: $0)) }, "settings controls fit the panel")
                 if let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
                     view.cacheDisplay(in: view.bounds, to: image)
                     try image.representation(using: .png, properties: [:])?.write(to: root.appendingPathComponent("settings.png"))
                 }
                 try await service.setEnabled(false)
-                let denied = try await rpc("tools/list", [:], url: url)
-                try check(!service.enabled && denied.0 == 403, "disable revokes access")
+                let denied = try? await rpc("tools/list", [:], url: url)
+                try check(!service.enabled && denied?.0 != 200, "disable revokes access and releases port")
                 try await service.setEnabled(true)
                 try check(try connection() == url, "re-enable retains endpoint")
                 let resumed = try await rpc("tools/list", [:], url: url)
                 try check(resumed.0 == 200, "re-enabled MCP accepts local clients without authentication")
+                service.stop()
+                try await service.setEnabled(true)
+                try check(try connection() == url, "helper restart retains the configured static endpoint")
                 try await service.setEnabled(false)
+                try await service.setPortOverride(nil)
+                try check(service.port == AutomationService.defaultPort && preferences.object(forKey: AutomationService.portKey) == nil, "clearing override restores default without enabling MCP")
                 settings.close()
                 service.stop()
                 preferences.removePersistentDomain(forName: suite)
-                print("PASS: token-free signed sandbox MCP, isolated workspace, separate copy actions, stable reads, disable/re-enable, native panel layout. Evidence: " + root.path)
+                print("PASS: token-free signed sandbox MCP, isolated workspace, static port/override/persistence, live rebind, separate copy actions, disable/re-enable, native panel layout. Evidence: " + root.path)
                 exit(0)
             } catch {
                 service.stop()

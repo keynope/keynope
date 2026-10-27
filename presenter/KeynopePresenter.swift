@@ -1203,11 +1203,19 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     private func editorEndpoint(_ path: String) -> URL? {
-        var components = URLComponents(url: presenterURL, resolvingAgainstBaseURL: false)
-        let relative = URLComponents(string: path)
-        components?.path = relative?.path ?? path
-        components?.percentEncodedQuery = relative?.percentEncodedQuery
-        return components?.url
+        guard var components = URLComponents(url: presenterURL, resolvingAgainstBaseURL: false),
+              let relative = URLComponents(string: path) else { return nil }
+        // Each Open starts a new engine, even for the same file. WebKit and
+        // URLSession have separate cookie stores, and an old engine response
+        // can also replace the shared localhost cookie. Authenticate every
+        // native request with the current engine instead of relying on cookies.
+        let token = components.percentEncodedQueryItems?.first { $0.name.removingPercentEncoding == "token" }
+        var items = (relative.percentEncodedQueryItems ?? []).filter { $0.name.removingPercentEncoding != "token" }
+        if let token { items.append(token) }
+        components.path = relative.path
+        components.percentEncodedQueryItems = items.isEmpty ? nil : items
+        components.fragment = nil
+        return components.url
     }
 
     @objc private func saveDeck() {
