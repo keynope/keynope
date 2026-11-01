@@ -134,6 +134,8 @@ func wasmEditorHandler(path string) http.HandlerFunc {
 		return activeNativeEditor.handleTextStyleDraft
 	case "/api/editor/activity-qr":
 		return activeNativeEditor.handleActivityQR
+	case "/api/editor/qr-code":
+		return activeNativeEditor.handleQRCode
 	case "/api/editor/workspace":
 		return activeNativeEditor.handleWorkspace
 	case "/api/editor/upload":

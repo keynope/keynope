@@ -4,6 +4,22 @@ All notable changes to `keynope` are documented in this file.
 
 This project follows semantic versioning.
 
+## 1.8.9
+
+Added:
+
+- Built-in MCP authoring guidance and native tools for object discovery, text and table sizing, layout inspection, layered diagrams, pixel artwork and configurable fireworks animations.
+- QR Code creator in Insert, with live preview, colour and error-correction options, plus native MCP generation for portable vector QR codes.
+
+Changed:
+
+- More efficient AI-assisted editing with compact responses, generated object IDs and clear partial-batch progress.
+- Isolated, sandbox-inheriting MCP screenshot renderer with independent temporary WebKit storage.
+
+Fixed:
+
+- Moving objects directly to the front or back through editor commands no longer requires an unrelated target field.
+
 ## 1.8.8
 
 Added:

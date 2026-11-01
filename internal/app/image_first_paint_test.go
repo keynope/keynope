@@ -75,6 +75,7 @@ func newGeometryBrowserServer(t *testing.T, s *nativeEditorSession) *httptest.Se
 	mux.HandleFunc("/api/editor/scene", s.handleScene)
 	mux.HandleFunc("/api/editor/scene-fonts", s.handleSceneFonts)
 	mux.HandleFunc("/api/editor/activity-qr", s.handleActivityQR)
+	mux.HandleFunc("/api/editor/qr-code", s.handleQRCode)
 	mux.HandleFunc("/api/editor/typeface", s.handleTypeface)
 	mux.HandleFunc("/api/editor/font-export", s.handleFontExport)
 	mux.HandleFunc("/api/editor/document", s.handleDocument)

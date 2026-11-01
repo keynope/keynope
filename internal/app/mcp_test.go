@@ -85,7 +85,7 @@ func TestMCPProtocolAndCommands(t *testing.T) {
 		t.Fatalf("tools: %v %v", tools, err)
 	}
 	resources, err := client.ListResources(ctx, nil)
-	if err != nil || len(resources.Resources) != 3 {
+	if err != nil || len(resources.Resources) != 5 {
 		t.Fatalf("resources: %v %v", resources, err)
 	}
 	call := func(name string, args any) *mcp.CallToolResult {

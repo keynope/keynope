@@ -152,19 +152,21 @@ func (s *nativeEditorSession) checkUploadDestinationLocked(action nativeEditorAc
 }
 
 type nativeEditorAction struct {
-	automationRevision    *int64               // Private MCP compare-and-swap stamp, never accepted from JSON.
-	PageSize              *DeckPageSize        `json:"pageSize,omitempty"`
-	objectInputOwned      bool                 // Request-local ownership, never accepted from JSON.
-	BuildGeneration       *int64               `json:"buildGeneration,omitempty"`
-	BuildData             *SlideBuild          `json:"buildData,omitempty"`
-	uploadContext         context.Context      // Native upload preparation; never client-controlled.
-	commandContext        context.Context      // Request cancellation for off-lock document commands.
-	ChartData             *ChartData           `json:"chartData,omitempty"`
-	ChartOptions          *ChartOptions        `json:"chartOptions,omitempty"`
-	ChartSeriesIndex      *int                 `json:"chartSeriesIndex,omitempty"`
-	ChartSeriesColor      *string              `json:"chartSeriesColor,omitempty"`
-	ChartSeriesColorToken *string              `json:"chartSeriesColorToken,omitempty"`
-	TableData             *TableData           `json:"tableData,omitempty"`
+	automationRevision    *int64          // Private MCP compare-and-swap stamp, never accepted from JSON.
+	PageSize              *DeckPageSize   `json:"pageSize,omitempty"`
+	objectInputOwned      bool            // Request-local ownership, never accepted from JSON.
+	BuildGeneration       *int64          `json:"buildGeneration,omitempty"`
+	BuildData             *SlideBuild     `json:"buildData,omitempty"`
+	uploadContext         context.Context // Native upload preparation; never client-controlled.
+	commandContext        context.Context // Request cancellation for off-lock document commands.
+	ChartData             *ChartData      `json:"chartData,omitempty"`
+	ChartOptions          *ChartOptions   `json:"chartOptions,omitempty"`
+	ChartSeriesIndex      *int            `json:"chartSeriesIndex,omitempty"`
+	ChartSeriesColor      *string         `json:"chartSeriesColor,omitempty"`
+	ChartSeriesColorToken *string         `json:"chartSeriesColorToken,omitempty"`
+	TableData             *TableData      `json:"tableData,omitempty"`
+	QRCode                *QRCodeOptions  `json:"qrCode,omitempty"`
+	preparedQRCode        bool
 	StyleData             *ObjectStyleSnapshot `json:"styleData,omitempty"`
 	StyleContext          string               `json:"styleContext,omitempty"`
 	CellRange             *tableCellRange      `json:"cellRange,omitempty"`
@@ -1581,6 +1583,17 @@ func nativeEditorViewAction(action string) bool {
 }
 
 func (s *nativeEditorSession) apply(action nativeEditorAction) (resultErr error) {
+	if action.Action == "insert-qr-code" {
+		ctx := action.commandContext
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		var err error
+		action, err = prepareQRCodeAction(ctx, action)
+		if err != nil {
+			return editorFailure("invalid-qr-code", "qrCode", "", err)
+		}
+	}
 	if action.Action == "replace-typefaces" {
 		return s.replaceDocumentTypefaces(action)
 	}
@@ -1871,7 +1884,7 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) (resultErr error)
 			return errInvalidEditorAction
 		}
 		var err error
-		if action.Name != "" {
+		if action.Kind != "" {
 			changed, err = moveObjectStack(&s.deck.Slides[s.current], action.ObjectID, action.Kind, s.editingGroup, action.Name)
 		} else {
 			changed, err = moveObjectLayer(&s.deck.Slides[s.current], action.ObjectID, action.Value, s.editingGroup)
@@ -2241,6 +2254,9 @@ func (s *nativeEditorSession) apply(action nativeEditorAction) (resultErr error)
 		}
 		if element.Kind == "image" && action.ElementData != nil {
 			initializeInsertedImagePlacement(&s.deck.Slides[s.current], s.selected)
+			if action.preparedQRCode {
+				s.deck.placeInsertedQRCode(&s.deck.Slides[s.current], s.selected)
+			}
 		}
 		changed = true
 		s.selection = map[int]bool{s.selected: true}
@@ -2905,7 +2921,7 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) (resultErr 
 		}
 	case "move-object-layer":
 		var err error
-		if action.Name != "" {
+		if action.Kind != "" {
 			changed, err = moveObjectStack(target, action.ObjectID, action.Kind, s.editingGroup, action.Name)
 		} else {
 			changed, err = moveObjectLayer(target, action.ObjectID, action.Value, s.editingGroup)
@@ -3081,6 +3097,9 @@ func (s *nativeEditorSession) applyMaster(action nativeEditorAction) (resultErr 
 		}
 		if element.Kind == "image" && action.ElementData != nil {
 			initializeInsertedImagePlacement(target, s.selected)
+			if action.preparedQRCode {
+				s.deck.placeInsertedQRCode(target, s.selected)
+			}
 		}
 		changed = true
 		s.selection = map[int]bool{s.selected: true}

@@ -9,13 +9,14 @@ const tempRoot=!process.env.KEYNOPE_MCP_ENGINE&&fs.existsSync(appTemp)?appTemp:o
 const output=process.env.KEYNOPE_MCP_EVIDENCE||fs.mkdtempSync(path.join(tempRoot,'keynope-mcp-deck-'));
 fs.mkdirSync(output,{recursive:true});
 fs.copyFileSync(path.join(repo,'assets/KeynopeAssets.xcassets/KeynopeApp.appiconset/icon_512x512.png'),path.join(output,'source.png'));
-const child=cp.spawn(engine,['--mcp','--workspace',output],{env:{...process.env,KEYNOPE_RENDERER:path.join(repo,'bin/Keynope.app/Contents/MacOS/Keynope')},stdio:['pipe','pipe','pipe']});
+const child=cp.spawn(engine,['--mcp','--workspace',output],{env:{...process.env,KEYNOPE_RENDERER:path.join(repo,'bin/Keynope.app/Contents/Helpers/keynope-renderer')},stdio:['pipe','pipe','pipe']});
 let sequence=0,buffer='',stderr='',version=1;const pending=new Map(),transcript=[];
 child.stdout.on('data',data=>{buffer+=data;for(;;){const newline=buffer.indexOf('\n');if(newline<0)break;const line=buffer.slice(0,newline);buffer=buffer.slice(newline+1);if(!line.trim())continue;let message;try{message=JSON.parse(line);}catch{throw Error('Non-protocol stdout: '+line)}const job=pending.get(message.id);if(job){pending.delete(message.id);clearTimeout(job.timeout);message.error?job.reject(Error(JSON.stringify(message.error))):job.resolve(message.result);}}});
 child.stderr.on('data',data=>stderr+=data);child.on('exit',(code,signal)=>{for(const job of pending.values()){clearTimeout(job.timeout);job.reject(Error('MCP engine exited '+(signal||code)+': '+stderr))}pending.clear();});
 function rpc(method,params={}){const id=++sequence;return new Promise((resolve,reject)=>{const timeout=setTimeout(()=>{pending.delete(id);reject(Error(method+' timed out: '+stderr));child.kill();},150000);pending.set(id,{resolve,reject,timeout});child.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');});}
 async function tool(name,args={}){const response=await rpc('tools/call',{name,arguments:args});const text=response.content?.filter(item=>item.type==='text').map(item=>item.text).join('\n');if(response.isError)throw Error(name+': '+text);const value=response.structuredContent||JSON.parse(text);if(Number.isInteger(value.version))version=value.version;transcript.push({tool:name,arguments:args,result:JSON.parse(JSON.stringify(value,(key,value)=>typeof value==='string'&&value.length>1000?'[large payload]':value))});return value;}
-const command=command=>tool('editor_command',{expected_version:version,command});
+// This older comprehensive fixture also exercises the full-state compatibility option.
+const command=command=>tool('editor_command',{expected_version:version,command,response:'full'});
 const query=values=>new URLSearchParams(Object.entries(values).map(([k,v])=>[k,String(v)])).toString();
 const inspect=slide=>tool('slide_inspect',{slide});
 async function text(content,left,top,width=216,height=7,size=64,color='#e6edf8',font='sans'){
@@ -31,7 +32,7 @@ async function screenshot(slide){return tool('slide_screenshot',{slide,path:'sli
 (async()=>{try{
  await rpc('initialize',{protocolVersion:'2025-06-18',clientInfo:{name:'Keynope authoring acceptance',version:'1'},capabilities:{}});child.stdin.write(JSON.stringify({jsonrpc:'2.0',method:'notifications/initialized'})+'\n');
  const listed=await rpc('tools/list');assert.ok(listed.tools.some(tool=>tool.name==='editor_command'));assert.ok(listed.tools.some(tool=>tool.name==='slide_screenshot'));
- const resources=await rpc('resources/list');assert.equal(resources.resources.length,3);await rpc('resources/read',{uri:'keynope://commands'});
+ const resources=await rpc('resources/list');assert.equal(resources.resources.length,5);await rpc('resources/read',{uri:'keynope://commands'});
  await tool('deck_inspect');for(const topic of ['action','element','properties','table','chart','activities','build','shapes','fonts'])await tool('deck_schema',{topic});
  const emoji=await tool('emoji_catalog',{query:'smile',limit:5});assert.ok(emoji.items.length);
  const fonts=await tool('fonts_installed',{limit:5});assert.ok(fonts.fonts.length);const imported=await tool('font_use_installed',{font:fonts.fonts[0].postScriptName,expected_version:version});assert.ok(imported.font_id);

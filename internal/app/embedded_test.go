@@ -22,7 +22,7 @@ func TestBundledResourcesMatchRepository(t *testing.T) {
 			t.Errorf("large archive must not be copied on access: %s", name)
 		}
 	}
-	for _, name := range []string{"LICENSE.txt", "app/Welcome.md", "assets/templates/previews.json", "assets/keynope-c64.ttf.base64", "web/workspace.js", "web/scene.js"} {
+	for _, name := range []string{"LICENSE.txt", "app/Welcome.md", "assets/templates/previews.json", "assets/keynope-c64.ttf.base64", "web/workspace.js", "web/scene.js", "skills/keynope-slides/SKILL.md", "skills/keynope-slides/reference.md"} {
 		if _, err := embeddedFiles.ReadFile(name); err != nil {
 			t.Fatalf("required bundled resource %s: %v", name, err)
 		}
@@ -31,7 +31,7 @@ func TestBundledResourcesMatchRepository(t *testing.T) {
 		if err != nil || entry.IsDir() {
 			return err
 		}
-		if name != "LICENSE.txt" && name != "app/Welcome.md" && !strings.HasPrefix(name, "assets/") && !strings.HasPrefix(name, "web/") {
+		if name != "LICENSE.txt" && name != "app/Welcome.md" && name != "skills/keynope-slides/SKILL.md" && name != "skills/keynope-slides/reference.md" && !strings.HasPrefix(name, "assets/") && !strings.HasPrefix(name, "web/") {
 			t.Errorf("unexpected bundled resource: %s", name)
 		}
 		actual, err := embeddedFiles.ReadFile(name)

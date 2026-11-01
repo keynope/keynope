@@ -75,6 +75,7 @@ jobs:
         run: |
           test "$(lipo -archs bin/Keynope.app/Contents/MacOS/Keynope)" = "${{ matrix.arch }}"
           test "$(lipo -archs bin/Keynope.app/Contents/Helpers/keynope-engine)" = "${{ matrix.arch }}"
+          test "$(lipo -archs bin/Keynope.app/Contents/Helpers/keynope-renderer)" = "${{ matrix.arch }}"
           test "$(plutil -extract CFBundleIdentifier raw -o - bin/Keynope.app/Contents/Info.plist)" = "sh.keynope.app"
           test "$(plutil -extract CFBundleShortVersionString raw -o - bin/Keynope.app/Contents/Info.plist)" = "$APP_VERSION"
           test "$(plutil -extract ITSAppUsesNonExemptEncryption raw -o - bin/Keynope.app/Contents/Info.plist)" = "false"
@@ -135,9 +136,14 @@ jobs:
             staging/arm64/Keynope.app/Contents/Helpers/keynope-engine \
             staging/x86_64/Keynope.app/Contents/Helpers/keynope-engine \
             -output dist/Keynope.app/Contents/Helpers/keynope-engine
+          lipo -create \
+            staging/arm64/Keynope.app/Contents/Helpers/keynope-renderer \
+            staging/x86_64/Keynope.app/Contents/Helpers/keynope-renderer \
+            -output dist/Keynope.app/Contents/Helpers/keynope-renderer
 
           lipo dist/Keynope.app/Contents/MacOS/Keynope -verify_arch arm64 x86_64
           lipo dist/Keynope.app/Contents/Helpers/keynope-engine -verify_arch arm64 x86_64
+          lipo dist/Keynope.app/Contents/Helpers/keynope-renderer -verify_arch arm64 x86_64
 
       - name: Import App Store Signing Material
         shell: bash
@@ -220,6 +226,14 @@ jobs:
       - name: Sign Universal App
         shell: bash
         run: |
+          codesign \
+            --force --options runtime --timestamp \
+            --keychain "$APP_STORE_KEYCHAIN" \
+            --identifier sh.keynope.app.renderer \
+            --entitlements app/KeynopeEngine.entitlements \
+            --sign "$APP_SIGNING_IDENTITY" \
+            dist/Keynope.app/Contents/Helpers/keynope-renderer
+
           codesign \
             --force \
             --options runtime \

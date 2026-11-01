@@ -4,7 +4,9 @@ package app
 // embed the same implementation; exported slides do not mount a workspace.
 var workspaceJS = embeddedString("web/workspace.js")
 
-var workspaceCSS = embeddedString("web/workspace.css")
+var workspaceCSS = embeddedString("web/workspace.css") + embeddedString("web/qr-code.css")
+
+var qrCodeJS = embeddedString("web/qr-code.js")
 
 var interfaceCSS = embeddedString("web/interface.css")
 

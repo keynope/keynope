@@ -1,8 +1,8 @@
 # keynope-slides
 
-An agent skill for building and editing Keynope decks through Keynope's MCP server. It gives the agent tested command JSON, query keys, effect and font names, layout workarounds and a low-token workflow, so it doesn't spend hundreds of thousands of tokens on `deck_schema`, `slide_inspect` and trial and error. It doesn't change Keynope itself.
+Authoring guidance for building and editing Keynope decks through its MCP server, based on Josh Gonggryp's contribution. Since 1.8.9, this guidance is embedded in the app: connected agents can call `deck_authoring_guide` or read `keynope://authoring/skill` without installing this folder. Native tools replace the original Python helpers and return compact edit receipts.
 
-It's written for [Claude Code](https://claude.com/claude-code). `SKILL.md` follows the common skill format, so other clients that read skills may work too, but they aren't tested.
+`SKILL.md` can also be installed independently in clients that support skills. The native MCP tools are client-independent.
 
 ## Contents
 
@@ -10,14 +10,6 @@ It's written for [Claude Code](https://claude.com/claude-code). `SKILL.md` follo
 |---|---|---|
 | `SKILL.md` | The instructions the agent loads | |
 | `reference.md` | Less common recipes and details, read only when `SKILL.md` points there | |
-| `scripts/list_ids.py` | Element IDs, positions and table data per slide from a saved deck | Python 3 |
-| `scripts/set_layout.py` | Sets slide layouts in a saved deck, so master elements show (no MCP command does this) | Python 3 |
-| `scripts/fit.py` | Line counts and heights for text and table rows before placing them | Python 3 |
-| `scripts/scene_bounds.py` | Real rendered bounds per slide from an HTML export | Python 3 |
-| `scripts/ascii_layers.py` | Splits an ASCII diagram into aligned layers for builds | Python 3 |
-| `scripts/pixelart.py` | Turns a logo image into a coloured block-character text element | Pillow |
-| `scripts/fireworks_gif.py` | Renders a looping fireworks GIF overlay | Pillow |
-| `scripts/selftest.py` | Checks this skill against the installed Keynope | Python 3, Keynope |
 
 ## Install
 
@@ -27,7 +19,7 @@ Copy the folder into your personal skills, or into a deck project's `.claude/ski
 cp -R skills/keynope-slides ~/.claude/skills/
 ```
 
-## Connect Keynope (1.8.6 or later)
+## Connect Keynope
 
 In Keynope, open **Automation (MCP)**, tick **Enable MCP access** and click **Copy Claude Command**. Run what it copies; with the default port on 1.8.8 that's:
 
@@ -60,21 +52,18 @@ Claude Code asks before it uses each new Keynope tool. It also can't copy finish
 
 If the Automation (MCP) window shows a different folder, use that one.
 
-## Check it against your Keynope
+## Native tools
 
-```sh
-python3 scripts/selftest.py --url http://127.0.0.1:50987/mcp   # through Keynope's in-app server
-python3 scripts/selftest.py                                     # through a headless server it starts itself
-```
+Use `deck_objects` for discovery, `text_measure` and `table_measure` for sizing,
+`slide_measure` for layout checks, `diagram_layers` for aligned artwork,
+`image_pixelart` for block-text conversion, `animation_create` for fireworks,
+and `qr_code_create` for embedded vector QR codes. Assign layouts with the
+native `set-layout` command. No Python, Pillow or external QR service is needed.
 
-The self-test builds a throwaway five-slide deck in the automation workspace and checks the commands, workarounds and scripts the skill relies on. It deletes its files afterwards (`--keep` leaves them) and never calls `slide_screenshot`.
-- With `--url`, Keynope must be open with **Enable MCP access** ticked. The test only runs while the in-app automation deck is a blank Untitled deck, and leaves it blank again. `--discard` lets it replace a deck you no longer need.
-- Run it with a Python that has Pillow to check the two image scripts as well.
-- Pass `--workspace` and `--keynope` if yours are elsewhere.
+Go regression tests cover these tools, compact receipts, stale-edit protection,
+history, embedding and MCP protocol behaviour. Browser acceptance tests live
+under `internal/app/testdata/` and exercise actual rendered results.
 
-Last run: Keynope 1.8.8 (Mac App Store build), macOS 15.7.7 on Apple silicon. All checks passed, both through the in-app server and through a headless one.
-
-## Known limits
-
-- Tested only with the Mac App Store build. There, `slide_screenshot` fails ("render slide: signal: trace/BPT trap") and macOS shows a crash dialog, so the skill previews the HTML export instead.
-- The command details come from Keynope's MCP behaviour, not from a documented API. When Keynope changes, run the self-test before relying on the skill.
+If `slide_screenshot` fails, preserve its diagnostic and review an HTML export;
+do not claim screenshots were verified. The app includes a separately signed,
+sandbox-inheriting renderer for native captures.

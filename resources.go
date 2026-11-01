@@ -17,10 +17,12 @@ import "embed"
 //go:embed assets/licenses/CRAFT-EFFECTS-LICENSE.txt
 //go:embed assets/licenses/MCP-SDK-LICENSE.txt assets/licenses/JSONSCHEMA-LICENSE.txt
 //go:embed assets/licenses/MCP-SUPPORT-LICENSE.txt
+//go:embed skills/keynope-slides/SKILL.md skills/keynope-slides/reference.md
 //go:embed assets/templates/*.md assets/templates/previews.json
 //go:embed web/activity-design.js web/activity-games.js web/builds.js web/charts.js web/conversion-report.js web/fonts.js
 //go:embed web/interface.css web/participant-transfer.js web/presentation-tools.js web/video.js web/print.js web/scene.js web/tables.js web/templates.js
 //go:embed web/text-layout.js web/text-styles.js web/truetype.js web/workspace.css web/workspace.js
+//go:embed web/qr-code.js web/qr-code.css
 var Resources embed.FS
 
 // Keep the large archives as direct byte embeds. Reading them through embed.FS

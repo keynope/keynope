@@ -137,6 +137,7 @@ jobs:
         run: |
           test "$(lipo -archs bin/Keynope.app/Contents/MacOS/Keynope)" = "${{ matrix.arch }}"
           test "$(lipo -archs bin/Keynope.app/Contents/Helpers/keynope-engine)" = "${{ matrix.arch }}"
+          test "$(lipo -archs bin/Keynope.app/Contents/Helpers/keynope-renderer)" = "${{ matrix.arch }}"
           test -s bin/Keynope.app/Contents/Resources/Assets.car
           test -s bin/Keynope.app/Contents/Resources/KeynopeApp.icns
 
@@ -272,6 +273,14 @@ jobs:
       - name: Sign Distribution
         shell: bash
         run: |
+          codesign \
+            --force --options runtime --timestamp \
+            --keychain "$RUNNER_TEMP/keynope-signing.keychain-db" \
+            --identifier sh.keynope.app.renderer \
+            --entitlements app/KeynopeEngine.entitlements \
+            --sign "$CODESIGN_IDENTITY" \
+            bin/Keynope.app/Contents/Helpers/keynope-renderer
+
           codesign \
             --force \
             --options runtime \

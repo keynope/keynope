@@ -547,8 +547,6 @@ enum AutomationRenderer {
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
         Task { @MainActor in
-            let renderer = SlideExportRenderer()
-            defer { renderer.close() }
             do {
                 var requestData = Data()
                 while let chunk = try FileHandle.standardInput.read(upToCount: 1_048_576), !chunk.isEmpty {
@@ -567,13 +565,22 @@ enum AutomationRenderer {
                 guard (320...2048).contains(request.width), request.page >= 0,
                       ["png", "pdf"].contains(request.format) else { throw CocoaError(.fileReadCorruptFile) }
                 guard request.html.utf8.count <= 128 * 1024 * 1024 else { throw CocoaError(.fileReadTooLarge) }
+                let renderer = SlideExportRenderer()
+                defer { renderer.close() }
                 let html = request.html
                 // Automation HTML is self-contained. Prevent network requests
                 // even if an authored resource somehow survived admission.
                 let rules = """
                 [{"trigger":{"url-filter":"^https?://"},"action":{"type":"block"}}]
                 """
-                let blocker = try await WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "keynope-automation-offline", encodedContentRuleList: rules)
+                // Each render owns its rule-store directory. Concurrent MCP
+                // clients must not contend over the app's persistent WebKit
+                // rule database (and font listing needs no WebKit at all).
+                let ruleDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("keynope-render-rules-" + UUID().uuidString, isDirectory: true)
+                try FileManager.default.createDirectory(at: ruleDirectory, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: ruleDirectory) }
+                guard let ruleStore = WKContentRuleListStore(url: ruleDirectory) else { throw CocoaError(.fileReadUnknown) }
+                let blocker = try await ruleStore.compileContentRuleList(forIdentifier: "keynope-automation-offline", encodedContentRuleList: rules)
                 if let blocker { renderer.view.configuration.userContentController.add(blocker) }
                 try await renderer.load(html)
                 let pages = try await renderer.pages()

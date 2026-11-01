@@ -18,7 +18,7 @@ import (
 
 // One discovery surface for every native command, rather than a competing
 // automation object model. Coverage is checked against native_editor.go in tests.
-const automationCommands = `select-slide select-element select-elements navigate-presentation previous-slide next-slide start-timer stop-timer add-slide clone-slide reorder-slide delete-slide add-element duplicate-element delete-element delete-selection delete-objects update-element update-elements paste-elements paste-objects convert-text-kind convert-selected-text-kind move-element update-slide set-layout add-layout update-layout delete-layout toggle-master-mode reorder-master rename-master toggle-page-number set-page-size set-theme set-deck-theme detach-deck-theme set-selection-property set-selection-geometry set-text-size set-text-width set-modern-text-style set-scene-text set-scene-crop set-shape-adjustment move-object-layer set-object-lock copy-object-style paste-object-style reset-object-style group-elements ungroup-elements enter-group exit-group promote-image-background restore-background-image insert-table set-table insert-chart set-chart-data set-chart-options set-chart-series-style set-slide-build navigate-build set-engagement remove-engagement set-engagement-result set-activity-qr set-tabs toggle-slide-tab reorder-slide-tab update-slide-notes register-typeface replace-typefaces undo redo`
+const automationCommands = `select-slide select-element select-elements navigate-presentation previous-slide next-slide start-timer stop-timer add-slide clone-slide reorder-slide delete-slide add-element duplicate-element delete-element delete-selection delete-objects update-element update-elements paste-elements paste-objects convert-text-kind convert-selected-text-kind move-element update-slide set-layout add-layout update-layout delete-layout toggle-master-mode reorder-master rename-master toggle-page-number set-page-size set-theme set-deck-theme detach-deck-theme set-selection-property set-selection-geometry set-text-size set-text-width set-modern-text-style set-scene-text set-scene-crop set-shape-adjustment move-object-layer set-object-lock copy-object-style paste-object-style reset-object-style group-elements ungroup-elements enter-group exit-group promote-image-background restore-background-image insert-qr-code insert-table set-table insert-chart set-chart-data set-chart-options set-chart-series-style set-slide-build navigate-build set-engagement remove-engagement set-engagement-result set-activity-qr set-tabs toggle-slide-tab reorder-slide-tab update-slide-notes register-typeface replace-typefaces undo redo`
 
 func (a *deckAutomation) schema(topic string) any {
 	types := map[string]reflect.Type{"action": reflect.TypeFor[nativeEditorAction](), "element": reflect.TypeFor[Element](), "slide": reflect.TypeFor[Slide](), "activity": reflect.TypeFor[EngagementDefinition](), "table": reflect.TypeFor[TableData](), "chart": reflect.TypeFor[ChartData](), "theme": reflect.TypeFor[DeckTheme](), "build": reflect.TypeFor[SlideBuild]()}
@@ -184,6 +184,12 @@ func (a *deckAutomation) command(ctx context.Context, raw json.RawMessage, versi
 	if !strings.Contains(" "+automationCommands+" ", " "+action.Action+" ") {
 		return fmt.Errorf("unsupported automation command %q; use deck_schema(commands)", action.Action)
 	}
+	if action.Action == "set-layout" && action.Kind == "" {
+		return errors.New(`set-layout requires kind=layout ID, for example {"action":"set-layout","kind":"blank"}; select the slide first`)
+	}
+	if action.Action == "move-object-layer" && action.ObjectID == "" {
+		return errors.New(`move-object-layer requires singular objectId and kind=front/back/forward/backward, for example {"action":"move-object-layer","objectId":"<id>","kind":"front"}`)
+	}
 	if err := a.checkImagePaths(action.ElementsData); err != nil {
 		return err
 	}
@@ -202,7 +208,7 @@ func (a *deckAutomation) command(ctx context.Context, raw json.RawMessage, versi
 			return err
 		}
 	}
-	state := a.editor.state()
+	state := a.commandContext()
 	if state.Version != version {
 		return errors.New("the deck changed; inspect before editing")
 	}
@@ -269,7 +275,7 @@ func (a *deckAutomation) command(ctx context.Context, raw json.RawMessage, versi
 	return a.editor.apply(action)
 }
 
-func (a *deckAutomation) call(ctx context.Context, name string, input automationArguments) (map[string]any, []byte, error) {
+func (a *deckAutomation) callCore(ctx context.Context, name string, input automationArguments) (map[string]any, []byte, error) {
 	switch name {
 	case "deck_inspect":
 		return a.inspect(), nil, nil
@@ -376,6 +382,9 @@ func (a *deckAutomation) call(ctx context.Context, name string, input automation
 		result, err := automationHTTP(ctx, handler, raw)
 		return map[string]any{"version": state.Version, "preview": result}, nil, err
 	case "deck_schema":
+		if input.Topic == "command" {
+			return a.commandSchema(input.CommandName), nil, nil
+		}
 		return map[string]any{"topic": input.Topic, "schema": a.schema(input.Topic)}, nil, nil
 	case "slide_inspect":
 		deck, _, version := a.snapshot()
@@ -473,16 +482,16 @@ func (a *deckAutomation) call(ctx context.Context, name string, input automation
 		version := *input.ExpectedVersion
 		for i, raw := range input.Commands {
 			if err := ctx.Err(); err != nil {
-				return nil, nil, err
+				return nil, nil, &automationPartialError{Err: err, Applied: i}
 			}
 			if err := a.command(ctx, raw, version); err != nil {
-				return nil, nil, fmt.Errorf("batch stopped after %d applied commands: %w", i, err)
+				return nil, nil, &automationPartialError{Err: fmt.Errorf("batch stopped after %d applied commands: %w", i, err), Applied: i}
 			}
 			a.editor.mu.RLock()
 			next := a.editor.version
 			a.editor.mu.RUnlock()
 			if next > version+1 {
-				return nil, nil, fmt.Errorf("batch stopped after %d commands: another editor changed the deck", i+1)
+				return nil, nil, &automationPartialError{Err: fmt.Errorf("batch stopped after %d commands: another editor changed the deck", i+1), Applied: i + 1}
 			}
 			version = next
 		}
@@ -490,7 +499,10 @@ func (a *deckAutomation) call(ctx context.Context, name string, input automation
 		if a.attached {
 			return nil, nil, errors.New("use File/New or File/Open in the Mac app to replace its native document; isolated MCP workspaces support this tool")
 		}
-		if a.editor.state().Dirty && !input.Discard {
+		a.editor.mu.RLock()
+		dirty := a.editor.dirtyLocked()
+		a.editor.mu.RUnlock()
+		if dirty && !input.Discard {
 			return nil, nil, errors.New("unsaved work: save first or explicitly set discard_unsaved")
 		}
 		var deck Deck
@@ -554,8 +566,16 @@ func (a *deckAutomation) call(ctx context.Context, name string, input automation
 		element := videoElement(id, path, asset, &a.editor.deck)
 		a.editor.mu.RUnlock()
 		version := *input.ExpectedVersion
-		state := a.editor.state()
+		state := a.commandContext()
 		if err = a.editor.apply(nativeEditorAction{Action: "add-element", Kind: "video", ElementData: &element, AssetData: &asset, SceneRevision: &version, automationRevision: &version, SceneMaster: state.MasterMode, Slide: state.Current, NotesSessionID: state.NotesSessionID, uploadContext: ctx}); err != nil {
+			return nil, nil, err
+		}
+	case "qr_code_create":
+		raw, err := json.Marshal(nativeEditorAction{Action: "insert-qr-code", QRCode: input.QRCode})
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := a.command(ctx, raw, *input.ExpectedVersion); err != nil {
 			return nil, nil, err
 		}
 	case "asset_import":
@@ -568,13 +588,13 @@ func (a *deckAutomation) call(ctx context.Context, name string, input automation
 			return nil, nil, err
 		}
 		version := *input.ExpectedVersion
-		state := a.editor.state()
+		state := a.commandContext()
 		element := Element{Kind: "image", AssetID: id, Path: path, Query: "image-style=modern"}
 		if err = a.editor.apply(nativeEditorAction{Action: "add-element", Kind: "image", ElementData: &element, AssetData: &asset, SceneRevision: &version, automationRevision: &version, SceneMaster: state.MasterMode, Slide: state.Current, NotesSessionID: state.NotesSessionID, uploadContext: ctx}); err != nil {
 			return nil, nil, err
 		}
 	case "font_export_confirm":
-		state := a.editor.state()
+		state := a.commandContext()
 		data, _ := json.Marshal(fontExportApproval{Owner: state.NotesSessionID, Version: *input.ExpectedVersion, Format: input.Format, Confirmed: input.Confirmed, Replacements: input.Replacements})
 		_, err := automationHTTP(ctx, a.editor.handleFontExport, data)
 		if err != nil {
@@ -602,11 +622,11 @@ func (a *deckAutomation) call(ctx context.Context, name string, input automation
 			return nil, nil, err
 		}
 		version := *input.ExpectedVersion
-		state := a.editor.state()
+		state := a.commandContext()
 		if err = a.editor.apply(nativeEditorAction{Action: "register-typeface", TypefaceData: &face, NotesSessionID: state.NotesSessionID, automationRevision: &version}); err != nil {
 			return nil, nil, err
 		}
-		result := a.inspect()
+		result := a.mutationResult(input)
 		result["font_id"] = face.ID()
 		return result, nil, nil
 	case "deck_save", "deck_export":
@@ -656,7 +676,7 @@ func (a *deckAutomation) call(ctx context.Context, name string, input automation
 				return nil, nil, errors.New("saved snapshot, but document changed while saving; inspect and save the latest revision")
 			}
 		}
-		result := a.inspect()
+		result := a.mutationResult(input)
 		result["output"] = saved
 		result["bytes"] = len(data)
 		result["conversion_report"] = report
@@ -664,8 +684,10 @@ func (a *deckAutomation) call(ctx context.Context, name string, input automation
 	default:
 		return nil, nil, errors.New("unknown tool")
 	}
-	result := a.inspect()
-	result["selection"] = a.editor.state().SelectionCapabilities
+	result := a.mutationResult(input)
+	if input.Response == "full" {
+		result["selection"] = a.editor.state().SelectionCapabilities
+	}
 	return result, nil, nil
 }
 

@@ -15,6 +15,7 @@ BIN_DIR := bin
 KEYNOPE_APP := $(BIN_DIR)/Keynope.app
 KEYNOPE_APP_EXECUTABLE := $(KEYNOPE_APP)/Contents/MacOS/Keynope
 KEYNOPE_APP_ENGINE := $(KEYNOPE_APP)/Contents/Helpers/keynope-engine
+KEYNOPE_APP_RENDERER := $(KEYNOPE_APP)/Contents/Helpers/keynope-renderer
 KEYNOPE_APP_INFO := app/Info.plist
 KEYNOPE_APP_ENTITLEMENTS := app/Keynope.entitlements
 KEYNOPE_APP_ENGINE_ENTITLEMENTS := app/KeynopeEngine.entitlements
@@ -35,6 +36,7 @@ GO_SRC += assets/keynope-c64.ttf.base64 $(wildcard assets/templates/*.md)
 GO_SRC += assets/fonts/GO-FONT-LICENSE.txt
 GO_SRC += $(wildcard assets/licenses/*.txt)
 GO_SRC += $(KEYNOPE_EMOJI_ASSETS)
+GO_SRC += skills/keynope-slides/SKILL.md skills/keynope-slides/reference.md
 TEMPLATE_PREVIEWS := assets/templates/previews.json
 GO_SRC += $(TEMPLATE_PREVIEWS)
 
@@ -75,6 +77,8 @@ $(KEYNOPE_APP)/Contents/_CodeSignature/CodeResources: $(PRESENTER_SRC) $(KEYNOPE
 	cp LICENSE.txt $(KEYNOPE_APP)/Contents/Resources/EmojiLicenses/Keynope-LICENSE.txt
 	$(GO) build -o $(KEYNOPE_APP_ENGINE) ./cmd/keynope
 	$(SWIFTC) $(SWIFTFLAGS) -target $(SWIFT_TARGET) -O $(PRESENTER_FRAMEWORKS) $(PRESENTER_SRC) -o $(KEYNOPE_APP_EXECUTABLE)
+	cp $(KEYNOPE_APP_EXECUTABLE) $(KEYNOPE_APP_RENDERER)
+	$(CODESIGN) --force --options runtime --identifier sh.keynope.app.renderer --entitlements $(KEYNOPE_APP_ENGINE_ENTITLEMENTS) --sign "$(CODESIGN_IDENTITY)" $(KEYNOPE_APP_RENDERER)
 	$(CODESIGN) --force --options runtime --identifier sh.keynope.app.engine --entitlements $(KEYNOPE_APP_ENGINE_ENTITLEMENTS) --sign "$(CODESIGN_IDENTITY)" $(KEYNOPE_APP_ENGINE)
 	$(CODESIGN) --force --options runtime --entitlements $(KEYNOPE_APP_ENTITLEMENTS) --sign "$(CODESIGN_IDENTITY)" $(KEYNOPE_APP)
 

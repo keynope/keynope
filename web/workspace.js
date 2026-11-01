@@ -675,7 +675,7 @@ globalThis.KeynopeWorkspace = (() => {
     const insertSection=(label,className)=>{const section=document.createElement('section');section.className='keynope-insert-section '+className;const heading=document.createElement('h3');heading.textContent=label;section.append(heading);panels.insert.append(section);return section;};
     const insertControls=[...panels.insert.children];
     const textSection=insertSection('Text','keynope-insert-text'),mediaSection=insertSection('Media & objects','keynope-insert-media'),defaults=insertSection('New text defaults','keynope-insert-defaults'),other=insertSection('Document','keynope-insert-document');
-    const labels={'Add title':'Title','Add subtitle':'Subtitle','Add text':'Text','Add bullet point':'Bullets','Add code':'Code','Add emoji':'Emoji','Add shape':'Shape','Connect shapes':'Connector','Import image':'Image','Import video':'Video','Add table':'Table','Add chart':'Chart'};
+    const labels={'Add title':'Title','Add subtitle':'Subtitle','Add text':'Text','Add bullet point':'Bullets','Add code':'Code','Add emoji':'Emoji','Add shape':'Shape','Connect shapes':'Connector','Import image':'Image','Import video':'Video','Add table':'Table','Add chart':'Chart','Add QR Code':'QR Code'};
     for(const node of insertControls){
       if(node.classList.contains('keynope-text-metric-control')){defaults.append(node);continue;}
       if(node.tagName==='BUTTON'&&labels[node.title]){

@@ -1,148 +1,208 @@
 ---
 name: keynope-slides
-description: Build, design or edit slide decks with Keynope's MCP server (deck_*, editor_*, asset_import tools). Load before the first Keynope tool call. Gives the exact command JSON, query keys, font widths, glyph coverage, effect/transition/build names, a low-token workflow, helper scripts and known gotchas, so you don't need deck_schema, slide_inspect or trial and error.
+description: Build, design and edit Keynope decks with its MCP server. Read before the first edit. Includes the native authoring workflow, compact receipts, text and table measurement, layouts, artwork tools and visual review.
 ---
 
-# Building slides with the Keynope MCP
+# Building slides with Keynope
 
-This skill covers how to drive Keynope's MCP server cheaply. Everything below was checked with Keynope 1.8.8 (Mac App Store build) against the saved Markdown and the HTML export; `scripts/selftest.py` re-checks it after a Keynope update. Script paths are relative to this skill's folder.
+Based on Josh Gonggryp's contributed skill (PR #16), now integrated with native
+MCP authoring tools. No helper scripts, Python or Pillow installation is needed.
 
-**Before you start**
-- **Workspace:** the server can only read and write its automation workspace (the folder shown in Keynope's Automation (MCP) window). Copy images in before `asset_import`; finished decks stay there unless you copy them out.
-- **Screenshots:** in the Mac App Store build (1.8.6–1.8.8), `slide_screenshot` fails with "render slide: signal: trace/BPT trap" and macOS shows a "Keynope quit unexpectedly" dialog. Preview the HTML export instead (section 9). If it works in your build, use it at a small width.
-- **The deck in the editor window is never shared** with the server; the server has its own automation deck.
-- **Tool names:** in Claude Code the tools are `mcp__keynope__<tool>` (e.g. `mcp__keynope__editor_batch`) when the server is registered as `keynope`. If your client loads them on demand, search for those full names; `deck_inspect` alone finds nothing.
-- **`expected_version` on every write:** every tool that changes or saves the deck (`editor_batch`, `editor_command`, `deck_save`, `deck_export`, `deck_open`, `deck_new`, `asset_import`, and the font and video imports) needs `expected_version`, the `version` from the last result (start with `deck_inspect`). Without it the call fails with `missing properties: ["expected_version"]`.
-- **Select the slide first:** commands that target objects by ID (`set-table`, `set-scene-text`, `set-selection-property`, `set-selection-geometry`, `set-slide-build`) only find objects on the current slide. Start each slide's part of a batch with `{"action":"select-slide","slide":N}`; otherwise the batch stops with "selected object no longer exists".
-- **Scripts:** every helper script except `selftest.py` (which runs the test) prints its usage when run without arguments. Run them; there's no need to read their source.
+## 1. Workflow
 
-## 1. Token budget (read first)
+1. Read `deck_inspect`. The automation deck is **separate from the user's open
+   document**. File access stays inside the configured automation workspace.
+2. Plan the story, slide order, palette and typography before editing. Use a
+   consistent hierarchy, generous margins, short headings and readable body
+   text. Use calm reading panels behind instructions on animated backgrounds.
+3. Create/open the deck, preserving unsaved work. `discard_unsaved:true` and
+   `overwrite:true` require user permission unless replacing your own scratch
+   work. To edit a copy, save to the new name before changing content.
+4. Batch up to **64 native commands**. Select the target slide before contextual
+   edits. Every write requires `expected_version` from the last returned result.
+   Do not calculate revisions: no-op commands need not increment them.
+5. Mutations return **compact receipts**: version, selection IDs, created,
+   changed and removed objects, affected slides. Use created IDs immediately.
+   `editor_batch` also returns `applied_count`; on failure earlier changes stay
+   applied and its error result includes the current revision and receipt.
+   Never blindly replay a partially successful batch.
+6. Use `deck_objects` for compact, paginated IDs and metadata, including masters
+   with `include_masters:true`, and table/chart payloads with `include_data:true`.
+   No save/parse/reopen cycle is needed. `response:"full"` on mutations restores
+   the older full-deck result if explicitly needed.
+7. Use `text_measure` and `table_measure` before positioning; `slide_measure`
+   reports actual scene bounds, layer order, off-slide objects, text overflow
+   and optional reading-panel containment. Overlap can be intentional.
+8. Inspect **actual rendered screenshots**, not just geometry. Use
+   `slide_screenshot` with width 800–1280. Review every slide in a final sweep.
+   If a renderer is unavailable, export HTML and inspect in a browser; report
+   the limitation rather than claiming a visual check.
+9. `deck_validate`, explicitly `deck_save`, and export the requested formats.
+   Stop only preview servers you started; never quit the user's Keynope.
 
-In one 34-slide rebuild, about 45 Keynope calls returned ~9k each (~400k tokens of results) before any screenshots. Budget **tool calls**, not commands.
+The guide is also available through `deck_authoring_guide` (topics workflow,
+typography, layouts, artwork, recipes, all), and MCP resources
+`keynope://authoring/skill` and `keynope://authoring/recipes`. Client prefixes vary;
+Claude Code may expose `mcp__keynope__editor_batch`, for example.
 
-| What | Cost | Do instead |
-|---|---|---|
-| **Every** editor_batch / editor_command / deck_save / deck_export / deck_open result | ~1.5k + ~220 chars per slide + the base master's elements verbatim. A run-coloured logo on the master adds ~2.5k to every result. 34 slides ≈ 9k per call | Max 64 commands per batch, as few calls as possible: aim for ~1 call per 2–4 slides of content plus one pass for runs/builds. Never `editor_command` for a single command when it can ride in a batch. |
-| Result with an object selected | +6–8k | End **every** batch with `{"action":"select-slide","slide":N}`. add-element, update-element, insert-table, select-elements leave a selection. |
-| `asset_import` | ~9k each (selection blob, unavoidable) | Import each image once; set its geometry in the next content batch. |
-| `deck_schema` topic `action` | ~30k | Never. Field names are below. `commands` (~1.5k) lists names only; `slide` (~2k) lists slideData fields. |
-| `slide_inspect` | 6–9k | `deck_save` + `list_ids.py` (section 2). |
-| A failed command | ~50 tokens (short error, batch stops, earlier commands stay applied) | Probing an unknown field is cheap; a probe that *succeeds* returns the full summary. |
-| Browser screenshots of the HTML export | ~1k each at 800×450 | One pass per 4–6 slides; read text from the page instead when you only need the words. |
-| Generating command JSON with a script and pasting it back | input + output | Hand-write plain text commands. Generate only pixel art, ASCII diagrams and large tables. |
-| Interactive probing of missing features (layouts, layer order) | 5–10 calls | Use the workarounds in section 3. |
+## 2. Commands and compact discovery
 
-**Plan briefly before the first write:** slide order, colours, roughly where each element goes, and which elements get runs and builds. Don't work out every coordinate in your head: check text that may wrap with `fit.py`, place everything, then measure with `scene_bounds.py` (section 9) and fix in one batch. Then: structure batch → content batches → one save + `list_ids.py` → one or two run/build/table batches → one preview sweep → fixes → finish.
+For one command's fields and example use
+`deck_schema {"topic":"command","command_name":"set-layout"}`. The full
+`topic:"action"` schema is intentionally available but large. Properties,
+shapes, fonts, templates, activities, tables, charts and builds have separate
+schema topics. Read only what the task needs.
 
-**Versions and resets:** start with `deck_inspect`; on "stale deck revision" inspect again. Every command bumps the version by 1, and a failed batch keeps the commands before the failure (the error says how many applied), so recompute `expected_version` (old + applied) instead of re-inspecting. A failed `asset_import` leaves the version unchanged. A server started by the client (stdio) begins at version 1 with an empty Untitled deck each time the client restarts it; the in-app server keeps its deck while Keynope stays open.
+Slides and element indices are **zero-based**. Native action geometry uses the
+authored grid (normally 245 columns × 56 rows). Measured scene bounds are also
+returned in physical pixels (normally 1920 × 1080). Do not mix these units.
 
-## 2. Workflow
+```json
+{"action":"select-slide","slide":2}
+{"action":"add-slide"}
+{"action":"clone-slide"}
+{"action":"reorder-slide","slide":3,"value":1}
+{"action":"update-slide-notes","slide":2,"notes":"Presenter notes"}
+```
 
-1. `deck_inspect`, then `deck_open` (`discard_unsaved: true` only for an Untitled scratch deck). To work on a copy, `deck_save` it to the new name first; the original file is never touched after that.
-2. Old element IDs: `deck_save`, then `python3 scripts/list_ids.py "<workspace>/deck.md" [slide ...]` (0-based slides; prints id, top/left, width, size, font, first 40 chars).
-3. **Structure batch:** add/reorder/delete slides, `update-slide` bg/fg/effect/background for every slide, master elements (section 3).
-4. **Content batches (2–4 slides each):** `delete-objects` the old elements, add texts with their plain text, then shapes, `insert-table` placeholders, `update-slide-notes`. Rebuilding a slide this way is usually cheaper and cleaner than patching element by element. Keep each slide's title text the **first element by top**: a frame or shape above it, even a full-slide border at row 1–2, becomes the slide's name in Keynope's slide list ("[shape:rounded]"). See Navigator titles (section 7).
-5. **One** `deck_save` + `list_ids.py` for all slides to get the new IDs.
-6. **Pass B batches:** `set-scene-text` runs (colour/bold/mono glyphs), `set-table` + geometry, `set-slide-build`, `asset_import` + geometry.
-7. Export, preview in one sweep (section 9), fix, then finish (section 8).
+`add-slide` inserts after the current slide and selects it; `clone-slide` copies
+the current slide. `delete-slide` deletes the **current** slide. `update-slide`
+also modifies the current slide, not an arbitrary supplied index:
 
-IDs can't be chosen in advance (`elementData.id`, `element-id=` are ignored). A single add returns its ID in `selection.targetIds[0]` but with the selection blob.
+```json
+{"action":"update-slide","slideData":{"bg":"#070a14","bgSet":true,"fg":"#ffffff","fgSet":true,"effect":"warp","effectSet":true,"background":"constellation","backgroundSet":true}}
+```
 
-## 3. Command cookbook (verified JSON)
+Appearance updates are replacement-style: preserve existing settings when
+changing just one. In particular, send both effect and background values.
 
-The full command list is in `reference.md`; the commands you need are below. There is **no** `duplicate-slide`.
+Add text, then use its **returned ID** for rich runs, styling and builds:
 
-**Slides**
-- `{"action":"add-slide"}`: blank slide after the current one, made current (layout "", so no master elements).
-- `{"action":"clone-slide"}`: copies the **current** slide (elements, runs, notes, bg, effect, layout) right after it and selects the copy. Cheapest way to make a slide that looks like an existing one (e.g. a closing slide from the title slide): clone, `reorder-slide`, then change texts by their new IDs.
-- `{"action":"reorder-slide","slide":30,"value":2}`: moves slide 30 to index 2.
-- `delete-slide` deletes the **current** slide (`slide` is ignored): `select-slide` first.
-- `{"action":"update-slide","slide":2,"slideData":{"bg":"#070a14","bgSet":true,"fg":"#ffffff","fgSet":true,"effect":"warp","effectSet":true,"background":"constellation","backgroundSet":true}}`. It ignores `elements` and `layoutId`, and it also ignores `slide`: it changes the **current** slide. Put `{"action":"select-slide","slide":N}` before every update-slide (two commands per slide, so 32 slides per batch). Without it, every update lands on the same slide. Sending `effect` without `background` **clears the background**: whenever you change either, send both, each with its `*Set` flag.
-- `{"action":"update-slide-notes","slide":3,"notes":"…"}` (plain text, `\n\n` for paragraphs, `""` clears).
+```json
+{"action":"add-element","kind":"text","elementData":{"kind":"text","text":"Hello","query":"render=truetype&modern-font=c64&modern-size=64&modern-width=120&fg=%23ffffff&top=12&left=18&width=210"}}
+{"action":"set-scene-text","objectId":"<returned-id>","textRuns":[{"text":"Hello ","color":"#55ffff"},{"text":"world","bold":true}]}
+{"action":"set-selection-property","objectIds":["<id>"],"property":"paint.glowRadius","propertyValue":12}
+{"action":"set-selection-geometry","objectIds":["<id>"],"geometry":{"x":12,"y":25.5,"width":221,"height":14},"geometryResize":true}
+```
 
-**Master and layouts**
-- `{"action":"toggle-master-mode"}`, then add-element / set-scene-text work on the base master, then toggle back. Master elements don't appear in `list_ids.py`; their IDs are in every result under `masters.base.slide.elements`.
-- Master elements render **only on slides whose layout is `blank`**. A new deck's first slide already has it; `add-slide` gives layout "". No MCP command sets a layout: `set-layout` rejects every field tried (`value` as a string or a number, `name`, `layout`, `layoutId`, `id`, `index`) and `update-slide` ignores `layoutId`. Workaround: `deck_save`, run `python3 scripts/set_layout.py "<workspace>/deck.md" blank --except 0 33` (sets or removes the `<!-- layout=blank -->` line of each slide), then `deck_open` the file again (undo history resets). Slides left without it don't show the master (useful for a title slide).
-- The master's text is echoed in every result, so keep it to what must repeat (e.g. one logo).
+For shape/code insertion, insert then update the selected element using its
+index from `deck_objects`. Do not assume index 0 after sorting. Query placement
+fields should be whole grid numbers; for fractional placement use
+`set-selection-geometry`. That preserves native offset metadata correctly.
 
-**Elements**
-- Text (`kind` at top level **and** in elementData): `{"action":"add-element","kind":"text","elementData":{"kind":"text","text":"Hello","query":"render=truetype&modern-font=c64&modern-width=160&ttf-size=40&fg=#ffffff&top=16&left=18&width=214"}}`
-- `kind:"heading"` ignores elementData and creates a default "# Title" at top 0. Don't use headings; use text.
-- Shape: add, then `update-element 0` (the new shape sits at top 0, index 0 sorted by top; only safe when nothing else is at top 0):
-  `{"action":"add-element","kind":"shape","name":"square"}`
-  `{"action":"update-element","element":0,"elementData":{"kind":"shape","text":"[shape:square]","query":"shape=square&top=25&left=15&width=214&height=13&fg=#202833&shape-stroke=#8b9ab5&shape-stroke-width=2"}}`
-- Code box: `{"action":"add-element","kind":"code"}` then `update-element 0` with `{"kind":"code","text":"…","query":"render=truetype&modern-font=mono&ttf-size=40&fg=#ffffff&top=27&left=19&width=206"}`. For full control of font and padding, prefer the boxed-text recipe in `reference.md`.
-- Delete: `{"action":"delete-objects","slide":1,"objectIds":["text-…","shape-…"]}`.
-- Replace text by ID (plain or styled): `{"action":"set-scene-text","objectId":"text-…","textRuns":[{"text":"run "},{"text":"npm test","color":"#55ffff"},{"text":" now","bold":true},{"text":" →","fontId":"mono"}]}`. The concatenation **replaces** the text; one plain run just changes the text. Runs can contain `\n`. Markdown and `[color=…]` markup in add-element text stay literal; runs can't be set at creation, and set-scene-text without `objectId` fails ("invalid editor action") instead of using the selection, so new elements need a save + `list_ids.py` before their runs.
-- Properties: `{"action":"set-selection-property","objectIds":["a","b","c"],"property":"paint.shadow","propertyValue":"none"}`. Many IDs per call work, but **all must be on the current slide** ("selected object no longer exists" otherwise). Verified keys: text.size, text.align (`"center"`), text.lineHeight, paint.color, paint.fill (`"none"` makes a shape hollow), paint.opacity, paint.strokeColor, paint.strokeWidth, paint.shadow (none/soft/solid), paint.shadowColor, paint.shadowX/Y, paint.gradientStart/End/Direction, paint.glowRadius, paint.glowColour, image.alpha (imports default to 96; set 100).
-- Geometry (grid units, fractions OK): `{"action":"set-selection-geometry","objectIds":["…"],"geometry":{"x":12,"y":25.5,"width":221,"height":28.5},"geometryResize":true}`. **One objectId per call.** All four fields are required; without `geometryResize` only x/y are used. For text, geometryResize sets the wrap width. The box must stay on the slide (x + width ≤ 245, y + height ≤ 56), else the batch stops with "keep the object box within the slide".
-- Copy elements to another slide (keeps runs): `{"action":"select-elements","objectIds":["text-…"]}` on the source slide, call the `selection_copy` tool (returns a compact bundle), then in a batch `select-slide` target and `{"action":"paste-objects","clipboard":<bundle>}`. Same position.
-- Layer order: new shapes **and imported images** go behind everything already on the slide; texts go on top. `move-object-layer` field names are unknown (objectIds+name/kind → invalid). So add texts first, then shapes; and add a filled frame **after** an image, or give it `paint.fill` `"none"`, or it hides the image. By the tie rule in section 7, a new shape or image left at y 0 comes first in array order and can take the slide's navigator title from a top-0 text: move it down (even y 0.9 is enough).
+## 3. Layouts and layering
 
-**Tables**
-- `{"action":"insert-table","cols":3,"rows":5}` lands at x24 y10; get its ID from `list_ids.py`. Then, after `select-slide` for that slide, `{"action":"set-table","objectId":"table-…","tableData":{…}}` (`reference.md`) and geometry with `geometryResize`.
-- Builds can only target whole tables. Row-by-row reveal: one 1-row table per row, stacked (header as its own table). Column reveal: side-by-side tables with identical row weights and the same total height.
+Layouts do have a native command. Its field is **kind**, containing the layout
+ID (not its display name):
 
-**Builds and transitions**
-- `select-slide` that slide **first** ("the slide changed; reopen Builds before applying"), then `{"action":"set-slide-build","slide":5,"buildData":{"version":1,"transition":{"effect":"cut"},"steps":[{"targetIds":["shape-…","text-…"],"effect":"wipe","direction":"right","durationMs":500},{"targetIds":["text-…"],"effect":"fade","direction":"up","durationMs":400,"advance":"after","delayMs":200}]}}`.
-- No `advance` = waits for a click; `"advance":"after"` + `delayMs` runs automatically (on the first step: right after the slide appears). Effects: appear, fade, wipe, zoom; directions left/right/up/down. Clear builds: `"steps":[]`.
+```json
+{"action":"select-slide","slide":2}
+{"action":"set-layout","kind":"blank"}
+```
 
-**Images**
-- Copy the file into the workspace, `select-slide`, then `asset_import {"path":"x.png"}`; the ID is in `selection.targetIds[0]`. The asset list shows a 384-px preview, but the full-resolution source is kept and the HTML export is sharp. SVGs are rasterised to 384×384, so import PNGs for photos and screenshots.
-- Then geometry with the image's aspect ratio (height rows = width cols × 7.84 / aspect / 19.29) and `image.alpha` 100.
-- Animated GIFs (limits, transparency, file size): see `reference.md`.
+Batch these pairs for multiple slides. This keeps undo history and unsaved state
+without editing saved Markdown or reopening the deck. Discover layout IDs
+with `deck_inspect`. `toggle-master-mode` switches to master editing; master 0
+is the base, and 1 onward are layouts. Switch back before selecting slides.
 
-## 4. Query keys (set everything at creation)
+Layer ordering takes singular **objectId**:
 
-- Text: `render=truetype`, `modern-font=c64|sans|mono`, `ttf-size=<px>`, `modern-width=<percent>`, `fg=#hex`, `top`, `left` (integers), `width` (wraps; cols), `align=center` (works with `width`; if a big title still isn't centred, set `text.align` afterwards), `modern-line-height=1.15`, `modern-opacity=0.8`.
-- `gradient-start=#…&gradient-end=#…&gradient-dir=horizontal|vertical|diagonal|radial` (works on c64 text).
-- `shadow=solid&shadow-color=#000000&shadow-x=2&shadow-y=1`: offsets are **grid cells** (x 2 = 15.7 px, y 1 = 19.3 px). Fine on 100 px titles; on 30–44 px body text it reads as doubled text, so keep shadows on titles only.
-- `fx-glow-radius=18&fx-glow-colour=%23hex` (`#` as `%23` in fx keys only).
-- Shape: `shape=square|rounded|pill|circle|triangle|diamond|hexagon|arrow-right|chevron|star|burst|cloud|database|document|callout|speech-bubble|brace|label|…`, `top,left,width,height`, `fg=#fill`, `shape-fill=none`, `shape-stroke=#hex`, `shape-stroke-width=2` (0 = none), `modern-opacity`, `shape-offset-y=-0.3`. Keep `top`/`left`/`width`/`height` in a query whole numbers: a fractional `top` is accepted, but then `deck_save` fails with `invalid numeric placement field "top"` until the element is fixed. For half rows use `shape-offset-y` or `set-selection-geometry` (fractions are fine there).
+```json
+{"action":"move-object-layer","objectId":"<id>","kind":"front"}
+{"action":"move-object-layer","objectId":"<id>","kind":"back"}
+{"action":"move-object-layer","objectId":"<id>","kind":"before","name":"<target-id>"}
+```
 
-## 5. Names
+Other directions: forward, backward, after. Group rules remain the same as in
+the editor. Use explicit ordering rather than relying on insertion order.
 
-- Slide `effect`: matrix, stars, plasma, glitch, digital-snow, radar, neural, circuit, data-storm, flame, warp, scanline, fireworks, explosion.
-  - How they look in the HTML player (all drawn on the character grid): calm enough behind body text: circuit, neural, warp, scanline, plasma, radar (a sweeping line), matrix (rain near the top). Noisy over text: data-storm (floating code snippets), digital-snow and glitch (rows of random characters). flame fills roughly the bottom half with tall flames, great on a title-only slide with the text kept above row ~26, unreadable behind text. fireworks and explosion are single-character sparks and barely show.
-  - Effects have **no settings** (frequency, size, speed, intensity): the player reads only the name and the slide index (as a random seed). fireworks is ~20 rockets per ~17 s loop with bursts ~14 cols wide. For more and bigger fireworks, overlay a GIF (`reference.md`).
-  - Effects and backgrounds draw under every element, so any semi-opaque card or panel hides them. On slides people read for minutes (instructions, exercises), even the calm effects distract: use the reading panel (`reference.md`).
-- Slide `background`: soft-plasma, aurora, topography, waves, mesh, constellation, ribbons, diagonal-flow, blueprint. Effects and backgrounds combine. `deck_validate` reports `background-counterpart` on animated backgrounds; it's informational.
-- Transitions: cut, fade, push, wipe, dip-black, dip-white, tv-switch.
-- Fonts: `c64` (KeynopeC64), `sans` (Go, KeynopeModern), `mono` (Go Mono, KeynopeModernMono).
+Keep the visible title first by top position where practical: navigator labels
+come from slide content. A shape before all text may otherwise become the
+navigator label. Avoid hidden duplicate headings unless truly necessary.
 
-## 6. Geometry, widths and type
+## 4. Typography
 
-- Canvas 1920×1080 = grid 245×56. **1 col = 7.84 px, 1 row = 19.29 px.** `ttf-size` = px.
-- Line box = size × lineHeight (text 1.25, code 1.3). Rows per line = size × lh / 19.29 (40 px → 2.6 rows, 32 px → 2.07, 28 px → 1.81).
-- **Width scaling:** the theme's `fonts.body.width` scales **every** text element (c64, sans **and mono**); keep theme widths at 100 and set `modern-width` per element.
-  - c64 char width = **0.333 × size** (width 100), **0.40 × size** (120), **0.533 × size** (160).
-  - mono/sans scale = width/100; mono char = 0.6 × size. Mono/sans runs inside a c64 element are squeezed by that element's scale (arrows → come out thin).
-- Chars per line = width_cols × 7.84 / char_px. `fit.py` does this with word wrap; budget one extra line for URLs. Usage: `printf '40|214|160|A title\n30|214|-100|A sans line\n' | python3 scripts/fit.py` (size|width in cols|modern-width, -100 for sans or mono|text) prints the lines and rows for each text.
-- c64 metrics: ascent 0.8, descent 0.2; with line height 1.25 the caps start 0.125 em below the top.
-- **C64 glyph coverage:** full printable ASCII. **Missing:** • · € → … ⋯ ✓ ’ “ ” é — – « » ■ □ ▸ ✗ × ². Put those in runs with `fontId:"mono"`, or use a separate sans element. Use straight quotes.
-- sans/mono have ▸ ✓ √ ■ □ ● → ← ↓ ▲ ▼ ░▒▓█ ▆ € and single/double box drawing (┌─┐│└┘├┤┬┴┼ ═║╔╗╚╝╠╣╦╩). Avoid ▶ (colour emoji), heavy and dashed box chars.
-- Go Mono █ is 0.6 × 1.156 em; **▆ (U+2586) is 0.6 × 0.765 em**: with `modern-line-height=0.76` rows touch exactly (block aspect 0.82 w/h at `modern-width=105`).
-- **Leading spaces are stripped per line.** Start each indented line with one NBSP (` `); the spaces after it can be regular spaces. Interior spaces are kept.
-- Bullets: one sans "•" element per bullet at the same top as its text. A single "•\n\n•" element only lines up if every text top is a whole number of line pitches apart, which integer tops rarely are.
+Use `modern-font=c64|sans|mono` or an imported font ID, `modern-size` in pixels,
+and `modern-width` as a percentage. `ttf-size` remains supported. A grid cell is
+1920/245 pixels horizontally and 1080/56 vertically on the default canvas;
+different page sizes change these ratios.
 
-## 7. Recipes
+Do not estimate proportional-font width from character counts. Example:
 
-**Navigator titles:** the slide title = the **first element by top** (ties follow array order). A shape first shows "[shape:square]"; a run-coloured element shows `[color=…]` markup. Keep a run-free text element alone at the smallest top. When the visible title has runs or sits below a frame, add a run-free copy in the background colour (size 20) at top 0.
+```json
+{"element":{"kind":"text","text":"A heading that might wrap","query":"render=truetype&modern-font=sans&modern-size=64"},"box_width":210,"box_height":8,"slide":0}
+```
 
-More recipes are in `reference.md`; read the one you need: boxed text with a tag (prompt/command boxes), the reading panel (calm text over an animated background), more or bigger fireworks (GIF overlay), pixel blocks/badges/cards, pixel-art logos, ASCII diagrams, tables (`tableData`), QR codes and screenshots of web pages.
+Call `text_measure`; it returns natural width, wrapped height, resolved font
+metrics and whether the proposed height fits. It uses the same native font
+metrics, mixed runs, Unicode line breaking and inherited style as the app.
+For mixed-font text pass `text_runs` with the same run objects used by
+`set-scene-text`; their concatenated text replaces the proposed element's text.
+`table_measure` accepts `table` or `object_id` plus `box_width`, and returns
+minimum row heights including padding and spanning cells. Apply these as row
+weights and use the returned total for the table's height.
 
-## 8. Finish
+Prefer `text-align` for text alignment inside its box; `align` positions the
+element. Gradient keys: gradient-start/end/dir. Shadows use grid-cell offsets,
+so keep large shadows off small body text. Query strings should be URL encoded.
+Gradient directions are `horizontal`, `vertical`, `diagonal`, `radial`,
+`reflected`, `diamond`, and `angle` (the UI calls the last one “Angular”).
+When changing an existing query, replace its key with `URLSearchParams.set`
+rather than appending a duplicate key; duplicate placement/style fields fail
+save validation.
 
-1. `deck_validate` (the background-counterpart notes are informational).
-2. `deck_save` to the final name (`overwrite:true` only for your own file or with the user's OK).
-3. `deck_export` HTML (numeric `expected_version`); copy the `.md` and `.html` out of the workspace if the user wants them elsewhere, and delete your own scratch files. If the client blocks the copy (Claude Code only touches files inside the project and folders added to it), don't try other commands: tell the user where the files are and that they can allow the workspace folder (`--add-dir`, or `permissions.additionalDirectories` in Claude Code's settings).
-4. Stop any preview server you started.
-5. Don't quit Keynope: the user may have decks open in the editor, and the in-app server stops with the app. A stdio server ends when the client disconnects.
+C64 supports printable ASCII but lacks many punctuation/Unicode symbols. Put
+arrows, accented characters, typographic quotes and bullets into appropriate
+sans/mono runs instead of assuming glyph coverage. Native measurement is more
+reliable than hard-coded width ratios. Use explicit line breaks deliberately.
+Check `text_measure.missing_glyphs`: even Go Mono lacks some symbols, notably
+`✓` and the partial block `▆`. Browser/system fallback may display these locally but is not guaranteed
+to look the same elsewhere. Use a font that contains the symbol, a Keynope
+emoji, or a portable ASCII alternative such as `[x]` for reliable output.
 
-## 9. Preview and measuring
+## 5. Artwork
 
-- `deck_export` HTML to the workspace and open it in a browser. If the browser can't open files in that folder, serve it: `python3 -m http.server 8765 --bind 127.0.0.1 --directory "<workspace>"`, then http://localhost:8765/preview.html.
-- With a browser tool: a 1280×720 viewport, then one batch per 4–6 slides: Right, wait, screenshot at half size.
-- In the player, Right first works through a slide's builds: one press per click step, and a press during an automatic build completes it. Presses per slide = 1 + click steps; wait 3–6 s on slides with automatic builds before the screenshot.
-- Real bounds without screenshots: `python3 scripts/scene_bounds.py "<workspace>/preview.html" [slide ...]` (0-based) prints every object's rows/cols, opacity, fill and stroke from the export's embedded scene JSON (`<script id="keynope-data">`, `pages[i].scene.objects[]`, bounds in px). `--panel 0.92` checks a reading panel: content bottom, gap, and anything behind it or outside it.
-- Effect internals, per-element text scale and glyph coverage checks: see `reference.md`.
+- `qr_code_create`: insert a sharp, embedded vector QR code. Pass
+  `qr_code:{"content":"https://example.com","correction":"M"}` and the current
+  `expected_version`. Optional `foreground`/`background` use `#RRGGBB`;
+  dark-on-light contrast and the four-module quiet border are enforced.
+  Correction is L/M/Q/H (M by default). It inserts a centred, physically square
+  image on the current slide or master and returns its ID. Move/resize it with
+  normal geometry commands, keeping its square aspect and quiet zone. No Segno,
+  Python, network generator or temporary SVG is needed. Scan the rendered QR
+  at its final display size. The equivalent editor command is
+  `{"action":"insert-qr-code","qrCode":{"content":"https://example.com"}}`.
+- `asset_import`: native image/GIF/SVG import; created image ID is in the receipt.
+  Set geometry and `image.alpha` as needed. Existing Retro conversion, cropping,
+  tinting and object effects remain accessible through selection properties.
+- `diagram_layers`: pass `text` and optional named layers with inclusive
+  row/column rectangles. It returns NBSP-preserving aligned text for separately
+  styled or animated layers. No temporary text files are needed.
+- `image_pixelart`: pass workspace `path`, `columns`, `mode` (alpha, dark,
+  nonwhite), optional `threshold` and `colour`. Returns a colour grid, a text
+  element and `text_runs`; add it and apply runs by the returned ID. Uses native
+  decoding and resampling. No Pillow required. Dark/nonwhite modes help with
+  logos on opaque backgrounds; alpha mode is for transparent artwork.
+  The contributor's `▆` text recipe uses a system fallback font; choose native
+  Retro image conversion with `glyph=blocks` for font-independent portability.
+- `animation_create`: generates a transparent fireworks GIF. Pass `path`,
+  `expected_version`, optional `animation` with width/height, seconds, delay_ms,
+  rockets, salvo_every, burst_min/max, colours, seed and avoid={x,y,width,height}
+  in grid cells. Import the generated GIF normally. A seed makes output
+  repeatable; native animation limits apply. Reduce motion can freeze playback.
+
+Slide effects: matrix, stars, plasma, glitch, digital-snow, radar, neural,
+circuit, data-storm, flame, warp, scanline, fireworks, explosion. Backgrounds:
+soft-plasma, aurora, topography, waves, mesh, constellation, ribbons,
+diagonal-flow, blueprint. Transitions: cut, fade, push, wipe, dip-black,
+dip-white, tv-switch. Busy effects should not compete with text.
+
+Build example (select the slide first):
+
+```json
+{"action":"set-slide-build","buildData":{"version":1,"transition":{"effect":"fade"},"steps":[{"targetIds":["<id>"],"effect":"wipe","direction":"right","durationMs":500},{"targetIds":["<other-id>"],"effect":"fade","advance":"after","delayMs":200,"durationMs":400}]}}
+```
+
+Build effects: appear, fade, wipe, zoom. No advance means click; after means
+automatic. Screenshot/HTML review must account for builds before judging
+missing elements. Detailed panel, table and artwork recipes are in reference.md.

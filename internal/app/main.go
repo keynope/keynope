@@ -1886,6 +1886,7 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 		mux.HandleFunc("/api/editor/table-cell-style-draft", activeNativeEditor.handleTableCellStyleDraft)
 		mux.HandleFunc("/api/editor/text-style-draft", activeNativeEditor.handleTextStyleDraft)
 		mux.HandleFunc("/api/editor/activity-qr", activeNativeEditor.handleActivityQR)
+		mux.HandleFunc("/api/editor/qr-code", activeNativeEditor.handleQRCode)
 		mux.HandleFunc("/api/editor/workspace", activeNativeEditor.handleWorkspace)
 		mux.HandleFunc("/api/editor/upload", activeNativeEditor.handleUpload)
 		mux.HandleFunc("/api/editor/upload-video", activeNativeEditor.handleVideoUpload)
@@ -3851,7 +3852,7 @@ func exportHTMLSuffix() string {
 	return `<script>
 const keynopeIntroductionAssets = ` + introductionAssetsJSON + `;
 ` + activityGamesJS + activityDesignJS + "\nconst keynopeTTFFontData = '" + strings.TrimSpace(trueTypeFontBase64) + "';\n" + trueTypeJS + `
-` + fontCatalogJS + participantTransferJS + workspaceJS + conversionReportJS + shapedTextJS + textStyleToolsJS + videoJS + sceneJS + templatesJS + tablesJS + chartsJS + buildsJS + presentationToolsJS + `
+` + fontCatalogJS + participantTransferJS + workspaceJS + conversionReportJS + shapedTextJS + textStyleToolsJS + videoJS + sceneJS + templatesJS + tablesJS + chartsJS + buildsJS + presentationToolsJS + qrCodeJS + `
 const keynopeShapeCatalog = ` + shapeCatalogJSON() + `;
 const deck = JSON.parse(document.getElementById('keynope-data').textContent);
 let pageIndex = Math.max(0, deck.pages.findIndex(page => !page.tabOnly));
@@ -10174,6 +10175,14 @@ if (keynopeAppSurface) {
     await editorActionQueue;
     const state=editorState,target={slide:state.current,sceneMaster:!!state.masterMode,sceneRevision:state.version};
     await editorAction({action:'insert-chart',...target});editSelectedChart();
+  });
+  addElementIconButton('Add QR Code','image','<path d="M2 2h6v6H2zM12 2h6v6h-6zM2 12h6v6H2zM12 12h2v2h-2zM16 12h2v6h-2zM12 16h2v2h-2z"/>',0,async()=>{
+    await editorActionQueue;
+    const capture=canvasGeometryContext(),target={slide:editorState.current,sceneMaster:!!editorState.masterMode,sceneRevision:editorState.version,notesSessionId:editorState.notesSessionId};
+    KeynopeQRCode.insert(qrCode=>{
+      if(!canvasGeometryContextCurrent(capture)||target.notesSessionId!==editorState?.notesSessionId)throw Error('The document changed; open QR Code again.');
+      return editorAction({action:'insert-qr-code',...target,qrCode});
+    });
   });
   function editSelectedChart(){
     const selected=editorState?.selectedChart;if(!selected||!canvasSelectionCommandAllows('chart.edit',selected.objectId))return;
