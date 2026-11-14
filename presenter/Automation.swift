@@ -2,8 +2,8 @@ import Cocoa
 import WebKit
 import PDFKit
 
-// App-level automation is independent of the editor engine and its current
-// document. In particular, do not forward its file bookmark to this helper.
+// App-level automation keeps a stable public endpoint and forwards requests
+// to the current editor. File bookmarks stay with the document engine.
 @MainActor
 final class AutomationService {
     static let enabledKey = "keynope.mcp.enabled"
@@ -13,6 +13,7 @@ final class AutomationService {
     private var input: Pipe?
     private var managementURL: URL?
     private var managementToken = ""
+    private var editorTarget: URL?
     private var operation: Task<Void, Error>?
     private let workspaceDirectory: URL?
     private let preferences: UserDefaults
@@ -38,6 +39,7 @@ final class AutomationService {
         let child = Process(), output = Pipe(), parentInput = Pipe()
         child.executableURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/keynope-engine")
         child.arguments = ["--mcp-http", "--workspace", directory.path, "--port", String(port)]
+        if workspaceDirectory == nil { child.arguments?.append("--live") }
         var environment = ProcessInfo.processInfo.environment
         environment.removeValue(forKey: "KEYNOPE_SANDBOX_BOOKMARK")
         child.environment = environment
@@ -121,17 +123,33 @@ final class AutomationService {
         else { settings = ["enabled": false, "port": port] }
     }
 
-    private func request(enabled: Bool? = nil, port: Int? = nil) async throws {
+    func setEditorTarget(_ url: URL) {
+        editorTarget = url
+        guard process?.isRunning == true else { return }
+        let previous = operation
+        let task = Task { @MainActor in
+            if let previous { _ = try? await previous.value }
+            try await self.request(target: url.absoluteString)
+        }
+        operation = task
+        Task { @MainActor in
+            do { try await task.value }
+            catch { self.settings["attached"] = false }
+        }
+    }
+
+    private func request(enabled: Bool? = nil, port: Int? = nil, target: String? = nil) async throws {
         guard let managementURL else { throw CocoaError(.fileReadUnknown) }
         var request = URLRequest(url: managementURL)
         request.timeoutInterval = 15
         request.setValue("keynope_session=" + managementToken, forHTTPHeaderField: "Cookie")
-        if enabled != nil || port != nil {
+        if enabled != nil || port != nil || target != nil {
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             var body: [String: Any] = [:]
             if let enabled { body["enabled"] = enabled }
             if let port { body["port"] = port }
+            if workspaceDirectory == nil { body["target"] = target ?? editorTarget?.absoluteString ?? "" }
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
         let configuration = URLSessionConfiguration.ephemeral
@@ -198,7 +216,7 @@ final class AutomationSettingsController: NSWindowController {
         super.init(window: panel)
         let title = NSTextField(labelWithString: "Deck Automation")
         title.font = .systemFont(ofSize: 17, weight: .semibold)
-        let description = NSTextField(wrappingLabelWithString: "Let trusted AI clients build decks in a separate automation workspace. Enabling MCP does not share the presentation you have open or grant access to its folder.")
+        let description = NSTextField(wrappingLabelWithString: "Let trusted AI clients edit the presentation you have open. Their changes appear immediately and share Undo and Save. Your view stays in place; an AI edit to an object you are editing cancels your draft for that object.")
         description.textColor = .secondaryLabelColor
         toggle.target = self
         toggle.action = #selector(changeEnabled)
@@ -217,7 +235,7 @@ final class AutomationSettingsController: NSWindowController {
         let portRow = NSStackView(views: [NSTextField(labelWithString: "Port override"), portField, applyPort])
         portRow.spacing = 10
         stack.addArrangedSubview(portRow)
-        let portHelp = NSTextField(wrappingLabelWithString: "Leave blank to use localhost port \(AutomationService.defaultPort). Applying a new port keeps your automation deck; reconnect clients using the updated connection details.")
+        let portHelp = NSTextField(wrappingLabelWithString: "Leave blank to use localhost port \(AutomationService.defaultPort). Applying a new port keeps your open deck; reconnect clients using the updated connection details.")
         portHelp.font = .systemFont(ofSize: 12)
         portHelp.textColor = .secondaryLabelColor
         stack.addArrangedSubview(portHelp)

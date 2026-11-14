@@ -34,6 +34,7 @@ type deckAutomation struct {
 	root      *os.Root
 	directory string
 	attached  bool
+	liveView  *mcpEditorView
 	enabled   atomic.Bool
 	server    *mcp.Server
 }
@@ -48,10 +49,21 @@ func newDeckAutomation(editor *nativeEditorSession, directory string, attached b
 		return nil, fmt.Errorf("open automation workspace: %w", err)
 	}
 	a := &deckAutomation{editor: editor, root: root, directory: directory, attached: attached}
-	a.server = mcp.NewServer(&mcp.Implementation{Name: "Keynope", Version: "1.0.0"}, &mcp.ServerOptions{Instructions: automationInstructions})
+	instructions := automationInstructions
+	if attached {
+		instructions = `You edit the document currently open in Keynope, in memory, alongside its user. First call deck_inspect and include its document_id and expected_version on every write. MCP has its own slide/selection cursor; never navigate the human view. Stable object IDs remain valid across concurrent unrelated edits. Every response can include delta events since expected_version or since_version; use deck_changes to poll. If reset_required, inspect again. MCP wins a conflicting edit and cancels the human draft for the affected object. Changes share native Undo. deck_save invokes the normal app Save workflow (no path required); an untitled deck opens the Save dialog. It saves the entire shared document. File/New and File/Open remain user-owned. Asset/export paths refer to a temporary workspace, not the document folder. Read deck_authoring_guide for authoring conventions; its isolated-workspace descriptions apply only to CLI mode.`
+	}
+	a.server = mcp.NewServer(&mcp.Implementation{Name: "Keynope", Version: "1.0.0"}, &mcp.ServerOptions{Instructions: instructions})
 	if err = a.registerTools(); err != nil {
 		root.Close()
 		return nil, err
+	}
+	if attached {
+		editor.enableCollaboration()
+		editor.mu.RLock()
+		view := editor.captureMCPViewLocked()
+		editor.mu.RUnlock()
+		a.liveView = &view
 	}
 	a.registerAuthoringResources()
 	for _, resource := range []struct{ uri, name string }{{"keynope://deck", "Active deck"}, {"keynope://commands", "Editor command reference"}, {"keynope://selection", "Selection capabilities"}} {
@@ -210,6 +222,7 @@ func runMCPHTTP(args []string) error {
 	flags := flag.NewFlagSet("Keynope MCP service", flag.ContinueOnError)
 	workspace := flags.String("workspace", "", "Private automation directory")
 	port := flags.Int("port", defaultMCPPort, "Local MCP port (1024–65535)")
+	live := flags.Bool("live", false, "Forward to the active Mac editor")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -234,7 +247,11 @@ func runMCPHTTP(args []string) error {
 	}
 	p := &presenterCompanion{url: "http://" + listener.Addr().String() + "/", token: hex.EncodeToString(secret[:])}
 	mux := http.NewServeMux()
-	configureAutomationMCP(mux, *workspace, p, &automationHTTPListener{port: *port})
+	if *live {
+		configureLiveMCPProxy(mux, p, &automationHTTPListener{port: *port})
+	} else {
+		configureAutomationMCP(mux, *workspace, p, &automationHTTPListener{port: *port})
+	}
 	defer p.automationCleanup()
 	server := &http.Server{Handler: p.authorized(mux), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	go func() {
@@ -284,6 +301,8 @@ func runMCP(args []string) error {
 }
 
 type automationArguments struct {
+	DocumentID      string               `json:"document_id,omitempty"`
+	SinceVersion    *int64               `json:"since_version,omitempty"`
 	Response        string               `json:"response,omitempty"`
 	CommandName     string               `json:"command_name,omitempty"`
 	Slides          []int                `json:"slides,omitempty"`
@@ -349,6 +368,7 @@ func (a *deckAutomation) registerTools() error {
 		{"deck_validate", "Validate the complete deck and inspect every slide's render diagnostics without altering it.", nil, nil, true},
 		{"deck_new", "Create an isolated deck from a built-in template, or a blank deck. Refuses unsaved replacement unless discard_unsaved. Never replaces the Mac editor's document.", []string{"template", "discard_unsaved", "expected_version"}, []string{"expected_version"}, false},
 		{"deck_open", "Explicitly open Markdown or PPTX inside the automation workspace. Refuses unsaved replacement unless discard_unsaved. Never opens the Mac editor's document implicitly.", []string{"path", "discard_unsaved", "expected_version"}, []string{"path", "expected_version"}, false},
+		{"deck_changes", "Changes since a prior revision, including human and MCP edits. On a history gap or document replacement, inspect the current deck. Live editor only.", []string{"since_version", "document_id"}, []string{"since_version"}, true},
 		{"deck_save", "Atomically save an editable self-contained Markdown deck inside the workspace. Existing destinations require overwrite=true. Respects native font embedding checks.", []string{"path", "overwrite", "expected_version"}, []string{"path", "expected_version"}, false},
 		{"deck_export", "Export HTML, PPTX or PDF to the workspace. Preserves conversion warnings and native font restrictions. Existing files require overwrite=true.", []string{"path", "format", "overwrite", "expected_version"}, []string{"path", "format", "expected_version"}, false},
 		{"editor_command", "Run ANY native editor command, using its exact camelCase fields inside command. Discover schemas with deck_schema. Supports all element kinds, styles/effects, geometry, layers, groups, masters, themes, notes, builds, activities, tables, charts, image adjustments, crops, tabs, font registration, undo and redo. Uses the native validation/history. Select targets first; use stable IDs and expected_version.", []string{"command", "expected_version"}, []string{"command", "expected_version"}, false},
@@ -369,6 +389,11 @@ func (a *deckAutomation) registerTools() error {
 		return err
 	}
 	for _, spec := range specs {
+		spec.fields = append(spec.fields, "document_id", "since_version")
+		if a.attached && spec.name == "deck_save" {
+			spec.required = []string{"expected_version"}
+			spec.description = "Save the current shared document using the app's normal Save workflow, including a Save dialog for an untitled deck. Do not pass a path."
+		}
 		if !spec.readonly {
 			spec.fields = append(spec.fields, "response")
 		}
@@ -416,7 +441,22 @@ func (a *deckAutomation) registerTools() error {
 			if err := ctx.Err(); err != nil {
 				return automationFailure(err), nil
 			}
+			if a.attached && !spec.readonly {
+				if input.DocumentID == "" || input.DocumentID != a.commandContext().NotesSessionID {
+					return automationFailure(errors.New("document_id must match deck_inspect; the active document may have changed")), nil
+				}
+			}
 			result, image, err := a.call(ctx, name, input)
+			if a.attached && result != nil {
+				since := input.SinceVersion
+				if since == nil {
+					since = input.ExpectedVersion
+				}
+				if since != nil {
+					result["delta"] = a.changesSince(*since)
+				}
+				result["document_id"] = a.commandContext().NotesSessionID
+			}
 			if err != nil {
 				var partial *automationPartialError
 				if errors.As(err, &partial) {

@@ -194,7 +194,7 @@ globalThis.KeynopeTables=(()=>{
       return pendingCommit;
     };
     d.addEventListener('cancel',event=>{event.preventDefault();if(d.dataset.keynopeSceneDialog!=='table')close();});d.addEventListener('keydown',event=>event.stopPropagation());
-    return {d,close,runCommit,setOnClose:callback=>{onClose=callback;}};
+    return {d,close,cancel:()=>{pendingCommit=null;close();},runCommit,setOnClose:callback=>{onClose=callback;}};
   }
   function insert(commit){
     const modal=dialog('Insert table');if(!modal)return;const {d,close}=modal;
@@ -385,6 +385,9 @@ globalThis.KeynopeTables=(()=>{
   }
   function edit(source,commit,options={}){
     const modal=dialog('Edit table');if(!modal)return;const {d,close}=modal;
+    const cancelForMCP=event=>{if(options.objectId&&event.detail?.includes(options.objectId))modal.cancel();};
+    document.addEventListener('keynope-mcp-objects-changed',cancelForMCP);
+    d.addEventListener('close',()=>document.removeEventListener('keynope-mcp-objects-changed',cancelForMCP),{once:true});
     let data=clone(source),selected={...(options.selection?.start||{r:0,c:0})},end={...(options.selection?.end||selected)},trackGesture=null;
     const history=draftHistory();
     const baseline=JSON.stringify(data);let cachedDirty=null;
@@ -674,7 +677,9 @@ globalThis.KeynopeTables=(()=>{
       else Object.assign(tools.style,{left:'auto',top:'auto',right:'8px',bottom:'8px',width:'min(560px,calc(100vw - 16px))',height:'auto',maxHeight:'40vh'});
     }
     const wordPainterChanged=()=>{if(!closed)refresh();};document.addEventListener('keynope-word-painter-change',wordPainterChanged);document.addEventListener('keynope-style-scope-change',wordPainterChanged);
-    function close(keepPainter=false){if(closed||pending)return;cancelTrack?.();closed=true;document.removeEventListener('keynope-word-painter-change',wordPainterChanged);document.removeEventListener('keynope-style-scope-change',wordPainterChanged);document.removeEventListener('selectionchange',selectionChanged);cancelAnimationFrame(overflowFrame);clearTimeout(overflowTimer);projectionAbort?.abort();stagedView?.dispose();caret?.wordStyles?.dispose({keepPainter});if(!keepPainter)globalThis.KeynopeTextStyles?.clearPainter();caret?.editor.dispose();for(const surface of surfaces.values())surface.dispose();view.dispose();observer.disconnect();window.removeEventListener('resize',fit);window.removeEventListener('scroll',fit,true);if(sourceNode?.isConnected)sourceNode.style.visibility=sourceVisibility;canvasSession=null;options.onClose?.();closeDialog();}
+    const cancelForMCP=event=>{if(event.detail?.includes(object.id)){pending=null;close();}};
+    document.addEventListener('keynope-mcp-objects-changed',cancelForMCP);
+    function close(keepPainter=false){if(closed||pending)return;document.removeEventListener('keynope-mcp-objects-changed',cancelForMCP);cancelTrack?.();closed=true;document.removeEventListener('keynope-word-painter-change',wordPainterChanged);document.removeEventListener('keynope-style-scope-change',wordPainterChanged);document.removeEventListener('selectionchange',selectionChanged);cancelAnimationFrame(overflowFrame);clearTimeout(overflowTimer);projectionAbort?.abort();stagedView?.dispose();caret?.wordStyles?.dispose({keepPainter});if(!keepPainter)globalThis.KeynopeTextStyles?.clearPainter();caret?.editor.dispose();for(const surface of surfaces.values())surface.dispose();view.dispose();observer.disconnect();window.removeEventListener('resize',fit);window.removeEventListener('scroll',fit,true);if(sourceNode?.isConnected)sourceNode.style.visibility=sourceVisibility;canvasSession=null;options.onClose?.();closeDialog();}
     async function finish(){if(closed)return;if(pending)return pending;await caret?.wordStyles?.pending();await refreshStyleTransfer.pending?.();if(projectionPending)await projectionPending;if(closed)return;cancelTrack?.();stopCaret();if(!dirty()){close(true);return;}
       // Assign the pending handle before invoking the committer. A synchronous
       // stale-scope rejection must not overwrite finally's cleanup with an

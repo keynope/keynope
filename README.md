@@ -145,17 +145,24 @@ For supported conversions and format limits, see [Format and export details](doc
 
 ## Build with an AI assistant
 
-Keynope includes an opt-in MCP server for building and editing decks with an AI
-client. Agents can use native editing tools, inspect slides, apply effects and
-review actual rendered screenshots while keeping the deck editable. Enable the
-app's separate automation workspace, or use an isolated folder without opening
-an editor window. Enabling MCP does not share the deck currently open in the editor.
+Keynope includes an opt-in MCP server for editing the presentation currently
+open in the Mac app. Enable **Automation (MCP)** and connect your AI client.
+Human and MCP edits share the same in-memory document, rendering and Undo
+history. Changes reach disk through the usual **Save** workflow; MCP's
+`deck_save` invokes that workflow too, including the Save dialog for untitled decks.
 
-When an agent saves changes to the same Markdown file open in the Mac app, the
-editor reloads it automatically. Reload waits while you are editing or presenting;
-unsaved changes are preserved, with **Reload from disk** available to explicitly
-discard them. Save the automation deck to that file to see its changes; unsaved
-edits in the separate MCP workspace do not update the open document.
+MCP has its own slide and object selection. Its edits do not switch your slide
+or scroll your navigator. If MCP changes an object you are editing, that object's
+pending draft or drag is cancelled and it is deselected. Unrelated edits remain
+active. Each MCP write identifies the document and a known revision; concurrent
+changes are returned as deltas, and `deck_changes` can retrieve changes between
+operations. File/Open and File/New remain controlled by the user. The MCP URL
+stays the same when switching documents; clients must inspect the new document
+before editing it.
+
+The standalone `--mcp --workspace` CLI still supports isolated authoring without
+an editor window. Live app MCP uses a temporary asset/export workspace and does
+not automatically grant access to the open document's folder.
 
 ## Build from source
 

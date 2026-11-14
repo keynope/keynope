@@ -1506,7 +1506,9 @@ globalThis.KeynopeScene = (() => {
     };
     const restore=delta=>{if(pending||drag||rangeDrag)return;const next=historyIndex+delta;if(next<0||next>=history.length)return;historyIndex=next;const value=history[next];crop={...value.crop};mask=value.mask;maskSelect.value=mask;preset.value=value.preset;status.textContent='';restoring=true;draw();restoring=false;};
     const undo=button('Undo crop',()=>restore(-1)),redo=button('Redo crop',()=>restore(1));
-    const close=()=>{if(pending||closed)return;closed=true;++draftGeneration;clearTimeout(draftTimer);draftController?.abort();draftController=null;cancelAnimationFrame(previewFrame);document.removeEventListener('visibilitychange',resetPreviewClock);motionPreference?.removeEventListener('change',motionChanged);observer.disconnect();view?.dispose();endTextPause();dialog.close();dialog.remove();if(previous?.isConnected)previous.focus({preventScroll:true});};
+    const cancelForMCP=event=>{if(event.detail?.includes(object.id)){pending=false;close();}};
+    document.addEventListener('keynope-mcp-objects-changed',cancelForMCP);
+    const close=()=>{if(pending||closed)return;document.removeEventListener('keynope-mcp-objects-changed',cancelForMCP);closed=true;++draftGeneration;clearTimeout(draftTimer);draftController?.abort();draftController=null;cancelAnimationFrame(previewFrame);document.removeEventListener('visibilitychange',resetPreviewClock);motionPreference?.removeEventListener('change',motionChanged);observer.disconnect();view?.dispose();endTextPause();dialog.close();dialog.remove();if(previous?.isConnected)previous.focus({preventScroll:true});};
     const reset=button('Reset crop',()=>{preset.value='source';crop={...blank};for(const side of Object.keys(inputs)){inputs[side].value=0;outputs[side].textContent='0%';}draw();}),cancel=button('Cancel',close),apply=button('Apply crop',async()=>{
       if(pending)return;
       for(const number of Object.values(numbers)){number.required=true;if(!number.reportValidity())return;}
@@ -1822,7 +1824,9 @@ globalThis.KeynopeScene = (() => {
       }catch(e){error.textContent=e.message||'Could not fit text';}
       finally{setPending(false);editor.element.focus();editor.select(selection.start,selection.end);}
     };
-    const close=(keepPainter=false)=>{if(pending||closed)return;closed=true;wordStyles?.dispose({keepPainter});++growthGeneration;for(const record of shapeDrafts.values())if(!record.done)record.controller.abort();shapeDrafts.clear();shapeView?.dispose();pendingTextDrafts.delete(commitForSave);++previewGeneration;previewObserver.disconnect();inlineObserver?.disconnect();window.removeEventListener('resize',fitInline);if(inlineSource)inlineSource.style.visibility=inlineSourceVisibility;previewView?.dispose();document.removeEventListener('selectionchange',rememberSelection);endTextPause();editor.dispose();dialog.close();dialog.remove();if(previous?.isConnected)previous.focus({preventScroll:true});};
+    const cancelForMCP=event=>{if(event.detail?.includes(object.id)){pending=false;if(confirmation){confirmation.close();confirmation.remove();confirmation=null;}close();}};
+    document.addEventListener('keynope-mcp-objects-changed',cancelForMCP);
+    const close=(keepPainter=false)=>{if(pending||closed)return;document.removeEventListener('keynope-mcp-objects-changed',cancelForMCP);closed=true;wordStyles?.dispose({keepPainter});++growthGeneration;for(const record of shapeDrafts.values())if(!record.done)record.controller.abort();shapeDrafts.clear();shapeView?.dispose();pendingTextDrafts.delete(commitForSave);++previewGeneration;previewObserver.disconnect();inlineObserver?.disconnect();window.removeEventListener('resize',fitInline);if(inlineSource)inlineSource.style.visibility=inlineSourceVisibility;previewView?.dispose();document.removeEventListener('selectionchange',rememberSelection);endTextPause();editor.dispose();dialog.close();dialog.remove();if(previous?.isConnected)previous.focus({preventScroll:true});};
     const requestClose=()=>{
       if(pending||closed||confirmation||editor.isComposing())return;
       if(initial===snapshot()){close();return;}
@@ -1865,7 +1869,7 @@ globalThis.KeynopeScene = (() => {
       for(const input of paragraphInputs)if(!input.checkValidity()){input.reportValidity();return;}
       if(initial===snapshot()&&!resetSize){close(true);return;}
       setPending(true);error.textContent='';
-      try{await growthTask;await commit(editor.value().runs,editor.value().fontId,editor.value().lineHeight,resetSize?0:editor.value().size===object.text.size?undefined:editor.value().size,editor.value().paragraphBefore,editor.value().paragraphAfter,editor.value().widthScale===(object.text.widthScale||1)?undefined:editor.value().widthScale*100,growingShape&&(outerBounds.width!==shapeOwner.bounds.width||outerBounds.height!==shapeOwner.bounds.height)?{...outerBounds}:undefined);pending=false;close(true);}
+      try{await growthTask;if(closed)return;await commit(editor.value().runs,editor.value().fontId,editor.value().lineHeight,resetSize?0:editor.value().size===object.text.size?undefined:editor.value().size,editor.value().paragraphBefore,editor.value().paragraphAfter,editor.value().widthScale===(object.text.widthScale||1)?undefined:editor.value().widthScale*100,growingShape&&(outerBounds.width!==shapeOwner.bounds.width||outerBounds.height!==shapeOwner.bounds.height)?{...outerBounds}:undefined);pending=false;close(true);}
       catch(e){error.textContent=e.message||'Could not apply text';}
       finally{setPending(false);if(!closed)editor.element.focus();}
     };

@@ -40,6 +40,39 @@ func (a *deckAutomation) commandContext() nativeEditorState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	current := s.current
+	selected, master := s.selected, s.masterMode
+	if a.attached && a.liveView != nil {
+		v := a.liveView
+		current = 0
+		selected = -1
+		master = v.Master
+		var elements []Element
+		if master {
+			for i, layout := range s.deck.Masters.Layouts {
+				if layout.ID == v.MasterID {
+					current = i + 1
+				}
+			}
+			elements = masterSlideAt(&s.deck, current).Elements
+		} else {
+			for i, slide := range s.deck.Slides {
+				if collaborationSlideID(slide) == v.SlideID {
+					current = i
+				}
+			}
+			if current < len(s.deck.Slides) {
+				elements = s.deck.Slides[current].Elements
+			}
+		}
+		for i, e := range elements {
+			for _, id := range v.Selected {
+				if e.ID == id {
+					selected = i
+				}
+			}
+		}
+		return nativeEditorState{Version: s.version, Current: current, Selected: selected, MasterMode: master, NotesSessionID: s.notesSessionID}
+	}
 	if s.masterMode {
 		current = s.currentMaster
 	}

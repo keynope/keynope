@@ -89,6 +89,7 @@ func automationSlide(deck Deck, input automationArguments) (Slide, Slide, error)
 	return deck.Slides[input.Slide], deck.slideRenderPreview(input.Slide, cols, rows), nil
 }
 func (a *deckAutomation) inspect() map[string]any {
+	view := a.commandContext()
 	s := a.editor
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -111,7 +112,7 @@ func (a *deckAutomation) inspect() map[string]any {
 		assets[id] = map[string]any{"mime": asset.MIME, "width": asset.Width, "height": asset.Height, "frames": len(asset.Frames)}
 	}
 	fonts := mergeTypefaces(s.deck.Typefaces, s.fontLibrary)
-	return map[string]any{"version": s.version, "owner": s.notesSessionID, "path": s.deckPath, "dirty": s.dirtyLocked(), "current_slide": s.current, "current_master": s.currentMaster, "selected_element": s.selected, "master_mode": s.masterMode, "masters": redactAutomationData(s.deck.Masters), "slides": slides, "assets": assets, "fonts": redactAutomationData(fonts), "canvas": s.deck.physicalCanvas(), "grid": map[string]int{"columns": authoredTerminalWidth, "rows": authoredTerminalHeight}, "undo": len(s.undo), "redo": len(s.redo), "workspace": a.directory, "attached": a.attached}
+	return map[string]any{"version": s.version, "owner": s.notesSessionID, "path": s.deckPath, "dirty": s.dirtyLocked(), "current_slide": view.Current, "current_master": s.currentMaster, "selected_element": view.Selected, "master_mode": view.MasterMode, "human_view": map[string]any{"slide": s.current, "master": s.masterMode, "selected": s.selected}, "masters": redactAutomationData(s.deck.Masters), "slides": slides, "assets": assets, "fonts": redactAutomationData(fonts), "canvas": s.deck.physicalCanvas(), "grid": map[string]int{"columns": authoredTerminalWidth, "rows": authoredTerminalHeight}, "undo": len(s.undo), "redo": len(s.redo), "workspace": a.directory, "attached": a.attached, "document_id": s.notesSessionID}
 }
 func redactAutomationData(value any) any {
 	raw, _ := json.Marshal(value)
@@ -148,6 +149,14 @@ func (a *deckAutomation) checkVersion(expected *int64) error {
 	a.editor.mu.RLock()
 	version := a.editor.version
 	a.editor.mu.RUnlock()
+	if a.attached {
+		a.editor.mu.RLock()
+		known := a.editor.collaborationRevisionLocked(*expected) != nil
+		a.editor.mu.RUnlock()
+		if known {
+			return nil
+		}
+	}
 	if *expected != version {
 		return fmt.Errorf("stale deck revision: expected %d, current %d; inspect again", *expected, version)
 	}
@@ -207,6 +216,10 @@ func (a *deckAutomation) command(ctx context.Context, raw json.RawMessage, versi
 		if err := a.checkImagePaths(action.Clipboard.Elements); err != nil {
 			return err
 		}
+	}
+	if a.attached {
+		action.commandContext = ctx
+		return a.applyLiveCommand(action, raw, version)
 	}
 	state := a.commandContext()
 	if state.Version != version {
@@ -277,6 +290,14 @@ func (a *deckAutomation) command(ctx context.Context, raw json.RawMessage, versi
 
 func (a *deckAutomation) callCore(ctx context.Context, name string, input automationArguments) (map[string]any, []byte, error) {
 	switch name {
+	case "deck_changes":
+		if !a.attached || input.SinceVersion == nil {
+			return nil, nil, errors.New("deck_changes requires a live editor and since_version")
+		}
+		if input.DocumentID != "" && input.DocumentID != a.commandContext().NotesSessionID {
+			return a.changesSince(-1), nil, nil
+		}
+		return a.changesSince(*input.SinceVersion), nil, nil
 	case "deck_inspect":
 		return a.inspect(), nil, nil
 	case "emoji_catalog":
@@ -490,7 +511,7 @@ func (a *deckAutomation) callCore(ctx context.Context, name string, input automa
 			a.editor.mu.RLock()
 			next := a.editor.version
 			a.editor.mu.RUnlock()
-			if next > version+1 {
+			if !a.attached && next > version+1 {
 				return nil, nil, &automationPartialError{Err: fmt.Errorf("batch stopped after %d commands: another editor changed the deck", i+1), Applied: i + 1}
 			}
 			version = next
@@ -567,7 +588,7 @@ func (a *deckAutomation) callCore(ctx context.Context, name string, input automa
 		a.editor.mu.RUnlock()
 		version := *input.ExpectedVersion
 		state := a.commandContext()
-		if err = a.editor.apply(nativeEditorAction{Action: "add-element", Kind: "video", ElementData: &element, AssetData: &asset, SceneRevision: &version, automationRevision: &version, SceneMaster: state.MasterMode, Slide: state.Current, NotesSessionID: state.NotesSessionID, uploadContext: ctx}); err != nil {
+		if err = a.applyImportedAction(ctx, version, nativeEditorAction{Action: "add-element", Kind: "video", ElementData: &element, AssetData: &asset, SceneRevision: &version, automationRevision: &version, SceneMaster: state.MasterMode, Slide: state.Current, NotesSessionID: state.NotesSessionID, uploadContext: ctx}); err != nil {
 			return nil, nil, err
 		}
 	case "qr_code_create":
@@ -590,7 +611,7 @@ func (a *deckAutomation) callCore(ctx context.Context, name string, input automa
 		version := *input.ExpectedVersion
 		state := a.commandContext()
 		element := Element{Kind: "image", AssetID: id, Path: path, Query: "image-style=modern"}
-		if err = a.editor.apply(nativeEditorAction{Action: "add-element", Kind: "image", ElementData: &element, AssetData: &asset, SceneRevision: &version, automationRevision: &version, SceneMaster: state.MasterMode, Slide: state.Current, NotesSessionID: state.NotesSessionID, uploadContext: ctx}); err != nil {
+		if err = a.applyImportedAction(ctx, version, nativeEditorAction{Action: "add-element", Kind: "image", ElementData: &element, AssetData: &asset, SceneRevision: &version, automationRevision: &version, SceneMaster: state.MasterMode, Slide: state.Current, NotesSessionID: state.NotesSessionID, uploadContext: ctx}); err != nil {
 			return nil, nil, err
 		}
 	case "font_export_confirm":
@@ -623,13 +644,16 @@ func (a *deckAutomation) callCore(ctx context.Context, name string, input automa
 		}
 		version := *input.ExpectedVersion
 		state := a.commandContext()
-		if err = a.editor.apply(nativeEditorAction{Action: "register-typeface", TypefaceData: &face, NotesSessionID: state.NotesSessionID, automationRevision: &version}); err != nil {
+		if err = a.applyImportedAction(ctx, version, nativeEditorAction{Action: "register-typeface", TypefaceData: &face, NotesSessionID: state.NotesSessionID, automationRevision: &version}); err != nil {
 			return nil, nil, err
 		}
 		result := a.mutationResult(input)
 		result["font_id"] = face.ID()
 		return result, nil, nil
 	case "deck_save", "deck_export":
+		if a.attached && name == "deck_save" {
+			return a.requestLiveSave(ctx)
+		}
 		format := input.Format
 		if name == "deck_save" {
 			format = "save"

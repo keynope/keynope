@@ -1864,6 +1864,7 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 	mux.HandleFunc("/video-playback", companion.handleVideoPlayback)
 	mux.HandleFunc("/engagement", companion.handleEngagement)
 	if activeNativeEditor != nil {
+		configureLiveEditorMCP(mux, activeNativeEditor, companion)
 		mux.HandleFunc("/api/editor/state", activeNativeEditor.handleState)
 		mux.HandleFunc("/api/editor/templates", activeNativeEditor.handleTemplates)
 		mux.HandleFunc("/api/editor/clipboard", activeNativeEditor.handleObjectClipboard)
@@ -1904,7 +1905,17 @@ func startPresenterCompanion(deckPath string, slides []Slide, cols, rows int) (*
 		return nil, err
 	}
 	companion.url = "http://" + listener.Addr().String() + "/?token=" + url.QueryEscape(companion.token)
-	companion.server = &http.Server{Handler: companion.authorized(mux)}
+	var handler http.Handler = mux
+	if activeNativeEditor != nil {
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if liveMCPReadPath(r.URL.Path) {
+				activeNativeEditor.operationMu.RLock()
+				defer activeNativeEditor.operationMu.RUnlock()
+			}
+			mux.ServeHTTP(w, r)
+		})
+	}
+	companion.server = &http.Server{Handler: companion.authorized(handler)}
 	go func() {
 		if err := companion.server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			fmt.Fprintf(os.Stderr, "presenter companion stopped: %v\n", err)
@@ -8939,7 +8950,7 @@ if (keynopeAppSurface) {
   sourceReload.type='button';sourceReload.textContent='Reload from disk';sourceNotice.append(sourceMessage,sourceReload);document.body.append(sourceNotice);
   sourceReload.onclick=async()=>{
     if(lastPublishedEditorDirty&&!window.confirm('Discard your unsaved changes and reload the file from disk?'))return;
-    try{if(activeInlineEditor)await activeInlineEditor.finish(false);await editorAction({action:'reload-source',sceneRevision:editorState.version});}catch(error){sourceMessage.textContent=error.message;}
+    try{if(activeInlineEditor)await activeInlineEditor.finish(false,true);await editorAction({action:'reload-source',sceneRevision:editorState.version});}catch(error){sourceMessage.textContent=error.message;}
   };
   let publishedEditorDiagnostics = new Set();
   let publishedEditorDiagnosticList = null;
@@ -9045,6 +9056,7 @@ if (keynopeAppSurface) {
   }
   async function performEditorAction(action) {
     action={notesSessionId:editorState?.notesSessionId,...action};
+    if(editorState?.collaboration&&!['select-element','select-elements','select-slide','navigate-presentation'].includes(action.action))action={sceneRevision:editorState.version,slide:editorState.current,sceneMaster:!!editorState.masterMode,...action};
     // Batch targets are stable IDs, but IDs alone do not identify the view
     // which owns the edit. Send the complete scope and let the mutation lock
     // reject a navigation/master switch that races the request.
@@ -9076,6 +9088,7 @@ if (keynopeAppSurface) {
     const performanceResponded=performanceStarted?performance.now():0;
     if(documentEpoch!==editorDocumentEpoch)return;
     if(editorState&&nextState.notesSessionId!==editorState.notesSessionId)resetEditorDocumentLifetime();
+    await receiveCollaboration(nextState);
     if(!selectionOnly)editorCommandErrorNotice.hidden=true;
     // The hosted WASM bridge applies the matching workspace before it releases
     // the action response. Do not immediately render the same chrome a second
@@ -10211,13 +10224,14 @@ if (keynopeAppSurface) {
     const selected=editorState?.selectedChart;if(!selected||!canvasSelectionCommandAllows('chart.edit',selected.objectId))return;
     const target={slide:editorState.current,sceneMaster:!!editorState.masterMode,sceneRevision:editorState.version,objectId:selected.objectId};
     const epoch=editorDocumentEpoch,path=editorState.path,group=editorState.editingGroup||'';
-    const available=()=>epoch===editorDocumentEpoch&&path===editorState?.path&&target.sceneRevision===editorState?.version&&target.slide===editorState?.current&&target.sceneMaster===!!editorState?.masterMode&&group===(editorState?.editingGroup||'');
-    KeynopeCharts.edit(selected.data,chartData=>{if(!available())throw Error('The document changed; reopen the chart editor.');return editorAction({action:'set-chart-data',...target,chartData});},{pickColor:openKeynopeColourPicker,onDirty:publishEditorDirtyState,theme:()=>editorState?.theme,available});
+    const chartSignature=JSON.stringify(selected);
+    const available=()=>epoch===editorDocumentEpoch&&path===editorState?.path&&(target.sceneRevision===editorState?.version||editorState?.collaboration&&JSON.stringify(editorState.selectedChart)===chartSignature)&&target.slide===editorState?.current&&target.sceneMaster===!!editorState?.masterMode&&group===(editorState?.editingGroup||'');
+    KeynopeCharts.edit(selected.data,chartData=>{if(!available())throw Error('The document changed; reopen the chart editor.');return editorAction({action:'set-chart-data',...target,chartData});},{objectId:selected.objectId,pickColor:openKeynopeColourPicker,onDirty:publishEditorDirtyState,theme:()=>editorState?.theme,available});
   }
   function editSelectedTable(selection){
     const selected=editorState?.selectedTable;if(!selected||!canvasSelectionCommandAllows('table.edit',selected.objectId))return;
     const target={slide:editorState.current,sceneMaster:!!editorState.masterMode,sceneRevision:editorState.version,objectId:selected.objectId,documentEpoch:editorDocumentEpoch};
-    KeynopeTables.edit(selected.data,tableData=>{if(target.documentEpoch!==editorDocumentEpoch)throw Error('The document changed; reopen the table editor.');return editorAction({action:'set-table',...target,tableData});},{onDirty:publishEditorDirtyState,pickColor:openKeynopeColourPicker,copyText:writeEditorPlainText,selection,theme:()=>editorState?.theme,styleClipboard:()=>canvasStyleClipboard,styleTransfer:(action,tableData,cellRange,request)=>tableCellStyleOperation(target,action,tableData,cellRange,request)});
+    KeynopeTables.edit(selected.data,tableData=>{if(target.documentEpoch!==editorDocumentEpoch)throw Error('The document changed; reopen the table editor.');return editorAction({action:'set-table',...target,tableData});},{objectId:selected.objectId,onDirty:publishEditorDirtyState,pickColor:openKeynopeColourPicker,copyText:writeEditorPlainText,selection,theme:()=>editorState?.theme,styleClipboard:()=>canvasStyleClipboard,styleTransfer:(action,tableData,cellRange,request)=>tableCellStyleOperation(target,action,tableData,cellRange,request)});
   }
   async function tableCellStyleOperation(target,action,tableData,cellRange,request={}){
     request.signal?.throwIfAborted();
@@ -11289,7 +11303,7 @@ if (keynopeAppSurface) {
       }
       return lines.join('\n');
     };
-    const finish = save => {
+    const finish = (save,externalCancel=false) => {
       if (finished) return finishPromise || Promise.resolve();
       const session=activeInlineEditor,parent=editor.parentNode;
       const recover=error=>{
@@ -11319,7 +11333,7 @@ if (keynopeAppSurface) {
       if (save && element.kind === 'bullet' && !text) {
         const originalPreview = editorPreviewOriginal;
         editorPreviewOriginal = null;
-        completion = editorAction({action: 'delete-element', element: index}).catch(error => {
+        completion = editorAction({action: 'delete-element', element: index,sceneRevision:requestedRevision,slide:requestedSlide,sceneMaster:requestedMaster,objectId:original.id}).catch(error => {
           editorPreviewOriginal = originalPreview;
           recover(error);
         });
@@ -11327,7 +11341,7 @@ if (keynopeAppSurface) {
         const originalPreview = editorPreviewOriginal;
         editorPreviewOriginal = null;
         element.text = text;
-        completion = editorAction({action: 'update-element', element: index, elementData: authoredEdit(element)}).catch(error => {
+        completion = editorAction({action: 'update-element', element: index, elementData: authoredEdit(element),sceneRevision:requestedRevision,slide:requestedSlide,sceneMaster:requestedMaster}).catch(error => {
           editorPreviewOriginal = originalPreview;
           recover(error);
         });
@@ -11335,7 +11349,7 @@ if (keynopeAppSurface) {
         restoreEditorPreview();
         drawFrame();
       }
-      finishPromise = completion.then(() => finished?editorAction({action: 'select-element', element: -1}).catch(() => {}):undefined).finally(() => {
+      finishPromise = completion.then(() => finished&&!externalCancel?editorAction({action: 'select-element', element: -1}).catch(() => {}):undefined).finally(() => {
           suppressSelectionTopbar = false;
           renderEditorTopbar();
       });
@@ -11841,13 +11855,18 @@ if (keynopeAppSurface) {
     return indices.map(index=>({index,element:canvasElementAt(index),bounds:bounds.get(index),context})).filter(item=>item.element&&item.bounds);
   }
   function canvasGeometryContext() {
-    return {epoch:editorDocumentEpoch,revision:editorState.version,mutationRevision:editorState.mutationRevision,slide:editorState.current,master:!!editorState.masterMode,group:editorState.editingGroup||''};
+    return {epoch:editorDocumentEpoch,revision:editorState.version,mutationRevision:editorState.mutationRevision,slide:editorState.current,slideOwner:editorState?.collaboration?editorState.notesOwnerId:null,master:!!editorState.masterMode,group:editorState.editingGroup||'',objects:editorState?.collaboration?canvasSelectedIndices(editorState.selected).map(i=>canvasElementAt(i)).filter(Boolean).map(e=>({id:e.id,signature:JSON.stringify(e)})):null};
   }
   function canvasGeometryContextCurrent(context,checkRevision=true) {
-    return context.epoch===editorDocumentEpoch&&(!checkRevision||context.revision===editorState.version)&&context.slide===editorState.current&&context.master===!!editorState.masterMode&&context.group===(editorState.editingGroup||'');
+    return context.epoch===editorDocumentEpoch&&(!checkRevision||context.revision===editorState.version)&&(context.slide===editorState.current||context.slideOwner&&context.slideOwner===editorState.notesOwnerId)&&context.master===!!editorState.masterMode&&context.group===(editorState.editingGroup||'');
   }
   function canvasGeometryGestureCurrent(context) {
-    return canvasGeometryContextCurrent(context,false)&&context.mutationRevision===editorState.mutationRevision;
+    if(!canvasGeometryContextCurrent(context,false))return false;
+    if(context.mutationRevision===editorState.mutationRevision)return true;
+    if(!context.objects?.length||!editorState?.collaboration)return false;
+    const changes=editorState.collaboration.changes||[];
+    const intervening=changes.filter(c=>c.version>context.revision);
+    return intervening.length>0&&intervening.every(c=>c.origin==='mcp'&&!c.global)&&context.objects.every(o=>{const e=editorState.slides[editorState.current]?.elements.find(e=>e.id===o.id);return e&&JSON.stringify(e)===o.signature;});
   }
   function canvasArrangeTargets(snapshot,context) {
     // Selection, timer and private-result traffic can advance the command
@@ -15429,8 +15448,10 @@ if (keynopeAppSurface) {
     if (!editorState || !editorState.slides || !editorState.slides.length) return;
     // Selection/timer/history state does not change slide previews. Preserve
     // their nodes, observers and decoded resources across those refreshes.
+    let restoreNavigatorScroll=null;
     const navigatorSignature=JSON.stringify({path:editorState.path,masterMode:editorState.masterMode,slides:editorState.slides.map(slide=>slide.tabId),masters:editorState.masters?.layouts?.map(layout=>layout.name),tabs:editorState.tabs});
     if(navigatorSignature!==slideNavigatorSignature||!slidesPanel.querySelector('.keynope-slide-item')){
+    const navigatorScroll=slidesPanel.scrollTop;restoreNavigatorScroll=navigatorScroll;
     slideNavigatorSignature=navigatorSignature;
     slideThumbnails?.dispose();
     slideThumbnails=null;
@@ -15528,6 +15549,7 @@ if (keynopeAppSurface) {
       }
       slidesPanel.appendChild(button);
     });
+    slidesPanel.scrollTop=navigatorScroll;
     }
     for(const [position,button] of [...slidesPanel.querySelectorAll('.keynope-slide-item[data-master-index]')].entries()){
       const index=Number(button.dataset.masterIndex),slide=editorState.slides[index];
@@ -15542,6 +15564,7 @@ if (keynopeAppSurface) {
     }
     deleteSlideButton.disabled=!!editorState.masterMode&&editorState.current===0;
     scheduleSlideThumbnailRefresh();
+    if(restoreNavigatorScroll!==null)queueMicrotask(()=>{slidesPanel.scrollTop=restoreNavigatorScroll;});
 
     // The visible inspector belongs to KeynopeWorkspace. The editor used to
     // rebuild a second, detached legacy inspector here on every command. On a
@@ -15775,6 +15798,29 @@ if (keynopeAppSurface) {
     }
     scheduleEditorCanvasOverlay();
   }
+  let collaborationVersion=0,collaborationOwner='',collaborationSave='';
+  async function receiveCollaboration(next){
+    if(!next?.collaboration)return;
+    if(collaborationOwner!==next.notesSessionId){collaborationOwner=next.notesSessionId;collaborationVersion=0;collaborationSave='';}
+    const events=(next.collaboration.changes||[]).filter(change=>change.version>collaborationVersion&&change.origin==='mcp');
+    collaborationVersion=Math.max(collaborationVersion,next.version);
+    const touched=new Set(events.flatMap(change=>[...(change.objects||[]),...(change.removed||[])].map(object=>object.id)));
+    if(events.some(change=>change.global))for(const element of editorState?.slides?.[editorState.current]?.elements||[])touched.add(element.id);
+    if(touched.size){
+      document.dispatchEvent(new CustomEvent('keynope-mcp-objects-changed',{detail:[...touched]}));
+      const oldElements=editorState?.slides?.[editorState.current]?.elements||[];
+      const activeID=activeInlineEditor&&oldElements[activeInlineEditor.element]?.id;
+      if(activeID&&touched.has(activeID))await activeInlineEditor.finish(false);
+      const selected=canvasSelectedIndices(editorState?.selected??-1).map(i=>oldElements[i]?.id);
+      if(activeCanvasDrag&&selected.some(id=>touched.has(id)))activeCanvasDrag.cancel?.();
+      if(selected.some(id=>touched.has(id))){shapeConnecting=null;closeSlideContextMenu();showEngagementToast('MCP updated the selected object.');}
+    }
+    const request=next.collaboration.save;
+    if(request&&request.id!==collaborationSave){
+      collaborationSave=request.id;
+      window.webkit?.messageHandlers?.keynopePresenter?.postMessage({action:'mcp-save',id:request.id,owner:request.owner});
+    }
+  }
   async function syncEditorState() {
     if(editorStatePoll)return editorStatePoll.promise;
     const poll={epoch:editorDocumentEpoch};
@@ -15786,8 +15832,9 @@ if (keynopeAppSurface) {
       if (!response.ok || response.status === 204) return;
       const next = mergeEditorStateResponse(await response.json());
       const completesDiagnostics=next.version===editorStateVersion&&editorState?.diagnosticsUnchanged&&!next.diagnosticsUnchanged&&next.notesSessionId===editorState.notesSessionId;
-      if (poll.epoch!==editorDocumentEpoch||!Number.isInteger(next.version)||next.version<editorStateVersion||(next.version===editorStateVersion&&!completesDiagnostics)) return;
+      if (poll.epoch!==editorDocumentEpoch||!Number.isInteger(next.version)||next.version<editorStateVersion||(next.version===editorStateVersion&&!completesDiagnostics&&!next.collaboration?.save)) return;
       if(editorState&&next.notesSessionId!==editorState.notesSessionId)resetEditorDocumentLifetime();
+      await receiveCollaboration(next);
       editorState = next;
       keynopeEditorMasterMode = !!editorState.masterMode;
       editorStateVersion = next.version;

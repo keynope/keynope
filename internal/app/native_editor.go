@@ -26,6 +26,8 @@ type nativeEditorSession struct {
 	sceneResponse    *sceneResponseCache
 	masterPreviews   map[int]masterPreviewStamp // Runtime-only thumbnail dependency tokens.
 	masterPreviewUse uint64
+	operationMu      sync.RWMutex // Serializes command application; never held across an MCP batch.
+	collaboration    *editorCollaboration
 	mu               sync.RWMutex
 	deck             Deck
 	fontLibrary      map[string]DeckTypeface
@@ -128,6 +130,7 @@ type nativeEditorState struct {
 	Masters                MasterDeck                `json:"masters"`
 	MasterMode             bool                      `json:"masterMode,omitempty"`
 	MasterPreviewRevisions []int64                   `json:"masterPreviewRevisions,omitempty"`
+	Collaboration          *editorCollaborationState `json:"collaboration,omitempty"`
 	Dirty                  bool                      `json:"dirty"`
 	Untitled               bool                      `json:"untitled"`
 	TimerMode              string                    `json:"timerMode,omitempty"`
@@ -155,6 +158,7 @@ func (s *nativeEditorSession) checkUploadDestinationLocked(action nativeEditorAc
 }
 
 type nativeEditorAction struct {
+	commandSerialized     bool            // Internal recursion guard; not accepted from JSON.
 	automationRevision    *int64          // Private MCP compare-and-swap stamp, never accepted from JSON.
 	PageSize              *DeckPageSize   `json:"pageSize,omitempty"`
 	objectInputOwned      bool            // Request-local ownership, never accepted from JSON.
@@ -1206,6 +1210,13 @@ func nativeEditorActionRequiresFullSlides(action string) bool {
 
 func (s *nativeEditorSession) stateForClient(currentOnly, currentSlideOnly bool, diagnosticsOwner string) nativeEditorState {
 	s.mu.RLock()
+	live := s.collaboration != nil
+	s.mu.RUnlock()
+	if live {
+		s.operationMu.RLock()
+		defer s.operationMu.RUnlock()
+	}
+	s.mu.RLock()
 	defer s.mu.RUnlock()
 	selection := make([]int, 0, len(s.selection))
 	for index := range s.selection {
@@ -1326,6 +1337,7 @@ func (s *nativeEditorSession) stateForClient(currentOnly, currentSlideOnly bool,
 		Version: s.version, MutationRevision: s.mutationRevision, NotesOwnerID: speakerNotesOwnerAt(s.deck, s.masterMode, current), NotesSessionID: s.notesSessionID, Path: s.deckPath, Current: current, Selected: s.selected, MasterMode: s.masterMode,
 		Selection: selection, EditingGroup: s.editingGroup, Slides: slides, CurrentSlide: currentSlide, Resolved: resolved, ResolvedCurrent: resolvedCurrent, Masters: s.deck.Masters,
 		MasterPreviewRevisions: s.masterPreviewRevisionsLocked(),
+		Collaboration:          s.collaborationStateLocked(),
 		Dirty:                  s.dirtyLocked(), Untitled: s.untitled, TimerMode: timerMode, TimerEndMS: timerEndMS, SourceStatus: s.sourceStatus,
 	}
 }
@@ -1541,7 +1553,7 @@ func (s *nativeEditorSession) handleState(w http.ResponseWriter, r *http.Request
 		if len(owner) > 0 {
 			knownOwner = owner[0]
 		}
-		unchanged := version == s.version && (!hasOwner || knownOwner == s.notesSessionID)
+		unchanged := version == s.version && (!hasOwner || knownOwner == s.notesSessionID) && (s.collaboration == nil || s.collaboration.Save == nil)
 		s.mu.RUnlock()
 		if unchanged {
 			w.WriteHeader(http.StatusNoContent)
@@ -1605,7 +1617,48 @@ func nativeEditorViewAction(action string) bool {
 	return false
 }
 
-func (s *nativeEditorSession) apply(action nativeEditorAction) (resultErr error) {
+func (s *nativeEditorSession) apply(action nativeEditorAction) error {
+	if action.commandSerialized {
+		return s.applyCommand(action)
+	}
+	s.mu.RLock()
+	live := s.collaboration != nil
+	s.mu.RUnlock()
+	if !live {
+		err := s.applyCommand(action)
+		s.mu.Lock()
+		if s.collaboration != nil && s.collaborationRevisionLocked(s.version) == nil {
+			s.collaboration.Revisions = append(s.collaboration.Revisions, s.collaborationSnapshotLocked())
+		}
+		s.mu.Unlock()
+		return err
+	}
+	// Preserve off-lock preparation: clipboard decoding and font/theme rendering
+	// must not exclude the other editor while doing expensive work.
+	if action.Action == "paste-objects" && action.preparedClipboard == nil {
+		return s.prepareAndApplyObjectClipboard(context.Background(), action)
+	}
+	if action.Action == "detach-deck-theme" && action.preparedThemeDetach == nil {
+		return s.prepareAndApplyThemeDetach(action)
+	}
+	action.commandSerialized = true
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	s.mu.Lock()
+	before := s.collaborationSnapshotLocked()
+	if err := s.rebaseHumanActionLocked(&action); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	s.mu.Unlock()
+	err := s.applyCommand(action)
+	s.mu.Lock()
+	s.recordCollaborationLocked(before, "human")
+	s.mu.Unlock()
+	return err
+}
+
+func (s *nativeEditorSession) applyCommand(action nativeEditorAction) (resultErr error) {
 	if action.Action == "insert-qr-code" {
 		ctx := action.commandContext
 		if ctx == nil {

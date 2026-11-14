@@ -22,7 +22,7 @@ final class PresenterWindow: NSWindow {
 
 @MainActor
 final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMessageHandler, WKScriptMessageHandlerWithReply, NSMenuDelegate, WKUIDelegate {
-    private var presenterURL: URL
+    private var presenterURL: URL { didSet { if appMode { automationService.setEditorTarget(presenterURL) } } }
     private let appMode: Bool
     private let openDeckHandler: ((String) -> URL?)?
     private let importDeckHandler: ((String) -> URL?)?
@@ -133,6 +133,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         self.didSaveDeckHandler = didSaveDeckHandler
         self.inputHandler = inputHandler
         super.init()
+        if appMode { automationService.setEditorTarget(url) }
     }
 
     private func updateParticipantPublicationTimer() {
@@ -1786,8 +1787,8 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
     }
 
-    private func saveDocument(forceSaveAs: Bool, copyOnly: Bool = false) {
-        guard !savingDocument else { return }
+    private func saveDocument(forceSaveAs: Bool, copyOnly: Bool = false, completion: ((Error?) -> Void)? = nil) {
+        guard !savingDocument else { completion?(NSError(domain: "Keynope", code: 1, userInfo: [NSLocalizedDescriptionKey: "Another save is in progress."])); return }
         var destination = forceSaveAs ? nil : activeDeckURLHandler?()
         if destination == nil {
             let panel = NSSavePanel()
@@ -1798,6 +1799,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             configureDocumentDestinationPanel(panel, extension: "md", copySuffix: copyOnly)
             guard runDocumentPanel(panel) == .OK else {
                 cancelDeferredSaveContinuation()
+                completion?(CocoaError(.userCancelled))
                 return
             }
             destination = panel.url
@@ -1814,6 +1816,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
               let documentURL = editorEndpoint("/api/editor/document"),
               let actionURL = editorEndpoint("/api/editor/action") else {
             cancelDeferredSaveContinuation()
+            completion?(CocoaError(.userCancelled))
             return
         }
         savingDocument = true
@@ -1832,6 +1835,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                         self.savingDocument = false
                         self.saveMenuItem?.isEnabled = self.documentDirty
                         self.cancelDeferredSaveContinuation()
+                        completion?(CocoaError(.userCancelled))
                         return
                     }
                 } else {
@@ -1862,6 +1866,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                     throw NSError(domain: "sh.keynope.app", code: 21, userInfo: [NSLocalizedDescriptionKey: String(data: confirmData, encoding: .utf8) ?? "The saved snapshot changed while it was being written."])
                 }
                 await MainActor.run {
+                    completion?(nil)
                     self.savingDocument = false
                     self.documentDirty = activityResultsPending
                     self.saveMenuItem?.isEnabled = activityResultsPending
@@ -1896,6 +1901,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 }
             } catch {
                 await MainActor.run {
+                    completion?(error)
                     self.savingDocument = false
                     self.closeAfterSave = false
                     self.actionAfterSave = nil
@@ -2614,6 +2620,23 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 resumePresentation()
             } else if action == "show-about" {
                 showAbout()
+            } else if action == "mcp-save" {
+                let expected = editorURL()
+                guard appMode, message.webView === editorWebView, message.frameInfo.isMainFrame,
+                      let source = message.frameInfo.request.url,
+                      source.scheme == expected.scheme, source.host == expected.host,
+                      source.port == expected.port, source.path == expected.path,
+                      let id = body["id"] as? String, let owner = body["owner"] as? String,
+                      let endpoint = editorEndpoint("/api/editor/mcp-save-result") else { return }
+                saveDocument(forceSaveAs: false) { error in
+                    Task { @MainActor in
+                        var request = URLRequest(url: endpoint)
+                        request.httpMethod = "POST"
+                        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                        request.httpBody = try? JSONSerialization.data(withJSONObject: ["id": id, "owner": owner, "error": error?.localizedDescription ?? ""])
+                        _ = try? await URLSession.shared.data(for: request)
+                    }
+                }
             } else if action == "save-presentation" {
                 saveDocument(forceSaveAs: false)
             } else if action == "save-presentation-copy" {

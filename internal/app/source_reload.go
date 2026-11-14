@@ -32,6 +32,8 @@ func sameSourceFile(a, b os.FileInfo) bool {
 }
 
 func (s *nativeEditorSession) refreshSource(allow, force bool, owner string, revision int64) error {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
 	s.mu.Lock()
 	w := s.sourceWatch
 	if w == nil || s.untitled {
@@ -95,8 +97,20 @@ func (s *nativeEditorSession) refreshSource(allow, force bool, owner string, rev
 				s.undo, s.redo, s.fontLibrary, s.fontExport, s.styleClipboard = nil, nil, nil, nil, nil
 				s.sceneResponse, s.masterPreviews = nil, nil
 				s.notesSessionID = next.notesSessionID
+				if s.collaboration != nil {
+					if request := s.collaboration.Save; request != nil {
+						select {
+						case request.done <- fmt.Errorf("the document was reloaded during Save"):
+						default:
+						}
+					}
+					s.collaboration = &editorCollaboration{}
+				}
 				s.mutationRevision++
 				s.version++
+				if s.collaboration != nil {
+					s.collaboration.Revisions = append(s.collaboration.Revisions, s.collaborationSnapshotLocked())
+				}
 				s.sourceStatus = ""
 				w.accepted, w.candidate = info, nil
 				companion, path, version, current := s.companion, s.deckPath, s.version, s.current

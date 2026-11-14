@@ -4,6 +4,14 @@ All notable changes to `keynope` are documented in this file.
 
 This project follows semantic versioning.
 
+## 1.8.11
+
+Changed:
+
+- App MCP edits the open deck in memory alongside the user, with shared Undo and the normal Save workflow. Independent MCP selection preserves the user's slide and scroll position.
+- MCP changes cancel pending edits and drags only on affected objects. Concurrent changes are reported through revision deltas and `deck_changes`; document identities prevent requests from crossing File/Open.
+- Standalone MCP workspaces remain available through the CLI.
+
 ## 1.8.10
 
 Added:

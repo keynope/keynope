@@ -47,7 +47,9 @@ globalThis.KeynopeCharts=(()=>{
     const seriesPageSize=8;
     function visibleSeries(fn){for(let i=seriesPage*seriesPageSize;i<Math.min(data.series.length,(seriesPage+1)*seriesPageSize);i++)fn(data.series[i],i);}
     const dirty=()=>{if(dirtyGeneration!==generation){dirtyValue=invalidBaseline||JSON.stringify(data)!==baseline;dirtyGeneration=generation;}return dirtyValue;},notify=()=>{const u=d.querySelector('[data-chart-undo]'),r=d.querySelector('[data-chart-redo]');if(u)u.disabled=!history.length;if(r)r.disabled=!future.length;options.onDirty?.();};
-    function close(){if(busy)return;d.close();d.remove();active=null;notify();if(previous?.isConnected)previous.focus({preventScroll:true});}
+    const cancelForMCP=event=>{if(options.objectId&&event.detail?.includes(options.objectId)){busy=false;close();}};
+    document.addEventListener('keynope-mcp-objects-changed',cancelForMCP);
+    function close(){if(busy)return;document.removeEventListener('keynope-mcp-objects-changed',cancelForMCP);d.close();d.remove();active=null;notify();if(previous?.isConnected)previous.focus({preventScroll:true});}
     const historyByteLimit=32*1024*1024;
     function snapshot(){const json=JSON.stringify(data);return {json,bytes:json.length*2};}
     function trimHistory(){

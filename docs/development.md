@@ -112,6 +112,14 @@ Office acceptance are separate from this automated batch. Runtime cache
 diagnostics are opt-in local counters, not saved deck metadata or heap
 measurements.
 
+The live collaboration tests run against a private native engine and temporary
+Markdown deck: `node tools/test_live_mcp.cjs`. Set `TEST_BROWSER=webkit` for the
+second engine. They verify stable human slide/scroll position, independent text
+editing, MCP conflict precedence, change deltas and native Save handoff. The
+script builds its own engine; `KEYNOPE_ENGINE` can point to a separately built
+CLI engine. Go `TestLiveMCP*` tests also cover routing across document replacement,
+stable object identities, shared Undo, journal expiry and concurrent commands.
+
 ### Focused checks
 
 The integration batch is the maintained end-to-end entry point. Additional
