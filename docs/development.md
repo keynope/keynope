@@ -77,6 +77,25 @@ node tools/test_editor_integration.cjs --browser=webkit
 node tools/test_editor_integration.cjs --case=tables,charts
 ```
 
+For keyboard shortcuts, slide duplication and rulers, build a fresh browser site
+and run `TEST_SITE=/path/to/site node tools/test_editor_issue_regressions.cjs`.
+Use `TEST_BROWSER=webkit` for the second browser. The source-reload checks are
+included in `go test ./...`; the activity connection timeout can also be checked
+with `node tools/test_activity_connection_timeout.cjs`.
+Run `node tools/test_source_reload.cjs` to check actual native engine reloads
+and conflict protection in a temporary deck. It builds an isolated CLI engine
+and does not open the desktop app. `KEYNOPE_ENGINE` can select a separately built
+CLI engine; the signed app helper requires its sandboxed app parent.
+`TEST_SITE=/path/to/site node tools/test_editor_context_menus.cjs` covers slide
+navigation, canvas deselection, slide/object/image action menus, layout and
+arrangement submenus, keyboard access, and stale-menu ownership.
+`TEST_SITE=/path/to/site node tools/test_editor_shortcuts.cjs` exercises the
+shared keyboard command registry, selection filtering, slide navigation and
+ordering, arrangement, text formatting, presentation, help and native-menu
+enablement notifications. It is also the integration batch's `shortcuts` case.
+The [Bruno branch review](bruno-shortcuts-review.md) records the upstream
+comparison and the changes retained during adoption.
+
 `PLAYWRIGHT_MODULE` can point to an existing Playwright installation, and
 `CHROME_PATH` can select a Chromium executable. Dependencies are not installed
 automatically.

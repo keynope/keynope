@@ -40,13 +40,15 @@ type nativeEditorSession struct {
 	editingGroup     string
 	version          int64
 	mutationRevision int64  // Conservative geometry-relevant transactions, not selection/timer/private note/result traffic.
-	notesSessionID   string // Immutable for this session; document replacement creates a new owner.
+	notesSessionID   string // Document lifetime token; replacement or external reload creates a new owner.
 	undo             []Deck
 	redo             []Deck
 	companion        *presenterCompanion
 	timerDeadline    time.Time
 	masterMode       bool
 	currentMaster    int
+	sourceWatch      *editorSourceWatch
+	sourceStatus     string
 }
 
 func (s *nativeEditorSession) handleUpload(w http.ResponseWriter, r *http.Request) {
@@ -88,6 +90,7 @@ func (s *nativeEditorSession) handleUpload(w http.ResponseWriter, r *http.Reques
 }
 
 type nativeEditorState struct {
+	SourceStatus           string                    `json:"sourceStatus,omitempty"`
 	RegisteredTypefaceID   string                    `json:"registeredTypefaceId,omitempty"`
 	PageSize               *DeckPageSize             `json:"pageSize,omitempty"`
 	ClipboardWarnings      []string                  `json:"clipboardWarnings,omitempty"` // One paste response only; never authored/session state.
@@ -1186,7 +1189,10 @@ func (s *nativeEditorSession) transportState() nativeEditorState {
 // change the authored slide collection. Structural/history commands retain a
 // complete recovery response. Master editing always transports all masters.
 func (s *nativeEditorSession) actionTransportState(action string) nativeEditorState {
-	return s.stateForClient(true, !nativeEditorActionRequiresFullSlides(action), s.notesSessionID)
+	s.mu.RLock()
+	owner := s.notesSessionID
+	s.mu.RUnlock()
+	return s.stateForClient(true, !nativeEditorActionRequiresFullSlides(action), owner)
 }
 
 func nativeEditorActionRequiresFullSlides(action string) bool {
@@ -1320,7 +1326,7 @@ func (s *nativeEditorSession) stateForClient(currentOnly, currentSlideOnly bool,
 		Version: s.version, MutationRevision: s.mutationRevision, NotesOwnerID: speakerNotesOwnerAt(s.deck, s.masterMode, current), NotesSessionID: s.notesSessionID, Path: s.deckPath, Current: current, Selected: s.selected, MasterMode: s.masterMode,
 		Selection: selection, EditingGroup: s.editingGroup, Slides: slides, CurrentSlide: currentSlide, Resolved: resolved, ResolvedCurrent: resolvedCurrent, Masters: s.deck.Masters,
 		MasterPreviewRevisions: s.masterPreviewRevisionsLocked(),
-		Dirty:                  s.dirtyLocked(), Untitled: s.untitled, TimerMode: timerMode, TimerEndMS: timerEndMS,
+		Dirty:                  s.dirtyLocked(), Untitled: s.untitled, TimerMode: timerMode, TimerEndMS: timerEndMS, SourceStatus: s.sourceStatus,
 	}
 }
 
@@ -1512,6 +1518,9 @@ func (s *nativeEditorSession) confirmSaved(path string, version int64) bool {
 	s.savedDeck = cloneDeck(s.deck)
 	s.untitled = false
 	s.dirtyOverride = false
+	if s.sourceWatch != nil || nativeAppModeActive {
+		s.resetSourceWatchLocked()
+	}
 	s.retainUnchangedSceneRevision()
 	s.version++
 	return true
@@ -1522,6 +1531,7 @@ func (s *nativeEditorSession) handleState(w http.ResponseWriter, r *http.Request
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	s.refreshSource(r.URL.Query().Get("deferReload") != "1", false, "", 0)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	if version, err := strconv.ParseInt(r.URL.Query().Get("version"), 10, 64); err == nil {
@@ -1549,6 +1559,19 @@ func (s *nativeEditorSession) handleAction(w http.ResponseWriter, r *http.Reques
 	var action nativeEditorAction
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 24<<20)).Decode(&action); err != nil {
 		writeEditorFailure(w, r, nativeEditorAction{}, errInvalidEditorAction, http.StatusBadRequest)
+		return
+	}
+	if action.Action == "reload-source" {
+		if action.SceneRevision == nil {
+			writeEditorFailure(w, r, action, errInvalidEditorAction, http.StatusBadRequest)
+			return
+		}
+		if err := s.refreshSource(true, true, action.NotesSessionID, *action.SceneRevision); err != nil {
+			writeEditorFailure(w, r, action, err, http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(s.transportState())
 		return
 	}
 	if action.Action == "detach-deck-theme" {

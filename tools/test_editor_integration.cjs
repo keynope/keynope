@@ -18,7 +18,8 @@ const cases=Object.freeze([
  ['document-lifetime','test_document_lifetime.cjs','Real New/Open cache release, failed-open ownership, portable media/fonts and subsequent editing/history'],
  ['builds','test_powerup_builds.cjs','Timeline editing, presenter/standalone/participant cursor playback'],
  ['corpus','test_powerup_corpus.cjs','Twenty public proof pages, fonts and declared diagnostics'],
- ['mixed','test_primitive_integration.cjs','Normal/tab/Base/layout mixed groups and editable second reopen']
+ ['mixed','test_primitive_integration.cjs','Normal/tab/Base/layout mixed groups and editable second reopen'],
+ ['shortcuts','test_editor_shortcuts.cjs','Keyboard commands, native command guards, formatting and shortcut help']
 ].map(([id,script,coverage])=>Object.freeze({id,script,coverage})));
 
 // These readbacks must consume this engine's fresh browser output, never an

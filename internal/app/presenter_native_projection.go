@@ -49,10 +49,24 @@ func (p *presenterCompanion) awaitEditorProjection(ctx context.Context, owner st
 		if ctx.Err() != nil {
 			return
 		}
+		// External reload changes the source owner. Read it without holding
+		// p.mu: commands acquire the document lock before the presenter lock.
+		p.mu.RLock()
+		var source *nativeEditorSession
+		if p.nativeProjection != nil {
+			source = p.nativeProjection.source
+		}
+		p.mu.RUnlock()
+		if source == nil {
+			return
+		}
+		source.mu.RLock()
+		currentOwner := source.notesSessionID
+		source.mu.RUnlock()
 		p.mu.Lock()
 		projection := p.nativeProjection
-		if p.closed || projection == nil || projection.source == nil || owner == "" ||
-			projection.source.notesSessionID != owner || !projection.pending || revision > projection.revision {
+		if p.closed || projection == nil || projection.source != source || owner == "" ||
+			currentOwner != owner || !projection.pending || revision > projection.revision {
 			p.mu.Unlock()
 			return
 		}

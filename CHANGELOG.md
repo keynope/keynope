@@ -4,6 +4,22 @@ All notable changes to `keynope` are documented in this file.
 
 This project follows semantic versioning.
 
+## 1.8.10
+
+Added:
+
+- Select All for canvas objects, with normal text-selection behavior in editors.
+- A native Duplicate Slide menu command and Cmd/Ctrl+Shift+D shortcut.
+- Shared keyboard commands, native Slide/Arrange/Format/Play menus and a keyboard shortcut reference in Help (Cmd/Ctrl+/), adapted from Bruno Schaatsbergen's shortcut branches.
+- Automatic reload of externally saved Markdown decks, with unsaved-edit protection.
+
+Changed:
+
+- Rulers include minor divisions, pointer coordinates and draggable horizontal/vertical alignment guides that follow zoom and pan. Click a guide to remove it, or click either ruler to clear all guides.
+- Activity connections time out and retry instead of remaining stuck while opening a room; late connections are closed.
+- Up/Down navigate slides when no object is selected, alongside Left/Right. Clicking blank canvas clears the selection and opens the Slide inspector.
+- Slide and object context menus offer editing commands, layout selection and arrangement instead of duplicating inspector settings.
+
 ## 1.8.9
 
 Added:

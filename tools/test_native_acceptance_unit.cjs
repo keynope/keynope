@@ -5,9 +5,9 @@ const path = require('node:path');
 const {spawnSync} = require('node:child_process');
 const script = path.join(__dirname, 'test_native_acceptance.sh');
 const flags = {
-  'activity-builds': 'ACTIVITY_BUILD', builds: 'BUILD', 'pptx-timing': 'PPTX_TIMING',
+  'activity-builds': 'ACTIVITY_BUILD', builds: 'BUILD', 'image-first-paint': 'IMAGE_FIRST_PAINT', 'pptx-timing': 'PPTX_TIMING',
   'presentation-tools': 'PRESENTATION_TOOLS', shapes: 'SHAPE', 'stroke-routes': 'STROKE_ROUTE',
-  svg: 'SVG', 'table-tokens': 'TABLE_TOKEN', 'theme-colours': 'THEME_COLOUR', transitions: 'TRANSITION'
+  svg: 'SVG', 'system-fonts': 'SYSTEM_FONTS', 'table-tokens': 'TABLE_TOKEN', 'theme-colours': 'THEME_COLOUR', transitions: 'TRANSITION'
 };
 const run = args => spawnSync('zsh', [script, ...args], {encoding: 'utf8'});
 test('native case listing and dry runs never launch the acceptance app', {skip: process.platform !== 'darwin'}, () => {

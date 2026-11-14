@@ -719,6 +719,7 @@ func appEngineMain() {
 		editorPath = pptxSuggestedName(args.DeckPath)
 	}
 	editor := newNativeEditorSession(editorPath, deck, args.Untitled || args.ImportPPTX, parsedDeckElementOrderChanged || args.ImportPPTX)
+	editor.resetSourceWatchLocked()
 	activeNativeEditor = editor
 	defer func() { activeNativeEditor = nil }()
 	editor.mu.RLock()
@@ -4733,10 +4734,19 @@ function publishEngagementRuntime(runtime = keynopeEngagementRuntime) {
     method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)
 	})).then(response => { if (!response.ok) throw new Error('Could not synchronize engagement'); }).catch(() => {});
 }
+function withActivityConnectionTimeout(operation, timeoutMS = 20000) {
+  return new Promise((resolve,reject)=>{
+    let settled=false;
+    const timer=setTimeout(()=>{settled=true;reject(new Error('The activity connection timed out. Check your internet connection; retrying automatically.'));},timeoutMS);
+    Promise.resolve(operation).then(value=>{
+      if(settled){try{Promise.resolve(value?.close?.()).catch(()=>{});}catch(_){}return;}
+      settled=true;clearTimeout(timer);resolve(value);
+    },error=>{if(settled)return;settled=true;clearTimeout(timer);reject(error);});
+  });
+}
 async function keynopeActivityConnector() {
-  if (globalThis.keynopeConnectActivity) return globalThis.keynopeConnectActivity;
-  const module = await import('https://keynope.sh/activity-channel.js');
-  return module.connectKeynopeActivity;
+  const connect=globalThis.keynopeConnectActivity || (await withActivityConnectionTimeout(import('https://keynope.sh/activity-channel.js'))).connectKeynopeActivity;
+  return options=>withActivityConnectionTimeout(connect(options));
 }
 function foldHostedEngagementResponses(runtime) {
   const entries = Object.entries(runtime.responseByIdentity || {});
@@ -8438,7 +8448,7 @@ function publishPresenterTimer(seconds) {
   }).catch(() => {});
 }
 function keynopeFormControlTarget(target) {
-  return !!target && (/^(INPUT|TEXTAREA|SELECT|VIDEO)$/.test(target.tagName) || target.isContentEditable || !!target.closest?.('[data-keynope-scene-dialog],[aria-modal="true"],[role="menu"],.kn-portrait-gallery,.keynope-workspace-more,.keynope-next-state,.keynope-presenter-tools-panel,.keynope-video-controls'));
+  return !!target && (/^(INPUT|TEXTAREA|SELECT|VIDEO)$/.test(target.tagName) || target.isContentEditable || !!target.closest?.('[data-keynope-scene-dialog],[aria-modal="true"],[role="menu"],.kn-portrait-gallery,.keynope-workspace-more,.keynope-next-state,.keynope-presenter-tools-panel,.keynope-video-controls,.keynope-ruler-guide'));
 }
 addEventListener('keydown', e => {
   if (keynopeFormControlTarget(e.target)) return;
@@ -8896,6 +8906,7 @@ if (keynopeAppSurface) {
   let editorTransparencyIconSequence = 0;
   let editorElementClipboard = null;
   let editorActionQueue = Promise.resolve();
+  let editorPendingOperations = 0;
   let activeCanvasDrag = null;
   let canvasStyleClipboard=null,canvasStylePainter=null;
   const wordPainterNotice=document.createElement('aside');wordPainterNotice.className='keynope-word-painter-notice';wordPainterNotice.hidden=true;wordPainterNotice.setAttribute('aria-label','Word painter status');
@@ -8923,6 +8934,13 @@ if (keynopeAppSurface) {
   let lastPublishedEditorDirty = null;
   let lastPublishedEditorTabsAvailable = null;
   let lastPublishedEditorQRVisible = null;
+  const sourceNotice=document.createElement('div'),sourceMessage=document.createElement('span'),sourceReload=document.createElement('button');
+  sourceNotice.className='keynope-font-warning';sourceNotice.hidden=true;sourceNotice.setAttribute('role','status');
+  sourceReload.type='button';sourceReload.textContent='Reload from disk';sourceNotice.append(sourceMessage,sourceReload);document.body.append(sourceNotice);
+  sourceReload.onclick=async()=>{
+    if(lastPublishedEditorDirty&&!window.confirm('Discard your unsaved changes and reload the file from disk?'))return;
+    try{if(activeInlineEditor)await activeInlineEditor.finish(false);await editorAction({action:'reload-source',sceneRevision:editorState.version});}catch(error){sourceMessage.textContent=error.message;}
+  };
   let publishedEditorDiagnostics = new Set();
   let publishedEditorDiagnosticList = null;
   let publishedEditorDiagnosticOwner = '';
@@ -8949,6 +8967,8 @@ if (keynopeAppSurface) {
   editorFontRetry.onclick=prepareEditorFonts;
   prepareEditorFonts();
   function publishEditorDiagnostics() {
+    sourceNotice.hidden=!editorState?.sourceStatus;
+    sourceMessage.textContent=editorState?.sourceStatus||'';
     const owner = editorState?.notesSessionId || editorState?.path || '';
     if (owner !== publishedEditorDiagnosticOwner) {
       publishedEditorDiagnosticOwner = owner;
@@ -8993,7 +9013,9 @@ if (keynopeAppSurface) {
     if (handler) handler.postMessage({action: 'editor-dirty-state', dirty});
   }
   function queueEditorOperation(operation) {
-    const pending = editorActionQueue.then(operation, operation);
+    editorPendingOperations++;
+    const run=async()=>{try{return await operation();}finally{editorPendingOperations--;}};
+    const pending = editorActionQueue.then(run, run);
     editorActionQueue = pending.catch(() => {});
     return pending;
   }
@@ -9053,6 +9075,7 @@ if (keynopeAppSurface) {
     const nextState = mergeEditorStateResponse(responseState);
     const performanceResponded=performanceStarted?performance.now():0;
     if(documentEpoch!==editorDocumentEpoch)return;
+    if(editorState&&nextState.notesSessionId!==editorState.notesSessionId)resetEditorDocumentLifetime();
     if(!selectionOnly)editorCommandErrorNotice.hidden=true;
     // The hosted WASM bridge applies the matching workspace before it releases
     // the action response. Do not immediately render the same chrome a second
@@ -10137,8 +10160,8 @@ if (keynopeAppSurface) {
   const cloneSlideButton = editorButton('', {action: 'clone-slide'}, mainTopbar);
   cloneSlideButton.classList.add('keynope-icon-button', 'keynope-clone-button');
   cloneSlideButton.innerHTML = cloneIconSVG;
-  cloneSlideButton.title = 'Clone slide';
-  cloneSlideButton.setAttribute('aria-label', 'Clone slide');
+  cloneSlideButton.title = 'Duplicate slide (⌘/Ctrl+Shift+D)';
+  cloneSlideButton.setAttribute('aria-label', 'Duplicate slide');
   const deleteIconSVG = '<svg viewBox="0 0 800 600" aria-hidden="true"><path d="M245 205h310l-25 300c-2 25-23 44-48 44H318c-25 0-46-19-48-44Z" fill="none" stroke="#fff" stroke-width="28" stroke-linejoin="round"/><path d="M205 190h390" fill="none" stroke="#fff" stroke-width="34" stroke-linecap="round"/><path d="M330 180v-48c0-18 14-32 32-32h76c18 0 32 14 32 32v48" fill="none" stroke="#fff" stroke-width="30" stroke-linejoin="round"/><path d="M330 280v170M400 280v170M470 280v170" fill="none" stroke="#fff" stroke-width="25" stroke-linecap="round"/></svg>';
   const deleteSlideButton = editorButton('', {action: 'delete-slide'}, mainTopbar);
   deleteSlideButton.classList.add('keynope-icon-button', 'keynope-delete-button');
@@ -11179,7 +11202,13 @@ if (keynopeAppSurface) {
         resolveEmojiFonts:async text=>{const response=await fetch('/api/editor/emoji-text-fonts?'+new URLSearchParams({text}));if(!response.ok)throw Error('Could not load emoji font');return response.json();},
         pickColor:openKeynopeColourPicker,renderDraft:async(tableData,signal)=>{const response=await fetch('/api/editor/table-draft',{method:'POST',headers:{'Content-Type':'application/json'},signal,body:JSON.stringify({slide:requestedSlide,sceneMaster:requestedMaster,sceneRevision:requestedRevision,objectId:object.id,tableData})});if(!response.ok)throw Error(await response.text());const scene=await response.json();return scene.objects.find(candidate=>candidate.id===object.id)?.table;},
         copyText:writeEditorPlainText,onEditTable:editSelectedTable,onFitTable:fitSelectedTable,onDirty:publishEditorDirtyState,onClose:()=>{keynopeEditorTextEditActive=false;publishEditorDirtyState();queueMicrotask(refreshWordPainterNotice);},
-        onOutsideCommit:async position=>{await new Promise(requestAnimationFrame);if(editorState.current!==requestedSlide||editorState.path!==requestedPath||!!editorState.masterMode!==requestedMaster)return;const hit=document.elementFromPoint(position.x,position.y)?.closest('.keynope-canvas-element');if(!hit||!canvasOverlay.contains(hit))return;const element=editorState.slides[requestedSlide]?.elements[Number(hit.dataset.element)];if(element)await editorAction({action:'select-element',element:Number(hit.dataset.element),elementData:{id:element.id}});}
+        onOutsideCommit:async position=>{
+          await new Promise(requestAnimationFrame);if(editorState.current!==requestedSlide||editorState.path!==requestedPath||!!editorState.masterMode!==requestedMaster)return;
+          const rect=canvasOverlay.getBoundingClientRect();if(position.x<rect.left||position.x>rect.right||position.y<rect.top||position.y>rect.bottom)return;
+          const hit=document.elementFromPoint(position.x,position.y)?.closest('.keynope-canvas-element'),element=hit&&canvasOverlay.contains(hit)?editorState.slides[requestedSlide]?.elements[Number(hit.dataset.element)]:null;
+          await editorAction({action:'select-element',element:element?Number(hit.dataset.element):-1,elementData:element?{id:element.id}:undefined});
+          if(!element&&!requestedMaster){workspace.selectPanel('slide');stage.focus({preventScroll:true});}
+        }
       });}catch(error){keynopeEditorTextEditActive=false;if(editorStatus)editorStatus.textContent=error.message;throw error;}return;
     }
     // Unified decks choose their editor from the concrete object projection.
@@ -11214,6 +11243,7 @@ if (keynopeAppSurface) {
             const next=hit&&canvasOverlay.contains(hit)?Number(hit.dataset.element):-1;
             const element=editorState.slides[requestedSlide]?.elements[next];
             await editorAction({action:'select-element',element:element?next:-1,elementData:element?{id:element.id}:undefined}).catch(error=>{if(editorStatus)editorStatus.textContent=error.message;});
+            if(!element&&!requestedMaster){workspace.selectPanel('slide');stage.focus({preventScroll:true});}
           }
         });return;}
         if(original.kind!=='shape')return;
@@ -11396,6 +11426,9 @@ if (keynopeAppSurface) {
     editor.addEventListener('click', updateCaret);
     editor.addEventListener('keyup', updateCaret);
     editor.addEventListener('keydown', keyEvent => {
+      if(keyEvent.key==='Enter'&&(keyEvent.metaKey||keyEvent.ctrlKey)&&!keyEvent.altKey&&!keyEvent.shiftKey){
+        keyEvent.preventDefault();keyEvent.stopPropagation();finish(true);return;
+      }
       if(KeynopeTrueType.is(element)){
         if(element.kind!=='code'&&(keyEvent.key==='Backspace'||keyEvent.key==='Delete')&&
           (deleteInlineEditorSelectionPreservingFormatting(editor)||deleteInlineEditorColorContent(editor,keyEvent.key==='Backspace'?-1:1)||deleteInlineEditorAcrossFormatting(editor,keyEvent.key==='Backspace'?-1:1))){keyEvent.preventDefault();}
@@ -11697,7 +11730,7 @@ if (keynopeAppSurface) {
   }
   function canvasElementAt(index) {
     if (!editorState || !editorState.slides || !editorState.slides[editorState.current]) return null;
-    const element = editorState.slides[editorState.current].elements[index];
+    const element = editorState.slides[editorState.current].elements?.[index];
     return element ? {...element} : null;
   }
   const canvasLabelStyleKeys=new Set(` + shapeLabelStyleKeysJSON() + `);
@@ -11959,6 +11992,7 @@ if (keynopeAppSurface) {
     return {copy:!!caps.commands?.[prefix+'copy']?.enabled,paste:!!caps.commands?.[prefix+'paste']?.enabled&&!!canvasStyleClipboard&&(canvasStyleClipboard.context||'')===context,reset:!!caps.commands?.[prefix+'reset']?.enabled,painter:!!canvasStylePainter&&(canvasStylePainter.context||'')===context||!!caps.commands?.[prefix+'copy']?.enabled};
   }
   function publishEditorStyleCommands() {
+    window.keynopePublishEditorCommands?.();
     refreshWordPainterNotice();
     const scope=JSON.stringify([editorDocumentEpoch,editorState?.version,editorState?.current,!!editorState?.masterMode,editorState?.editingGroup||'',!!presenterTimerMode,!!activeCanvasDrag,!!shapeConnecting]);
     if(scope!==editorStyleScopeSignature){editorStyleScopeSignature=scope;document.dispatchEvent(new Event('keynope-style-scope-change'));}
@@ -14468,7 +14502,7 @@ if (keynopeAppSurface) {
       const path=(color,width)=>{const p=document.createElementNS(svg.namespaceURI,'polyline');p.setAttribute('points',points.map(p=>p.x+','+p.y).join(' '));p.setAttribute('fill','none');p.setAttribute('stroke',color);p.setAttribute('stroke-width',width);p.setAttribute('vector-effect','non-scaling-stroke');svg.append(p);return p};
       const hit=path('transparent',Math.max(14,Number(q.get('connector-width')||1)*3));hit.classList.add('keynope-connector-hit');hit.dataset.element=String(index);hit.dataset.id=e.id;hit.style.pointerEvents=shapeConnecting?'none':'stroke';hit.style.cursor='pointer';
       const hitContext=canvasGeometryContext();
-      hit.addEventListener('pointerdown',event=>{event.preventDefault();event.stopPropagation();if(!canvasGeometryContextCurrent(hitContext,false))return;editorAction({action:'select-element',element:index,name:event.shiftKey?'toggle':'',elementData:{id:e.id}}).catch(()=>{});});
+      hit.addEventListener('pointerdown',event=>{if(event.button!==0)return;event.preventDefault();event.stopPropagation();if(!canvasGeometryContextCurrent(hitContext,false))return;editorAction({action:'select-element',element:index,name:event.shiftKey?'toggle':'',elementData:{id:e.id}}).catch(()=>{});});
       hit.addEventListener('dblclick',async event=>{
         event.preventDefault();event.stopPropagation();if(!canvasGeometryContextCurrent(hitContext,false))return;const context=canvasGeometryContext();
         const property=canvasSelectionProperty('line.path'),mode=property?.eligibleIds?.includes(e.id)?property.value:q.get('connector-mode');
@@ -14479,7 +14513,7 @@ if (keynopeAppSurface) {
         if(!canvasGeometryContextCurrent(context,false))return;
         editingConnector=e.id;renderEditorTopbar();renderEditorCanvasOverlay();
       });
-      hit.addEventListener('contextmenu',event=>{event.preventDefault();event.stopPropagation();});
+      hit.addEventListener('contextmenu',event=>{event.preventDefault();event.stopPropagation();openObjectActionMenu(index,event.clientX,event.clientY,hit).catch(showEditorCommandError);});
       }
       connectorOrder.push(svg);
       const selected=index===editorState.selected||(editorState.selection||[]).includes(index);
@@ -14739,10 +14773,7 @@ if (keynopeAppSurface) {
       hit.addEventListener('contextmenu', event => {
         event.preventDefault();
         event.stopPropagation();
-        // There is one home for element actions: the Format inspector.
-        const open = () => selectRibbonTab('content',true);
-        if (editorState.selected === index || (editorState.selection||[]).includes(index)) open();
-        else editorAction({action: 'select-element', element: index}).then(open).catch(() => {});
+        openObjectActionMenu(index,event.clientX,event.clientY,hit).catch(showEditorCommandError);
       });
       hit.addEventListener('pointerdown', event => {
         if(event.button!==0)return;
@@ -15011,18 +15042,159 @@ if (keynopeAppSurface) {
 	refreshCanvasShapeAdjustments();
   };
 
-  canvasOverlay.addEventListener('pointerdown', event => {
-    if (!activeInlineEditor || activeInlineEditor.editor.contains(event.target)) return;
-    if (event.target.closest && event.target.closest('.keynope-canvas-element')) return;
+  let canvasBackgroundClickSequence=0;
+  stage.addEventListener('pointerdown',()=>{canvasBackgroundClickSequence++;},true);
+  stage.addEventListener('pointerdown', async event => {
+    if(event.button!==0||event.shiftKey||event.defaultPrevented||!editorState||editorState.masterMode||editorPresentationMode!=='none'||presenterTimerMode||activeCanvasDrag||shapeConnecting)return;
+    if(event.target.closest?.('button,input,textarea,select,a,[contenteditable="true"],.keynope-canvas-element,.keynope-connector-hit,.keynope-ruler-guide,.keynope-video-controls'))return;
     event.preventDefault();
     event.stopPropagation();
-    activeInlineEditor.finish(true);
+    const sequence=canvasBackgroundClickSequence,owner=editorState.notesSessionId,slide=editorState.current;
+    try{
+      if(activeInlineEditor)await activeInlineEditor.finish(true);
+      if(activeInlineEditor||sequence!==canvasBackgroundClickSequence||owner!==editorState?.notesSessionId||slide!==editorState.current)return;
+      if(editorState.selected>=0||editorState.selection?.length)await editorAction({action:'select-element',element:-1});
+      if(sequence===canvasBackgroundClickSequence&&owner===editorState?.notesSessionId&&slide===editorState.current){workspace.selectPanel('slide');stage.focus({preventScroll:true});}
+    }catch(error){showEditorCommandError(error);}
   });
 
   function slideTitle(slide, index) {
     const element = (slide.elements || []).find(item => item.text && (item.kind === 'heading' || item.kind === 'text'));
     return (index + 1) + '. ' + (element ? element.text.split('\n')[0] : 'Untitled slide');
   }
+  let editorContextRequest=0,editorContextOwner=null,editorContextLauncher=null;
+  const editorContextMenus=[];
+  function closeEditorActionMenu(restore=false){
+    editorContextRequest++;
+    for(const menu of editorContextMenus)menu.remove();
+    editorContextMenus.length=0;editorContextOwner=null;
+    const launcher=editorContextLauncher;editorContextLauncher=null;
+    if(restore){const target=launcher?.isConnected&&launcher.tabIndex>=0?launcher:stage;target.focus({preventScroll:true});}
+  }
+  function editorContextCurrent(){
+    return !!editorContextOwner&&!!editorState&&canvasGeometryContextCurrent(editorContextOwner)&&editorContextOwner.owner===editorState.notesSessionId;
+  }
+  function showEditorActionMenu(items,label,x,y,launcher){
+    closeEditorActionMenu();closeSlideContextMenu();
+    editorContextOwner={...canvasGeometryContext(),owner:editorState.notesSessionId};
+    editorContextLauncher=launcher;
+    function level(entries,name,left,top,parentButton=null){
+      const depth=parentButton?editorContextMenus.indexOf(parentButton.closest('.keynope-context-menu'))+1:0;
+      for(const menu of editorContextMenus.splice(depth)){menu.keynopeParent?.setAttribute('aria-expanded','false');menu.remove();}
+      const menu=document.createElement('div');menu.className='keynope-context-menu';menu.tabIndex=-1;
+      menu.setAttribute('role','menu');menu.setAttribute('aria-label',name);menu.keynopeParent=parentButton;
+      const controls=()=>[...menu.children].filter(node=>node.matches('button:not(:disabled)'));
+      for(const item of entries){
+        if(!item){const divider=document.createElement('div');divider.setAttribute('role','separator');menu.append(divider);continue;}
+        const button=document.createElement('button');button.type='button';button.tabIndex=-1;
+        button.setAttribute('role',item.checked===undefined?'menuitem':'menuitemradio');button.setAttribute('aria-label',item.label);
+        if(item.checked!==undefined)button.setAttribute('aria-checked',String(item.checked));
+        button.disabled=!!item.disabled;if(item.reason)button.title=item.reason;
+        const text=document.createElement('span');text.textContent=item.label;button.append(text);
+        if(item.shortcut||item.children){const hint=document.createElement('span');hint.className='keynope-context-hint';hint.setAttribute('aria-hidden','true');hint.textContent=item.children?'›':item.shortcut;button.append(hint);}
+        if(item.children){button.setAttribute('aria-haspopup','menu');button.setAttribute('aria-expanded','false');}
+        const openChild=()=>{if(!editorContextCurrent()){closeEditorActionMenu();return;}const rect=button.getBoundingClientRect();button.setAttribute('aria-expanded','true');level(item.children,item.label,rect.right+3,rect.top,button);};
+        button.onclick=()=>{
+          if(!editorContextCurrent()){closeEditorActionMenu(true);return;}
+          if(item.children){openChild();return;}
+          closeEditorActionMenu(true);
+          try{Promise.resolve(item.run()).catch(showEditorCommandError);}catch(error){showEditorCommandError(error);}
+        };
+        button.addEventListener('keydown',event=>{if(event.key==='ArrowRight'&&item.children){event.preventDefault();event.stopPropagation();openChild();}});
+        menu.append(button);
+      }
+      menu.addEventListener('keydown',event=>{
+        if(event.key==='Escape'){event.preventDefault();event.stopPropagation();closeEditorActionMenu(true);return;}
+        if(event.key==='Tab'){closeEditorActionMenu(true);return;}
+        if(event.key==='ArrowLeft'&&parentButton){event.preventDefault();event.stopPropagation();for(const node of editorContextMenus.splice(depth))node.remove();parentButton.setAttribute('aria-expanded','false');parentButton.focus();return;}
+        if(!['ArrowUp','ArrowDown','Home','End'].includes(event.key))return;
+        event.preventDefault();event.stopPropagation();const buttons=controls(),index=buttons.indexOf(document.activeElement);
+        buttons[event.key==='Home'?0:event.key==='End'?buttons.length-1:(index+(event.key==='ArrowUp'?-1:1)+buttons.length)%buttons.length]?.focus();
+      });
+      document.body.append(menu);editorContextMenus.push(menu);
+      const rect=menu.getBoundingClientRect();
+      if(parentButton&&left+rect.width>innerWidth-8)left=parentButton.getBoundingClientRect().left-rect.width-3;
+      menu.style.left=Math.max(8,Math.min(left,innerWidth-rect.width-8))+'px';menu.style.top=Math.max(8,Math.min(top,innerHeight-rect.height-8))+'px';
+      controls()[0]?.focus({preventScroll:true});
+    }
+    level(items,label,x,y);
+  }
+  function canOpenEditorActionMenu(){
+    return !!editorState&&editorPresentationMode==='none'&&!presenterTimerMode&&!activeCanvasDrag&&!shapeConnecting&&!document.querySelector('dialog[open],.keynope-engagement-blocker,.keynope-tabs-overlay');
+  }
+  async function prepareEditorActionMenu(select){
+    closeEditorActionMenu();
+    const request=editorContextRequest,owner=editorState?.notesSessionId,master=!!editorState?.masterMode;
+    if(!canOpenEditorActionMenu())return false;
+    if(activeInlineEditor)await activeInlineEditor.finish(true);
+    if(activeInlineEditor||request!==editorContextRequest||owner!==editorState?.notesSessionId||master!==!!editorState?.masterMode)return false;
+    await select();
+    return request===editorContextRequest&&owner===editorState?.notesSessionId&&master===!!editorState?.masterMode&&canOpenEditorActionMenu();
+  }
+  async function openSlideActionMenu(index,x,y,launcher){
+    if(!Number.isInteger(index)||!editorState?.slides?.[index])return;
+    if(!await prepareEditorActionMenu(async()=>{if(editorState.current!==index||editorState.selected>=0)await editorAction({action:'select-slide',slide:index});}))return;
+    const master=!!editorState.masterMode,slide=editorState.slides[index];
+    const items=[
+      {label:master?'New master':'New slide',run:()=>editorAction({action:'add-slide'})},
+      {label:master?'Duplicate master':'Duplicate slide',shortcut:'⌘/Ctrl+Shift+D',run:()=>editorAction({action:'clone-slide'})},
+      {label:master?'Delete master':'Delete slide',disabled:master&&index===0,run:()=>editorAction({action:'delete-slide'})}
+    ];
+    if(!master){
+      items.push(null,{label:'Layout',children:(editorState.masters?.layouts||[]).map(layout=>({label:layout.name||layout.id,checked:slide.layoutId===layout.id||!slide.layoutId&&layout.id==='blank',run:()=>editorAction({action:'set-layout',kind:layout.id})}))});
+    }
+    items.push(null,{label:'Slide settings…',run:()=>workspace.selectPanel('slide')});
+    if(!master){
+      const rulers=window.keynopeWorkspaceState?.().rulers;
+      items.push({label:rulers?'Hide rulers':'Show rulers',run:()=>window.keynopeWorkspaceCommand('rulers')});
+    }
+    showEditorActionMenu(items,master?'Master actions':'Slide actions',x,y,launcher);
+  }
+  async function openObjectActionMenu(index,x,y,launcher){
+    const element=canvasElementAt(index);if(!element)return;
+    const id=element.id,slide=editorState.current;
+    if(!await prepareEditorActionMenu(async()=>{
+      if(editorState.current!==slide)throw Error('The slide changed; reopen the menu.');
+      index=editorElementIndexByID(id,index);if(index<0)throw Error('The object changed; reopen the menu.');
+      if(editorState.selected!==index&&!(editorState.selection||[]).includes(index))await editorAction({action:'select-element',element:index,elementData:{id}});
+    }))return;
+    const elements=selectedEditorElements(),single=elements.length===1,locked=elements.some(e=>new URLSearchParams(e.query||'').get('object-locked')==='1'),inherited=elements.some(e=>e.inherited),editable=!locked&&!inherited;
+    const groupIDs=new Set(elements.map(e=>canvasGroupID(e)).filter(Boolean)),oneGroup=groupIDs.size===1&&elements.every(e=>canvasGroupID(e)===[...groupIDs][0]);
+    const command=(action,extra={})=>editorAction({action,element:index,elementData:{id},...extra});
+    const items=[
+      {label:'Cut',shortcut:'⌘/Ctrl+X',disabled:!editable,run:()=>editorClipboardCommand('cut')},
+      {label:'Copy',shortcut:'⌘/Ctrl+C',run:()=>editorClipboardCommand('copy')},
+      {label:'Paste',shortcut:'⌘/Ctrl+V',run:()=>editorClipboardCommand('paste')},null,
+      {label:'Duplicate',shortcut:'⌘/Ctrl+D',disabled:!single,reason:single?'':'Select one object to duplicate.',run:()=>command('duplicate-element')},
+      {label:'Delete',disabled:!editable,run:()=>elements.length>1?editorAction({action:'delete-selection'}):command('delete-element')}
+    ];
+    if(single){
+      if(['text','heading','bullet','code','text-image','shape','page-number'].includes(element.kind))items.push(null,{label:element.kind==='shape'?'Edit label':'Edit text',disabled:!editable,run:()=>beginInlineEdit(index,launcher)});
+      if(element.kind==='image')items.push(null,
+        {label:'Crop image…',disabled:!canvasSelectionCommandAllows('image.crop',id),run:()=>beginInlineEdit(index,launcher)},
+        {label:'Set as background',disabled:!canvasSelectionCommandAllows('image.background',id),run:()=>editorAction({action:'promote-image-background',objectId:id,slide:editorState.current,sceneMaster:!!editorState.masterMode,sceneRevision:editorState.version})});
+      if(element.kind==='table')items.push(null,{label:'Edit table…',disabled:!canvasSelectionCommandAllows('table.edit',id),run:()=>editSelectedTable()});
+      if(element.kind==='chart')items.push(null,{label:'Edit chart…',disabled:!canvasSelectionCommandAllows('chart.edit',id),run:()=>editSelectedChart()});
+    }
+    items.push(null);
+    if(elements.length>1&&!oneGroup)items.push({label:'Group',disabled:!editable,run:()=>command('group-elements')});
+    if(groupIDs.size)items.push({label:'Ungroup',disabled:!editable,run:()=>command('ungroup-elements')});
+    if(oneGroup&&!editorState.editingGroup)items.push({label:'Edit group',disabled:inherited,run:()=>command('enter-group')});
+    if(editorState.editingGroup)items.push({label:'Exit group',run:()=>command('exit-group')});
+    if(single||oneGroup)items.push({label:'Arrange',disabled:!editable,children:[
+      ...[['Bring to front','front'],['Bring forward','forward'],['Send backward','backward'],['Send to back','back']].map(([label,kind])=>({label,run:()=>editorAction({action:'move-object-layer',objectId:id,kind,slide:editorState.current,sceneMaster:!!editorState.masterMode,sceneRevision:editorState.version})}))
+    ]});
+    items.push({label:locked?'Unlock':'Lock',disabled:inherited,run:()=>editorAction({action:'set-object-lock',value:locked?0:1})});
+    if(single)items.push({label:'Link…',disabled:!editable,run:()=>openCanvasLinkDialog(index)});
+    const style=editorStyleCommandState();
+    items.push(null,{label:'Copy style',disabled:!style.copy,run:()=>editorStyleCommand('copy')},{label:'Paste style',disabled:!style.paste,run:()=>editorStyleCommand('paste')},null,
+      {label:single&&element.kind==='image'?'Format image…':single&&['text','heading','bullet','code','text-image'].includes(element.kind)?'Format text…':'Format object…',run:()=>workspace.selectPanel('style')},
+      {label:'Size and position…',disabled:!canvasSelectionCommandAllows('arrange.geometry')&&!canvasSelectionCommandAllows('arrange.move'),run:()=>workspace.selectPanel('arrange')});
+    showEditorActionMenu(items,'Object actions',x,y,launcher);
+  }
+  document.addEventListener('pointerdown',event=>{if(!event.target.closest?.('.keynope-context-menu'))closeEditorActionMenu();},true);
+  window.addEventListener('blur',()=>closeEditorActionMenu());
+  window.addEventListener('resize',()=>closeEditorActionMenu());
   function closeSlideContextMenu(restoreFocus = false) {
     slideContextMenu.classList.remove('open');
     slideContextMenu.replaceChildren();
@@ -15151,10 +15323,10 @@ if (keynopeAppSurface) {
     if (!slideContextMenu.contains(event.target)) closeSlideContextMenu();
   }, true);
   stage.addEventListener('contextmenu', event => {
+    if(editorClipboardTextTarget(event.target)||event.target.closest?.('[data-keynope-scene-dialog]'))return;
     event.preventDefault();
     event.stopPropagation();
-    if (activeInlineEditor) activeInlineEditor.finish(true);
-    showSlideContextMenu(editorState ? editorState.current : -1, event.clientX, event.clientY, document.activeElement);
+    openSlideActionMenu(editorState?.current,event.clientX,event.clientY,stage).catch(showEditorCommandError);
   });
   let slideThumbnails=null;
   async function paintSlideThumbnail(host,page,cols,rows) {
@@ -15243,6 +15415,7 @@ if (keynopeAppSurface) {
   window.keynopeScheduleThumbnailRefresh=scheduleSlideThumbnailRefresh;
   let slideNavigatorSignature='';
   function renderEditorPanels() {
+    if(editorContextOwner&&!editorContextCurrent())closeEditorActionMenu();
     KeynopeFonts.setDeck(editorState?.typefaces);
     refreshWordPainterNotice();
     const hideQR = !!editorState?.hideActivityQR;
@@ -15272,8 +15445,8 @@ if (keynopeAppSurface) {
     slidesPanel.appendChild(slideKeyboardStatus);
     addSlideButton.title = editorState.masterMode ? 'Add master' : 'Add slide';
     addSlideButton.setAttribute('aria-label', addSlideButton.title);
-    cloneSlideButton.title = editorState.masterMode ? 'Clone master' : 'Clone slide';
-    cloneSlideButton.setAttribute('aria-label', cloneSlideButton.title);
+    cloneSlideButton.title = (editorState.masterMode ? 'Duplicate master' : 'Duplicate slide') + ' (⌘/Ctrl+Shift+D)';
+    cloneSlideButton.setAttribute('aria-label', editorState.masterMode ? 'Duplicate master' : 'Duplicate slide');
     deleteSlideButton.title = editorState.masterMode ? 'Delete master' : 'Delete slide';
     deleteSlideButton.setAttribute('aria-label', deleteSlideButton.title);
     deleteSlideButton.disabled = !!editorState.masterMode && editorState.current === 0;
@@ -15308,16 +15481,12 @@ if (keynopeAppSurface) {
         event.preventDefault();
         event.stopPropagation();
         const rect = button.getBoundingClientRect();
-        const open = () => showSlideContextMenu(index, rect.left + Math.min(24, rect.width / 2), rect.top + Math.min(24, rect.height / 2), button);
-        if (editorState.current === index) open();
-        else editorAction({action: 'select-slide', slide: index}).then(open).catch(() => {});
+        openSlideActionMenu(index,rect.left + Math.min(24, rect.width / 2),rect.top + Math.min(24, rect.height / 2),button).catch(showEditorCommandError);
       });
       button.addEventListener('contextmenu', event => {
         event.preventDefault();
         event.stopPropagation();
-        const open = () => showSlideContextMenu(index, event.clientX, event.clientY, event.currentTarget);
-        if (editorState.current === index) open();
-        else editorAction({action: 'select-slide', slide: index}).then(open).catch(() => {});
+        openSlideActionMenu(index,event.clientX,event.clientY,button).catch(showEditorCommandError);
       });
       {
         button.dataset.masterIndex = String(index);
@@ -15325,7 +15494,7 @@ if (keynopeAppSurface) {
           button.draggable = true;
           button.classList.add('master-reorderable');
           button.title = editorState.masterMode ? 'Drag to reorder master slide' : tabOnly ? 'Drag to reorder participant tab' : 'Drag to reorder slide';
-          button.title += ' · Alt+Up/Down to reorder with keyboard · Shift+F10 for settings';
+          button.title += ' · Alt+Up/Down to reorder with keyboard · Shift+F10 for actions';
           button.addEventListener('dragstart', event => {
             draggedMasterIndex = index;
             draggingMasterMode = !!editorState.masterMode;
@@ -15612,11 +15781,13 @@ if (keynopeAppSurface) {
     editorStatePoll=poll;
     poll.promise=(async()=>{try {
       const diagnosticsOwner=editorState&&!editorState.diagnosticsUnchanged?editorState.notesSessionId||'':'';
-      const response = await fetch('/api/editor/state?version=' + encodeURIComponent(editorStateVersion)+'&diagnosticsOwner='+encodeURIComponent(diagnosticsOwner), {cache: 'no-store',signal:AbortSignal.timeout(12000)});
+      const deferReload=!!(activeInlineEditor||activeCanvasDrag||editorPendingOperations||hasPendingSpeakerNotes()||window.keynopeHasPendingActivityResults?.()||document.querySelector('dialog[open],[aria-modal="true"].open,.keynope-engagement-overlay')||keynopeFormControlTarget(document.activeElement)||editorPresentationMode!=='none');
+      const response = await fetch('/api/editor/state?version=' + encodeURIComponent(editorStateVersion)+'&diagnosticsOwner='+encodeURIComponent(diagnosticsOwner)+'&deferReload='+(deferReload?'1':'0'), {cache: 'no-store',signal:AbortSignal.timeout(12000)});
       if (!response.ok || response.status === 204) return;
       const next = mergeEditorStateResponse(await response.json());
       const completesDiagnostics=next.version===editorStateVersion&&editorState?.diagnosticsUnchanged&&!next.diagnosticsUnchanged&&next.notesSessionId===editorState.notesSessionId;
       if (poll.epoch!==editorDocumentEpoch||!Number.isInteger(next.version)||next.version<editorStateVersion||(next.version===editorStateVersion&&!completesDiagnostics)) return;
+      if(editorState&&next.notesSessionId!==editorState.notesSessionId)resetEditorDocumentLifetime();
       editorState = next;
       keynopeEditorMasterMode = !!editorState.masterMode;
       editorStateVersion = next.version;
@@ -15705,7 +15876,7 @@ if (keynopeAppSurface) {
     renderEditorCanvasOverlay();
     if(state&&Number.isInteger(state.version)&&state.version===workspace.documentRevision)window.keynopeWorkspaceAppliedRevision=state.version;
   };
-  window.keynopeReloadWebDocument = async workspace => {
+  function resetEditorDocumentLifetime() {
     editorDocumentEpoch++;
     KeynopeTrueType.clearDocumentCaches();
     KeynopeBuilds.discardPending();
@@ -15725,6 +15896,9 @@ if (keynopeAppSurface) {
     keynopePendingActivityResults.clear();
     editorStateVersion = -1;
     editorState = null;
+  }
+  window.keynopeReloadWebDocument = async workspace => {
+    resetEditorDocumentLifetime();
     await window.keynopeLoadWebWorkspace(workspace);
     await syncEditorState();
   };
@@ -16032,6 +16206,303 @@ if (keynopeAppSurface) {
     }).catch(() => {});
     return true;
   }
+  // Command registry adapted from Bruno Schaatsbergen, keys/shortcut-help
+  // (ae6420a1220e8d71091246112e379a3cbf83a71d).
+  // Native editor shortcuts. A binding names its chord the way the help
+  // sheet and the native menus describe it ("Meta+Shift+A"), so one table owns
+  // the contract. Letters use the physical key when Option is held because
+  // macOS rewrites event.key for Option chords. Bindings run after the surface
+  // guards in the keydown handler below, so they never fire inside text
+  // fields, dialogs or menus. Unmodified navigator keys stay local; modified
+  // commands share the same registry as native menus and the help sheet.
+  const editorShortcutBindings=[];
+  function editorShortcutChord(e){
+    let key=e.key;
+    const shifted={BracketLeft:'{',BracketRight:'}',Backslash:'|',Comma:'<',Period:'>'};
+    if(e.altKey&&/^Key[A-Z]$/.test(e.code||''))key=e.code.slice(3);
+    else if(e.altKey&&/^Digit[0-9]$/.test(e.code||''))key=e.code.slice(5);
+    else if(e.shiftKey&&shifted[e.code])key=shifted[e.code];
+    else if(key.length===1)key=key.toUpperCase();
+    return [(e.metaKey||e.ctrlKey)&&'Meta',e.altKey&&'Alt',e.shiftKey&&'Shift',key].filter(Boolean).join('+');
+  }
+  function defineEditorShortcut(name,chord,label,run,when){const chords=[].concat(chord);editorShortcutBindings.push({name,chord:chords[0],chords,label,run,when});}
+  function editorShortcutsAvailable(){
+    if(!editorState||editorPresentationMode!=='none'||presenterTimerMode||activeCanvasDrag||activeInlineEditor||keynopeEditorTextEditActive||shapeConnecting)return false;
+    if(keynopeFormControlTarget(document.activeElement))return false;
+    return ![...document.querySelectorAll('dialog[open],[aria-modal="true"],[role="menu"]')].some(node=>node.getClientRects().length);
+  }
+  function runEditorShortcut(e){
+    if(!editorState||editorPresentationMode!=='none'||presenterTimerMode||activeCanvasDrag||activeInlineEditor||keynopeEditorTextEditActive||shapeConnecting)return false;
+    // Native <dialog> elements carry no aria-modal attribute; any open one
+    // owns the keyboard, as does a chord typed inside a dialog.
+    if(e.isComposing||e.defaultPrevented||keynopeFormControlTarget(e.target)||!editorShortcutsAvailable())return false;
+    if(!e.metaKey&&!e.ctrlKey&&e.target?.closest?.('#keynope-slide-navigator'))return false;
+    const chord=editorShortcutChord(e);
+    const binding=editorShortcutBindings.find(entry=>entry.chords.includes(chord)&&(!entry.when||entry.when()));
+    if(!binding)return false;
+    e.preventDefault();e.stopImmediatePropagation();
+    Promise.resolve().then(binding.run).catch(showEditorCommandError);
+    return true;
+  }
+  // Native menu items run a binding by name through the same guards as the
+  // chord, so a cached menu item can never act on a text field or behind a
+  // dialog. The state map drives menu enablement.
+  function editorCommandAvailable(binding){return !!binding&&editorShortcutsAvailable()&&(!binding.when||binding.when());}
+  window.keynopeEditorCommand=name=>{
+    const binding=editorShortcutBindings.find(entry=>entry.name===name);
+    if(!editorCommandAvailable(binding))return false;
+    Promise.resolve().then(binding.run).catch(showEditorCommandError);
+    return true;
+  };
+  window.keynopeEditorCommandState=()=>Object.fromEntries(editorShortcutBindings.map(binding=>[binding.name,editorCommandAvailable(binding)]));
+  window.keynopeEditorShortcuts=()=>editorShortcutBindings.map(({name,chord,chords,label})=>({name,chord,chords:[...chords],label}));
+  let editorCommandSignature='',editorCommandPublishPending=false;
+  window.keynopePublishEditorCommands=()=>{
+    if(editorCommandPublishPending||!window.webkit?.messageHandlers?.keynopePresenter)return;
+    editorCommandPublishPending=true;
+    queueMicrotask(()=>{
+      editorCommandPublishPending=false;
+      const flags=window.keynopeEditorCommandState(),signature=JSON.stringify(flags);
+      if(signature===editorCommandSignature)return;
+      editorCommandSignature=signature;
+      window.webkit.messageHandlers.keynopePresenter.postMessage({action:'editor-command-state',flags});
+    });
+  };
+  document.addEventListener('focusin',window.keynopePublishEditorCommands);
+  document.addEventListener('focusout',window.keynopePublishEditorCommands);
+  for(const type of ['pointerdown','pointerup','pointercancel'])document.addEventListener(type,window.keynopePublishEditorCommands,true);
+
+  // Select All mirrors the Shift-drag marquee: hidden and locked objects stay
+  // out, groups travel as one unit unless that group is being edited.
+  function canvasSelectAllIndices(){
+    const elements=editorState?.slides?.[editorState.current]?.elements||[];
+    if(!elements.length||canvasOverlay.hidden)return [];
+    const hits=[...canvasOverlay.querySelectorAll('.keynope-canvas-element')].map(hit=>Number(hit.dataset.element)).filter(index=>Number.isInteger(index)&&index>=0&&index<elements.length);
+    const editing=editorState.editingGroup||'';
+    const units=KeynopeWorkspace.marqueeSelectionUnits(elements,canvasCurrentBounds(),hits,editing);
+    // A collapsed group containing a locked/hidden member cannot be selected
+    // partially: the backend expands groups again when applying selection.
+    const eligible=index=>{const q=new URLSearchParams(elements[index].query||'');return !elements[index].inherited&&q.get('object-hidden')!=='1'&&q.get('object-locked')!=='1';};
+    const indices=new Set(units.filter(unit=>unit.members.every(eligible)).flatMap(unit=>unit.members));
+    const connectors=new Set([...canvasOverlay.querySelectorAll('.keynope-connector-hit')].map(hit=>Number(hit.dataset.element)));
+    for(const index of connectors){
+      const group=canvasGroupID(elements[index]),members=group&&group!==editing?elements.flatMap((e,i)=>canvasGroupID(e)===group?[i]:[]):[index];
+      if((!editing||group===editing)&&members.every(eligible))for(const member of members)indices.add(member);
+    }
+    return [...indices].filter(index=>{
+      const q=new URLSearchParams(elements[index].query||'');
+      if(editing&&q.get('group')!==editing)return false;
+      return q.get('object-hidden')!=='1'&&q.get('object-locked')!=='1';
+    }).sort((a,b)=>a-b);
+  }
+  async function selectAllCanvasObjects(){
+    if(activeInlineEditor)await activeInlineEditor.finish(true);
+    const elements=editorState?.slides?.[editorState.current]?.elements||[],indices=canvasSelectAllIndices();
+    if(!indices.length){if(editorStatus)editorStatus.textContent='No selectable objects on this slide.';return false;}
+    await editorAction({action:'select-elements',elementIndices:indices,elementsData:indices.map(index=>({id:elements[index].id}))});
+    return true;
+  }
+  async function deselectAllCanvasObjects(){
+    if(!editorState||(editorState.selected<0&&!(editorState.selection||[]).length))return false;
+    if(pendingCanvasSelection){clearTimeout(pendingCanvasSelection);pendingCanvasSelection=null;}
+    await editorAction({action:'select-element',element:-1});
+    return true;
+  }
+  defineEditorShortcut('select-all','Meta+A','Select all objects on the slide',selectAllCanvasObjects,()=>canvasSelectAllIndices().length>0);
+  defineEditorShortcut('deselect-all','Meta+Shift+A','Deselect all objects',deselectAllCanvasObjects,()=>editorState.selected>=0||(editorState.selection||[]).length>0);
+
+  // Slide commands. New, Duplicate and Delete send the same actions as the
+  // toolbar, so master mode keeps its layout semantics. Moving a slide only
+  // reorders ordinary slides; participant tabs and masters keep their own
+  // navigator gestures.
+  async function finishInlineEditing(){if(activeInlineEditor)await activeInlineEditor.finish(true);}
+  function ordinarySlideIndices(){return (editorState.slides||[]).map((slide,index)=>slide.tabId?-1:index).filter(index=>index>=0);}
+  function slideShortcutsAllowed(){return !editorState.masterMode&&!!deck.pages?.length;}
+  function slideMoveDestination(target){
+    if(!slideShortcutsAllowed()||editorState.selected>=0)return -1;
+    const order=ordinarySlideIndices(),position=order.indexOf(editorState.current);
+    if(position<0)return -1;
+    const destination=target==='first'?order[0]:target==='last'?order[order.length-1]:order[position+(target==='up'?-1:1)];
+    return destination==null||destination===editorState.current?-1:destination;
+  }
+  async function moveCurrentSlide(target){
+    await finishInlineEditing();
+    const destination=slideMoveDestination(target);
+    if(destination<0)return false;
+    await editorAction({action:'reorder-slide',slide:editorState.current,value:destination});
+    return true;
+  }
+  async function navigateEditorPageTo(targetIndex){
+    if(!deck.pages?.length||targetIndex<0||targetIndex>=deck.pages.length||targetIndex===pageIndex)return false;
+    await finishInlineEditing();
+    const target=deck.pages[targetIndex];
+    await editorAction({action:'navigate-presentation',slide:target.slide,page:target.page||0});
+    return true;
+  }
+  defineEditorShortcut('new-slide','Meta+Shift+N','New slide after the current slide',async()=>{await finishInlineEditing();await editorAction({action:'add-slide'});});
+  defineEditorShortcut('duplicate','Meta+D','Duplicate the selected object, or the slide when nothing is selected',async()=>{
+    await finishInlineEditing();
+    if(editorState.selected>=0)await editorAction({action:'duplicate-element',element:editorState.selected});
+    else await editorAction({action:'clone-slide'});
+  });
+  defineEditorShortcut('duplicate-slide','Meta+Shift+D','Duplicate the current slide',()=>editorAction({action:'clone-slide'}));
+  defineEditorShortcut('delete-slide',['Meta+Backspace','Meta+Delete'],'Delete the current slide',async()=>{await finishInlineEditing();await editorAction({action:'delete-slide'});},()=>!(editorState.masterMode&&editorState.current===0));
+  defineEditorShortcut('move-slide-up','Meta+ArrowUp','Move the slide up',()=>moveCurrentSlide('up'),()=>slideMoveDestination('up')>=0);
+  defineEditorShortcut('move-slide-down','Meta+ArrowDown','Move the slide down',()=>moveCurrentSlide('down'),()=>slideMoveDestination('down')>=0);
+  defineEditorShortcut('move-slide-first','Meta+Shift+ArrowUp','Move the slide to the beginning',()=>moveCurrentSlide('first'),()=>slideMoveDestination('first')>=0);
+  defineEditorShortcut('move-slide-last','Meta+Shift+ArrowDown','Move the slide to the end',()=>moveCurrentSlide('last'),()=>slideMoveDestination('last')>=0);
+  defineEditorShortcut('previous-slide','PageUp','Previous slide',()=>navigateEditorPage(-1),slideShortcutsAllowed);
+  defineEditorShortcut('next-slide','PageDown','Next slide',()=>navigateEditorPage(1),slideShortcutsAllowed);
+  defineEditorShortcut('first-slide','Home','First slide',()=>navigateEditorPageTo(nextPresentationPage(-1,1)),slideShortcutsAllowed);
+  defineEditorShortcut('last-slide','End','Last slide',()=>navigateEditorPageTo(nextPresentationPage(deck.pages.length,-1)),slideShortcutsAllowed);
+
+  // Arrange commands follow Keynote: Shift-Command-F/B send the stack unit to
+  // the front or back and Option steps one layer; Command-L locks,
+  // Option-Command-L unlocks. A stack unit is one object or one whole group,
+  // the same rule as the Arrange inspector, and locked members stay put.
+  function selectedElementIndices(){
+    const elements=editorState.slides?.[editorState.current]?.elements||[];
+    return canvasSelectedIndices(editorState.selected).filter(index=>elements[index]);
+  }
+  function arrangeStackTarget(){
+    if(editorState.selected<0)return '';
+    const elements=editorState.slides?.[editorState.current]?.elements||[],indices=selectedElementIndices();
+    if(!indices.length)return '';
+    const members=canvasGroupMembers(editorState.selected);
+    if(indices.some(index=>!members.includes(index)))return '';
+    if(members.some(index=>elements[index].inherited||new URLSearchParams(elements[index].query||'').get('object-locked')==='1'))return '';
+    return elements[editorState.selected]?.id||'';
+  }
+  async function moveSelectionLayer(kind){
+    const objectId=arrangeStackTarget();
+    if(!objectId)return false;
+    await finishInlineEditing();
+    const capture=canvasGeometryContext();
+    await queueEditorOperation(async()=>{
+      if(!canvasGeometryGestureCurrent(capture)||arrangeStackTarget()!==objectId)throw Error('The slide changed; try the layer move again.');
+      await performEditorAction({action:'move-object-layer',objectId,kind,slide:capture.slide,sceneMaster:capture.master,sceneRevision:editorState.version,mutationRevision:capture.mutationRevision});
+    });
+    return true;
+  }
+  function selectionLockStates(){
+    const elements=editorState.slides?.[editorState.current]?.elements||[];
+    const indices=selectedElementIndices();if(indices.some(index=>elements[index].inherited))return [];
+    return indices.map(index=>new URLSearchParams(elements[index].query||'').get('object-locked')==='1');
+  }
+  defineEditorShortcut('bring-to-front','Meta+Shift+F','Bring the selected object to the front',()=>moveSelectionLayer('front'),()=>!!arrangeStackTarget());
+  defineEditorShortcut('send-to-back','Meta+Shift+B','Send the selected object to the back',()=>moveSelectionLayer('back'),()=>!!arrangeStackTarget());
+  defineEditorShortcut('bring-forward','Meta+Alt+Shift+F','Bring the selected object forward one layer',()=>moveSelectionLayer('forward'),()=>!!arrangeStackTarget());
+  defineEditorShortcut('send-backward','Meta+Alt+Shift+B','Send the selected object back one layer',()=>moveSelectionLayer('backward'),()=>!!arrangeStackTarget());
+  defineEditorShortcut('lock','Meta+L','Lock the selected objects',()=>editorAction({action:'set-object-lock',value:1}),()=>selectionLockStates().some(locked=>!locked));
+  defineEditorShortcut('unlock','Meta+Alt+L','Unlock the selected objects',()=>editorAction({action:'set-object-lock',value:0}),()=>selectionLockStates().some(locked=>locked));
+  function groupAction(action){
+    const elements=editorState.slides?.[editorState.current]?.elements||[],index=editorState.selected;
+    return editorAction({action,element:index,elementData:elements[index]});
+  }
+  const editableGroupSelection=()=>{const elements=selectedEditorElements();return elements.length>0&&elements.every(e=>!e.inherited&&new URLSearchParams(e.query||'').get('object-locked')!=='1');};
+  defineEditorShortcut('group','Meta+Alt+G','Group the selected objects',()=>groupAction('group-elements'),()=>selectedEditorElements().length>1&&editableGroupSelection());
+  defineEditorShortcut('ungroup','Meta+Alt+Shift+G','Ungroup the selected group',()=>groupAction('ungroup-elements'),()=>selectedEditorElements().some(e=>canvasGroupID(e))&&editableGroupSelection());
+  defineEditorShortcut('edit-group','Meta+Alt+Enter','Edit the objects inside the selected group',()=>groupAction('enter-group'),()=>!!canvasGroupID(canvasElementAt(editorState.selected))&&!editorState.editingGroup&&editableGroupSelection());
+
+  // Text commands act on the selected objects through the same selection
+  // properties as the Format ribbon, so mixed selections, inherited styles
+  // and read-only targets resolve exactly as the ribbon buttons do.
+  // Wait for the same revision's capabilities before enabling writes.
+  function textPropertyEditable(property){
+    const state=canvasSelectionProperty(property);
+    if(state)return !!state.editable&&!!state.eligibleIds?.length;
+    return false; // Missing capabilities must not enable writes to stale/locked targets.
+  }
+  function textPropertyOn(property){const state=canvasSelectionProperty(property);return state?.state==='value'&&state.value===true;}
+  function toggleTextEmphasis(property,key){return changeModernTextStyle(editorState.selected,{[key]:!textPropertyOn(property)});}
+  defineEditorShortcut('bold','Meta+B','Bold',()=>toggleTextEmphasis('text.bold','textBold'),()=>textPropertyEditable('text.bold','emphasis'));
+  defineEditorShortcut('italic','Meta+I','Italic',()=>toggleTextEmphasis('text.italic','textItalic'),()=>textPropertyEditable('text.italic','emphasis'));
+  defineEditorShortcut('underline','Meta+U','Underline',()=>toggleTextEmphasis('text.underline','textUnderline'),()=>textPropertyEditable('text.underline','emphasis'));
+  defineEditorShortcut('bigger-text','Meta+Shift+>','Bigger text',()=>changeModernTextStyle(editorState.selected,{textSizeDelta:1}),()=>textPropertyEditable('text.size','size'));
+  defineEditorShortcut('smaller-text','Meta+Shift+<','Smaller text',()=>changeModernTextStyle(editorState.selected,{textSizeDelta:-1}),()=>textPropertyEditable('text.size','size'));
+  defineEditorShortcut('align-left','Meta+Shift+{','Align text left',()=>changeModernTextStyle(editorState.selected,{textAlign:'left'}),()=>textPropertyEditable('text.align','alignment'));
+  defineEditorShortcut('align-center','Meta+Shift+|','Center text',()=>changeModernTextStyle(editorState.selected,{textAlign:'center'}),()=>textPropertyEditable('text.align','alignment'));
+  defineEditorShortcut('align-right','Meta+Shift+}','Align text right',()=>changeModernTextStyle(editorState.selected,{textAlign:'right'}),()=>textPropertyEditable('text.align','alignment'));
+
+  // Presentation commands drive the toolbar buttons so the app surface, the
+  // browser editor and the external-display rules stay in one place.
+  const toolbarButtonReady=button=>!!button&&!button.hidden&&!button.disabled;
+  defineEditorShortcut('play','Meta+Alt+P','Present on this computer',()=>presentButton.click(),()=>toolbarButtonReady(presentButton));
+  defineEditorShortcut('play-external','Meta+Alt+Shift+P','Present on the external screen',()=>externalButton.click(),()=>toolbarButtonReady(externalButton));
+  defineEditorShortcut('toggle-notes','Meta+Shift+P','Show or hide speaker notes',()=>setSpeakerNotesVisible(!editorSpeakerNotesVisible,false));
+
+  for(const [name,chord,label,command] of [
+    ['view-navigator','Meta+Alt+1','Show or hide the slide navigator','navigator'],
+    ['view-format','Meta+Alt+I','Show or hide the Format inspector','format'],
+    ['view-fit','Meta+0','Zoom to fit','fit'],
+    ['view-zoom-in',['Meta+=','Meta+Shift++'],'Zoom in','zoom-in'],
+    ['view-zoom-out','Meta+-','Zoom out','zoom-out'],
+    ['view-rulers','Meta+R','Show or hide rulers','rulers']
+  ])defineEditorShortcut(name,chord,label,()=>window.keynopeWorkspaceCommand(command));
+
+  // Keyboard shortcut sheet. Bound commands come straight from the table;
+  // the static rows describe chords that older handlers still own.
+  const shortcutSheetSections=[
+    ['Selection',['select-all','deselect-all','group','ungroup','edit-group']],
+    ['Slides',['new-slide','duplicate','duplicate-slide','delete-slide','move-slide-up','move-slide-down','move-slide-first','move-slide-last']],
+    ['Navigation',['previous-slide','next-slide','first-slide','last-slide']],
+    ['Arrange',['bring-to-front','send-to-back','bring-forward','send-backward','lock','unlock']],
+    ['Text',['bold','italic','underline','bigger-text','smaller-text','align-left','align-center','align-right']],
+    ['Presentation',['play','play-external','toggle-notes']],
+    ['View',['view-navigator','view-format','view-fit','view-zoom-in','view-zoom-out','view-rulers']],
+    ['Help',['shortcuts']]
+  ];
+  const shortcutSheetStatic={
+    Selection:[['Tab','Select the next object'],['Shift+Tab','Select the previous object'],['Escape','Deselect, cancel a drag or leave a group'],['Shift+Drag','Marquee select']],
+    Editing:[['Meta+Z','Undo'],['Meta+Shift+Z','Redo'],['Meta+X','Cut'],['Meta+C','Copy'],['Meta+V','Paste'],['Meta+Alt+C','Copy style'],['Meta+Alt+V','Paste style'],['Meta+S','Save'],['Delete','Delete the selected objects'],['Meta+Enter','Finish editing text']],
+    Objects:[['Arrows','Nudge the selected object one cell'],['Shift+Arrows','Nudge five cells'],['<','Align the object left'],['=','Center the object'],['>','Align the object right'],['O','Cycle the outline']],
+    Navigation:[['ArrowLeft','Previous slide when nothing is selected'],['ArrowUp','Previous slide when nothing is selected'],['ArrowRight','Next slide when nothing is selected'],['ArrowDown','Next slide when nothing is selected']],
+    View:[['M','Master slides'],['2','Speaker notes'],['0','Timer'],['F6','Move focus to the next pane']]
+  };
+  const shortcutSheetMac=/Mac|iPhone|iPad/.test(navigator.platform||'');
+  function formatShortcutChord(chord){
+    const symbols=shortcutSheetMac?{Meta:'\u2318',Alt:'\u2325',Shift:'\u21e7'}:{Meta:'Ctrl',Alt:'Alt',Shift:'Shift'};
+    const keys={ArrowUp:'\u2191',ArrowDown:'\u2193',ArrowLeft:'\u2190',ArrowRight:'\u2192',Backspace:'\u232b',Delete:'\u2326',Enter:'\u21a9',Escape:'\u238b',PageUp:'\u21de',PageDown:'\u21df',Home:'\u2196',End:'\u2198',Tab:'\u21e5'};
+    const plus=chord.endsWith('++'),parts=(plus?chord.slice(0,-1):chord).split('+').filter(Boolean),key=plus?'+':parts.pop();
+    const modifiers=parts.map(part=>symbols[part]||part);
+    return [...modifiers,keys[key]||key].join(shortcutSheetMac?'':'+');
+  }
+  function shortcutSheetRows(){
+    const byName=new Map(editorShortcutBindings.map(binding=>[binding.name,binding]));
+    const sections=new Map();
+    for(const [heading,names] of shortcutSheetSections){
+      const rows=names.map(name=>byName.get(name)).filter(Boolean).flatMap(binding=>binding.chords.map(chord=>[chord,binding.label]));
+      sections.set(heading,rows);
+    }
+    for(const [heading,rows] of Object.entries(shortcutSheetStatic))sections.set(heading,[...(sections.get(heading)||[]),...rows]);
+    return [...sections].filter(([,rows])=>rows.length);
+  }
+  function openShortcutSheet(){
+    if(document.querySelector('.keynope-shortcuts-dialog'))return;
+    const previousFocus=document.activeElement;
+    const dialog=document.createElement('dialog');dialog.className='keynope-shortcuts-dialog';dialog.setAttribute('aria-label','Keyboard shortcuts');dialog.setAttribute('aria-modal','true');
+    const title=document.createElement('h2');title.textContent='Keyboard shortcuts';
+    const grid=document.createElement('div');grid.className='keynope-shortcuts-grid';
+    for(const [heading,rows] of shortcutSheetRows()){
+      const section=document.createElement('section'),name=document.createElement('h3'),list=document.createElement('dl');
+      name.textContent=heading;
+      for(const [chord,label] of rows){
+        const term=document.createElement('dt'),key=document.createElement('kbd'),description=document.createElement('dd');
+        key.textContent=formatShortcutChord(chord);term.append(key);description.textContent=label;list.append(term,description);
+      }
+      section.append(name,list);grid.append(section);
+    }
+    const actions=document.createElement('div');actions.className='keynope-engagement-actions';
+    const done=document.createElement('button');done.type='button';done.textContent='Done';done.addEventListener('click',()=>dialog.close());
+    actions.append(done);dialog.append(title,grid,actions);document.body.append(dialog);
+    dialog.addEventListener('keydown',event=>keynopeHandleDialogKey(event,dialog,()=>dialog.close()));
+    dialog.addEventListener('close',()=>{dialog.remove();if(previousFocus?.isConnected)previousFocus.focus({preventScroll:true});else stage.focus({preventScroll:true});});
+    dialog.showModal();done.focus();
+  }
+  defineEditorShortcut('shortcuts','Meta+/','Show keyboard shortcuts',openShortcutSheet);
+  window.keynopePublishEditorCommands();
+  window.keynopeSelectAll=()=>window.keynopeEditorCommand('select-all');
+  window.keynopeDuplicateSlide=()=>window.keynopeEditorCommand('duplicate-slide');
   addEventListener('keydown', e => {
     if((e.metaKey||e.ctrlKey)&&e.altKey&&!e.shiftKey&&['c','v'].includes(e.key.toLowerCase())){
       if(editorClipboardTextTarget(e.target))return;
@@ -16090,8 +16561,13 @@ if (keynopeAppSurface) {
     // Escape cancels connection mode even while its ribbon button has focus.
     if(e.key==='Escape'&&shapeConnecting){e.preventDefault();e.stopImmediatePropagation();toggleShapeConnecting();return;}
     if (keynopeFormControlTarget(e.target)) return;
+    if(runEditorShortcut(e))return;
     // The slide navigator owns focus navigation, ordering and drawer dismissal.
     if (!e.metaKey && !e.ctrlKey && e.target?.closest?.('#keynope-slide-navigator')) return;
+    if(e.key==='ContextMenu'||e.shiftKey&&e.key==='F10'){
+      e.preventDefault();e.stopImmediatePropagation();const rect=presenterCanvas.getBoundingClientRect();
+      (editorState?.selected>=0?openObjectActionMenu(editorState.selected,rect.left+24,rect.top+24,stage):openSlideActionMenu(editorState?.current,rect.left+24,rect.top+24,stage)).catch(showEditorCommandError);return;
+    }
     // Ribbon keyboard navigation belongs to the focused control, not the slide.
     // Escape still dismisses canvas selection after using a toolbar button.
     // Text fields were excluded above; their editing/navigation stays local.
@@ -16132,7 +16608,7 @@ if (keynopeAppSurface) {
     }
     if (!e.metaKey && !e.ctrlKey && !e.altKey && editorState && editorState.masterMode) {
       const navigationKey = [' ', 'PageUp', 'PageDown'].includes(e.key) ||
-        ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && editorState.selected < 0);
+        (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key) && editorState.selected < 0);
       if (navigationKey || ['0', '2', 'p', 'P'].includes(e.key)) {
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -16152,18 +16628,6 @@ if (keynopeAppSurface) {
       e.stopImmediatePropagation();
       const redo = e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey);
       editorAction({action: redo ? 'redo' : 'undo'}).catch(() => {});
-      return;
-    }
-    if ((e.metaKey || e.ctrlKey) && e.altKey && e.key.toLowerCase() === 'g' && editorState && editorState.selected >= 0) {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      editorAction({action:e.shiftKey?'ungroup-elements':'group-elements',element:editorState.selected,elementData:editorState.slides?.[editorState.current]?.elements?.[editorState.selected]}).catch(() => {});
-      return;
-    }
-    if ((e.metaKey || e.ctrlKey) && e.altKey && e.key === 'Enter' && editorState && editorState.selected >= 0) {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      editorAction({action:'enter-group',element:editorState.selected,elementData:editorState.slides?.[editorState.current]?.elements?.[editorState.selected]}).catch(() => {});
       return;
     }
     if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === '2') {
@@ -16216,12 +16680,6 @@ if (keynopeAppSurface) {
       editorAction(action).catch(() => {});
       return;
     }
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'd' && editorState && editorState.selected >= 0) {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      editorAction({action: 'duplicate-element', element: editorState.selected}).catch(() => {});
-      return;
-    }
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -16231,10 +16689,11 @@ if (keynopeAppSurface) {
       return;
     }
     if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-      if (!editorState || editorState.selected < 0) return;
       e.preventDefault();
       e.stopImmediatePropagation();
-      nudgeSelected(0, (e.key === 'ArrowUp' ? -1 : 1) * (e.shiftKey ? 5 : 1));
+      if(!nudgeSelected(0, (e.key === 'ArrowUp' ? -1 : 1) * (e.shiftKey ? 5 : 1))){
+        navigateEditorPage(e.key === 'ArrowUp' ? -1 : 1).catch(showEditorCommandError);
+      }
       return;
     }
     const sequence = keynopeTerminalSequence(e);

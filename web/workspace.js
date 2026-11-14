@@ -863,34 +863,134 @@ globalThis.KeynopeWorkspace = (() => {
     snap.setAttribute('aria-label','Snap to alignment guides');snap.classList.add('keynope-workspace-extra');updateSnapping();
     let rulersOn=false;
     try{rulersOn=localStorage.getItem('keynope.workspace.rulers')==='on';}catch(_){}
-    const rulerBars=['horizontal','vertical'].map(axis=>{const node=document.createElement('div');node.className='keynope-ruler keynope-ruler-'+axis;node.setAttribute('role','img');node.setAttribute('aria-label',axis+' slide-coordinate ruler');Object.assign(node.style,{position:'fixed',pointerEvents:'none',overflow:'hidden',background:'#202830',color:'#d5dde5',font:'10px system-ui',zIndex:'3'});document.body.append(node);return node;});
+    const rulerBars=['horizontal','vertical'].map(axis=>{const node=document.createElement('div');node.className='keynope-ruler keynope-ruler-'+axis;node.setAttribute('role','img');node.setAttribute('aria-label',axis+' slide-coordinate ruler');node.title=(axis==='horizontal'?'Drag down to place a horizontal guide':'Drag right to place a vertical guide')+' · Click to clear all guides';Object.assign(node.style,{position:'fixed',touchAction:'none',userSelect:'none',cursor:axis==='horizontal'?'row-resize':'col-resize',overflow:'hidden',background:'#202830',color:'#d5dde5',font:'10px system-ui',zIndex:'3'});document.body.append(node);return node;});
+    // Workspace aids only: guides span slides and never enter the deck or exports.
+    const guides=[],guideLayer=document.createElement('div');let guideDrag=null;
+    guideLayer.className='keynope-ruler-guides';Object.assign(guideLayer.style,{position:'fixed',pointerEvents:'none',overflow:'hidden',zIndex:'3'});document.body.append(guideLayer);
+    function guideCanvas(){
+      const rect=document.getElementById('presenter-canvas')?.getBoundingClientRect(),style=getComputedStyle(root);
+      return {rect,cols:Number(style.getPropertyValue('--cols'))||1,rows:Number(style.getPropertyValue('--rows'))||1};
+    }
+    function paintGuides(){
+      const {rect,cols,rows}=guideCanvas(),bounds=zoomStage.getBoundingClientRect();
+      guideLayer.hidden=!rulersOn||!rect?.width||!rect?.height||!['','none'].includes(root.getAttribute('data-keynope-presentation-mode')||'');
+      if(guideLayer.hidden)return;
+      const left=Math.max(rect.left,bounds.left),top=Math.max(rect.top,bounds.top+56),right=Math.min(rect.right,bounds.right),bottom=Math.min(rect.bottom,bounds.bottom-52);
+      Object.assign(guideLayer.style,{left:left+'px',top:top+'px',width:Math.max(0,right-left)+'px',height:Math.max(0,bottom-top)+'px'});
+      for(const guide of guides){
+        const horizontal=guide.axis==='y',max=horizontal?rows:cols,position=(horizontal?rect.top:rect.left)+guide.value/max*(horizontal?rect.height:rect.width)-(horizontal?top:left);
+        guide.node.hidden=guide.value<0||guide.value>max;
+        guide.node.setAttribute('aria-valuemax',String(max));guide.node.setAttribute('aria-valuenow',String(guide.value));
+        guide.node.setAttribute('aria-valuetext',(horizontal?'Y ':'X ')+guide.value);
+        guide.node.title=(horizontal?'Horizontal guide · Y ':'Vertical guide · X ')+guide.value+' · Drag to move; click or drag outside the slide to remove';
+        Object.assign(guide.node.style,horizontal?{left:'0',top:(position-5)+'px',width:'100%',height:'11px'}:{left:(position-5)+'px',top:'0',width:'11px',height:'100%'});
+      }
+    }
+    function removeGuide(guide){const index=guides.indexOf(guide);if(index>=0)guides.splice(index,1);guide.node.remove();}
+    function placeGuide(guide,event){
+      const {rect,cols,rows}=guideCanvas();if(!rect?.width||!rect?.height)return;
+      const horizontal=guide.axis==='y';
+      guide.value=Math.round(((horizontal?event.clientY-rect.top:event.clientX-rect.left)/(horizontal?rect.height:rect.width))*(horizontal?rows:cols)*10)/10;
+      paintGuides();
+    }
+    function createGuide(axis){
+      const node=document.createElement('button'),guide={axis,value:0,node};node.type='button';node.className='keynope-ruler-guide';
+      node.setAttribute('role','slider');node.setAttribute('aria-label',axis==='y'?'Horizontal alignment guide':'Vertical alignment guide');node.setAttribute('aria-orientation',axis==='y'?'vertical':'horizontal');node.setAttribute('aria-valuemin','0');
+      Object.assign(node.style,{position:'absolute',pointerEvents:'auto',padding:'0',margin:'0',minWidth:'0',minHeight:'0',border:'0',borderRadius:'0',background:'transparent',cursor:axis==='y'?'row-resize':'col-resize',touchAction:'none'});
+      const line=document.createElement('span');line.setAttribute('aria-hidden','true');Object.assign(line.style,{position:'absolute',pointerEvents:'none',...(axis==='y'?{left:'0',right:'0',top:'5px',borderTop:'1px dashed #00b8e6'}:{top:'0',bottom:'0',left:'5px',borderLeft:'1px dashed #00b8e6'}),filter:'drop-shadow(0 0 1px #000)'});node.append(line);
+      node.addEventListener('pointerdown',event=>startGuideDrag(event,guide,false));
+      guides.push(guide);guideLayer.append(node);return guide;
+    }
+    function startGuideDrag(event,guide,isNew){
+      if(event.button!==0||guideDrag||blocked()||!['','none'].includes(root.getAttribute('data-keynope-presentation-mode')||''))return;
+      event.preventDefault();event.stopImmediatePropagation();
+      const target=event.currentTarget;
+      if(isNew){if(guides.length>=64)return;guide=createGuide(guide);}
+      const before=guide.value;let moved=false;
+      guideDrag={guide,before,isNew,target,id:event.pointerId};target.setPointerCapture(event.pointerId);
+      if(!isNew)guide.node.focus({preventScroll:true});
+      const track=e=>{moved ||= Math.hypot(e.clientX-event.clientX,e.clientY-event.clientY)>4;};
+      const move=e=>{if(e.pointerId===event.pointerId){e.preventDefault();e.stopPropagation();track(e);if(moved)placeGuide(guide,e);}};
+      const finish=(cancel,e)=>{
+        if(e&&e.pointerId!==event.pointerId)return;
+        guideDrag=null;
+        target.removeEventListener('pointermove',move);target.removeEventListener('pointerup',up);target.removeEventListener('pointercancel',cancelled);target.removeEventListener('lostpointercapture',cancelled);window.removeEventListener('blur',cancelled);
+        if(target.hasPointerCapture(event.pointerId))target.releasePointerCapture(event.pointerId);
+        if(cancel){if(isNew)removeGuide(guide);else guide.value=before;}
+        else {
+          track(e);
+          if(!moved){
+            if(isNew)for(const item of [...guides])removeGuide(item);
+            else removeGuide(guide);
+            zoomStage.focus({preventScroll:true});
+          }else{
+            const {rect}=guideCanvas();
+            if(!rect||e.clientX<rect.left||e.clientX>rect.right||e.clientY<rect.top||e.clientY>rect.bottom)removeGuide(guide);
+            else {placeGuide(guide,e);guide.node.focus({preventScroll:true});}
+          }
+        }
+        paintGuides();
+      };
+      const up=e=>finish(false,e),cancelled=e=>finish(true,e?.pointerId===undefined?null:e);
+      guideDrag.cancel=()=>finish(true);
+      target.addEventListener('pointermove',move);target.addEventListener('pointerup',up);target.addEventListener('pointercancel',cancelled);target.addEventListener('lostpointercapture',cancelled);window.addEventListener('blur',cancelled);
+      placeGuide(guide,event);
+    }
+    rulerBars.forEach((bar,index)=>bar.addEventListener('pointerdown',event=>startGuideDrag(event,index===0?'y':'x',true)));
+    // Own guide keys before canvas and drawer shortcuts can consume them.
+    window.addEventListener('keydown',event=>{
+      if(guideDrag&&event.key==='Escape'){event.preventDefault();event.stopImmediatePropagation();guideDrag.cancel();return;}
+      const guide=guides.find(item=>item.node===event.target);if(!guide||blocked())return;
+      if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End','Delete','Backspace'].includes(event.key))return;
+      event.preventDefault();event.stopImmediatePropagation();
+      if(['Delete','Backspace'].includes(event.key)){removeGuide(guide);zoomStage.focus({preventScroll:true});return;}
+      const {cols,rows}=guideCanvas(),max=guide.axis==='y'?rows:cols;
+      const delta=(event.key==='ArrowLeft'||event.key==='ArrowUp'?-1:1)*(event.shiftKey?10:1);
+      guide.value=event.key==='Home'?0:event.key==='End'?max:Math.max(0,Math.min(max,Math.round((guide.value+delta)*10)/10));paintGuides();
+    },true);
     let rulerGeometry='';
     const paintRulers=()=>{
+      paintGuides();
       rulerBars.forEach(node=>node.hidden=!rulersOn);if(!rulersOn)return;
       const canvas=document.getElementById('presenter-canvas');if(!canvas)return;
-      const rect=canvas.getBoundingClientRect(),style=getComputedStyle(document.documentElement);
-      const geometry=[rect.left,rect.top,rect.width,rect.height,style.getPropertyValue('--cols'),style.getPropertyValue('--rows')].join(':');
+      const rect=canvas.getBoundingClientRect(),style=getComputedStyle(document.documentElement),bounds=zoomStage.getBoundingClientRect();
+      const geometry=[rect.left,rect.top,rect.width,rect.height,bounds.left,bounds.top,bounds.right,bounds.bottom,style.getPropertyValue('--cols'),style.getPropertyValue('--rows')].join(':');
       if(geometry===rulerGeometry)return;
       rulerGeometry=geometry;
       rulerBars.forEach((bar,axis)=>{
         const horizontal=axis===0,length=horizontal?rect.width:rect.height,units=Number(style.getPropertyValue(horizontal?'--cols':'--rows'))||1;
-        const bounds=zoomStage.getBoundingClientRect();
         const left=Math.max(bounds.left,rect.left-20),top=Math.max(bounds.top+56,rect.top-20);
         const start=horizontal?Math.max(left+20,rect.left):Math.max(top+20,rect.top);
         const end=horizontal?Math.min(bounds.right,rect.right):Math.min(bounds.bottom-52,rect.bottom);
         const offset=(horizontal?rect.left:rect.top)-start;
         Object.assign(bar.style,{left:(horizontal?start:left)+'px',top:(horizontal?top:start)+'px',width:(horizontal?Math.max(0,end-start):20)+'px',height:(horizontal?20:Math.max(0,end-start))+'px'});
         bar.replaceChildren();const step=[1,2,5,10,20,25,50,100,200,500,1000].find(n=>n*length/units>=45)||Math.ceil(units/5);
-        for(let value=0;value<=units;value+=step){const tick=document.createElement('span');tick.textContent=String(value);tick.dataset.coordinate=String(value);Object.assign(tick.style,{position:'absolute',...(horizontal?{left:(offset+value/units*length)+'px',bottom:'0',borderLeft:'1px solid #7e8b98',paddingLeft:'3px',height:'15px'}:{top:(offset+value/units*length)+'px',right:'0',borderTop:'1px solid #7e8b98',paddingTop:'2px',width:'19px',textAlign:'center'})});bar.append(tick);}
+        for(let n=0;n*step/5<=units;n++){const value=n*step/5,major=n%5===0,tick=document.createElement('span');if(major){tick.textContent=String(value);tick.dataset.coordinate=String(value);}Object.assign(tick.style,{position:'absolute',...(horizontal?{left:(offset+value/units*length)+'px',bottom:'0',borderLeft:'1px solid #7e8b98',paddingLeft:'3px',height:major?'15px':'5px'}:{top:(offset+value/units*length)+'px',right:'0',borderTop:'1px solid #7e8b98',paddingTop:'2px',width:major?'19px':'5px',textAlign:'center'})});bar.append(tick);}
       });
     };
     const rulers=button('Rulers',()=>{rulersOn=!rulersOn;try{localStorage.setItem('keynope.workspace.rulers',rulersOn?'on':'off');}catch(_){}updateRulers();resize();requestAnimationFrame(paintRulers);});
     rulers.classList.add('keynope-workspace-extra');rulers.setAttribute('aria-label','Show slide rulers');
+    rulers.title='Show slide-coordinate rulers · Drag from a ruler onto the slide to add an alignment guide';
+    zoomStage.addEventListener('pointermove',event=>{
+      rulerBars.forEach(bar=>bar.querySelector('.keynope-ruler-position')?.remove());
+      if(!rulersOn)return;
+      const rect=document.getElementById('presenter-canvas')?.getBoundingClientRect();
+      if(!rect?.width||event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)return;
+      const style=getComputedStyle(document.documentElement);
+      rulerBars.forEach((bar,axis)=>{
+        const horizontal=axis===0,point=horizontal?event.clientX:event.clientY,box=bar.getBoundingClientRect(),start=horizontal?box.left:box.top;
+        const value=(point-(horizontal?rect.left:rect.top))/(horizontal?rect.width:rect.height)*Number(style.getPropertyValue(horizontal?'--cols':'--rows'));
+        const marker=document.createElement('span');marker.className='keynope-ruler-position';marker.textContent=String(Math.round(value*10)/10);
+        Object.assign(marker.style,{position:'absolute',background:'#ffd166',color:'#15191e',...(horizontal?{left:(point-start)+'px',top:'0',borderLeft:'1px solid currentColor'}:{top:(point-start)+'px',left:'0',borderTop:'1px solid currentColor'})});bar.append(marker);
+      });
+    });
+    zoomStage.addEventListener('pointerleave',()=>rulerBars.forEach(bar=>bar.querySelector('.keynope-ruler-position')?.remove()));
     function updateRulers(){document.documentElement.dataset.keynopeRulers=rulersOn?'on':'off';rulers.dataset.state=rulersOn?'ON':'OFF';rulers.setAttribute('aria-pressed',String(rulersOn));paintRulers();}
     updateRulers();
     const rulerObserver=new ResizeObserver(paintRulers);for(const node of [document.getElementById('stage'),document.getElementById('presenter-canvas')])if(node)rulerObserver.observe(node);
     new MutationObserver(paintRulers).observe(document.documentElement,{attributes:true,attributeFilter:['style']});
     window.addEventListener('resize',paintRulers);
+    new MutationObserver(paintGuides).observe(root,{attributes:true,attributeFilter:['data-keynope-presentation-mode']});
     for(const node of quick.querySelectorAll('button'))if(!node.classList.contains('keynope-save-button')&&!node.classList.contains('keynope-history-button'))node.classList.add('keynope-narrow-overflow');
     slide.classList.add('keynope-narrow-overflow');fit.classList.add('keynope-narrow-overflow');
     const morePanel=document.createElement('div');morePanel.id='keynope-workspace-more';morePanel.className='keynope-workspace-more';morePanel.hidden=true;morePanel.setAttribute('role','menu');morePanel.setAttribute('aria-label','More actions');topbar.append(morePanel);

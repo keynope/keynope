@@ -77,6 +77,31 @@ Shift-drag to select multiple objects, then group them to move them together. Do
 
 Copy and paste objects between decks, or use Copy/Paste Style and format painting to reuse their appearance.
 
+Use **⌘A** (Windows/Linux: **Ctrl+A**) to select the current slide's objects. While
+editing text, the shortcut selects text as usual. Duplicate a slide from the
+**Slide** inspector or with **⌘Shift+D / Ctrl+Shift+D**. **⌘D / Ctrl+D** also
+duplicates the slide when no object is selected or the slide navigator has focus.
+
+Open **Help → Keyboard Shortcuts** (**⌘/ / Ctrl+/**) for the complete reference.
+The native **Slide**, **Arrange**, **Format** and **Play** menus expose the same
+commands: create and reorder slides, change object layers and locking, format
+text, start presenting and toggle speaker notes. Commands respect the current
+selection and leave text fields, dialogs and active drags in control of input.
+
+Turn on **Rulers** in the workspace toolbar (or **More actions**) to measure in
+slide coordinates. The top and left rulers follow zoom and pan and show the
+pointer position, measured from the slide's top-left corner.
+Drag down from the top ruler or right from the left ruler to place an alignment
+guide across the slide. Drag a guide to move it; click it or drag it outside the
+slide to remove it. Click either ruler to clear all guides. Focused guides also support arrow keys (Shift for
+larger steps) and Delete. Guides are workspace aids and are not saved or exported.
+
+With no object selected, Left/Up and Right/Down navigate between slides. Click
+blank canvas to clear the selection and return to the **Slide** inspector.
+Right-click a slide thumbnail for slide commands and layouts, or an object for
+editing, clipboard, grouping and arrangement commands. Detailed formatting stays
+in the inspector. **Shift+F10** opens the same action menu from the keyboard.
+
 ## Present
 
 Present on your Mac or a connected external display while retaining your editing controls. Keep speaker notes beneath each slide, use the built-in timer, and guide attention with a laser pointer, spotlight or temporary ink.
@@ -125,6 +150,12 @@ client. Agents can use native editing tools, inspect slides, apply effects and
 review actual rendered screenshots while keeping the deck editable. Enable the
 app's separate automation workspace, or use an isolated folder without opening
 an editor window. Enabling MCP does not share the deck currently open in the editor.
+
+When an agent saves changes to the same Markdown file open in the Mac app, the
+editor reloads it automatically. Reload waits while you are editing or presenting;
+unsaved changes are preserved, with **Reload from disk** available to explicitly
+discard them. Save the automation deck to that file to see its changes; unsaved
+edits in the separate MCP workspace do not update the open document.
 
 ## Build from source
 

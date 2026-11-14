@@ -233,3 +233,29 @@ html[data-keynope-workspace="inspector"] .keynope-pane-focus { outline:2px solid
 @media(pointer:coarse) {
   .keynope-workspace-inspector :is(button,select,input:not([type="checkbox"]):not([type="radio"])),.keynope-insert-popover button { min-height:36px!important; }
 }
+.keynope-context-menu {
+  position:fixed;z-index:80;min-width:210px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);overflow-y:auto;
+  box-sizing:border-box;padding:5px;color:var(--ui-text,#eee);background:var(--ui-panel,#202124);
+  border:1px solid var(--ui-border,#555);border-radius:8px;box-shadow:0 8px 28px #0005;
+  font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+}
+.keynope-context-menu > button {
+  display:flex;align-items:center;justify-content:space-between;gap:24px;width:100%;min-height:30px;
+  box-sizing:border-box;padding:6px 10px;border:0;border-radius:4px;background:transparent;color:inherit;font:inherit;text-align:left;white-space:nowrap;
+}
+.keynope-context-menu > button:is(:hover,:focus-visible):not(:disabled) { background:var(--ui-selected,#253e59);outline:none; }
+.keynope-context-menu > button:disabled { opacity:.4; }
+.keynope-context-menu > [role="separator"] { height:1px;background:var(--ui-divider,#444);margin:5px 4px; }
+.keynope-context-hint { font-size:11px;color:var(--ui-secondary,#aaa); }
+.keynope-context-menu [aria-checked="true"] > span:first-child::before { content:'✓ '; }
+
+/* Shortcut sheet adapted from Bruno Schaatsbergen (ae6420a). */
+.keynope-shortcuts-dialog { width:min(880px,calc(100vw - 32px));max-height:calc(100vh - 48px);overflow:auto;border:1px solid var(--ui-border);border-radius:10px;padding:20px;color:var(--ui-text);background:var(--ui-surface); }
+.keynope-shortcuts-dialog::backdrop { background:#0008; }
+.keynope-shortcuts-dialog h2 { margin:0 0 12px; }
+.keynope-shortcuts-grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px 28px;margin-bottom:16px; }
+.keynope-shortcuts-grid h3 { margin:8px 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--ui-secondary); }
+.keynope-shortcuts-grid dl { margin:0;display:grid;grid-template-columns:auto minmax(0,1fr);gap:5px 10px;align-items:baseline; }
+.keynope-shortcuts-grid dt, .keynope-shortcuts-grid dd { margin:0; }
+.keynope-shortcuts-grid dd { font-size:13px;line-height:1.4; }
+.keynope-shortcuts-grid kbd { font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;padding:1px 6px;border:1px solid var(--ui-border);border-bottom-width:2px;border-radius:5px;background:var(--ui-field);white-space:nowrap; }

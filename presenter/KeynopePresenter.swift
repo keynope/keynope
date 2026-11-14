@@ -56,6 +56,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var appearanceMenuItems: [String: NSMenuItem] = [:]
     private let interfaceAppearanceKey = "keynope.interface.appearance"
     private var styleMenuItems: [String: NSMenuItem] = [:]
+    private var editorCommandMenus: [NSMenu] = []
     private var saveMenuItem: NSMenuItem?
     private var participantTabsMenuItem: NSMenuItem?
     private var activityQRMenuItem: NSMenuItem?
@@ -350,7 +351,14 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let copyItem = editMenu.addItem(withTitle: "Copy", action: #selector(copyEditorObjects(_:)), keyEquivalent: "c")
         let pasteItem = editMenu.addItem(withTitle: "Paste", action: #selector(pasteEditorObjects(_:)), keyEquivalent: "v")
         for item in [cutItem, copyItem, pasteItem] { item.target = self }
-        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let selectAllItem = editMenu.addItem(withTitle: "Select All", action: #selector(selectAllEditorObjects(_:)), keyEquivalent: "a")
+        selectAllItem.target = self
+        let deselectAllItem = editMenu.addItem(withTitle: "Deselect All", action: #selector(deselectAllEditorObjects(_:)), keyEquivalent: "A")
+        deselectAllItem.keyEquivalentModifierMask = [.command, .shift]
+        deselectAllItem.target = self
+        let duplicateSlideItem = editMenu.addItem(withTitle: "Duplicate Slide", action: #selector(duplicateEditorSlide(_:)), keyEquivalent: "D")
+        duplicateSlideItem.keyEquivalentModifierMask = [.command, .shift]
+        duplicateSlideItem.target = self
         editMenu.addItem(NSMenuItem.separator())
         let styleItem = NSMenuItem(title: "Style", action: nil, keyEquivalent: "")
         let styles = NSMenu(title: "Style")
@@ -381,6 +389,111 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         editMenu.addItem(styleItem)
         editItem.submenu = editMenu
         mainMenu.addItem(editItem)
+
+        // Items whose key equivalents are editor chords. The web view sees the
+        // key first and handles it in place; the menu item is for discovery and
+        // the mouse. Plain navigation keys (Page Up/Down, Home, End) are chords
+        // too but stay off the menu so they keep scrolling focused text fields.
+        let slideItem = NSMenuItem()
+        let slideMenu = NSMenu(title: "Slide")
+        slideMenu.autoenablesItems = false
+        slideMenu.delegate = self
+        let upArrow = String(utf16CodeUnits: [unichar(NSUpArrowFunctionKey)], count: 1)
+        let downArrow = String(utf16CodeUnits: [unichar(NSDownArrowFunctionKey)], count: 1)
+        for (command, title, shortcut, modifiers) in [
+            ("new-slide", "New Slide", "N", NSEvent.ModifierFlags([.command, .shift])),
+            ("duplicate", "Duplicate Selection or Slide", "d", [.command]),
+            ("delete-slide", "Delete Slide", "\u{08}", [.command]),
+            ("move-slide-up", "Move Slide Up", upArrow, [.command]),
+            ("move-slide-down", "Move Slide Down", downArrow, [.command]),
+            ("move-slide-first", "Move Slide to Beginning", upArrow, [.command, .shift]),
+            ("move-slide-last", "Move Slide to End", downArrow, [.command, .shift]),
+            ("previous-slide", "Previous Slide", "", []),
+            ("next-slide", "Next Slide", "", []),
+            ("first-slide", "First Slide", "", []),
+            ("last-slide", "Last Slide", "", [])
+        ] {
+            if command == "move-slide-up" || command == "previous-slide" { slideMenu.addItem(.separator()) }
+            let item = slideMenu.addItem(withTitle: title, action: #selector(performEditorCommand(_:)), keyEquivalent: shortcut)
+            item.target = self
+            item.identifier = NSUserInterfaceItemIdentifier(command)
+            item.keyEquivalentModifierMask = modifiers
+            item.isEnabled = false
+        }
+        editorCommandMenus.append(slideMenu)
+        slideItem.submenu = slideMenu
+        mainMenu.addItem(slideItem)
+
+        let arrangeItem = NSMenuItem()
+        let arrangeMenu = NSMenu(title: "Arrange")
+        arrangeMenu.autoenablesItems = false
+        arrangeMenu.delegate = self
+        for (command, title, shortcut, modifiers) in [
+            ("bring-to-front", "Bring to Front", "F", NSEvent.ModifierFlags([.command, .shift])),
+            ("send-to-back", "Send to Back", "B", [.command, .shift]),
+            ("bring-forward", "Bring Forward", "F", [.command, .option, .shift]),
+            ("send-backward", "Send Backward", "B", [.command, .option, .shift]),
+            ("group", "Group", "g", [.command, .option]),
+            ("ungroup", "Ungroup", "G", [.command, .option, .shift]),
+            ("edit-group", "Edit Group", "\r", [.command, .option]),
+            ("lock", "Lock", "l", [.command]),
+            ("unlock", "Unlock", "l", [.command, .option])
+        ] {
+            if command == "group" || command == "lock" { arrangeMenu.addItem(.separator()) }
+            let item = arrangeMenu.addItem(withTitle: title, action: #selector(performEditorCommand(_:)), keyEquivalent: shortcut)
+            item.target = self
+            item.identifier = NSUserInterfaceItemIdentifier(command)
+            item.keyEquivalentModifierMask = modifiers
+            item.isEnabled = false
+        }
+        editorCommandMenus.append(arrangeMenu)
+        arrangeItem.submenu = arrangeMenu
+        mainMenu.addItem(arrangeItem)
+
+        let formatItem = NSMenuItem()
+        let formatMenu = NSMenu(title: "Format")
+        formatMenu.autoenablesItems = false
+        formatMenu.delegate = self
+        for (command, title, shortcut, modifiers) in [
+            ("bold", "Bold", "b", NSEvent.ModifierFlags([.command])),
+            ("italic", "Italic", "i", [.command]),
+            ("underline", "Underline", "u", [.command]),
+            ("bigger-text", "Bigger", ">", [.command, .shift]),
+            ("smaller-text", "Smaller", "<", [.command, .shift]),
+            ("align-left", "Align Left", "{", [.command]),
+            ("align-center", "Center", "|", [.command]),
+            ("align-right", "Align Right", "}", [.command])
+        ] {
+            if command == "bigger-text" || command == "align-left" { formatMenu.addItem(.separator()) }
+            let item = formatMenu.addItem(withTitle: title, action: #selector(performEditorCommand(_:)), keyEquivalent: shortcut)
+            item.target = self
+            item.identifier = NSUserInterfaceItemIdentifier(command)
+            item.keyEquivalentModifierMask = modifiers
+            item.isEnabled = false
+        }
+        editorCommandMenus.append(formatMenu)
+        formatItem.submenu = formatMenu
+        mainMenu.addItem(formatItem)
+
+        let playItem = NSMenuItem()
+        let playMenu = NSMenu(title: "Play")
+        playMenu.autoenablesItems = false
+        playMenu.delegate = self
+        for (command, title, shortcut, modifiers) in [
+            ("play", "Present on This Computer", "p", NSEvent.ModifierFlags([.command, .option])),
+            ("play-external", "Present on External Screen", "P", [.command, .option, .shift]),
+            ("toggle-notes", "Speaker Notes", "P", [.command, .shift])
+        ] {
+            if command == "toggle-notes" { playMenu.addItem(.separator()) }
+            let item = playMenu.addItem(withTitle: title, action: #selector(performEditorCommand(_:)), keyEquivalent: shortcut)
+            item.target = self
+            item.identifier = NSUserInterfaceItemIdentifier(command)
+            item.keyEquivalentModifierMask = modifiers
+            item.isEnabled = false
+        }
+        editorCommandMenus.append(playMenu)
+        playItem.submenu = playMenu
+        mainMenu.addItem(playItem)
 
         let viewItem = NSMenuItem()
         let viewMenu = NSMenu(title: "View")
@@ -418,6 +531,18 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         windowMenu.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
         windowItem.submenu = windowMenu
         mainMenu.addItem(windowItem)
+        let helpItem = NSMenuItem()
+        let helpMenu = NSMenu(title: "Help")
+        helpMenu.autoenablesItems = false
+        helpMenu.delegate = self
+        let shortcutsItem = helpMenu.addItem(withTitle: "Keyboard Shortcuts", action: #selector(performEditorCommand(_:)), keyEquivalent: "/")
+        shortcutsItem.target = self
+        shortcutsItem.identifier = NSUserInterfaceItemIdentifier("shortcuts")
+        shortcutsItem.isEnabled = false
+        editorCommandMenus.append(helpMenu)
+        helpItem.submenu = helpMenu
+        mainMenu.addItem(helpItem)
+        NSApp.helpMenu = helpMenu
         NSApp.mainMenu = mainMenu
         NSApp.windowsMenu = windowMenu
     }
@@ -530,6 +655,56 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     @objc private func cutEditorObjects(_ sender: Any?) { editorClipboardCommand("cut") }
     @objc private func copyEditorObjects(_ sender: Any?) { editorClipboardCommand("copy") }
     @objc private func pasteEditorObjects(_ sender: Any?) { editorClipboardCommand("paste") }
+    @objc private func selectAllEditorObjects(_ sender: Any?) {
+        guard let view = editorWebView, editorWindow?.isKeyWindow == true else {
+            NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: sender)
+            return
+        }
+        view.evaluateJavaScript("window.keynopeSelectAll?.() ?? false") { result, _ in
+            MainActor.assumeIsolated {
+                if (result as? Bool) != true { NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: sender) }
+            }
+        }
+    }
+    @objc private func deselectAllEditorObjects(_ sender: Any?) { editorShortcutCommand("deselect-all", fallback: nil) }
+    @objc private func duplicateEditorSlide(_ sender: Any?) {
+        guard editorWindow?.isKeyWindow == true else { return }
+        editorWebView?.evaluateJavaScript("window.keynopeDuplicateSlide?.()")
+    }
+
+    // Menu items for editor chords run the named binding through the same
+    // guards as the keyboard shortcut, so a text field or an open dialog
+    // declines the command and the ordinary AppKit responder chain handles it
+    // instead. Names are internal constants, never user input.
+    private func editorShortcutCommand(_ name: String, fallback: Selector?) {
+        guard let editorWebView, editorWindow?.isKeyWindow == true else {
+            if let fallback { NSApp.sendAction(fallback, to: nil, from: nil) }
+            return
+        }
+        let script = "window.keynopeEditorCommand?.('\(name)') === true"
+        editorWebView.evaluateJavaScript(script) { result, error in
+            MainActor.assumeIsolated {
+                if error != nil || (result as? Bool) != true, let fallback {
+                    NSApp.sendAction(fallback, to: nil, from: nil)
+                }
+            }
+        }
+    }
+
+    @objc private func performEditorCommand(_ sender: NSMenuItem) {
+        guard let command = sender.identifier?.rawValue,
+              editorCommandMenus.contains(where: { $0.items.contains(sender) }) else { return }
+        editorShortcutCommand(command, fallback: nil)
+    }
+
+    private func updateEditorCommandMenus(_ flags: [String: Bool]) {
+        let ready = appMode && editorWindow?.isKeyWindow == true
+        for menu in editorCommandMenus {
+            for item in menu.items where !item.isSeparatorItem {
+                item.isEnabled = ready && flags[item.identifier?.rawValue ?? ""] == true
+            }
+        }
+    }
 
     @objc private func performWorkspaceCommand(_ sender: NSMenuItem) {
         guard appMode, editorWindow?.isKeyWindow == true, let view = editorWebView,
@@ -2019,6 +2194,21 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if editorCommandMenus.contains(where: { $0 === menu }) {
+            for item in menu.items where !item.isSeparatorItem { item.isEnabled = false }
+            guard appMode, editorWindow?.isKeyWindow == true, let view = editorWebView else { return }
+            view.evaluateJavaScript("window.keynopeEditorCommandState?.() || {}") { [weak self, weak view, weak menu] result, _ in
+                MainActor.assumeIsolated {
+                    guard let self, let view, let menu, view === self.editorWebView else { return }
+                    let state = result as? [String: Bool] ?? [:]
+                    for item in menu.items where !item.isSeparatorItem {
+                        item.isEnabled = self.editorWindow?.isKeyWindow == true && state[item.identifier?.rawValue ?? ""] == true
+                    }
+                }
+            }
+            return
+        }
+
         if menu === workspaceMenu {
             let ready = appMode && editorWindow?.isKeyWindow == true
             for item in menu.items where !item.isSeparatorItem { item.isEnabled = ready }
@@ -2393,7 +2583,7 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                       source.port == expected.port, source.path == expected.path,
                       let mode = body["mode"] as? String else { return }
                 applyInterfaceAppearance(mode)
-            } else if action == "editor-style-commands" {
+            } else if action == "editor-style-commands" || action == "editor-command-state" {
                 let expected = editorURL()
                 guard appMode, message.webView === editorWebView,
                       message.frameInfo.isMainFrame, let source = message.frameInfo.request.url,
@@ -2404,7 +2594,11 @@ final class PresenterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                     #endif
                     return
                 }
-                updateEditorStyleCommands(body["flags"] as? [String: Bool] ?? [:])
+                if action == "editor-command-state" {
+                    updateEditorCommandMenus(body["flags"] as? [String: Bool] ?? [:])
+                } else {
+                    updateEditorStyleCommands(body["flags"] as? [String: Bool] ?? [:])
+                }
             } else if action == "stop" {
                 noPresentation()
             } else if action == "show-main" {
